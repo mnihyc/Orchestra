@@ -331,6 +331,58 @@ async fn bump(rig: &Rig) -> Proof {
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+async fn personal_admission_names_the_committed_shell_cut_without_a_second_http_read() -> Proof {
+    let rig = Rig::with_time_held().await;
+    let reader = Reader::new(&rig, &rig.token).await?;
+    let mut conn = rig.pool.acquire().await?;
+    let (personal, inbox, meta, authority) =
+        orch_db::sequences::personal_revision(&mut conn, rig.ada)
+            .await?
+            .ok_or("the personal reader is missing")?;
+    subscriptions::subscribe(
+        &reader.realtime.inner,
+        &reader.connection,
+        serde_json::from_value(json!({"id":1,"feed":"user"}))?,
+    )
+    .await?;
+    let accepted = reader.next().await?;
+    assert_eq!(accepted["op"], "subscribed");
+    assert_eq!(
+        accepted["personal_revision"],
+        json!({"personal":personal,"inbox":inbox,"meta":meta,"authority":authority})
+    );
+    // An event committed before a second source exists cannot be replayed to it;
+    // its admitted cut must still reveal the gap to the earlier HTTP snapshot.
+    let mut tx = rig.pool.begin().await?;
+    orch_db::sequences::notify_user_event(&mut tx, &[rig.ada], &json!({"what":"favorites"}))
+        .await?;
+    tx.commit().await?;
+    let peer = reader.peer(&rig, &rig.token).await?;
+    subscriptions::subscribe(
+        &peer.realtime.inner,
+        &peer.connection,
+        serde_json::from_value(json!({"id":1,"feed":"user"}))?,
+    )
+    .await?;
+    let accepted = peer.next().await?;
+    assert_eq!(accepted["op"], "subscribed");
+    assert_eq!(accepted["personal_revision"]["personal"], personal + 1);
+    assert_eq!(accepted["personal_revision"]["meta"], meta);
+    peer.finish().await;
+    reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_personal_admission_names_the_committed_shell_cut_without_a_second_http_read()
+-> ::futures::future::LocalBoxFuture<'static, crate::realtime::epoch_handoff_tests::Proof> {
+    ::std::boxed::Box::pin(
+        self::personal_admission_names_the_committed_shell_cut_without_a_second_http_read(),
+    )
+}
+
 async fn inbox(rig: &Rig, key: &str) -> Proof<people::Announced> {
     let mut conn = rig.pool.acquire().await?;
     Ok(people::announce(
@@ -390,7 +442,7 @@ async fn enroll(rig: &Rig, node: bool) -> Proof<(String, Id)> {
                     arch: Arch::X86_64,
                 },
                 connector_version: "1.0.0".to_owned(),
-                protocol_versions: vec![1],
+                protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
                 roles: vec![if node { Role::Node } else { Role::Agent }],
             },
             &orch_db::audit::Origin::default(),
@@ -2004,7 +2056,7 @@ pub fn __api_run_a_nodes_machine_feed_keeps_host_view_until_the_physical_machine
 #[cfg(any(test, feature = "test-support"))]
 async fn an_existing_scoped_key_authenticates_realtime_as_that_key_and_revocation_ends_it() -> Proof
 {
-    use crate::middleware::authentication::{self, API_TOKEN_PREFIX, Via, new_token, token_hash};
+    use crate::middleware::authentication::{self, Via, new_api_token, token_hash};
     use chrono::Duration as Span;
     use http::{HeaderMap, HeaderValue, header};
 
@@ -2012,8 +2064,8 @@ async fn an_existing_scoped_key_authenticates_realtime_as_that_key_and_revocatio
     // The same ordinary account owns both: the key's exact thread subtree is what separates them.
     let allowed = rig.thread("Allowed key read").await;
     let other = rig.thread("Outside key read").await;
-    let key = new_token(API_TOKEN_PREFIX);
     let key_id = new_id();
+    let key = new_api_token(key_id);
     let hash = token_hash(&key);
     let scopes = vec!["thread.view".to_owned()];
     {
@@ -2112,7 +2164,7 @@ pub fn __api_run_an_existing_scoped_key_authenticates_realtime_as_that_key_and_r
 #[cfg(any(test, feature = "test-support"))]
 async fn an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_protocol_management()
 -> Proof {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_token, token_hash};
     use chrono::Duration as Span;
     use orch_access_contract::key_scope::{
         KeyAction, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
@@ -2138,8 +2190,8 @@ async fn an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_protocol
         constraints: Vec::new(),
         excluded_places: Vec::new(),
     };
-    let key = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let key = new_api_token(id);
     let hash = token_hash(&key);
     let policy = serde_json::to_value(scope)?;
     let projection = {
@@ -2230,7 +2282,7 @@ pub fn __api_run_an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_
 
 #[cfg(any(test, feature = "test-support"))]
 async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_rows() -> Proof {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_token, token_hash};
     use chrono::Duration as Span;
     use orch_access_contract::key_scope::{
         KeyAction, KeyIdentityKind, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget,
@@ -2313,7 +2365,8 @@ async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_row
             constraints: Vec::new(),
             excluded_places: Vec::new(),
         };
-        let key = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let key = new_api_token(issued_key_id);
         let hash = token_hash(&key);
         let policy = serde_json::to_value(scope)?;
         {
@@ -2321,7 +2374,7 @@ async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_row
             identity::create_api_token_scoped(
                 &mut conn,
                 &identity::NewApiToken {
-                    id: new_id(),
+                    id: issued_key_id,
                     user_id: rig.ada,
                     name: "same topic read selection",
                     token_hash: &hash,
@@ -2401,3 +2454,69 @@ pub fn __api_run_topic_sync_uses_the_same_selection_for_scoped_http_and_socket_c
 
 #[path = "native_feed_key_tests.rs"]
 pub mod native_feed_keys;
+
+#[cfg(any(test, feature = "test-support"))]
+async fn subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn() -> Proof
+{
+    let rig = Rig::with_time_held().await;
+    let thread = rig.thread("Contribution source").await;
+    let (person, token) = rig.person("following-reader").await;
+    let role = rig.give(person, "viewer").await;
+    {
+        let mut conn = rig.pool.acquire().await?;
+        orch_db::queries::notifications::subscribers::follow(
+            &mut conn,
+            person,
+            thread,
+            rig.clock.now(),
+        )
+        .await?;
+    }
+    let reader = Reader::new(&rig, &token).await?;
+    let sub = reader.subscribe(Feed::User).await?;
+    let automatic: UserEvent = serde_json::from_value(
+        json!({"what":"subscription","node_id":thread,"level":"all","source":"auto"}),
+    )?;
+    {
+        let mut conn = rig.pool.acquire().await?;
+        orch_db::queries::hierarchy::put_subscription(
+            &mut conn,
+            person,
+            thread,
+            "all",
+            "manual",
+            rig.clock.now(),
+        )
+        .await?;
+    }
+    reader
+        .realtime
+        .inner
+        .personal_event(&sub, automatic.clone())
+        .await?;
+    let delivered = reader.next().await?;
+    assert_eq!(delivered["data"]["level"], "all");
+    assert_eq!(
+        delivered["data"]["source"], "manual",
+        "an older automatic hint cannot replace the committed explicit choice"
+    );
+    reader.empty();
+    rig.take(role).await;
+    reader.reset(&sub).await?;
+    assert_eq!(reader.next().await?["op"], "resync");
+    reader
+        .realtime
+        .inner
+        .personal_event(&sub, automatic)
+        .await?;
+    reader.empty();
+    reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn()
+-> ::futures::future::LocalBoxFuture<'static, Proof> {
+    Box::pin(subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn())
+}

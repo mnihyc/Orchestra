@@ -36,6 +36,38 @@ pub(super) fn mount(registry: &mut Registry) {
     );
 }
 
+/// Prepared file rows retain their physical publication until the caller records ownership.
+#[derive(Debug, Clone, Default)]
+pub(super) struct HeldFiles {
+    rows: Vec<HeldFile>,
+    publications: Vec<orch_blob_contract::store::Stored>,
+}
+impl std::ops::Deref for HeldFiles {
+    type Target = Vec<HeldFile>;
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+impl std::ops::DerefMut for HeldFiles {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rows
+    }
+}
+impl<'a> IntoIterator for &'a HeldFiles {
+    type Item = &'a HeldFile;
+    type IntoIter = std::slice::Iter<'a, HeldFile>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.iter()
+    }
+}
+impl<'a> IntoIterator for &'a mut HeldFiles {
+    type Item = &'a mut HeldFile;
+    type IntoIter = std::slice::IterMut<'a, HeldFile>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.iter_mut()
+    }
+}
+
 /// What the reader is told of the document it reads for: its people, and its files by their names.
 pub(super) struct Held {
     pub(super) people: HashMap<String, Id>,
@@ -71,8 +103,11 @@ pub(super) async fn hold(
     taken: &mut HashSet<String>,
     by: Id,
     at: DateTime<Utc>,
-) -> ApiResult<Vec<HeldFile>> {
-    let mut held = Vec::with_capacity(embedded.len());
+) -> ApiResult<HeldFiles> {
+    let mut held = HeldFiles {
+        rows: Vec::with_capacity(embedded.len()),
+        publications: Vec::with_capacity(embedded.len()),
+    };
     for each in embedded {
         let meta = ctx
             .app
@@ -93,6 +128,7 @@ pub(super) async fn hold(
             },
             blob: meta.hash,
         });
+        held.publications.push(meta);
     }
     Ok(held)
 }
@@ -129,7 +165,7 @@ where
             .blobs
             .register(
                 tx,
-                BlobMeta {
+                &BlobMeta {
                     hash: file.blob,
                     size: file.file.size,
                 },

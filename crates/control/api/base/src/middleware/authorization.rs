@@ -317,6 +317,7 @@ pub fn resource_kind_of(plural: &str) -> Option<ResourceKind> {
         "mcp-servers" | "mcp_servers" => Some(ResourceKind::McpServer),
         "mounts" => Some(ResourceKind::Mount),
         "skills" => Some(ResourceKind::Skill),
+        "pools" => Some(ResourceKind::Pool),
         _ => None,
     }
 }

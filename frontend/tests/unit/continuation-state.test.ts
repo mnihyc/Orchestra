@@ -195,3 +195,25 @@ it('keeps a selected history read marker while accepting current global title an
   expect(view.thread?.my_last_read_seq).toBe(7); expect(view.openedReadSeq).toBe(0);
   expect(view.read?.projection?.viewed_continuation_id).toBe(B);
 });
+
+it('keeps messages before the first turn through a jump and discards pages from an old history', () => {
+  const { id, capture } = install();
+  const before = { after_item: null, cursor: 'before-first-turn' };
+  const first = { id: 'first-submission', after_item: null, continuation_id: A, author: ADA, parts: [],
+    outcome: null, submitted_at: '2026-11-01T10:00:00Z', seq_created: 1, seq_updated: 4 };
+  threadWriter.apply(id, { retained_inputs: [first], retained_inputs_next: [before] }, capture);
+  threadWriter.window(id, [answer('first-answer', 'First')], false, true, capture, {});
+  expect(threadViewOf(id).retainedInputs.get(first.id)).toEqual(first);
+  expect(threadViewOf(id).retainedCursors.get(null)).toBe(before.cursor);
+
+  const next = { ...first, id: 'second-submission', seq_created: 2 };
+  threadWriter.retainedPage(id, before, { retained_inputs: [next] }, capture);
+  expect([...threadViewOf(id).retainedInputs.keys()]).toEqual([first.id, next.id]);
+  expect(threadViewOf(id).retainedCursors.size).toBe(0);
+  threadWriter.retainedPage(id, before, { retained_inputs_next: [before] }, capture);
+  expect(threadViewOf(id).retainedCursors.size).toBe(0);
+
+  selectThreadContinuation(id, B);
+  threadWriter.retainedPage(id, before, { retained_inputs: [next] }, capture);
+  expect(threadViewOf(id).retainedInputs.size).toBe(0);
+});

@@ -404,13 +404,19 @@ struct OpeningStore {
 }
 #[async_trait]
 impl BlobStore for OpeningStore {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         content: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, content).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, content, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         if self.armed.load(Ordering::SeqCst) && self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -425,8 +431,13 @@ impl BlobStore for OpeningStore {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 async fn opening_office() -> (Office, Arc<OpeningStore>) {

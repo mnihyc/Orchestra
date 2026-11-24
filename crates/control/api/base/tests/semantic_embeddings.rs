@@ -126,6 +126,7 @@ async fn name(s: &Scene, provider: Id, dimensions: u32) {
         )
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!({
                 "provider_id": provider, "model_name": MODEL, "dimensions": dimensions,
                 "query_prefix": "task: search result | query: ", "document_prefix": "title: {title} | text: "

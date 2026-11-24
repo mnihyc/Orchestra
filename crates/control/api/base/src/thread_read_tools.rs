@@ -131,6 +131,7 @@ fn refusal(error: ApiError) -> Refusal {
         ErrorCode::AuthzDenied | ErrorCode::AuthSuspended => Code::NotYours,
         ErrorCode::NotFound => Code::NotFound,
         ErrorCode::ConflictStaleRevision
+        | ErrorCode::ConflictConcurrentChange
         | ErrorCode::ConflictIdempotencyMismatch
         | ErrorCode::ConflictConfirmationRequired => Code::Changed,
         ErrorCode::RequestTooLarge => Code::TooLarge,

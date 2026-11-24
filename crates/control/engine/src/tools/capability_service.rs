@@ -29,6 +29,7 @@ pub use accepted::{AcceptedCapabilityResult, CapabilityResultReceipt, NativeImag
 mod model;
 mod origin;
 mod recovery;
+pub(crate) use recovery::recovery_candidate_reason;
 mod recovery_binding;
 mod standalone;
 pub(crate) use origin::NativeSource;
@@ -225,50 +226,161 @@ async fn service_mode(
         == Some("service"))
 }
 
+/// Current complete service operands, supplied by the actual native source.
+struct ServiceUse<'a> {
+    purpose: orch_access_contract::permissions::UsagePurpose,
+    place: Id,
+    provider: Id,
+    offering: &'a str,
+    groups: &'a [String],
+    pool: Option<&'a crate::resource_choice::ProviderSelection>,
+    in_thread: bool,
+}
 /// Every contributing list applies, including overlapping family and group patterns.
 async fn service_use(
     conn: &mut Conn,
     caller: &Caller,
-    thread: Id,
-    provider: Id,
-    offering: &str,
-    groups: &[String],
+    request: &ServiceUse<'_>,
     clock: &dyn Clock,
 ) -> Result<Option<Option<Id>>, EngineError> {
     let principal = Principal::load(conn, caller.clone(), clock.time()).await?;
-    let policies = crate::access::resource_policies(conn, provider).await?;
-    let usable =
-        orch_authz::usable::usable(conn, &principal, provider, Some(thread), &policies).await?;
-    let Some(granted) = usable.granted() else {
-        return Ok(None);
+    let policies = if let Some(pool) = request.pool {
+        crate::access::resource_policies_for_choice(
+            conn,
+            &[request.provider],
+            pool.selection().path,
+        )
+        .await?
+    } else {
+        crate::access::resource_policies(conn, request.provider).await?
     };
-    // One entry has to allow the service, in the environment the thread works in.
-    let place = crate::access::thread_place(conn, thread).await?;
-    let allowing = granted.allowing(&orch_authz::options::Wanted {
-        service: Some((offering, groups)),
+    let place = if request.in_thread {
+        crate::access::thread_place(conn, request.place).await?
+    } else {
+        None
+    };
+    let wanted = orch_authz::options::Wanted {
+        purpose: request.purpose,
+        service: Some((request.offering, request.groups)),
         at: place.as_ref(),
-        ..orch_authz::options::Wanted::default()
-    });
-    if allowing.is_empty() {
-        return Ok(None);
-    }
+        ..Default::default()
+    };
+    let entry = if let Some(pool) = request.pool {
+        if pool.purpose() != request.purpose
+            || !pool.matches_request(request.provider, Some(request.offering))
+        {
+            return Ok(None);
+        }
+        let Some(contribution) = orch_authz::pools::provider_choice(
+            conn,
+            &principal,
+            pool.selection().path,
+            pool.selection().leaf,
+            Some(request.place),
+            &wanted,
+            pool.purpose().grant(),
+            &policies,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        contribution.member_entry()
+    } else {
+        let usable = orch_authz::usable::usable(
+            conn,
+            &principal,
+            request.provider,
+            Some(request.place),
+            &policies,
+        )
+        .await?;
+        let Some(granted) = usable.granted() else {
+            return Ok(None);
+        };
+        let allowing = granted.allowing(&wanted);
+        if allowing.is_empty() {
+            return Ok(None);
+        }
+        granted.entry_among(&allowing)
+    };
     let def = super::definition_of(keys::SERVICES_ALLOWED)?;
     let snapshot = orch_settings::Snapshot::load(
         conn,
-        Place::Node(thread),
+        Place::Node(request.place),
         orch_settings::Wanted::Keys(&[def]),
     )
     .await?;
     for part in snapshot.resolve(def).parts {
         let patterns: Vec<String> = serde_json::from_value(part.value)?;
-        if !orch_agent_contract::discovery::ModelPattern::list_names(&patterns, offering, groups) {
+        if !orch_agent_contract::discovery::ModelPattern::list_names(
+            &patterns,
+            request.offering,
+            request.groups,
+        ) {
             return Ok(None);
         }
     }
-    Ok(Some(granted.entry_among(&allowing)))
+    Ok(Some(entry))
 }
 
 impl ServiceCommand {
+    async fn pool_choice(&self, conn: &mut Conn) -> Result<Option<Id>, EngineError> {
+        if let Some(choice) = self
+            .recovery
+            .as_ref()
+            .and_then(recovery_binding::Binding::pool_choice)
+        {
+            return Ok(Some(choice));
+        }
+        Ok(sqlx::query_scalar("SELECT id FROM pool_choices WHERE id=$1 AND target->>'type'='pool' AND source->>'kind'='call_recovery'").bind(self.command).fetch_optional(conn).await.map_err(orch_db::DbError::from)?)
+    }
+    async fn pool_selection(
+        &self,
+        conn: &mut Conn,
+        caller: &Caller,
+    ) -> Result<Option<crate::resource_choice::ProviderSelection>, EngineError> {
+        let Some(choice) = self.pool_choice(conn).await? else {
+            return Ok(None);
+        };
+        let purpose = self
+            .capability
+            .parse::<orch_access_contract::permissions::UsagePurpose>()
+            .map_err(EngineError::unreadable)?;
+        Ok(Some(
+            crate::resource_choice::ProviderSelection::load(
+                conn,
+                choice,
+                self.origin.place()?,
+                self.provider,
+                Some(&self.offering),
+                purpose,
+                caller,
+            )
+            .await?,
+        ))
+    }
+    async fn admit_pool_choice(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+    ) -> Result<bool, EngineError> {
+        let choice = self.pool_choice(conn).await?;
+        let Some(choice) = choice else {
+            return Ok(true);
+        };
+        crate::resource_choice::health::admit_choice(
+            conn,
+            choice,
+            self.command,
+            self.origin.place()?,
+            self.provider,
+            &self.offering,
+            self.backend.as_ref().map(|backend| &backend.reference),
+            clock.now(),
+        )
+        .await
+    }
     pub(crate) fn command_kind(&self) -> &'static str {
         match &self.model {
             Some(plan) if plan.complete => "provider.complete",
@@ -341,6 +453,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -404,7 +524,12 @@ impl ServiceCommand {
             return Ok(None);
         }
         if self.model.is_some() {
-            return model::current(self, conn, command, clock, &origins).await;
+            let current = model::current(self, conn, command, clock, &origins).await?;
+            if current.is_some() && stored.is_none() && !self.admit_pool_choice(conn, clock).await?
+            {
+                return Ok(None);
+            }
+            return Ok(current);
         }
         let configs: BTreeMap<String, ServiceConfig> =
             serde_json::from_value(row.service_offerings)?;
@@ -416,13 +541,21 @@ impl ServiceCommand {
             return Ok(None);
         }
         for caller in origins.callers() {
+            let pool = self.pool_selection(conn, caller).await?;
             if service_use(
                 conn,
                 caller,
-                place,
-                self.provider,
-                &self.offering,
-                &self.groups,
+                &ServiceUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::for_capability(
+                        &self.capability,
+                    ),
+                    place,
+                    provider: self.provider,
+                    offering: &self.offering,
+                    groups: &self.groups,
+                    pool: pool.as_ref(),
+                    in_thread: self.origin.tool().is_some(),
+                },
                 clock,
             )
             .await?
@@ -474,6 +607,9 @@ impl ServiceCommand {
             }
             return Ok(None);
         }
+        if stored.is_none() && !self.admit_pool_choice(conn, clock).await? {
+            return Ok(None);
+        }
         Ok(Some(origins.callers))
     }
 
@@ -487,6 +623,8 @@ impl ServiceCommand {
         self.checked(
             conn,
             &link::NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -577,7 +715,23 @@ impl Engine {
                 self.execute_web_model_service(sources, call, capability)
                     .await
             }
-            "program-session" => delegation::execute(self, call, capability).await,
+            "program-session" => {
+                let executor = delegation::executor::Executor::thread_tool(
+                    self, call, capability, sources, selected,
+                )
+                .await?;
+                let request = executor.request();
+                let mut executors = orch_provider_contract::capabilities::Executors::default();
+                executors
+                    .register("program-session", std::sync::Arc::new(executor))
+                    .map_err(EngineError::unreadable)?;
+                executors
+                    .execute(request)
+                    .await
+                    .map(serde_json::to_value)
+                    .map_err(delegation::executor::engine_error)?
+                    .map_err(EngineError::from)
+            }
             _ => Err(EngineError::unreadable(
                 "the selected capability executor is not installed",
             )),
@@ -601,6 +755,25 @@ impl Engine {
         harness_takes_mcp: bool,
         now: Time,
     ) -> Result<Vec<orch_agent_contract::events::OrchTool>, EngineError> {
+        self.offered_tools_with_facts(conn, thread, harness_takes_mcp, now)
+            .await
+            .map(|(tools, _)| tools)
+    }
+
+    pub(crate) async fn offered_tools_with_facts(
+        &self,
+        conn: &mut Conn,
+        thread: &threads::ThreadRow,
+        harness_takes_mcp: bool,
+        now: Time,
+    ) -> Result<
+        (
+            Vec<orch_agent_contract::events::OrchTool>,
+            super::catalogue::AcceptedOrchTools,
+        ),
+        EngineError,
+    > {
+        let mut inputs = super::ToolOfferInputs::default();
         let owned: Option<Id> =
             sqlx::query_scalar("SELECT t.input_id FROM turns t WHERE t.id=$1 AND t.thread_id=$2")
                 .bind(thread.current_turn_id)
@@ -613,14 +786,21 @@ impl Engine {
                 .await?
                 .is_some()
         {
-            return Ok(Vec::new());
+            inputs.blocker = Some(orch_api_contract::settings::OrchToolUnavailable::CapabilityWork);
+            return Ok((
+                Vec::new(),
+                super::catalogue::capture(thread, &[], inputs, now),
+            ));
         }
-        let mut tools = super::offered_for_session(conn, thread, harness_takes_mcp, now).await?;
+        let mut tools =
+            super::offered_for_session_in(conn, thread, harness_takes_mcp, now, Some(&mut inputs))
+                .await?;
         if harness_takes_mcp {
             self.append_web_service_tools(conn, thread, &mut tools)
                 .await?;
         }
-        Ok(tools)
+        let receipt = super::catalogue::capture(thread, &tools, inputs, now);
+        Ok((tools, receipt))
     }
 
     pub(crate) async fn append_web_service_tools(
@@ -956,13 +1136,37 @@ impl Engine {
                 let entry = {
                     let mut entry = None;
                     for caller in origins.callers() {
+                        let recovery = recovery_binding::binding();
+                        let pool = match recovery.as_ref() {
+                            Some(recovery) => {
+                                recovery
+                                    .selection(
+                                        &mut tx,
+                                        caller,
+                                        call.thread,
+                                        provider,
+                                        offering,
+                                        capability,
+                                    )
+                                    .await?
+                            }
+                            None => None,
+                        };
                         let allowed = service_use(
                             &mut tx,
                             caller,
-                            call.thread,
-                            provider,
-                            offering,
-                            &selected.groups,
+                            &ServiceUse {
+                                purpose:
+                                    orch_access_contract::permissions::UsagePurpose::for_capability(
+                                        capability,
+                                    ),
+                                place: call.thread,
+                                provider,
+                                offering,
+                                groups: &selected.groups,
+                                pool: pool.as_ref(),
+                                in_thread: true,
+                            },
                             self.inner.clock.as_ref(),
                         )
                         .await?
@@ -1075,6 +1279,8 @@ impl Engine {
             let mut tx = self.db().begin().await?;
             let key = command.key.wire();
             let proposed = link::NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -1182,6 +1388,8 @@ pub(crate) async fn reconcile(engine: &Engine, command: Id) -> Result<(), Engine
         return Ok(());
     };
     if !evidence.matches(&link::NewCommand {
+        content_transit: false,
+        native_target: None,
         id: retained.command.id,
         machine_id: retained.command.machine_id,
         kind: &retained.command.kind,
@@ -1190,6 +1398,23 @@ pub(crate) async fn reconcile(engine: &Engine, command: Id) -> Result<(), Engine
         deadline_at: retained.command.deadline_at,
     })? {
         return Err(EngineError::ToolCallIdentity);
+    }
+    if matches!(
+        retained.command.state.as_str(),
+        "succeeded" | "failed" | "cancelled" | "expired"
+    ) {
+        crate::resource_choice::health::outcome(
+            &mut tx,
+            command,
+            retained.command.state == "succeeded",
+            retained
+                .command
+                .error
+                .as_ref()
+                .and_then(|error| error.pointer("/details/failure")),
+            engine.inner.clock.now(),
+        )
+        .await?;
     }
     if evidence.model.is_some() {
         model::counted(engine, &mut tx, evidence, retained.command).await?;
