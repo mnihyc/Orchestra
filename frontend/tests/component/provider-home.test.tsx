@@ -30,9 +30,9 @@ for (const lifecycle of ['unit', 'attach'] as const) it(`offers the same home ch
   await waitFor(() => expect(read).toHaveBeenCalled());
   expect(screen.queryByRole('combobox', { name: 'Workspace' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('combobox', { name: 'Home' }));
-  const existing = screen.getByRole('option', { name: i18n.t('choiceCatalog.dataSource.existing_directory.name') });
-  expect(existing).toHaveAccessibleDescription(i18n.t('environmentData.allowed'));
-  await user.click(existing);
+  const existing = () => screen.getByRole('option', { name: i18n.t('choiceCatalog.dataSource.existing_directory.name') });
+  await waitFor(() => expect(existing()).toHaveAccessibleDescription(i18n.t('environmentData.allowed')));
+  await user.click(existing());
   const input = screen.getByRole('textbox', { name: 'Directory on this machine' });
   await user.clear(input); await user.type(input, '/srv/harness/team');
   await user.click(screen.getByRole('button', { name: 'Save' }));

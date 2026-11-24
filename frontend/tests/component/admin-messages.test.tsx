@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Messages from '@/api/adminMessages';
 import type * as Nodes from '@/api/nodes';
+import { Audience } from '@/features/admin-messages/Audience';
 import { MessageComposer } from '@/features/admin-messages/Composer';
 import { MessagesSection } from '@/features/admin-messages/Sent';
 import { AdministratorMessage } from '@/features/admin-messages/Message';
@@ -18,14 +19,17 @@ import { ADA } from '../unit/general-access-fixtures';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ manage: true, send: vi.fn<typeof Messages.sendMessage>(),
-  list: vi.fn<(org: string | null) => Promise<AdminMessageListResponse>>(),
-  read: vi.fn<(id: string) => Promise<AdminMessage>>() }));
+  list: vi.fn<(org: string | null, q?:string) => Promise<AdminMessageListResponse>>(),
+  read: vi.fn<(id: string) => Promise<AdminMessage>>(), audience:vi.fn() }));
 vi.mock('@/api/adminMessages', () => ({
   sendMessage: calls.send,
-  sentMessagesQuery: (org: string | null) => ({ queryKey: ['admin-messages', org ?? 'system'], initialPageParam: null,
-    queryFn: () => calls.list(org), getNextPageParam: (page: AdminMessageListResponse) => page.next_cursor }),
+  sentMessagesQuery: (org: string | null, q='') => ({ queryKey: ['admin-messages', org ?? 'system',q], initialPageParam: null,
+    queryFn: () => calls.list(org,q), getNextPageParam: (page: AdminMessageListResponse) => page.next_cursor }),
   messageQuery: (id: string) => ({ queryKey: ['admin-message', id], queryFn: () => calls.read(id) }),
 }));
+vi.mock('@/api/directory', () => ({membersQuery:(org:string,{q}:{q:string}) => ({queryKey:['message-audience',org,q],initialPageParam:null,getNextPageParam:()=>null,queryFn:() => {
+  calls.audience(q); return Promise.resolve({items:Array.from({length:13},(_,n)=>({user:{...ADA,id:`audience-${n}`,username:`reader${n}`,display_name:`Recipient ${n}`}})).filter(({user})=>q==='' || user.display_name.toLowerCase().includes(q.toLowerCase())),next_cursor:null});
+}})}));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(), nodeQuery: (id: string) => ({ queryKey: ['message-org', id], queryFn: () => {
   const value = org(id, 'acme', 'Acme', ADA);
   return Promise.resolve({ ...value, access: { ...value.access, owns: calls.manage, permissions: calls.manage ? ['node.view', 'members.manage'] : ['node.view'] } });
@@ -152,4 +156,31 @@ it.each(modes)('keeps received markup as written data in %s/%s', async (locale, 
   expect(screen.queryByRole('img', { name: 'Diagram' })).toBeNull();
   expect(screen.getByText('A note', { exact: true })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'A note' })).toBeNull();
+});
+
+it('finds a later audience member through the native people query without changing the send count', async () => {
+  const user=userEvent.setup(); show(<Audience org="acme" count={13}>13 recipients</Audience>);
+  await user.click(screen.getByRole('button',{name:'13 recipients'}));
+  const search = await screen.findByRole('searchbox');
+  await user.type(search,'Recipient 12');
+  await waitFor(()=>expect(calls.audience).toHaveBeenLastCalledWith('Recipient 12'));
+  expect(await screen.findByText('Recipient 12')).toBeVisible();
+  expect(screen.queryByText('Recipient 0')).not.toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'13 recipients'})).toBeVisible();
+  expect(calls.send).not.toHaveBeenCalled();
+});
+
+it('searches sent titles natively while an open message draft survives a background list refresh', async () => {
+  const user=userEvent.setup(); const cache=new QueryClient({defaultOptions:{queries:{retry:false}}});
+  show(<QueryClientProvider client={cache}><MessagesSection scope={{kind:'org',id:'acme',name:'Acme'}}/></QueryClientProvider>);
+  await user.type(screen.getByRole('searchbox'),'older');
+  await waitFor(()=>expect(calls.list).toHaveBeenCalledWith('acme','older'));
+  await user.click(screen.getByRole('button',{name:i18n.t('adminMessages.messageMembers')}));
+  const body=screen.getByRole('textbox',{name:i18n.t('adminMessages.body')});
+  await user.type(body,'Keep this draft');
+  const before=calls.list.mock.calls.filter(([,q])=>q==='older').length;
+  await act(async()=>{await cache.invalidateQueries({queryKey:['admin-messages','acme','older'],exact:true});});
+  expect(calls.list.mock.calls.filter(([,q])=>q==='older')).toHaveLength(before+1);
+  expect(body).toHaveValue('Keep this draft');
+  expect(calls.send).not.toHaveBeenCalled();
 });

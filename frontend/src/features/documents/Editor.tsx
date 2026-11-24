@@ -5,6 +5,7 @@
  * the editor can be replaced without touching a document. Typing is the editor's own; what is typed is
  * sent behind the person's back (`sync.ts`) and what others write is laid over the page (`remote.ts`).
  */
+import { READ_NOW } from '@/api/freshness';
 import { bindEditorMarks, useDocumentMarksStore } from '@/features/documents/marks';
 import { Extension, type Editor } from '@tiptap/core';
 import { Plugin, Selection } from '@tiptap/pm/state';
@@ -185,7 +186,7 @@ function LoadedEditor({ document: doc, editable, fixed, inspection = false, onRe
       UndoRedo,
       Dropcursor.configure({ width: 2, class: 'ProseMirror-dropcursor' }),
       Gapcursor,
-      Suggestions.configure({ people: async (query, cursor) => await queryClient.query({ ...documentReadersQuery(doc.id, query, cursor), staleTime: 0 }),
+      Suggestions.configure({ people: async (query, cursor) => await queryClient.query({ ...documentReadersQuery(doc.id, query, cursor), ...READ_NOW }),
         places: (query, editor) => referenceChoices(() => referenceContexts.get(editor), query) }),
       Habits,
       PasteMarkdown.configure({ report: setPasteNotice, convert: (format, text) => convertText(doc.id, format, text) }),

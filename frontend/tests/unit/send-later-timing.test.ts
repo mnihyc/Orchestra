@@ -39,6 +39,14 @@ it('a repeat fold uses the first occurrence once and skips the second after it h
   const value = fields({ mode: 'repeat', time: '01:30', zone: 'America/New_York' });
   expect(timingPreview(value, Date.parse('2026-11-01T05:00:00Z')).at).toBe('2026-11-01T05:30:00.000Z');
   expect(timingPreview(value, Date.parse('2026-11-01T05:45:00Z')).at).toBe('2026-11-02T06:30:00.000Z');
+  expect(timingPreview(value, Date.parse('2026-11-01T05:45:00Z')).timing_policy).toEqual({
+    clock: 'civil', repeated_time: 'earlier_instant', missing_time: 'skipped', overdue: 'latest_occurrence', paused_dates: 'not_replayed',
+  });
+});
+it('keeps a once fold as an explicitly chosen instant rather than claiming the recurring fold rule', () => {
+  const preview = timingPreview(fields({ date: '2026-11-01', time: '01:30', zone: 'America/New_York', fold: 'second' }), before);
+  expect(preview.at).toBe('2026-11-01T06:30:00.000Z');
+  expect(preview.timing_policy).toEqual({ clock: 'fixed_instant', repeated_time: 'explicit_instant', missing_time: 'refused', overdue: 'single_occurrence', paused_dates: 'not_replayed' });
 });
 it('restores the chosen fold even for a stored instant with seconds', () => {
   expect(fieldsForTiming({ kind: 'once', at: '2026-11-01T05:30:34Z', zone: 'America/New_York' })).toMatchObject({ date: '2026-11-01', time: '01:30', fold: 'first' });
