@@ -69,7 +69,8 @@ async fn endpoint_and_named_group_options_survive_native_updates_and_bound_final
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         list[0].option_constraints["openai-responses"]["properties"]["temperature"]["default"],
         0.25
@@ -244,7 +245,8 @@ async fn model_group_membership_uses_the_scoped_configured_default_without_a_dat
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         rows[0].groups, groups,
         "changing a default never rewrites membership"

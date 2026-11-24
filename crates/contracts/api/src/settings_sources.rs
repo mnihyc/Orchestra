@@ -169,7 +169,7 @@ pub const CAPABILITY_BACKEND_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(ObjectKind::Topic),
             KeyTargetKind::Object(ObjectKind::Thread),
         ],
-        TargetResolver::Resolved("capability_backend_place"),
+        TargetResolver::ResolvedCollection("capability_backend_place"),
     ),
 ];
 /// This read uses native source admission for the provider and the query's real place.
@@ -192,9 +192,9 @@ pub const CAPABILITY_BACKENDS: Declaration<CapabilityBackendSource> = Declaratio
         },
         Binding {
             source: CapabilityBackendSource::Place,
-            target: TargetResolver::Resolved("capability_backend_place"),
+            target: TargetResolver::ResolvedCollection("capability_backend_place"),
             usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
+            cardinality: Cardinality::Collection,
         },
     ],
 };

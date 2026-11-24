@@ -221,19 +221,24 @@ impl Engine {
             tx.commit().await.map_err(DbError::from)?;
             return Ok(());
         };
-        if !self
-            .room_for_own_use(
-                &mut tx,
-                &crate::caps::OwnCapAsk {
-                    place: selected.material.identity.place(),
-                    provider: selected.config.provider_id,
-                    model: &selected.config.model_name,
-                    tier: None,
-                    purpose: "summary",
-                    person: None,
-                },
-            )
-            .await?
+        let offering = selected
+            .config
+            .offering()
+            .map_err(EngineError::unreadable)?;
+        if pool::configured(&selected.policy)?.is_none()
+            && !self
+                .room_for_own_use(
+                    &mut tx,
+                    &crate::caps::OwnCapAsk {
+                        place: selected.material.identity.place(),
+                        provider: offering.provider,
+                        model: &offering.offering,
+                        tier: None,
+                        purpose: "summary",
+                        person: None,
+                    },
+                )
+                .await?
         {
             rows::checked(&mut tx, event, false).await?;
             tx.commit().await.map_err(DbError::from)?;
@@ -247,7 +252,7 @@ impl Engine {
             model: None,
             range,
         };
-        let source = json!({"target":target,"range":selected.material.range,"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint});
+        let source = json!({"target":target,"range":selected.pinned_range(),"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint,"selection":selected.backend_selection()?});
         let accepted = rows::enqueue(
             &mut tx,
             cache.id,
@@ -258,6 +263,9 @@ impl Engine {
             due,
         )
         .await?;
+        if let rows::Enqueued::New(row) = &accepted {
+            pool::accept(self, &mut tx, &principal, row, &selected).await?;
+        }
         let consumed =
             consumed && matches!(accepted, rows::Enqueued::New(_) | rows::Enqueued::Replay(_));
         rows::checked(&mut tx, event, consumed).await?;

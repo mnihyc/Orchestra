@@ -111,11 +111,13 @@ pub fn item_tokens(item: &ActivityItem) -> u32 {
 }
 
 /// Reserve the real configured prompt, prior material and tag choices before selecting activity.
-pub fn request_budget(request: &SummaryRequest, tokens: u32) -> Result<Budget, SummarizeError> {
-    let config = crate::descriptor::Config::read(&request.config)?;
-    let (system, input) = prompts::request_frame(request, &config);
+pub fn request_budget(
+    request: &SummaryRequest,
+    config: &crate::descriptor::Config,
+) -> Result<Budget, SummarizeError> {
+    let (system, input) = prompts::request_frame(request, config);
     Budget::new(
-        tokens,
+        config.context_tokens,
         estimated_tokens(&system).saturating_add(estimated_tokens(&input)),
     )
 }

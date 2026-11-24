@@ -337,7 +337,7 @@ if [ -n "${ORCH_PROVIDER_REAL_ENV:-}" ]; then
       continue
     fi
     thread="$(call POST "/topics/$TOPIC/threads" "$(jq -cn --arg name "$title, a real model" --arg agent "$agent" --arg provider "$REAL" --arg env "$ENV_ID" --arg model "$model" --arg dir "real-$kind" \
-      '{name:$name,binding:{agent_id:$agent,provider_id:$provider,arrangement:"separated"},model:$model,environment:{use:$env},directory:$dir}')" | jq -r .id)"
+      '{name:$name,binding:{agent_id:$agent,target:{type:"single",resource:{kind:"provider",id:$provider}},arrangement:"separated"},model:$model,environment:{use:{type:"single",resource:{kind:"environment",id:$env}}},directory:$dir}')" | jq -r .id)"
     check "$kind: a thread on the real model" test -n "$thread" -a "$thread" != null
     if turn "$thread" "Reply with the single word: ready" "$WORK/real-$kind.jsonl"; then pass "$kind: the turn completed"; else fail "$kind: the turn completed"; cat "$WORK/real-$kind.jsonl" >&2; fi
     check "$kind: the model answered" jq -e 'select(.event == "item" and .kind == "agent_message" and (.summary | test("ready"; "i")))' "$WORK/real-$kind.jsonl"

@@ -28,6 +28,8 @@ fn once(scene: &rig::Scene, target: InputScheduleTarget, minutes: i64) -> InputS
             text: "the author's private future prompt".to_owned(),
         }],
         native_action: None,
+        plan: false,
+        delivery: orch_api_contract::threads::Delivery::Queue,
         timing: InputTiming::Once {
             at: Time::new(scene.rig.world.now() + Duration::minutes(minutes)),
             zone: "UTC".to_owned(),
@@ -53,6 +55,229 @@ async fn offline(scene: &rig::Scene) {
         .execute(scene.rig.db.pool())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn coalescing_and_a_previous_pending_skip_keep_their_typed_occurrence_outcomes() {
+    let scene = rig::Scene::without_supervisor().await;
+    let thread = scene.thread().await;
+    sqlx::query("UPDATE environments SET status='failed',status_detail='not started' WHERE id=$1")
+        .bind(scene.on.environment)
+        .execute(scene.rig.db.pool())
+        .await
+        .unwrap();
+    let mut body = once(
+        &scene,
+        InputScheduleTarget::Thread {
+            thread_id: thread.base.id,
+        },
+        2,
+    );
+    body.timing = InputTiming::Cron {
+        expression: "* * * * *".to_owned(),
+        zone: "UTC".to_owned(),
+    };
+    let created = scene
+        .rig
+        .world
+        .app
+        .call(TopicInputScheduleCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .body(&body)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let first = created.next_run_at.unwrap().get();
+    scene
+        .rig
+        .world
+        .advance(first + Duration::minutes(3) + Duration::seconds(1) - scene.rig.world.now());
+    orch_api_core::input_schedules::run_due(&scene.rig.world.app.app)
+        .await
+        .unwrap();
+    let queued = get(&scene, created.id).await;
+    let run = queued.last_run.as_ref().unwrap();
+    // The accepted occurrence and its unavailable environment's current hold are independent facts.
+    assert_eq!(run.state, InputScheduleRunState::Blocked);
+    let recorded = serde_json::to_value(run).unwrap()["outcome"].clone();
+    assert_eq!(recorded["reason_code"], "accepted");
+    assert_eq!(recorded["coalesced_count"], 3);
+    assert_eq!(recorded["zone"], "UTC");
+    assert_eq!(recorded["timing_policy"]["clock"], "utc");
+    assert_eq!(recorded["timing_policy"]["overdue"], "latest_occurrence");
+    assert_eq!(recorded["timing_policy"]["paused_dates"], "not_replayed");
+    assert_eq!(recorded["accepted_input_ref"], json!(run.input_id));
+    scene.rig.world.advance(Duration::minutes(1));
+    orch_api_core::input_schedules::run_due(&scene.rig.world.app.app)
+        .await
+        .unwrap();
+    let skipped = get(&scene, created.id).await;
+    let skip = skipped.last_run.as_ref().unwrap();
+    assert_eq!(skip.state, InputScheduleRunState::Skipped);
+    let skip_outcome = serde_json::to_value(skip).unwrap()["outcome"].clone();
+    assert_eq!(skip_outcome["reason_code"], "previous_input_pending");
+    assert_eq!(skip_outcome["coalesced_count"], 0);
+    assert!(skip_outcome["accepted_input_ref"].is_null());
+    // An edit changes future timing, never the facts of the occurrence already accepted.
+    scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.ada.token)
+        .body(&InputScheduleUpdateBody {
+            revision: skipped.revision,
+            timing: Some(InputTiming::Once {
+                at: Time::new(scene.rig.world.now() + Duration::hours(1)),
+                zone: "Asia/Tokyo".to_owned(),
+            }),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let page = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleRunList, &[&created.id])
+        .token(&scene.ada.token)
+        .send()
+        .await
+        .ok();
+    let retained = page.items.iter().find(|item| item.id == run.id).unwrap();
+    assert_eq!(serde_json::to_value(retained).unwrap()["outcome"], recorded);
+}
+
+#[tokio::test]
+async fn future_inputs_keep_the_authors_plan_and_delivery_choices() {
+    use orch_api_contract::threads::Delivery;
+    let scene = rig::Scene::new().await;
+    let thread = scene.thread().await;
+    offline(&scene).await;
+    sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,plan_mode}','true'::jsonb) WHERE id=(SELECT agent_id FROM segments WHERE id=(SELECT current_segment_id FROM threads WHERE node_id=$1))")
+        .bind(thread.base.id).execute(scene.rig.db.pool()).await.unwrap();
+    for plan in [false, true] {
+        for delivery in [Delivery::Queue, Delivery::Steer, Delivery::Interrupt] {
+            let body = InputScheduleCreateBody {
+                plan,
+                delivery,
+                ..once(
+                    &scene,
+                    InputScheduleTarget::Thread {
+                        thread_id: thread.base.id,
+                    },
+                    2,
+                )
+            };
+            let created = scene
+                .rig
+                .world
+                .app
+                .call(TopicInputScheduleCreate, &[&scene.tree.topic.base.id])
+                .token(&scene.ada.token)
+                .body(&body)
+                .send()
+                .await
+                .ok()
+                .into_full()
+                .unwrap();
+            assert_eq!(created.plan, plan);
+            assert_eq!(created.delivery, delivery);
+            scene.rig.world.advance(Duration::minutes(3));
+            orch_api_core::input_schedules::run_due(&scene.rig.world.app.app)
+                .await
+                .unwrap();
+            let finished = get(&scene, created.id).await;
+            let input = finished
+                .last_run
+                .unwrap()
+                .input_id
+                .expect("the authored input is accepted");
+            let stored: (bool, String) =
+                sqlx::query_as("SELECT plan,delivery FROM thread_inputs WHERE id=$1")
+                    .bind(input)
+                    .fetch_one(scene.rig.db.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(stored.0, plan);
+            assert_eq!(json!(stored.1), json!(delivery));
+        }
+    }
+}
+
+#[tokio::test]
+async fn editing_only_a_schedules_modes_keeps_the_authored_definition_and_revision_boundary() {
+    use orch_api_contract::threads::Delivery;
+    let scene = rig::Scene::new().await;
+    let thread = scene.thread().await;
+    offline(&scene).await;
+    let body = once(
+        &scene,
+        InputScheduleTarget::Thread {
+            thread_id: thread.base.id,
+        },
+        2,
+    );
+    let created = scene
+        .rig
+        .world
+        .app
+        .call(TopicInputScheduleCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .body(&body)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let change = InputScheduleUpdateBody {
+        revision: created.revision,
+        plan: Some(true),
+        delivery: Some(Delivery::Interrupt),
+        ..Default::default()
+    };
+    let denied = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.dan.token)
+        .body(&change)
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::AuthzDenied);
+    sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,plan_mode}','true'::jsonb) WHERE id=(SELECT agent_id FROM segments WHERE id=(SELECT current_segment_id FROM threads WHERE node_id=$1))")
+        .bind(thread.base.id).execute(scene.rig.db.pool()).await.unwrap();
+    let changed = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.ada.token)
+        .body(&change)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert!(changed.plan);
+    assert_eq!(changed.delivery, Delivery::Interrupt);
+    assert_eq!(changed.definition.unwrap().content, body.content);
+    let stale = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.ada.token)
+        .body(&change)
+        .send()
+        .await
+        .problem();
+    assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
 }
 
 #[tokio::test]
@@ -406,13 +631,13 @@ async fn new_thread_choices_are_resolved_when_due_and_creation_is_atomic_with_it
     let scene = rig::Scene::new().await;
     offline(&scene).await;
     let config = CreateThread {
-        binding: Some(CreateThreadBinding {
-            agent_id: scene.on.agent,
-            provider_id: scene.on.provider,
-            arrangement: None,
-        }),
+        binding: Some(CreateThreadBinding::provider(
+            scene.on.agent,
+            scene.on.provider,
+            None,
+        )),
         model: Some(rig::MODEL.to_owned()),
-        environment: Some(EnvironmentChoice::Use(scene.on.environment)),
+        environment: Some(EnvironmentChoice::existing(scene.on.environment)),
         ..Default::default()
     };
     let created = scene

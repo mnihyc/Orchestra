@@ -1,0 +1,10 @@
+fmt
+test -p orch-api-core --lib
+test -p orch-api-core --test ask --test ask_tools_native_origin
+test -p orch-api-core --test resource_summaries
+test -p orch-engine --test resource_summaries
+test -p orch-engine --lib -- ask::policy::tests::
+test -p orch-settings-contract --lib
+web typecheck
+web lint
+web test tests/component/ask-models-editor.test.tsx tests/component/ask-model-choice.test.tsx tests/component/resource-summary.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

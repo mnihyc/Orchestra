@@ -593,6 +593,7 @@ async fn materialized_origin(
         // residual creator footprint rather than replaying these completed mutations.
         for role in [
             "creator_new_environment_homes",
+            "creator_pool_placement",
             "creator_initial_file_threads",
             "creator_initial_file_environments",
             "creator_file_environments",
@@ -782,6 +783,17 @@ async fn restore_for_input(
     complete: bool,
     clock: &dyn Clock,
 ) -> Result<Option<(super::authority::RestoredInputAuthority, Vec<Caller>)>, EngineError> {
+    if let Some(parent) = authority.capability_parent() {
+        let Some(current) = parent
+            .input_callers(unit.conn, thread, &input.content, actor, clock)
+            .await?
+        else {
+            return Ok(None);
+        };
+        return authority
+            .restore_program(unit.conn, actor, current, clock)
+            .await;
+    }
     let Some(restored) = authority.restore_current(unit.conn, actor, clock).await? else {
         return Ok(None);
     };
@@ -847,9 +859,10 @@ pub(super) async fn for_input(
         return Ok(None);
     }
     if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(unit.conn, thread, &input.content, actor, clock)
-            .await?
+        && (!parent.owns_input(unit.conn, input.id).await?
+            || !parent
+                .current(unit.conn, thread, &input.content, actor, clock)
+                .await?)
     {
         return Ok(None);
     }
@@ -876,9 +889,10 @@ pub(super) async fn for_preflight(
         return Ok(None);
     }
     if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(unit.conn, thread, &input.content, actor, clock)
-            .await?
+        && (!parent.owns_input(unit.conn, input.id).await?
+            || !parent
+                .current(unit.conn, thread, &input.content, actor, clock)
+                .await?)
     {
         return Ok(None);
     }

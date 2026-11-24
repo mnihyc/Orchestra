@@ -100,6 +100,7 @@ impl Answer {
 #[derive(Clone)]
 pub struct Content {
     router: axum::Router,
+    clock: Arc<dyn orch_types::Clock>,
 }
 
 impl Content {
@@ -116,7 +117,10 @@ impl Content {
                 certificate: None,
                 remote: "127.0.0.1:41001".parse().unwrap(),
             }));
-        Self { router }
+        Self {
+            router,
+            clock: Arc::clone(&app.clock),
+        }
     }
 
     /// A request, as the gateway hands it over for `machine` under `command`.
@@ -253,6 +257,8 @@ pub async fn issue(app: &App, machine: Id, kind: CommandKind, body: &Json) -> Id
     command_rows::insert_command(
         &mut conn,
         &command_rows::NewCommand {
+            content_transit: false,
+            native_target: None,
             id,
             machine_id: machine,
             kind: kind.as_str(),
@@ -348,7 +354,7 @@ impl Depot {
         let mut conn = self.world.conn().await;
         self.app()
             .blobs
-            .register(&mut conn, meta, self.app().clock.now())
+            .register(&mut conn, &meta, self.app().clock.now())
             .await
             .unwrap();
         meta.hash
@@ -365,6 +371,15 @@ pub struct Stored {
     pub mode: u32,
 }
 
+#[derive(Clone)]
+struct NativeUpload {
+    path: String,
+    size: i64,
+    bytes: Vec<u8>,
+    verified: Option<Hash>,
+    receipt: Option<(orch_link_contract::commands::FsRelayCommit, FileStat)>,
+}
+
 /// What an environment host would do on a machine, with its files in memory: it lists, describes,
 /// uploads, writes, renames, copies and removes, takes snapshots, and answers what is left with
 /// canned words. It moves content through the routes of the internal listener, as a machine does.
@@ -373,6 +388,7 @@ pub struct Disk {
     pub environment: Id,
     content: Content,
     files: Mutex<BTreeMap<String, Stored>>,
+    native_uploads: Mutex<HashMap<Id, NativeUpload>>,
     dirs: Mutex<BTreeSet<String>>,
     clock: AtomicI64,
     refusals: Mutex<HashMap<CommandKind, VecDeque<CommandError>>>,
@@ -444,6 +460,7 @@ impl Disk {
             cancelled: Mutex::new(BTreeSet::new()),
             content,
             files: Mutex::new(BTreeMap::new()),
+            native_uploads: Mutex::new(HashMap::new()),
             dirs: Mutex::new(BTreeSet::new()),
             clock: AtomicI64::new(EPOCH_NS),
             refusals: Mutex::new(HashMap::new()),
@@ -552,6 +569,117 @@ impl Disk {
         None
     }
 
+    async fn receive_native(
+        &self,
+        id: Id,
+        body: orch_link_contract::commands::FsRelayReceive,
+    ) -> Result<Json, CommandError> {
+        {
+            let mut uploads = lock(&self.native_uploads);
+            let held = uploads
+                .entry(body.session_id)
+                .or_insert_with(|| NativeUpload {
+                    path: body.path.clone(),
+                    size: body.size,
+                    bytes: Vec::new(),
+                    verified: None,
+                    receipt: None,
+                });
+            if held.path != body.path || held.size != body.size || held.receipt.is_some() {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "this native session names another upload",
+                ));
+            }
+        }
+        loop {
+            if self.saw_stop(id) {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native receive stopped",
+                ));
+            }
+            let offset =
+                i64::try_from(lock(&self.native_uploads)[&body.session_id].bytes.len()).unwrap();
+            let reported = self
+                .content
+                .send(self.content.request(
+                    Method::HEAD,
+                    &format!(
+                        "/internal/link/blobs/relay/{}?received={offset}",
+                        body.relay_id
+                    ),
+                    Some(self.machine),
+                    Some(id),
+                    &[],
+                    Bytes::new(),
+                ))
+                .await;
+            if !reported.status.is_success() {
+                return Err(CommandError::new(
+                    ErrorCode::Internal,
+                    "the relay refused the native prefix",
+                ));
+            }
+            if offset >= body.end {
+                let expires = self.content.clock.now()
+                    + chrono::Duration::seconds(i64::try_from(body.retention_secs).unwrap());
+                return Ok(json!({"received":offset,"expires_at":Time::new(expires)}));
+            }
+            let len = (body.end - offset).min(i64::try_from(PIECE).unwrap());
+            let piece = self
+                .content
+                .send(self.content.request(
+                    Method::GET,
+                    &format!(
+                        "/internal/link/blobs/relay/{}?offset={offset}&len={len}",
+                        body.relay_id
+                    ),
+                    Some(self.machine),
+                    Some(id),
+                    &[],
+                    Bytes::new(),
+                ))
+                .await;
+            if piece.status == StatusCode::NO_CONTENT {
+                continue;
+            }
+            if piece.status != StatusCode::OK || piece.body.is_empty() {
+                return Err(CommandError::new(
+                    ErrorCode::Internal,
+                    "the relay ended before its native destination received the piece",
+                ));
+            }
+            let mut uploads = lock(&self.native_uploads);
+            let held = uploads.get_mut(&body.session_id).unwrap();
+            held.bytes.extend_from_slice(&piece.body);
+            held.verified = None;
+        }
+    }
+
+    async fn relay_bytes(&self, id: Id, relay: Id, bytes: &[u8]) -> Result<(), CommandError> {
+        let mut offset = 0;
+        for piece in bytes.chunks(PIECE) {
+            let request = self.content.request(
+                Method::PUT,
+                &format!("/internal/link/blobs/relay/{}?offset={offset}", relay),
+                Some(self.machine),
+                Some(id),
+                &[],
+                Bytes::copy_from_slice(piece),
+            );
+            let answer = self.content.send(request).await;
+            if answer.status != StatusCode::OK {
+                return Err(CommandError::new(
+                    ErrorCode::Internal,
+                    format!("the relay refused its piece: {}", answer.status),
+                ));
+            }
+            offset = answer.received().unwrap();
+        }
+        Ok(())
+    }
+
     fn stat_of(&self, path: &str) -> Option<FileStat> {
         let entry = self.entry_of(path)?;
         let hash = lock(&self.files)
@@ -561,6 +689,7 @@ impl Disk {
         let media = orch_api_core::media::media_type(&entry.name, &[]).to_owned();
         let is_text = is_file && orch_api_core::media::is_text_by_name(&entry.name);
         Some(FileStat {
+            facts: None,
             entry,
             hash,
             media_type: if is_file {
@@ -635,6 +764,7 @@ impl Disk {
             .upload(self.machine, id, &file.bytes, PIECE)
             .await;
         Self::json(&FsFetchResult {
+            minimum_reach: orch_link_contract::policy::FileReach::Roots,
             hash,
             size: i64::try_from(file.bytes.len()).unwrap(),
             mtime_ns: file.mtime_ns,
@@ -888,6 +1018,147 @@ impl Machine for Disk {
                     .ok_or_else(|| Self::not_found(&stat.path))?;
                 Self::json(&found)
             }
+            CommandKind::FsRelayReceive => {
+                self.receive_native(id, serde_json::from_value(body).map_err(bad)?)
+                    .await
+            }
+            CommandKind::FsRelayVerify => {
+                let body: orch_link_contract::commands::FsRelayVerify =
+                    serde_json::from_value(body).map_err(bad)?;
+                let mut uploads = lock(&self.native_uploads);
+                let held = uploads
+                    .get_mut(&body.session_id)
+                    .ok_or_else(|| Self::not_found("native upload"))?;
+                if held.path != body.receive_path
+                    || i64::try_from(held.bytes.len()).unwrap() != held.size
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Busy,
+                        "the native upload is incomplete",
+                    ));
+                }
+                let hash = Hash::of(&held.bytes);
+                held.verified = Some(hash);
+                let expires = self.content.clock.now()
+                    + chrono::Duration::seconds(i64::try_from(body.retention_secs).unwrap());
+                Self::json(&orch_link_contract::commands::FsRelayVerified {
+                    file: FsFetchResult {
+                        minimum_reach: orch_link_contract::policy::FileReach::Roots,
+                        hash,
+                        size: held.size,
+                        mtime_ns: self.tick(),
+                    },
+                    expires_at: Time::new(expires),
+                })
+            }
+            CommandKind::FsRelayPrepare => {
+                let body: orch_link_contract::commands::FsRelayPrepare =
+                    serde_json::from_value(body).map_err(bad)?;
+                let uploads = lock(&self.native_uploads);
+                let held = uploads
+                    .get(&body.session_id)
+                    .ok_or_else(|| Self::not_found("native upload"))?;
+                if held.path != body.receive_path || held.verified.is_none() {
+                    return Err(CommandError::new(
+                        ErrorCode::Busy,
+                        "the native upload is not verified",
+                    ));
+                }
+                Ok(json!({}))
+            }
+            CommandKind::FsRelayCommit => {
+                let body: orch_link_contract::commands::FsRelayCommit =
+                    serde_json::from_value(body).map_err(bad)?;
+                let held = lock(&self.native_uploads)
+                    .get(&body.session_id)
+                    .cloned()
+                    .ok_or_else(|| Self::not_found("native upload"))?;
+                if let Some((accepted, receipt)) = held.receipt {
+                    return if accepted == body {
+                        Self::json(&receipt)
+                    } else {
+                        Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "this upload has already been committed",
+                        ))
+                    };
+                }
+                if held.path != body.receive_path
+                    || held.verified != Some(body.hash)
+                    || held.size != body.size
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Changed,
+                        "the native upload changed",
+                    ));
+                }
+                let present = lock(&self.files)
+                    .get(&body.path)
+                    .map(|file| Hash::of(&file.bytes));
+                if matches!(
+                    (body.expected_hash, present),
+                    (Some(ExpectedHash::Absent), Some(_))
+                ) || matches!((body.expected_hash,present),(Some(ExpectedHash::Is(expected)),found) if found!=Some(expected))
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the destination is another version",
+                    )
+                    .with_details(json!({"current":self.stat_of(&body.path)})));
+                }
+                self.put(&body.path, &held.bytes);
+                let receipt = self.stat_of(&body.path).unwrap();
+                let mut uploads = lock(&self.native_uploads);
+                let held = uploads.get_mut(&body.session_id).unwrap();
+                held.receipt = Some((body, receipt.clone()));
+                held.bytes.clear();
+                Self::json(&receipt)
+            }
+            CommandKind::FsRelayAbort => {
+                let body: orch_link_contract::commands::FsRelayAbort =
+                    serde_json::from_value(body).map_err(bad)?;
+                lock(&self.native_uploads).remove(&body.session_id);
+                Ok(json!({}))
+            }
+            CommandKind::FsRelayDescribe => {
+                let body: orch_link_contract::commands::FsRelayDescribe =
+                    serde_json::from_value(body).map_err(bad)?;
+                let file = lock(&self.files)
+                    .get(&body.path)
+                    .cloned()
+                    .ok_or_else(|| Self::not_found(&body.path))?;
+                Self::json(&FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
+                    hash: Hash::of(&file.bytes),
+                    size: i64::try_from(file.bytes.len()).unwrap(),
+                    mtime_ns: file.mtime_ns,
+                })
+            }
+            CommandKind::FsRelaySend => {
+                let body: orch_link_contract::commands::FsRelaySend =
+                    serde_json::from_value(body).map_err(bad)?;
+                let file = lock(&self.files)
+                    .get(&body.path)
+                    .cloned()
+                    .ok_or_else(|| Self::not_found(&body.path))?;
+                if Hash::of(&file.bytes) != body.hash {
+                    return Err(CommandError::new(
+                        ErrorCode::Changed,
+                        "the file is another content version",
+                    ));
+                }
+                let from = usize::try_from(body.offset)
+                    .map_err(|_| CommandError::new(ErrorCode::Unsupported, "negative offset"))?;
+                let len = usize::try_from(body.len)
+                    .map_err(|_| CommandError::new(ErrorCode::Unsupported, "negative range"))?;
+                let end = from
+                    .checked_add(len)
+                    .filter(|end| *end <= file.bytes.len())
+                    .ok_or_else(|| CommandError::new(ErrorCode::Unsupported, "invalid range"))?;
+                self.relay_bytes(id, body.relay_id, &file.bytes[from..end])
+                    .await?;
+                Ok(json!({}))
+            }
             CommandKind::FsFetch => {
                 self.fetch(id, serde_json::from_value(body).map_err(bad)?)
                     .await
@@ -926,11 +1197,12 @@ impl Machine for Disk {
                 }
                 lock(&self.dirs).remove(&rename.from);
                 lock(&self.dirs).insert(rename.to.clone());
-                Self::json(
-                    &self
+                Self::json(&orch_api_contract::workspace::FileRenameResult {
+                    stat: self
                         .stat_of(&rename.to)
                         .unwrap_or_else(|| self.stat_of("").unwrap()),
-                )
+                    kept_entries: 0,
+                })
             }
             CommandKind::FsCopy => {
                 let copy: FsCopy = serde_json::from_value(body).map_err(bad)?;
@@ -981,6 +1253,22 @@ impl Machine for Disk {
             }
             CommandKind::FsSearch => {
                 let search: FsSearch = serde_json::from_value(body).map_err(bad)?;
+                if search.scope == orch_api_contract::workspace::FileSearchIn::Names {
+                    let paths: Vec<_> = lock(&self.files)
+                        .keys()
+                        .filter(|path| path.to_lowercase().contains(&search.query.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    let names: Vec<_> = paths
+                        .iter()
+                        .filter_map(|path| self.stat_of(path))
+                        .map(|stat| stat.entry)
+                        .take(search.limit as usize)
+                        .collect();
+                    return Ok(
+                        json!({"names":names,"next_cursor":null,"observed_from":null,"as_of":null,"matches":[],"truncated":false,"searched":paths.len()}),
+                    );
+                }
                 let matches = self.matches_in(&search);
                 let limit = usize::try_from(search.limit).unwrap();
                 let truncated = matches.len() > limit;
@@ -1000,6 +1288,19 @@ impl Machine for Disk {
                     "entries": [{ "path": "docs/", "kind": "dir", "size": null, "modified_at": null },
                                 { "path": "readme.txt", "kind": "file", "size": 11, "modified_at": null }]
                 }))
+            }
+            CommandKind::FsRelayArchiveRead => {
+                let read: orch_link_contract::commands::FsRelayArchiveRead =
+                    serde_json::from_value(body).map_err(bad)?;
+                let bytes = format!("inside {}", read.entry).into_bytes();
+                if i64::try_from(bytes.len()).unwrap() > read.max_bytes {
+                    return Err(CommandError::new(
+                        ErrorCode::TooLarge,
+                        "the archive entry exceeds its preview bound",
+                    ));
+                }
+                self.relay_bytes(id, read.relay_id, &bytes).await?;
+                Ok(json!({"blob": {"hash": Hash::of(&bytes), "size": bytes.len()}}))
             }
             CommandKind::FsArchiveRead => {
                 let read: FsArchiveRead = serde_json::from_value(body).map_err(bad)?;
@@ -1077,7 +1378,9 @@ impl Machine for Disk {
             CommandKind::GitDiff => {
                 let diff: GitDiff = serde_json::from_value(body).map_err(bad)?;
                 if let Some((text, truncated)) = lock(&self.diff).clone() {
-                    return Ok(json!({ "text": text, "truncated": truncated }));
+                    return Ok(
+                        json!({ "text": text, "truncated": truncated, "next_cursor":truncated.then_some("same-output") }),
+                    );
                 }
                 Ok(json!({
                     "text": format!("diff --git a/x b/x\n{}", if diff.staged == Some(true) { "staged" } else { "unstaged" }),
@@ -1338,13 +1641,9 @@ impl Site {
             .token(&ada.token)
             .body(&CreateThread {
                 name: Some("Fix login".to_owned()),
-                binding: Some(CreateThreadBinding {
-                    agent_id: agent,
-                    provider_id: provider,
-                    arrangement: None,
-                }),
+                binding: Some(CreateThreadBinding::provider(agent, provider, None)),
                 model: Some(MODEL.to_owned()),
-                environment: Some(EnvironmentChoice::Use(environment)),
+                environment: Some(EnvironmentChoice::existing(environment)),
                 directory: Some("web".to_owned()),
                 ..CreateThread::default()
             })
@@ -1384,13 +1683,13 @@ impl Site {
             .token(&by.token)
             .body(&CreateThread {
                 name: Some("Another".to_owned()),
-                binding: Some(CreateThreadBinding {
-                    agent_id: self.agent,
-                    provider_id: self.provider,
-                    arrangement: None,
-                }),
+                binding: Some(CreateThreadBinding::provider(
+                    self.agent,
+                    self.provider,
+                    None,
+                )),
                 model: Some(MODEL.to_owned()),
-                environment: Some(EnvironmentChoice::Use(self.environment)),
+                environment: Some(EnvironmentChoice::existing(self.environment)),
                 directory: Some(directory.to_owned()),
                 ..CreateThread::default()
             })
@@ -1471,6 +1770,7 @@ impl Site {
             "bytes_total": 1000, "rate_bps": null, "eta_seconds": null, "message": "reading"
         });
         let event = orch_link::streams::DeliveredEvent {
+            native_opening_id: None,
             seq: 1,
             at: Time::new(self.world.now()),
             kind: "job.progress".to_owned(),
@@ -1616,6 +1916,7 @@ impl Site {
             .upload(self.machine, nil, &written.bytes, PIECE)
             .await;
         let event = orch_link::streams::DeliveredEvent {
+            native_opening_id: None,
             seq: 1,
             at: Time::new(self.world.now()),
             kind: "env.manifest".to_owned(),
@@ -1673,6 +1974,7 @@ pub mod ask {
             .call(EnvironmentFileList, &[&site.environment])
             .token(&by.token)
             .query(&EnvironmentFileListQuery {
+                prefix: None,
                 thread: Some(site.thread),
                 path: path.to_owned(),
                 source,
@@ -1793,7 +2095,12 @@ pub mod ask {
     }
 
     /// A path renamed.
-    pub async fn rename(site: &Site, by: &Who, from: &str, to: &str) -> Reply<FileStat> {
+    pub async fn rename(
+        site: &Site,
+        by: &Who,
+        from: &str,
+        to: &str,
+    ) -> Reply<orch_api_contract::workspace::FileRenameResult> {
         site.app()
             .call(EnvironmentFileRename, &[&site.environment])
             .token(&by.token)

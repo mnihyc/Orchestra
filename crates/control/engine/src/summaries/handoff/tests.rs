@@ -14,6 +14,238 @@ use std::{
 use tokio::sync::oneshot;
 
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[tokio::test]
+async fn a_handoff_keeps_its_actual_read_allowance_and_omits_a_large_turn_before_reading_it()
+-> Proof {
+    check_bounded_handoff(false).await
+}
+
+#[tokio::test]
+async fn a_paid_handoff_uses_its_model_pool_and_retains_the_confirmed_source_cut() -> Proof {
+    check_bounded_handoff(true).await
+}
+
+async fn check_bounded_handoff(use_pool: bool) -> Proof {
+    let world = common::World::on_a_key("synthetic-handoff-coverage-key").await;
+    let thread = world.thread("A bounded handoff receipt").await;
+    for (number, question, reply) in [
+        (0, "small question", "a completed answer".to_owned()),
+        // The retained answer exceeds the receipt's allowance without changing the next prompt's admission.
+        (1, "another question", "large source".repeat(500)),
+    ] {
+        world
+            .engine()
+            .submit_input(
+                &Caller::session(world.ada),
+                thread,
+                common::queued(question),
+            )
+            .await?;
+        world.run_turn(thread, number, &reply).await;
+        common::eventually(
+            "the captured handoff turn finishes its end accounting",
+            || async {
+                let mut conn = match world.pool.acquire().await {
+                    Ok(conn) => conn,
+                    Err(_) => return false,
+                };
+                !threads::turn_end_work_pending(&mut conn, thread)
+                    .await
+                    .unwrap_or(true)
+            },
+        )
+        .await;
+    }
+    world
+        .set(world.topic, "thread.read_turn_bytes", json!(4_000))
+        .await;
+    let mut conn = world.pool.acquire().await?;
+    let row = threads::thread(&mut conn, thread)
+        .await?
+        .ok_or("the thread is absent")?;
+    let cut = thread_history_cuts::capture(
+        &mut conn,
+        &thread_history_cuts::Capture {
+            id: thread,
+            thread,
+            view: row.active_continuation_id,
+            job: None,
+            owner_thread: Some(thread),
+            segment: row.current_segment_id,
+            execution_revision: row.execution_revision,
+            range: Some((1, 2)),
+            at: world.clock.now(),
+        },
+    )
+    .await?;
+    drop(conn);
+    let budget = InputBudget {
+        window: Some(40_000),
+        share: 50,
+        tokens: 20_000,
+        bytes: 60_000,
+    };
+    let input = crate::fork_history::cut::summary_input(&world.engine(), &cut, &budget).await?;
+    assert!(input.text.contains("small question"));
+    assert!(!input.text.contains("large sourcelarge source"));
+    let coverage = input.coverage_for(&input.text);
+    assert_eq!(coverage.read_turn_bytes, 4_000);
+    assert_eq!(
+        coverage.included_turn_ranges,
+        vec![orch_api_contract::summary_facts::SummaryTurnRange {
+            first: 1,
+            through: 1
+        }]
+    );
+    assert_eq!(
+        coverage.oversized_turn_ranges,
+        vec![orch_api_contract::summary_facts::SummaryTurnRange {
+            first: 2,
+            through: 2
+        }]
+    );
+    world
+        .set(world.topic, "thread.read_turn_bytes", json!(80_000))
+        .await;
+    assert_eq!(
+        input.coverage_for(&input.text),
+        coverage,
+        "a later default does not rewrite a receipt"
+    );
+    world.engine().stop();
+    let backend = json!({"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":common::MODEL}});
+    let pool = if use_pool {
+        let pool = world.summary_model_pool("Handoff models", &backend).await?;
+        Some(pool)
+    } else {
+        None
+    };
+    let producer = match pool {
+        Some(id) => json!({"kind":"model","target":{"type":"pool","kind":"model","id":id}}),
+        None => json!({"kind":"model","backend":backend}),
+    };
+    world.set(world.topic, "auto.summarizer", producer).await;
+    world.machine.handler.on(
+        orch_link_contract::commands::CommandKind::ProviderComplete,
+        |command| {
+            if let orch_link_contract::commands::Command::ProviderComplete(request) = command {
+                assert!(request.input.contains("small question"));
+                assert!(!request.input.contains("large sourcelarge source"));
+            }
+            Ok(
+                orch_link_contract::commands::CommandResult::ProviderComplete(
+                    orch_link_contract::commands::ProviderCompleteResult {
+                        text: "rejected-whole-answer".repeat(1_000),
+                        usage: Default::default(),
+                        request_ref: Some("synthetic-whole-handoff".into()),
+                        timing: orch_api_contract::usage::RequestTiming {
+                            reported_tokens: Some(orch_api_contract::usage::RequestTokens {
+                                input_tokens: Some(9),
+                                output_tokens: Some(0),
+                                total_tokens: Some(9),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            )
+        },
+    );
+    let choice = capture_handoff_choice(&mut *world.pool.acquire().await?, thread, None).await?;
+    handoff_budget(&world.engine(), thread, &choice).await?;
+    if let Some(pool) = pool {
+        let preview = super::super::estimate::handoff_estimate(
+            &world.engine(),
+            &mut *world.pool.acquire().await?,
+            thread,
+            2,
+        )
+        .await?;
+        assert!(
+            preview.available,
+            "the fork plan offers the configured handoff pool"
+        );
+        assert!(preview.input_tokens > 0 && preview.output_tokens > 0);
+        assert!(preview.credits.is_none(), "a preview has no selected rate");
+        let before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE target->>'id'=$1")
+                .bind(pool.to_string())
+                .fetch_one(&mut *world.pool.acquire().await?)
+                .await?;
+        assert_eq!(before, 0, "preview cannot reserve a handoff member");
+    }
+    let mut observed = None;
+    let made = handoff_captured(
+        &world.engine(),
+        thread,
+        &input.text,
+        cut.id,
+        &choice,
+        Some(HandoffCapture {
+            cut: cut.id,
+            input: &input,
+            receipt: &mut observed,
+        }),
+    )
+    .await;
+    let Err(error) = made else {
+        return Err("the oversized handoff was accepted".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("no usable bounded handoff summary"),
+        "the real conformance decision completes: {error}"
+    );
+    let observed = observed
+        .ok_or("the rejected output was not observed")?
+        .result;
+    assert!(
+        thread_history_cuts::keep_artifact(
+            &mut *world.pool.acquire().await?,
+            cut.id,
+            "summary_skipped",
+            &json!({"reason":"failed","handoff":observed}),
+            &[]
+        )
+        .await?
+    );
+    let kept = thread_history_cuts::cut(&mut *world.pool.acquire().await?, cut.id)
+        .await?
+        .ok_or("the retained cut is absent")?;
+    let receipt: orch_api_contract::summary_facts::HandoffResult =
+        serde_json::from_value(kept.artifacts["summary_skipped"]["handoff"].clone())?;
+    assert_eq!(receipt.input_coverage, Some(coverage));
+    let output = receipt
+        .result_facts
+        .ok_or("the rejected result has no receipt")?;
+    assert_eq!(output.rejected_whole, Some(true));
+    assert_eq!(
+        output.captured_usage.and_then(|usage| usage.output_tokens),
+        Some(0)
+    );
+    assert!(
+        !kept.artifacts.to_string().contains("rejected-whole-answer"),
+        "no rejected text is retained as a usable prefix"
+    );
+    if let Some(pool) = pool {
+        let selected: Vec<(Id, Id)> = sqlx::query_as(
+            "SELECT p.id,p.actor_id FROM pool_choices p JOIN summary_calls paid ON paid.id=p.id WHERE p.state='selected' AND p.target->>'id'=$1 AND p.source->>'workflow'=$2 AND p.source->>'cut'=$2 AND paid.node_id=$3 AND paid.provider_id=$4",
+        ).bind(pool.to_string()).bind(cut.id.to_string()).bind(thread).bind(world.provider)
+            .fetch_all(&mut *world.pool.acquire().await?).await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "one real paid call belongs to this history cut"
+        );
+        assert_eq!(selected[0].1, world.ada);
+    }
+    world.shutdown().await;
+    Ok(())
+}
+
 struct Gate {
     view: Id,
     reached: oneshot::Sender<()>,

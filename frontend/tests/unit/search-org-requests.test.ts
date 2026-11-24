@@ -1,12 +1,29 @@
 /** A rail preview sends the same real scope as its cache key; query changes retire old-org placeholders. */
 import { LiveQueryClient } from '@/api/query';
+import { isPeopleProjection } from '@/api/peopleChanges';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as Client from '@/api/client';
-import { namesQuery, searchPreviewQuery } from '@/api/search';
+import { nameByIdQuery, namesQuery, pickerNamesQuery, searchPreviewQuery } from '@/api/search';
+import type { NameHit } from '@/generated/api-types';
 import type { HttpTransport } from '../doubles/http-wire';
 const calls = vi.hoisted(() => ({ get: vi.fn<HttpTransport>() }));
 vi.mock('@/api/client', async (original) => { const actual = await original<typeof Client>(); return { ...actual, api: { ...actual.api, GET: calls.get } }; });
 afterEach(() => vi.clearAllMocks());
+
+it('resolves a saved target by its exact kind and identity without depending on recents', async () => {
+  const hit: NameHit = { id: 'target-topic', kind: 'topic', name: 'Release plan', home_path: [], path: [], address: null, avatar: null, archived: false, color: null, custom_color: null, owner: null, recent: false, tag: null, thread_attention: null, username: null };
+  calls.get.mockResolvedValue({ data: { items: [hit], partial: false }, response: new Response(null, { status: 200 }) });
+  const cache = new LiveQueryClient();
+  try {
+    expect(await cache.query(nameByIdQuery(hit.kind, hit.id))).toEqual(hit);
+    const signal: unknown = expect.any(AbortSignal);
+    expect(calls.get).toHaveBeenLastCalledWith('/search/names', expect.objectContaining({ params: { query: { id: hit.id, kinds: hit.kind } }, signal }));
+    expect(await cache.query(nameByIdQuery('project', hit.id))).toBeNull();
+    expect(nameByIdQuery(hit.kind, hit.id).queryKey).not.toEqual(nameByIdQuery('project', hit.id).queryKey);
+    expect(isPeopleProjection(nameByIdQuery(hit.kind, hit.id).queryKey)).toBe(true);
+  } finally { cache.clear(); }
+});
+
 it('sends root scope and leaves it out only on the explicit global preview', async () => {
   calls.get.mockResolvedValue({ data: { items: [], next_cursor: null }, response: new Response(null, { status: 200 }) });
   const cache = new LiveQueryClient();
@@ -20,4 +37,20 @@ it('sends root scope and leaves it out only on the explicit global preview', asy
     expect(namesQuery({ q: 'canary', kinds: ['topic'], orgId: 'work' }).queryKey)
       .not.toEqual(namesQuery({ q: 'canary', kinds: ['topic'], orgId: 'personal' }).queryKey);
   } finally { cache.clear(); }
+});
+
+
+it('continues empty native candidate batches without calling them an empty picker',async()=>{
+ const hit:NameHit={id:'late-topic',kind:'topic',name:'Later place',home_path:[],path:[],address:null,avatar:null,archived:false,color:null,custom_color:null,owner:null,recent:false,tag:null,thread_attention:null,username:null};
+ calls.get.mockResolvedValueOnce({data:{items:[],partial:true,next_cursor:'native-progress'},response:new Response(null,{status:200})})
+  .mockResolvedValueOnce({data:{items:[hit],partial:false,next_cursor:null},response:new Response(null,{status:200})});
+ const cache=new LiveQueryClient();try {
+  const reply=await cache.infiniteQuery(pickerNamesQuery({q:'L',kinds:['topic'],orgId:'work'}));
+  expect(reply.pages.flatMap((page)=>page.items)).toEqual([hit]);
+  expect(calls.get).toHaveBeenCalledTimes(2);
+  expect(calls.get.mock.calls.map(([,request])=>request.params?.query)).toEqual([
+   {picker:true,q:'L',kinds:'topic',limit:20,org_id:'work'},
+   {picker:true,q:'L',kinds:'topic',limit:20,org_id:'work',cursor:'native-progress'},
+  ]);
+ }finally{cache.clear();}
 });

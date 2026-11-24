@@ -8,6 +8,8 @@ summary: Manage your profile, sign-ins, account recovery, sessions and personal 
 
 # Manage your account and profile
 
+This page shows how to sign in and recover access, edit your profile, and manage your sign-ins and keys.
+
 ## Sign in and recover access
 
 Use the sign-in methods offered by your installation. Registration and
@@ -41,11 +43,20 @@ not expand existing keys. Choose an expiry and copy the secret when it is create
 Later lists show its policy and recent activity. Revoke keys you no longer need.
 
 A program uses the secret with `Authorization: Bearer <key>` on the same API.
-The key is limited by your current authority and its own rules. Administrative
-operations need your current administrative standing and an explicit selection;
+The key is limited by your current permissions and by its own rules. Administrative
+operations need your current standing as an administrator and a choice made on purpose;
 the browser's As admin private-access override is not delegated. A write-only
 operation returns an acknowledgement without existing content. A newly issued
 secret remains available once in that acknowledgement.
+
+New API keys use `opat_<key id>_<secret><checksum>`: the key’s own UUID as 32
+lowercase hexadecimal characters, a 256-bit secret as 43 unpadded base64url
+characters, and six Base62 checksum characters (`0–9`, `A–Z`, `a–z`). The
+checksum is CRC-32/ISO-HDLC over everything before it, encoded with leading
+zeroes. Invalid encodings are rejected before a database lookup; a valid
+checksum grants no access. Older opaque API keys are not accepted by this
+version; create new keys after upgrading. Browser sessions keep their own
+credential format.
 
 Recent activity shows up to 100 calls from the last seven days, with operation,
 target, status and timing. Resource names and source addresses follow the reader's

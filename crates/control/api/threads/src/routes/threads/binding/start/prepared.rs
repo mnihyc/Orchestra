@@ -50,10 +50,28 @@ pub(super) async fn context(
     principal: &Principal,
     query: &NodeBindingOptionsGetQuery,
 ) -> ApiResult<Context> {
-    if query.environment_new && query.environment_id.is_some() {
+    if usize::from(query.environment_new)
+        + usize::from(query.environment_id.is_some())
+        + usize::from(query.environment_pool_id.is_some())
+        > 1
+    {
         return Err(invalid(
             "environment_id",
-            "choose either an existing environment or a new one",
+            "choose an environment, an environment pool, or a new environment",
+        ));
+    }
+    if !query.environment_new
+        && (query.template_id.is_some() || query.host_id.is_some() || query.host_auto)
+    {
+        return Err(invalid(
+            "environment_new",
+            "a template or host describes a new environment",
+        ));
+    }
+    if query.host_auto && query.host_id.is_some() {
+        return Err(invalid(
+            "host_id",
+            "choose either a named host or the scheduler",
         ));
     }
     let id = ctx.id("id")?;
@@ -70,12 +88,48 @@ pub(super) async fn context(
         };
     // This is the ordinary context decision, before its independently scoped choice
     // lists. A key never silently substitutes a different configured primary context.
-    let existing = match query.environment_id {
-        Some(environment) => Some(chosen_environment(conn, principal, environment, id).await?),
-        None if !query.environment_new && environment_default == EnvironmentDefault::Shared => {
-            let candidates =
-                environment_candidates(conn, principal, id, Permission::EnvironmentUse, None)
-                    .await?;
+    let work = principal.ordinary(conn).await.map_err(ApiError::internal)?;
+    let existing = match (query.environment_id, query.environment_pool_id) {
+        (None, Some(pool)) => {
+            let candidates = environment_candidates(
+                conn,
+                principal,
+                &work,
+                id,
+                Permission::EnvironmentUse,
+                None,
+            )
+            .await?;
+            let member = binding::environment_pool::setup_member(
+                conn,
+                &work,
+                id,
+                pool,
+                &candidates.placeable,
+            )
+            .await
+            .map_err(ApiError::engine)?
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::EnvironmentNoneUsable,
+                    "This pool has no available environment that can be shown in setup.",
+                )
+            })?;
+            Some(chosen_environment(conn, &work, member, id).await?)
+        }
+        (Some(environment), None) => Some(chosen_environment(conn, &work, environment, id).await?),
+        (None, None)
+            if !query.environment_new && environment_default == EnvironmentDefault::Shared =>
+        {
+            let candidates = environment_candidates(
+                conn,
+                principal,
+                &work,
+                id,
+                Permission::EnvironmentUse,
+                None,
+            )
+            .await?;
             match setting::<Id>(conn, Place::Node(id), keys::ENV_DEFAULT_ID)
                 .await
                 .map_err(ApiError::internal)?
@@ -93,7 +147,7 @@ pub(super) async fn context(
                         )
                         .is_none()
                     }) {
-                        Some(chosen_environment(conn, principal, environment, id).await?)
+                        Some(chosen_environment(conn, &work, environment, id).await?)
                     } else {
                         None
                     }
@@ -103,7 +157,7 @@ pub(super) async fn context(
         }
         _ => None,
     };
-    let (judged, sources) = match existing {
+    let (judged, mut sources) = match existing {
         Some(environment) => {
             let source = ObjectRef {
                 kind: ObjectKind::Environment,
@@ -114,7 +168,7 @@ pub(super) async fn context(
                 .map_err(ApiError::internal)?;
             (Some((environment, offers)), vec![source])
         }
-        None => match template_ground_source(conn, principal, &node).await? {
+        None => match template_ground_source(conn, principal, &node, query.template_id).await? {
             Some((environment, offers, template)) => (
                 Some((environment, offers)),
                 vec![ObjectRef {
@@ -125,6 +179,12 @@ pub(super) async fn context(
             None => (None, Vec::new()),
         },
     };
+    if let Some(pool) = query.environment_pool_id {
+        sources.push(ObjectRef {
+            kind: ObjectKind::Pool,
+            id: pool,
+        });
+    }
     let mut orch_tools = OrchToolsOf::read(
         conn,
         id,
