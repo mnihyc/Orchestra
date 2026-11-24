@@ -39,9 +39,16 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Proof<Self> {
+        Self::with_entries(&[]).await
+    }
+
+    async fn with_entries(names: &[&str]) -> Proof<Self> {
         let directory = tempfile::tempdir()?;
         let root = directory.path().join("workspace");
         std::fs::create_dir(&root)?;
+        for name in names {
+            std::fs::write(root.join(name), name)?;
+        }
         let settings =
             HostSettings::connected(directory.path().join("connector"), vec![root.clone()]);
         let (reports, receiver) = Reports::channel(256);
@@ -55,6 +62,8 @@ impl Rig {
         let environment = new_id();
         host.env_attach(
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
@@ -81,6 +90,8 @@ impl Rig {
 
     fn request(&self, watch: Id) -> FsList {
         FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.environment,
             path: String::new(),
             mount: None,
@@ -307,16 +318,34 @@ async fn removing_one_logical_reader_keeps_another_native_directory_watch_live()
 async fn a_plain_observation_does_not_claim_live_activation_when_native_watching_is_unavailable()
 -> Proof {
     let rig = Rig::new().await?;
-    std::fs::write(rig.root.join("actual.txt"), b"actual")?;
     let environment = rig.host.environment(rig.environment)?;
     lock(&environment.watcher)
         .as_ref()
         .ok_or("watcher absent")?
         .stop();
+    std::fs::write(rig.root.join("actual.txt"), b"actual")?;
     let watch = new_id();
     let mut plain = rig.request(watch);
     plain.watch_id = None;
-    let observed = rig.host.fs_list(&plain).await?;
+    let host = EnvHost {
+        inner: Arc::clone(&rig.host.inner),
+    };
+    let (entered, reached) = oneshot::channel();
+    let (resume, blocked) = oneshot::channel();
+    let reading = tokio::spawn(BEFORE_SNAPSHOT.scope(
+        Mutex::new(Some(Boundary {
+            entered,
+            resume: blocked,
+        })),
+        async move { host.fs_list(&plain).await },
+    ));
+    tokio::time::timeout(PATIENCE, reached).await??;
+    // A late classification of watch loss cannot revoke a read that promised no native activation.
+    environment.admit_directory_change(&Change::Unavailable);
+    resume
+        .send(())
+        .map_err(|()| "the plain reader ended before its delivery resumed")?;
+    let observed = tokio::time::timeout(PATIENCE, reading).await???;
     assert_eq!(
         observed
             .entries
@@ -324,6 +353,14 @@ async fn a_plain_observation_does_not_claim_live_activation_when_native_watching
             .map(|row| row.name.as_str())
             .collect::<Vec<_>>(),
         ["actual.txt"]
+    );
+    assert!(observed.watch_instance.is_none());
+    assert!(
+        observed
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.watch.as_ref())
+            .is_some_and(|watch| !watch.native)
     );
     let metadata = observed
         .page
@@ -460,10 +497,9 @@ async fn admitted_loss_and_rule_changes_fence_current_cursors_without_any_stat_c
         Change::Unavailable,
         Change::Paths(vec![RelPath::root().join(crate::ignore::IGNORE_FILE)?]),
     ] {
-        let rig = Rig::new().await?;
-        for name in ["a", "b"] {
-            std::fs::write(rig.root.join(name), name)?;
-        }
+        // Seed before native activation: this case injects admission itself and must not
+        // race delayed create/close events from its own baseline files.
+        let rig = Rig::with_entries(&["a", "b"]).await?;
         let watch = new_id();
         let mut body = rig.request(watch);
         body.page = Some(orch_link_contract::commands::FsListPage {

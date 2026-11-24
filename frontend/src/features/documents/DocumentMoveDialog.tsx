@@ -26,6 +26,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { Table } from '@/ui/Table';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { toast } from '@/ui/Toast';
 import { deletionPaths } from './treeLocation';
 
@@ -93,11 +94,11 @@ export function DocumentMoveDialog({ row, directory, onClose, onDone }: { row: D
       {at !== null && targetRead.isPending && <SkeletonRows read={targetRead} rows={1} />}
       <Input label={t('documentFolders.name')} value={name} disabled={write.isPending} onChange={(event) => { setName(event.target.value); write.reset(); }} />
       {across && (preview.isError ? <ErrorState compact error={preview.error} onRetry={reviewAgain} /> : preview.data === undefined ? <SkeletonRows read={preview} rows={2} /> : plan === undefined ? <StateLine compact message={t('duplicate.deletePlanReady')} /> : <>
-        <Table label={t('duplicate.deletePlan')} rows={plan.stamp.entries} rowKey={(entry) => `${entry.item.kind}:${entry.item.id}`} columns={[
+        <CompleteCollection label={t('duplicate.deletePlan')} items={plan.stamp.entries} textOf={(entry) => paths.get(`${entry.item.kind}:${entry.item.id}`) ?? entry.basename}>{(rows) => <Table virtual label={t('duplicate.deletePlan')} rows={rows} rowKey={(entry) => `${entry.item.kind}:${entry.item.id}`} columns={[
           { id: 'name', header: t('documentFolders.name'), cell: (entry) => entry.item.kind === 'document' ? <NamedChip kind="doc" id={entry.item.id} name={paths.get(`document:${entry.item.id}`) ?? entry.basename} path={`/doc/${encodeURIComponent(entry.item.id)}`} /> : <Link to="/document-folder/$folderId" params={{ folderId: entry.item.id }} className="break-all text-accent hover:underline">{paths.get(`container:${entry.item.id}`) ?? entry.basename}</Link> },
           { id: 'files', header: t('duplicate.files'), cell: (entry) => formatNumber(entry.files, i18n.language) },
           { id: 'versions', header: t('duplicate.versions'), cell: (entry) => formatNumber(entry.versions, i18n.language) },
-        ]} />
+        ]} />}</CompleteCollection>
         <span className="text-sm text-text-muted">{t('duplicate.restorableUntil')} <RelativeTime at={plan.restore_until} /></span>
       </>)}
       {write.isError && <ErrorAlert error={write.error} action={write.error instanceof ApiError && write.error.is('conflict.stale_revision') ? <Button onClick={reviewAgain}>{t('duplicate.reviewAgain')}</Button> : undefined} />}

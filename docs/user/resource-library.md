@@ -8,6 +8,8 @@ summary: Choose a resource view, inspect sharing and usage, and return to your p
 
 # Resource library
 
+This page shows how to choose a view of the resources you can see, look at who they are shared with and how they are used, and return to the list you had before.
+
 ## Choose a view
 
 The **Show** menu comes before search. **Mine** shows what you own.
@@ -25,8 +27,8 @@ When a view has no rows, its button opens the next wider view.
 **Given** describes current relationships. Providers, profiles and environments
 show bound threads. Skills show explicit places and delivered sessions.
 MCP servers show explicit places and environments. Templates show existing
-environments or provider runtimes. Mounts show attached environments; hosts show
-their units. Open a Given figure to see the names you may read and **and N more**
+environments or managed providers. Mounts show attached environments; hosts show
+their containers. Open a Given figure to see the names you may read and **and N more**
 for the others. Inherited availability is not counted as another explicit place.
 
 **Used** counts actual reported work: turns for providers, profiles and environments;
