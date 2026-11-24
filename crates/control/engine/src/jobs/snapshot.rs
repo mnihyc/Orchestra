@@ -349,6 +349,7 @@ impl Snapshotting {
             machine,
             SerialKey::Environment(self.plan.environment),
             &FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: self.plan.environment,
                 job_id: job.id(),
@@ -570,9 +571,14 @@ impl Engine {
         }
         if !kind::WORKSPACE.contains(&row.kind.as_str())
             || row.plan.get("workspace_upload").is_some()
+            || row
+                .plan
+                .pointer("/active_command/kind")
+                .and_then(Json::as_str)
+                == Some("git.prepare")
         {
-            // A single-file upload uses the active command's counters; only its controller
-            // finishes the phase, after the native result and filesystem cleanup.
+            // Uploads and source clones report only their active command's counters.
+            // The controller completes the phase after the native result and cleanup.
             return crate::jobs::runner::report_progress(
                 conn,
                 machine,
@@ -588,6 +594,12 @@ impl Engine {
             return Ok(());
         };
         let (before, _) = read_progress(&row);
+        let deadline = crate::jobs::runner::reported_deadline(
+            &row,
+            command_id,
+            reported.activity.as_ref(),
+            before.activity.as_ref(),
+        );
         if reported.files_done != before.files_done
             || reported.bytes_done != before.bytes_done
             || reported.phase != before.phase
@@ -595,6 +607,7 @@ impl Engine {
             || reported.message != before.message
         {
             reported.activity = Some(orch_api_contract::workspace::JobActivity {
+                captured_deadline: deadline.clone(),
                 waiting_for: None,
                 updated_at: orch_types::Time::new(self.inner.clock.now()),
                 stall_after_seconds: 0,
@@ -606,6 +619,9 @@ impl Engine {
             });
         } else {
             reported.activity = before.activity.clone();
+        }
+        if let Some(activity) = &mut reported.activity {
+            activity.captured_deadline = deadline;
         }
         reported.percent = reported.percent.max(before.percent);
         if row.kind == kind::SNAPSHOT {
@@ -659,6 +675,33 @@ impl Engine {
             tracing::warn!(%machine, %environment, "a machine uploaded the list of a tree that is not on it");
             return Ok(());
         }
+        if manifest
+            .generation
+            .is_some_and(|generation| generation != i64::from(row.generation))
+        {
+            return Ok(());
+        }
+        if let Some(state) = manifest.transfer_state {
+            let Some(generation) = manifest.generation else {
+                return Ok(());
+            };
+            let state = match state {
+                orch_api_contract::workspace::FileTransferState::Transferring => "transferring",
+                orch_api_contract::workspace::FileTransferState::Interrupted => "interrupted",
+                orch_api_contract::workspace::FileTransferState::Expired => return Ok(()),
+            };
+            storage::record_source_transfer(
+                conn,
+                environment,
+                machine,
+                generation,
+                &manifest.manifest_blob,
+                state,
+                taken_at,
+            )
+            .await?;
+            return Ok(());
+        }
         // The list was uploaded before it was told of: the store holds it, and the row says so.
         if storage::blob(conn, &manifest.manifest_blob)
             .await?
@@ -667,14 +710,32 @@ impl Engine {
             tracing::warn!(%environment, "a list of a tree was announced and the store has no row of it");
             return Ok(());
         }
+        storage::finish_source_transfer(
+            conn,
+            environment,
+            machine,
+            &manifest.manifest_blob,
+            taken_at,
+        )
+        .await?;
         if row.manifest_blob == Some(manifest.manifest_blob) {
             return Ok(());
         }
         let now = self.inner.clock.now();
         storage::pin_blobs(conn, &[manifest.manifest_blob]).await?;
-        if let Some(Some(before)) =
-            workspace_rows::keep_manifest(conn, environment, &manifest.manifest_blob, taken_at)
-                .await?
+        let source_facts = manifest
+            .source_facts
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        if let Some(Some(before)) = workspace_rows::keep_manifest(
+            conn,
+            environment,
+            &manifest.manifest_blob,
+            taken_at,
+            source_facts.as_ref(),
+        )
+        .await?
         {
             storage::unpin_blobs(conn, &[before], now).await?;
         }
@@ -710,7 +771,7 @@ impl Engine {
             .ok_or_else(|| EngineError::unreadable("no store of content is attached"))?;
         let hash = Hash::of(&bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        store
+        let _publication = store
             .put(
                 &hash,
                 Some(size),
@@ -718,7 +779,7 @@ impl Engine {
             )
             .await
             .map_err(EngineError::unreadable)?;
-        storage::register_blob(conn, &hash, size, self.inner.clock.now()).await?;
+        storage::register_owned_blob(conn, &hash, size, self.inner.clock.now()).await?;
         Ok(BlobMeta { hash, size })
     }
 }

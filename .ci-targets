@@ -1,0 +1,1 @@
+web-e2e tests/e2e/human-check-admin.spec.ts --grep "the card with (off|hcaptcha|recaptcha) chosen at 1440px in zh-CN/light|the card with off chosen at 1440px in zh-CN/dark|the card with hcaptcha chosen at 400px in zh-CN/light" --repeat-each=4 --retries=0 --reporter=line

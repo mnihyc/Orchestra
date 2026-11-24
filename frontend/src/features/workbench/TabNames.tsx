@@ -1,5 +1,6 @@
 /** Name unopened content tabs from already authorized navigation rows, without mounting their readers. */
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useTranslation } from 'react-i18next';
 import { Box } from 'lucide-react';
 import { THREAD_GLYPHS } from '@/ui/ThreadState';
@@ -19,11 +20,14 @@ import { formatNumber } from '@/lib/format';
 /** Existing names, readable paths and public kind labels only; no hidden tab reader is mounted. */
 export function useTabCaptions(tabs: readonly Tab[]): Map<string, string> {
   const { t, i18n } = useTranslation();
-  const named = useWorkbench((state) => state.named);
+  const titles = useWorkbench(useShallow((state) => tabs.map((tab) => state.named.get(tab.id)?.title)));
+  const paths = useWorkbench(useShallow((state) => tabs.map((tab) => state.named.get(tab.id)?.path)));
+  const locale = i18n.resolvedLanguage ?? 'en';
   const definitions = useViews();
-  return tabCaptions(tabs.map((tab) => {
-    const definition = definitions.find((view) => view.name === tab.view), held = named.get(tab.id);
-    const baseTitle = held?.title ?? (definition === undefined ? tab.view : t(definition.title));
+  return useMemo(() => tabCaptions(tabs.map((tab, index) => {
+    const definition = definitions.find((view) => view.name === tab.view);
+    const path = paths[index];
+    const baseTitle = titles[index] ?? (definition === undefined ? tab.view : t(definition.title));
     const href = tab.view === 'page' ? pageAddress(tab) : null, page = href === null ? null : parsePageAddress(href);
     const management = t('admin.nav.label');
     const title = page !== null && (page.pathname === '/admin' || page.pathname.startsWith('/admin/')) && baseTitle !== management ? management + ' · ' + baseTitle : baseTitle;
@@ -31,8 +35,8 @@ export function useTabCaptions(tabs: readonly Tab[]): Map<string, string> {
     const category = page?.pathname.match(/^\/resources\/[^/]+/)?.[0];
     const kind = resource !== null ? t(`everything.kinds.${resource.kind}`) : category !== undefined && page !== null
       ? staticPageName({ ...page, pathname: category }, t)?.title : tab.view !== 'page' && definition !== undefined ? t(definition.title) : undefined;
-    return { id: tab.id, title, ...(kind === undefined ? {} : { kind }), ...(held?.path === undefined ? {} : { path: held.path }) };
-  }), (name, number) => t('workbench.tabInstance', { name, number: formatNumber(number, i18n.resolvedLanguage ?? 'en') }));
+    return { id: tab.id, title, ...(kind === undefined ? {} : { kind }), ...(path === undefined ? {} : { path }) };
+  }), (name, number) => t('workbench.tabInstance', { name, number: formatNumber(number, locale) })), [tabs, titles, paths, definitions, t, locale]);
 }
 
 export function CachedTabNames({ layout }: { layout: Layout }) {
@@ -56,10 +60,10 @@ export function CachedTabNames({ layout }: { layout: Layout }) {
       }
       const target = pageResource(page);
       if (target === null) continue;
-      let found: { tree: OrgTree; node: TreeNode } | undefined;
-      for (const tree of trees.values()) {
+      let found: { rootId:string;tree: OrgTree; node: TreeNode } | undefined;
+      for (const [rootId,tree] of trees) {
         const node = tree.nodes.get(target.id);
-        if (node !== undefined && !node.deleted) { found = { tree, node }; break; }
+        if (node !== undefined && !node.deleted) { found = { rootId,tree, node }; break; }
       }
       let title = before.get(tab.id)?.title ?? t(`everything.kinds.${target.kind}`);
       if (found !== undefined) {
@@ -69,9 +73,10 @@ export function CachedTabNames({ layout }: { layout: Layout }) {
         title = placeLabels([placedOfRow(found.tree, found.node)], known).get(target.id) ?? found.node.name;
       }
       const path = found === undefined ? before.get(tab.id)?.path : pathTo(found.tree, found.node.id).map((node) => node.name).join(' / ');
-      const display = found?.node.thread?.display;
+      const display = found?.node.thread?.display??before.get(tab.id)?.thread?.display;
+      const rootId=found?.rootId??before.get(tab.id)?.thread?.rootId;
       const icon = target.kind === 'thread' && display !== undefined ? THREAD_GLYPHS[display.state] : target.kind === 'environment' ? Box : NODE_GLYPHS[target.kind];
-      if (before.get(tab.id)?.title !== title || before.get(tab.id)?.path !== path || before.get(tab.id)?.icon !== icon) next.set(tab.id, { title, icon, path, source: 'cache', ...(target.kind === 'thread' && display !== undefined ? { thread: { id: target.id, display } } : {}) });
+      if (before.get(tab.id)?.title !== title || before.get(tab.id)?.path !== path || before.get(tab.id)?.icon !== icon) next.set(tab.id, { title, icon, path, source: 'cache', ...(target.kind === 'thread' && display !== undefined ? { thread: { id: target.id, display,...(rootId===undefined?{}:{rootId}) } } : {}) });
     }
     if ([...next].some(([id, name]) => before.get(id) !== name)) useWorkbench.setState({ named: next });
   }, [layout, trees, t]);

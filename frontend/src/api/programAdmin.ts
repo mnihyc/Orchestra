@@ -7,7 +7,7 @@ import type { HarnessArch, HarnessBuild, HarnessBuildStatus, MachineOs, ProgramD
 
 export const adminProgramsKey = ['admin', 'programs'] as const;
 export interface ProgramPage<Item> { items: Item[]; next_cursor?: string | null }
-export interface ProgramBuildFilters { os?: MachineOs; arch?: HarnessArch; status?: HarnessBuildStatus }
+export interface ProgramBuildFilters { q?:string; os?: MachineOs; arch?: HarnessArch; status?: HarnessBuildStatus }
 
 /** Leaving a page releases its rows; the cursor in the address is enough to return to it. */
 export const adminProgramsQuery = (q: string, cursor: string | undefined) => queryOptions({
@@ -24,7 +24,7 @@ export const adminProgramBuildsQuery = (kind: string, cursor: string | undefined
   ...ADMIN_QUERY, queryKey: [...adminProgramsKey, kind, 'builds', cursor ?? null, filters], gcTime: 0,
   queryFn: ({ signal }): Promise<ProgramPage<HarnessBuild>> => ok(api.GET('/admin/programs/{kind}/builds', {
     params: { path: { kind }, query: { limit: ADMIN_PAGE_SIZE, cursor: cursor ?? null,
-      os: filters.os ?? null, arch: filters.arch ?? null, status: filters.status ?? null } }, signal,
+      q: filters.q ?? null, os: filters.os ?? null, arch: filters.arch ?? null, status: filters.status ?? null } }, signal,
   })),
 });
 export function saveProgramBuild(build: HarnessBuild): Promise<HarnessBuild> {

@@ -1,8 +1,13 @@
 /** The sections of a resource's page, as the address names them: read by the routes before the pages themselves are fetched.
  *
  * A route checks the address's `tab` when it is entered, which is before its screen's code arrives; keeping the names
- * here lets it do so without the screen (a template's brings the code editor with it).
+ * here lets it do so without the screen (a template's and a skill's bring the code editor with them).
  */
+
+/** The sections of a skill's page. */
+export type SkillTab = 'overview' | 'versions' | 'draft' | 'access';
+
+export const SKILL_TABS: readonly SkillTab[] = ['overview', 'versions', 'draft', 'access'];
 
 /** The sections of a template's page. */
 export type TemplateTab = 'overview' | 'spec' | 'access' | 'danger';
