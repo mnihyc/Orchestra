@@ -150,6 +150,8 @@ async fn update(mut ctx: Ctx, (): (), body: PageChange) -> ApiResult<PermissionP
     admin_of(&ctx)?;
     let admin = guard.user().id();
     let principal = guard.principal();
+    let server_hosts =
+        crate::server_host_use::Before::defaults(&mut tx, principal, None, &body).await?;
     guard.check_deadline(&ctx)?;
     let changed = pages::change(
         &mut tx,
@@ -190,6 +192,7 @@ async fn update(mut ctx: Ctx, (): (), body: PageChange) -> ApiResult<PermissionP
         .await?;
     }
     disclosure.require(&ctx, &mut tx).await?;
+    server_hosts.require(&ctx, &mut tx, principal).await?;
     let page = read(&ctx, &mut tx, principal).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(page)

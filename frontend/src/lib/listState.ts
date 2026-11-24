@@ -2,7 +2,7 @@
  * A list resumes its own last state on this device; an addressed state always wins.
  *
  * What an address holds of lists, whoever writes it (a control's own choice, a page's navigation, the arrival of a bare address): the
- * choices of the controls on the screen the address names, each when the person chose it or the control is on screen, and always with the
+ * choices of the controls on the screen the address names, each when the person chose it or a nondefault choice is restored, and always with the
  * marker (`_list=true`), which says that the address is the whole state and nothing is to be resumed beside it. The choices of another
  * screen never travel: not into a navigation to a screen that has none of those controls, and not from a hook that only reads a choice to ask
  * for what the screen shows. A writer takes its `list` from `navigatedList` and a control tells the page that it is on screen by `useListChoice`.
@@ -14,6 +14,7 @@ import { client } from '@/api/client';
 
 import { usePageContext } from '@/features/workbench/pageContext';
 import { useViewChoice } from '@/lib/viewChoices';
+import { bindDeviceChoice, type DeviceChoiceObservation } from '@/lib/viewChoiceFacts';
 import { useViewInstance } from '@/features/workbench/instance';
 import { canonicalListSearch, objectOf } from '@/lib/listAddress';
 
@@ -107,8 +108,8 @@ export function usePageListSearch(route: string, pathname: string, addressed: Se
 
 /**
  * Addressed list controls join their list's URL; transient controls keep only device state. A control puts its state into the address
- * while it is on screen (`shown`): a control that is mounted but closed, such as a drawer, has not been looked at, and a default it
- * never showed is no choice of the person's to carry in an address that is copied.
+ * while it is on screen (`shown`), when chosen or restored away from its default. Simply showing defaults leaves a bare address bare.
+ * A control that is mounted but closed, such as a drawer, has no choice to carry in the copied address.
  */
 export function useListChoice<T>(list: string, key: string, fallback: T, persistence: 'address' | 'device' = 'address', shown = true): [T, Dispatch<SetStateAction<T>>] {
   const context = usePageContext();
@@ -120,7 +121,7 @@ export function useListChoice<T>(list: string, key: string, fallback: T, persist
   const instance = useViewInstance();
   const target=instance?.target;
   const pathname = context?.target.pathname ?? (target === null || target === undefined ? list : `/${target.kind}/${target.id}`);
-  const [kept, keep] = useViewChoice(`page.${pathname}.${list}`, key, JSON.stringify(fallback));
+  const [kept, keep, observation] = useViewChoice(`page.${pathname}.${list}`, key, JSON.stringify(fallback));
   const addressed = page?.target.search.list;
   const choices = useMemo<Search>(()=>typeof addressed === 'object' && addressed !== null && !Array.isArray(addressed) ? addressed as Search : {},[addressed]);
   const name = `${list}.${key}`;
@@ -135,12 +136,7 @@ export function useListChoice<T>(list: string, key: string, fallback: T, persist
   const value=user===null&&page===null&&anonymous?.scope===scope?anonymous.value:restored;
   const current = useRef(value);
   useLayoutEffect(()=>{current.current=value;},[value]);
-  const choose = useCallback<Dispatch<SetStateAction<T>>>((next) => {
-    const value = typeof next === 'function' ? (next as (before: T) => T)(current.current) : next;
-    current.current = value;
-    // Unsigned readers can use a control without creating another person's device choice.
-    if(user===null&&page===null)setAnonymous({scope,value});
-    keep(JSON.stringify(value));
+  const publish = useCallback((value: T) => {
     if (page !== null && resource && queryKey !== undefined) {
       if (typeof value !== 'string' && typeof value !== 'boolean') return;
       void page.navigate({ search: (before) => ({ ...resourceListSearch(before), [queryKey]: value }), replace: true });
@@ -149,16 +145,33 @@ export function useListChoice<T>(list: string, key: string, fallback: T, persist
     if (page !== null) void page.navigate({ search: (before) => ({ ...before, _list: true, list: {
       ...listOnScreen(page.id, before.list), [name]: value,
     } }), replace: true });
-  }, [keep, name, page, user, scope, resource, queryKey]);
+  }, [name, page, resource, queryKey]);
+  const choose = useCallback<Dispatch<SetStateAction<T>>>((next) => {
+    const value = typeof next === 'function' ? (next as (before: T) => T)(current.current) : next;
+    current.current = value;
+    // Unsigned readers can use a control without creating another person's device choice.
+    if(user===null&&page===null)setAnonymous({scope,value});
+    keep(JSON.stringify(value));
+    publish(value);
+  }, [keep, publish, page, user, scope]);
   // The page is told that this control is on screen, and a choice or a navigation puts into the address only the controls that are.
   const pageId = page?.id;
   useLayoutEffect(() => (shown && !resource && pageId !== undefined ? onScreen(pageId, name) : undefined), [shown, resource, pageId, name]);
   const serialized=JSON.stringify(value);
+  const defaultValue=JSON.stringify(fallback);
   const published=useRef<string|null>(null);
   useEffect(()=>{
-    if(shown && !resource && page!==null && choices[name]===undefined && published.current!==serialized) {
-      published.current=serialized;choose(JSON.parse(serialized) as T);
+    if(shown && !resource && page!==null && choices[name]===undefined && serialized!==defaultValue && published.current!==serialized) {
+      published.current=serialized;publish(JSON.parse(serialized) as T);
     } else if(choices[name]!==undefined) published.current=null;
-  },[page,choices,name,choose,serialized,resource,shown]);
-  return [value, choose];
+  },[page,choices,name,publish,serialized,defaultValue,resource,shown]);
+  const savedChoice = typeof observation?.saved === 'string' ? storedListState(`{"value":${observation.saved}}`).value : undefined;
+  const hasAddress = page !== null && (resource ? queryKey !== undefined && Object.hasOwn(page.target.search, queryKey) : Object.hasOwn(choices, name));
+  const validSaved = savedChoice !== undefined && (savedChoice === null ? fallback === null : fallback === null || (Array.isArray(fallback) ? Array.isArray(savedChoice) : typeof savedChoice === typeof fallback));
+  const fact = observation === undefined ? undefined : { ...observation, chosen: raw, effective: value, saved: savedChoice,
+    origin: hasAddress ? 'address' : page?.target.search._list === true || observation.chosen !== undefined && !validSaved && observation.read_result !== 'memory' ? 'default' : observation.origin,
+    saved_choice_availability: observation.saved !== undefined && !validSaved ? 'unavailable' : observation.saved_choice_availability } satisfies DeviceChoiceObservation<T>;
+  // This stores the handler as a weak key; it neither calls the handler nor reads its current-value ref.
+  // eslint-disable-next-line react-hooks/refs
+  return [value, bindDeviceChoice(choose, fact)];
 }

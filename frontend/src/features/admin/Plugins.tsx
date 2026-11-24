@@ -5,11 +5,14 @@
  * the state it is in and, where it is not running well, what it last said was wrong. A state is
  * always a word beside its mark.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { CircleAlert, CircleCheck, Puzzle, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { pluginsQuery } from '@/api/admin';
+import { pluginsPageQuery } from '@/api/admin';
 import type { AdminPlugin } from '@/generated/api-types';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
@@ -38,7 +41,9 @@ function State({ plugin }: { plugin: AdminPlugin }) {
 
 export function Plugins() {
   const { t, i18n } = useTranslation();
-  const plugins = useQuery(pluginsQuery);
+  const search = useCollectionSearch("admin-plugins");
+  const plugins = useInfiniteQuery(pluginsPageQuery(search.q));
+  const rows = plugins.data?.pages.flatMap((page) => page.items) ?? [];
   const where = (plugin: AdminPlugin): string => {
     const key = `admin.plugins.components.${plugin.component}`;
     const part = i18n.exists(key) ? (t as (key: string) => string)(key) : plugin.component;
@@ -66,8 +71,11 @@ export function Plugins() {
     { id: 'error', header: t('admin.plugins.lastError'), cell: (plugin) => (plugin.detail === '' ? <span className="text-text-subtle">–</span> : <span className="text-sm wrap-anywhere text-text-muted">{plugin.detail}</span>) },
   ];
 
-  if (plugins.isPending) return <SkeletonRows read={plugins} rows={3} />;
-  if (plugins.isError) return <ErrorState error={plugins.error} retrying={plugins.isRefetching} onRetry={() => void plugins.refetch()} />;
-  if (plugins.data.length === 0) return <EmptyState compact icon={<Puzzle aria-hidden />} title={t('admin.plugins.none')} description={t('admin.plugins.noneHint')} />;
-  return <Table label={t('admin.sections.plugins.title')} columns={columns} rows={plugins.data} rowKey={(plugin) => `${plugin.component}/${plugin.machine?.id ?? ''}/${plugin.kind}/${plugin.name}`} />;
+  return <div className="flex min-w-0 flex-col gap-3">
+    <CollectionSearch name={t('admin.sections.plugins.title')} {...search} />
+    {plugins.isPending ? <SkeletonRows read={plugins} rows={3} /> : plugins.isError && rows.length === 0 ? <ErrorState error={plugins.error} retrying={plugins.isRefetching} onRetry={() => void plugins.refetch()} />
+      : rows.length === 0 ? <EmptyState compact icon={<Puzzle aria-hidden />} title={t('admin.plugins.none')} description={t('admin.plugins.noneHint')} />
+      : <Table label={t('admin.sections.plugins.title')} columns={columns} rows={rows} virtual rowKey={(plugin) => `${plugin.component}/${plugin.machine?.id ?? ''}/${plugin.kind}/${plugin.name}`} />}
+    <Pagination hasMore={plugins.hasNextPage} loading={plugins.isFetchingNextPage} error={plugins.isFetchNextPageError ? plugins.error : undefined} onMore={() => void plugins.fetchNextPage()} />
+  </div>;
 }
