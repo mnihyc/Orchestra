@@ -88,6 +88,9 @@ pub enum LinkedKind {
 pub struct DocumentReferencesListQuery {
     /// Which way: `in` for what refers to the document, `out` for what it refers to.
     pub direction: LinkDirection,
+    /// Visible source/target name, context or written label/path words; with of, rendered mention-line words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// How many sources or targets, at most; the place's page size when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,

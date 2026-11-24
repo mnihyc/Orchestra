@@ -156,12 +156,13 @@ impl Prefix {
             .await?
             .ok_or_else(|| unreadable("the creator Environment disappeared"))?;
         let source = crate::jobs::source::resolved(conn, thread).await?;
-        let pending = crate::jobs::source::preparation_pending(
-            birth.prepare_source,
-            birth.worktree.is_some(),
-            source.repository_url.is_some(),
-            env.status == "running",
-        );
+        let pending = !birth.workspace_edits.is_empty()
+            || crate::jobs::source::preparation_pending(
+                birth.prepare_source,
+                birth.worktree.is_some(),
+                source.repository_url.is_some(),
+                env.status == "running",
+            );
         super::creator_files::bind(
             conn,
             &mut plan,

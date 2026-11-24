@@ -9,18 +9,19 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
-import { liveIndexReason } from '@/features/files/indexWords';
+import { RecordingNotice, recordingReason } from '@/features/source/RecordingNotice';
+import { exclusionProblem, indexingProgress, liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { ArrowRightLeft, Ban, Boxes, CirclePlay, Hourglass } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { environmentKey, environmentQuery, updateEnvironment } from '@/api/environments';
+import { environmentKey, environmentQuery, environmentThreadsPageQuery, updateEnvironment } from '@/api/environments';
 import { ApiError } from '@/api/client';
-import { DetailPages, DetailSections, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
+import { DetailSections, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { PortsPanel } from '@/features/ports/Ports';
 import { BrowsersPanel } from '@/features/browser/Browsers';
 import { portsBrowser } from '@/features/browser/View';
@@ -35,6 +36,7 @@ import { UnitCommandFailure } from '@/features/resources/UnitConfiguration';
 import { EnvironmentDoor } from '@/features/resources/environments/Doors';
 import { HarnessTrustSection } from '@/features/resources/environments/HarnessTrust';
 import { AgentReach } from '@/features/resources/environments/AgentReach';
+import { EnvironmentProviderConnections } from './ProviderConnections';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
 import { EnvironmentReadinessNotice } from '@/features/resources/SandboxReadiness';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
@@ -57,6 +59,9 @@ import { formatDateTime, useNow } from '@/lib/time';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -134,6 +139,10 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
   const context = { locale, timeZone };
+  const indexing = indexingProgress(environment.facts);
+  const idleStop = environment.idle_stop_deferred ? t('inspector.environment.idle.working')
+    : environment.idle_stop_at === null ? null : formatDateTime(environment.idle_stop_at, context, now);
+  const exclusions = exclusionProblem(t, environment.facts);
   return (
     <div className="flex flex-col gap-6">
       {environment.status_detail !== null && environmentRemovalPhase(environment) === undefined && <InlineAlert tone={environment.status === 'failed' ? 'danger' : 'info'}>{environmentStatusDetail(environment, t)}</InlineAlert>}
@@ -157,11 +166,12 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
-      {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
-        <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
-        <p>{t('largeTree.liveCost')}</p>
-      </InlineAlert>}
-      <EnvironmentPrograms id={environment.id} generation={environment.generation} />
+      {indexing !== null && <InlineAlert tone="info">{t('largeTree.indexing', { files: new Intl.NumberFormat().format(indexing.total), percent: indexing.percent })}</InlineAlert>}
+      {exclusions !== null && <p role="alert" className="text-xs text-danger-text">{exclusions}</p>}
+      {exclusions === null && environment.index === 'live' && <p className="text-sm text-text-muted">{liveIndexReason(t, environment.index_reason, environment.facts)} · {t('largeTree.openFolders')}</p>}
+      <RecordingNotice environmentId={environment.id} reason={exclusions === null ? recordingReason(environment.facts) ?? (environment.index === 'live' ? 'live_tree' : null) : null} />
+      <p className="text-xs text-text-muted">{t('source.restore.gitignore')}</p>
+      <EnvironmentPrograms id={environment.id} machineId={environment.machine?.id} generation={environment.generation} />
       <Section id="environment-about" title={t('environments.overview.about')}>
         <Facts compact
           label={t('environments.overview.about')}
@@ -181,18 +191,27 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
             ...(environment.template === null ? [] : [{ name: t('environments.overview.template'), value: <ResourceName subject={{ kind: 'template', template: environment.template }} hint={false} /> }]),
             { name: t('environments.overview.reach'), value: t('environments.overview.reachValue', { count: environment.reach }) },
             ...(environment.last_activity_at === null ? [] : [{ name: t('environments.overview.lastActivity'), value: <RelativeTime at={environment.last_activity_at} /> }]),
-            ...(environment.idle_stop_at === null ? [] : [{ name: t('environments.overview.idleStop'), value: formatDateTime(environment.idle_stop_at, context, now) }]),
+            ...(idleStop === null ? [] : [{ name: t('environments.overview.idleStop'), value: idleStop }]),
             { name: t('environments.overview.may'), value: t(`environments.holding.${holding(environment.access.permissions)}`) },
           ]}
         />
       </Section>
       <ResourceDetails><AgentReach environment={environment} /></ResourceDetails>
+      <ResourceDetails label={t('providerCreation.environmentConnections')}>{()=> <EnvironmentProviderConnections environmentId={environment.id}/>}</ResourceDetails>
     </div>
   );
 }
 
 function Threads({ environment, manage }: { environment: EnvironmentRow; manage: boolean }) {
   const { t } = useTranslation();
+  const search = useCollectionSearch('environment-threads:' + environment.id);
+  const version = useMemo(() => JSON.stringify(environment.threads.map((row) => [row.thread.id, row.thread.name, row.topic.name, row.owner.id, row.owner.display_name, row.owner.username, row.directory])), [environment.threads]);
+  const paged = environment.threads.length > 50 || typeof environment.threads_next_cursor === 'string' || search.q !== '';
+  const pages = useInfiniteQuery({ ...environmentThreadsPageQuery(environment.id, search.q, version), enabled: paged });
+  const current = useMemo(() => new Map(environment.threads.map((row) => [row.thread.id, row])), [environment.threads]);
+  const rows = paged ? pages.data?.pages.flatMap((page) => page.items).map((row) => current.get(row.thread.id) ?? row) ?? [] : environment.threads;
+  const hidden = paged ? pages.data?.pages[0]?.hidden ?? environment.threads_hidden : environment.threads_hidden;
+
   const columns: Column<EnvironmentRow['threads'][number]>[] = [
     {
       id: 'thread',
@@ -246,14 +265,16 @@ function Threads({ environment, manage }: { environment: EnvironmentRow; manage:
         ) : undefined
       }
     >
-      {environment.threads.length === 0 && environment.threads_hidden === 0 ? (
+      <CollectionSearch name={t('environments.threads.title')} {...search} />
+      {paged && pages.isPending ? <SkeletonRows read={pages} rows={3} /> : paged && pages.isError && !pages.isFetchNextPageError ? <ErrorState compact error={pages.error} onRetry={() => void pages.refetch()} /> : rows.length === 0 && hidden === 0 ? (
         <EmptyState compact icon={<Boxes aria-hidden />} title={t('environments.threads.none')} />
       ) : (
         <div className="flex flex-col gap-2">
-          {environment.threads.length > 0 && <DetailPages items={environment.threads}>{(page) => <Table label={t('environments.threads.title')} columns={columns} rows={page} rowKey={(row) => row.thread.id} />}</DetailPages>}
-          {environment.threads_hidden > 0 && <p className="text-sm text-text-muted">{t('environments.threads.hidden', { count: environment.threads_hidden })}</p>}
+          {rows.length > 0 && <Table key={search.q} virtual label={t('environments.threads.title')} columns={columns} rows={rows} rowKey={(row) => row.thread.id} />}
+          {hidden > 0 && <p className="text-sm text-text-muted">{t('environments.threads.hidden', { count: hidden })}</p>}
         </div>
       )}
+      <Pagination hasMore={paged && pages.hasNextPage} loading={pages.isFetchingNextPage} error={paged && pages.isFetchNextPageError ? pages.error : null} onMore={() => void pages.fetchNextPage()} />
     </Section>
   );
 }
@@ -301,9 +322,13 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const environment = query.data;
   const manage = holds(environment.access, 'environment.manage');
   const viewPorts = holds(environment.access, 'ports.view');
-  const displayStatus = environmentDisplayStatus(environment);
-  const busy = isBusy(displayStatus);
   const { edit, primary, menu } = acts.page(environment);
+  const job = isBusy(environmentDisplayStatus(environment)) ? environment.job : null;
+  const headingAct = job === null ? primary : {
+    id: 'progress',
+    label: t('change.banner.progress'),
+    run: () => openChange({ kind: 'environment', id: environment.id, name: environment.name }, { kind: 'progress', job: job.id }),
+  };
   const keep = acts.keepAwake(environment);
   const sectionHref = (section: string) => `/resources/environments/${encodeURIComponent(environment.id)}?tab=${section}`;
   const toolSections = [
@@ -317,7 +342,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
     { value: 'settings' as const, label: t('resourceDetails.layout.configuration'), panel: <EnvironmentSettings key={wantedKey} environment={environment} wantedKey={wantedKey} /> },
     { value: 'controls' as const, label: t('environments.overview.switches'), panel: <><Switches environment={environment} manage={manage} /><DataSourcesSummary value={environment.data_sources} /></> },
     { value: 'trust' as const, label: t('resourceDetails.layout.trust'), panel: <HarnessTrustSection environment={environment} /> },
-    ...(environment.machine !== null && manage ? [{ value: 'limits' as const, label: t('environments.tabs.limits'), panel: <MachineLimits compact machineId={environment.machine.id} bounds="environment" id="environment-limits" title={t('environments.limits.title')} lead={t('environments.limits.lead', { machine: environment.machine.name })} /> }] : []),
+    ...(environment.machine !== null && manage ? [{ value: 'limits' as const, label: t('environments.tabs.limits'), panel: <MachineLimits machineId={environment.machine.id} bounds="environment" id="environment-limits" title={t('environments.limits.title')} lead={t('environments.limits.lead', { machine: environment.machine.name })} /> }] : []),
     ...(manage ? [{ value: 'danger' as const, label: t('resourceDetails.layout.lifecycle'), panel: <DangerZone environment={environment} onEnable={() => acts.enable(environment)} onDisable={() => acts.ask('disable', environment)} /> }] : []),
   ];
   const tool = toolSections.find((section) => section.value === tab)?.value ?? 'tools';
@@ -337,9 +362,14 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const directDoor = tab === 'files' || tab === 'terminal' || tab === 'browsers' || tab === 'vnc';
   const Frame = directDoor ? DoorPage : Page;
 
+  const notices = <>
+    <TemporaryStatus environment={environment} />
+    <EnvironmentReadinessNotice environment={environment} />
+    {shown !== 'settings' && <UnitCommandFailure jobId={environment.job?.id} detail={environment.status_detail} href={`/resources/environments/${environment.id}?tab=settings&setting=env.after_up#unit-after-up`} />}
+  </>;
   return (
     <Frame>
-      <PageHeader
+      <PageHeader compactResource
         adminAccess={environment.access.admin_access} ownership={environment} opening={{ kind: 'environment', id: environment.id }}
         back={back}
         mark={
@@ -349,7 +379,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
         }
         title={environment.name}
         facts={[
-          ...(!busy ? [<EnvironmentStatusText key="status" environment={environment} />] : []),
+          <EnvironmentStatusText key="status" environment={environment} />,
           // What it runs on and under, with what that shares with the host as its hint.
           ...(namesRuntime(environment.isolation) ? [<RuntimePair key="runtime" isolation={environment.isolation} />] : []),
           <PortsExposure key="ports" environment={environment} />,
@@ -359,7 +389,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
           <HeadingActs
             admin={adminSpec(environment, 'environment.manage')}
             name={environment.name}
-            primary={primary}
+            primary={headingAct}
             edit={edit}
             menu={menu}
             omit={settings === 'danger' && shown === 'settings' ? ['enable', 'disable'] : []}
@@ -373,25 +403,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
           />
         }
       />
-      <TemporaryStatus environment={environment} />
-      <EnvironmentReadinessNotice environment={environment} />
-      {busy && (
-        <InlineAlert
-          tone="info"
-          title={t(`environments.status.${displayStatus}`)}
-          {...(environment.job === null
-            ? {}
-            : {
-                action: (
-                  <Button size="sm" onClick={() => openChange({ kind: 'environment', id: environment.id, name: environment.name }, { kind: 'progress', job: environment.job?.id ?? '' })}>
-                    {t('change.banner.progress')}
-                  </Button>
-                ),
-              })}
-        />
-      )}
-      {shown !== 'settings' && <UnitCommandFailure jobId={environment.job?.id} detail={environment.status_detail} href={`/resources/environments/${environment.id}?tab=settings&setting=env.after_up#unit-after-up`} />}
-      {tab === 'ports' && !viewPorts ? <PortsPanel environment={environment} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> : <Tabs label={t('environments.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} className={directDoor ? 'flex min-h-0 flex-1 flex-col' : undefined} panelClassName={directDoor ? 'min-h-0 flex-1 overflow-hidden pt-3' : 'pt-6'} />}
+      {tab === 'ports' && !viewPorts ? <>{notices}<PortsPanel environment={environment} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /></> : <Tabs frame={(navigation, panels) => <>{navigation}{notices}{panels}</>} label={t('environments.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} className={directDoor ? 'flex min-h-0 flex-1 flex-col' : undefined} panelClassName={directDoor ? 'min-h-0 flex-1 overflow-hidden pt-3' : 'pt-6'} />}
       {acts.dialogs}
     </Frame>
   );

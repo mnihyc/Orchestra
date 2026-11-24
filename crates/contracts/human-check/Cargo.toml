@@ -1,0 +1,20 @@
+[package]
+name = "orch-human-check-contract"
+description = "HumanCheckProvider trait seam; hCaptcha and reCAPTCHA of Google Cloud Fraud Defense are the first backends."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+orch-plugin-contract.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
+[lints]
+workspace = true

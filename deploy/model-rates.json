@@ -1193,6 +1193,52 @@
       }
     },
     {
+      "match": "gemini-4-neon",
+      "vendor": "Google",
+      "source": "https://aistudio.google.com/docs/pricing#gemini-4-neon",
+      "as_of": "2026-11-25",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "0.15",
+        "output_per_mtok": "15"
+      }
+    },
+    {
+      "match": "gemini-4-hydrogen",
+      "vendor": "Google",
+      "source": "https://aistudio.google.com/docs/pricing#gemini-4-hydrogen",
+      "as_of": "2026-11-25",
+      "rate": {
+        "input_per_mtok": "1.5",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "7.5"
+      }
+    },
+    {
+      "match": "gemini-4-carbon",
+      "vendor": "Google",
+      "source": "https://aistudio.google.com/docs/pricing#gemini-4-carbon",
+      "as_of": "2026-11-25",
+      "note": "Introductory standard rates through November 30, 2026. Google lists twice these rates from December 1.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.10",
+        "output_per_mtok": "10"
+      }
+    },
+    {
+      "match": "gemini-4-argon",
+      "vendor": "Google",
+      "source": "https://aistudio.google.com/docs/pricing#gemini-4-argon",
+      "as_of": "2026-11-25",
+      "note": "Introductory standard rates through November 30, 2026. Google lists twice these rates from December 1.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.10",
+        "output_per_mtok": "10"
+      }
+    },
+    {
       "match": "gemini-3.8-flash*",
       "vendor": "Google",
       "source": "https://ai.google.dev/gemini-api/docs/pricing",

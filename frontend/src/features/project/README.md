@@ -40,4 +40,3 @@ Regression sources: creation-once, place-collection-rows, project-page-selection
 project-provider-default component cases, folders/project-views units and the place-collection-layout,
 places/folders/project-views and starting-work browser cases. They cover both languages and themes,
 1440/400 geometry, whole names, keyboard details, named defaults, guarded saves and retained results.
-Authored only; the integrator runs the gates, request proof and fresh screenshot review.
