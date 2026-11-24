@@ -252,6 +252,7 @@ fn start_report(
             title,
         });
     let delivered = orch_link::streams::DeliveredEvent {
+        native_opening_id: None,
         seq: sequence,
         at: orch_types::Time::new(w.clock.now()),
         kind: event.kind().as_str().to_owned(),

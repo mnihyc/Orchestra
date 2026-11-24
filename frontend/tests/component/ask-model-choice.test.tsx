@@ -5,7 +5,11 @@ import { AskModelChoice } from '@/features/ask/ModelChoice';
 import { i18n, setLocale } from '@/i18n';
 import { askModels } from '../unit/ask-fixtures';
 import { show } from './support';
-vi.mock('@/api/ask', () => ({ askModelsQuery: (root: string) => ({ queryKey: ['ask-default-test', root], queryFn: () => Promise.resolve(askModels(root)) }) }));
+vi.mock('@/api/ask', () => ({ askModelsQuery: (root: string) => ({ queryKey: ['ask-default-test', root], queryFn: () => Promise.resolve(root === 'pool-root' ? askModels(root, {
+  default_model: { target: { type: 'pool', kind: 'model', id: 'pool-id' } },
+  models: [{ selection: { target: { type: 'pool', kind: 'model', id: 'pool-id' } }, pool_name: 'Review models',
+    model: null, provider: null, allowed: true, is_default: true, unavailable_reason: null, request_option_schema: null }],
+}) : askModels(root)) }) }));
 afterEach(async () => { cleanup(); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) it(`resets a personal choice to the resolved native default (${locale})`, async () => {
   await setLocale(locale); const t = i18n.getFixedT(locale), onChange = vi.fn(), reply = askModels('root');
@@ -31,4 +35,14 @@ for (const locale of ['en', 'zh-CN'] as const) it(`resolves the Default caption 
   show(<AskModelChoice root="root" value={null} disabled={false} onChange={change} />);
   await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('ask.model') })).toHaveTextContent(`${i18n.t('ask.defaultModel')} · Readable API model`));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); expect(change).not.toHaveBeenCalled();
+});
+
+it('shows the model pool as the default and keeps its identity when chosen explicitly', async () => {
+  const change = vi.fn();
+  show(<AskModelChoice root="pool-root" value={null} disabled={false} onChange={change} />);
+  const trigger = screen.getByRole('button', { name: i18n.t('ask.model') });
+  await waitFor(() => expect(trigger).toHaveTextContent('Review models'));
+  fireEvent.click(trigger);
+  fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Review models' }));
+  expect(change).toHaveBeenCalledWith({ target: { type: 'pool', kind: 'model', id: 'pool-id' } });
 });

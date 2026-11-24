@@ -29,12 +29,19 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
 import { fetchArchive, useDownloading } from './download';
 import { dismissFinished, failureWords } from './jobs';
+import { saveFile } from './save';
 import type { Export as ExportRow } from '@/generated/api-types';
 
 /** The columns whose words move into the first one when the room is narrow. */
 const ASKED = 'asked';
 const SIZE = 'size';
 const STATE = 'state';
+
+const partialArchive = (row: ExportRow) => row.left_out.some((item) => item.count > 0);
+function downloadReport(row: ExportRow): void {
+  if (row.manifest === undefined || row.manifest === null) return;
+  saveFile(new Blob([JSON.stringify(row.manifest, null, 2)], { type: 'application/json' }), 'export-report.json');
+}
 
 /** The kinds of thing an archive was asked to hold, when not all three. */
 function kindsOf(row: ExportRow): ('conversations' | 'chats' | 'documents')[] {
@@ -117,7 +124,7 @@ function StateCell({ row }: { row: ExportRow }) {
   const [now] = useState(() => Date.now());
   if (row.state === 'pending') return <Writing row={row} />;
   if (row.state === 'failed') return <Failure row={row} />;
-  if (row.state === 'ready') return <span className="text-sm text-text">{t('export.list.ready')}</span>;
+  if (row.state === 'ready') return <span className="text-sm text-text">{t(partialArchive(row) ? 'export.list.partial' : 'export.list.ready')}</span>;
   return <span className="text-sm text-text-muted">{t(`export.list.${endedAs(row, now)}`)}</span>;
 }
 
@@ -134,10 +141,10 @@ function DownloadButton({ row }: { row: ExportRow }) {
       variant="secondary"
       icon={<Download aria-hidden />}
       pending={active !== null}
-      aria-label={t('export.list.downloadOf', { name: placeName(row, t) })}
+      aria-label={t(partialArchive(row) ? 'export.list.downloadPartialOf' : 'export.list.downloadOf', { name: placeName(row, t) })}
       onClick={() => void fetchArchive(row.id)}
     >
-      {t('export.downloadButton')}
+      {t(partialArchive(row) ? 'export.downloadPartialButton' : 'export.downloadButton')}
     </Button>{active !== null && <span role="status" className="text-xs text-text-muted">{percent === null ? t('export.list.downloading') : t('export.list.downloadingAt', { percent: formatNumber(percent, locale) })}</span>}</span>
   );
 }
@@ -171,7 +178,8 @@ export function YourExports() {
   const entries = (row: ExportRow): MenuEntry[] => {
     if (row.state === 'ready') {
       return [
-        { id: 'download', label: t('export.downloadButton'), icon: <Download aria-hidden />, onSelect: () => void fetchArchive(row.id) },
+        { id: 'download', label: t(partialArchive(row) ? 'export.downloadPartialButton' : 'export.downloadButton'), icon: <Download aria-hidden />, onSelect: () => void fetchArchive(row.id) },
+        ...(partialArchive(row) && row.manifest !== undefined && row.manifest !== null ? [{ id: 'report', label: t('export.list.report'), icon: <Download aria-hidden />, onSelect: () => downloadReport(row) }] : []),
         { type: 'separator', id: 'before-remove' },
         { id: 'remove', label: t('export.list.remove'), danger: true, onSelect: () => setRemoving(row) },
       ];
@@ -243,8 +251,9 @@ export function YourExports() {
       cell: (row) => {
         const own = entries(row);
         return (
-          <div className="flex items-center justify-end gap-1">
+          <div className="flex flex-wrap items-center justify-end gap-1">
             {row.state === 'ready' && <DownloadButton row={row} />}
+            {row.state === 'ready' && partialArchive(row) && row.manifest !== undefined && row.manifest !== null && <Button action="download" size="sm" variant="secondary" aria-label={t('export.list.reportOf', { name: placeName(row, t) })} onClick={() => downloadReport(row)}>{t('export.list.report')}</Button>}
             {own.length > 0 && (
               <Menu
                 label={t('export.list.menuOf', { name: placeName(row, t) })}

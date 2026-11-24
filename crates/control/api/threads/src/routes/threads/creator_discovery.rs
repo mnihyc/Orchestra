@@ -25,7 +25,6 @@ use orch_access_contract::permissions::ObjectKind;
 
 use orch_access_contract::permissions::Permission;
 
-use orch_api_contract::binding::EnvironmentChoice;
 
 use orch_api_contract::common::ErrorCode;
 
@@ -217,6 +216,7 @@ async fn checked(
             // facet remains unresolved; current file/blob source reads must already pass here.
             for role in [
                 "creator_new_environment_homes",
+                "creator_pool_placement",
                 "creator_initial_file_threads",
                 "creator_initial_file_environments",
             ] {
@@ -288,7 +288,7 @@ async fn checked(
     let provider_row = resources::provider(conn, provider)
         .await?
         .filter(|row| row.deleted_at.is_none() && row.status != "disabled")
-        .ok_or_else(|| ApiError::invalid("binding.provider_id", "the provider is unavailable"))?;
+        .ok_or_else(|| ApiError::invalid("binding.target", "the provider is unavailable"))?;
     let env = environments::environment(conn, environment)
         .await?
         .filter(|row| {
@@ -310,6 +310,8 @@ async fn checked(
             .provider_use(
                 conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: caller.user(),
                     node: topic,
                     provider,
@@ -347,7 +349,7 @@ async fn checked(
             .await
             .map_err(ApiError::engine)?;
         orch_engine::models::check_allowed(row.as_ref(), settings.models_allowed.as_deref(), model)
-            .map_err(|_| ApiError::new(ErrorCode::ModelNotAllowed, "the model is not allowed"))?;
+            .map_err(|why| super::model_refusal(model, why))?;
         if let Some(effort) = body.effort.as_deref() {
             let row = row.ok_or_else(|| {
                 ApiError::new(ErrorCode::ModelNotAllowed, "the model is not allowed")
@@ -391,7 +393,7 @@ pub(super) fn initial<'a>(
             || !caller
                 .grant()
                 .is_some_and(|grant| grant.operation_scope().is_some())
-            || matches!(body.environment.as_ref(), Some(EnvironmentChoice::New(_)))
+            || super::make::requires_birth(&body)
         {
             return Ok(());
         }

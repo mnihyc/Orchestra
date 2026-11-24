@@ -182,30 +182,16 @@ async fn a_whole_agent_note_reaches_tool_http_and_feed_lists_and_an_overlong_not
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agents_first_address_and_note_are_thread_content_but_a_browser_sitting_keeps_hosts_only()
  {
-    use orch_api_contract::threads::{Delivery, ThreadSyncGet, ThreadSyncGetQuery};
+    use orch_api_contract::threads::{ThreadSyncGet, ThreadSyncGetQuery};
     use orch_link_contract::events::{EmittedItemKind, Event, ItemCompleted, ItemStarted};
     let Some(floor) = Floor::new().await else {
         return;
     };
     floor.serve().await;
     let thread = floor.scene.thread().await.base.id;
-    floor
-        .scene
-        .say(
-            &floor.scene.ada,
-            thread,
-            "Check this screen",
-            Delivery::Queue,
-            "browser-content",
-        )
+    let turn = browsers_support::fake::active_tool_turn(&floor.scene, thread)
         .await
-        .ok();
-    let turn = floor.scene.rig.turn_start(thread, 1).await;
-    floor
-        .scene
-        .rig
-        .say(thread, rig::turn_began(turn.turn_id))
-        .await;
+        .unwrap();
     let url = "http://127.0.0.1:41820/private-path?private-first-address-marker=1";
     let note = "private-tool-note-marker";
     let arguments = json!({"command":"open","url":url,"note":note});
@@ -219,7 +205,7 @@ async fn an_agents_first_address_and_note_are_thread_content_but_a_browser_sitti
         .say(
             thread,
             Event::ItemStarted(ItemStarted {
-                turn_id: turn.turn_id,
+                turn_id: turn,
                 native_ref: native.to_owned(),
                 stream: "main".to_owned(),
                 parent_native_ref: None,
@@ -228,7 +214,7 @@ async fn an_agents_first_address_and_note_are_thread_content_but_a_browser_sitti
             }),
         )
         .await;
-    let reply = browsers_support::fake::call_on(&floor, thread, turn.turn_id, arguments.clone())
+    let reply = browsers_support::fake::call_on(&floor, thread, turn, arguments.clone())
         .await
         .result
         .unwrap();
@@ -285,30 +271,36 @@ async fn an_agents_first_address_and_note_are_thread_content_but_a_browser_sitti
     screen
         .send(json!({"op":"watch","tab":tab,"width":800,"height":600,"dpr":1}))
         .await;
+    let next_url = "http://127.0.0.1:41820/private-path?private-navigation-marker=1";
     screen
-        .send(json!({"op":"navigate","tab":tab,"url":url}))
+        .send(json!({"op":"navigate","tab":tab,"url":next_url}))
         .await;
+    screen.send(json!({"op":"ping","n":1})).await;
+    assert_eq!(screen.text("pong").await["n"], 1);
     tokio::time::timeout(browsers_support::WAIT, async {
-        while floor.peer.observe(browser, "location.search") != "?private-first-address-marker=1" {
+        while floor.peer.observe(browser, "location.search") != "?private-navigation-marker=1" {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
     .await
     .unwrap();
     floor.scene.rig.world.advance(chrono::Duration::minutes(6));
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let details: Vec<serde_json::Value> = sqlx::query_scalar(
-        "SELECT details FROM audit_log WHERE environment_id=$1 AND action='browser.driven'",
+    rig::eventually(
+        "the completed browser sitting records the visited host",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM audit_log WHERE environment_id=$1 AND object_id=$2
+                 AND action='browser.driven' AND details->'hosts' @> $3)",
+            )
+            .bind(floor.environment)
+            .bind(browser)
+            .bind(json!(["127.0.0.1"]))
+            .fetch_one(floor.scene.rig.db.pool())
+            .await
+            .unwrap()
+        },
     )
-    .bind(floor.environment)
-    .fetch_all(floor.scene.rig.db.pool())
-    .await
-    .unwrap();
-    assert!(details.iter().any(|row| {
-        row["hosts"]
-            .as_array()
-            .is_some_and(|hosts| hosts.iter().any(|host| host == "127.0.0.1"))
-    }));
+    .await;
     let audit: Vec<serde_json::Value> = sqlx::query_scalar(
         "SELECT details FROM audit_log WHERE environment_id=$1 AND action LIKE 'browser.%'",
     )
@@ -317,7 +309,14 @@ async fn an_agents_first_address_and_note_are_thread_content_but_a_browser_sitti
     .await
     .unwrap();
     let kept = serde_json::to_string(&audit).unwrap();
-    for private in [url, "private-path", "private-first-address-marker", note] {
+    for private in [
+        url,
+        next_url,
+        "private-path",
+        "private-first-address-marker",
+        "private-navigation-marker",
+        note,
+    ] {
         assert!(
             !kept.contains(private),
             "browser history must omit {private}"
@@ -396,7 +395,10 @@ async fn a_profile_is_joined_and_the_endpoint_is_only_shown_to_a_browser_manager
         .app
         .call(EnvironmentBrowserList, &[&floor.environment])
         .token(&floor.scene.cai.token)
-        .query(&EnvironmentBrowserListQuery { look: None })
+        .query(&EnvironmentBrowserListQuery {
+            look: None,
+            ..Default::default()
+        })
         .send()
         .await
         .ok();
@@ -690,6 +692,12 @@ async fn announced_cli_browsers_do_not_count_toward_the_limit_and_each_gate_disa
             &format!("browser close {}", own["browser"].as_str().unwrap()),
         )
         .await;
+    let template: orch_types::Id =
+        sqlx::query_scalar("SELECT template_id FROM environments WHERE id=$1")
+            .bind(floor.environment)
+            .fetch_one(floor.scene.rig.db.pool())
+            .await
+            .unwrap();
     for off in [
         "disabled_by_policy",
         "environment_switch_off",
@@ -712,11 +720,13 @@ async fn announced_cli_browsers_do_not_count_toward_the_limit_and_each_gate_disa
                     .unwrap();
             }
             _ => {
-                sqlx::query("UPDATE environments SET placement='connected' WHERE id=$1")
-                    .bind(floor.environment)
-                    .execute(floor.scene.rig.db.pool())
-                    .await
-                    .unwrap();
+                sqlx::query(
+                    "UPDATE environments SET placement='connected',template_id=NULL WHERE id=$1",
+                )
+                .bind(floor.environment)
+                .execute(floor.scene.rig.db.pool())
+                .await
+                .unwrap();
                 sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy}',jsonb_build_object('environment.browser',false),true) WHERE id=$1").bind(floor.scene.rig.machine_id).execute(floor.scene.rig.db.pool()).await.unwrap();
             }
         }
@@ -745,11 +755,14 @@ async fn announced_cli_browsers_do_not_count_toward_the_limit_and_each_gate_disa
             .world
             .set("browser.enabled", json!(true))
             .await;
-        sqlx::query("UPDATE environments SET browser=true,placement='managed' WHERE id=$1")
-            .bind(floor.environment)
-            .execute(floor.scene.rig.db.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE environments SET browser=true,placement='managed',template_id=$2 WHERE id=$1",
+        )
+        .bind(floor.environment)
+        .bind(template)
+        .execute(floor.scene.rig.db.pool())
+        .await
+        .unwrap();
     }
     agent
         .run(
@@ -1083,4 +1096,79 @@ async fn everything_a_view_only_socket_sends_is_dropped_and_never_reaches_the_pa
             assert!(!kept, "page material was kept in {table}");
         }
     }
+}
+
+#[tokio::test]
+async fn retained_closed_browsers_are_paged_on_intent_even_after_the_environment_is_offline() {
+    let s = rig::Scene::new().await;
+    s.rig.engine.stop();
+    s.rig.world.set("browser.enabled", json!(true)).await;
+    let now = s.rig.world.now();
+    let first = orch_types::new_id();
+    let second = orch_types::new_id();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    sqlx::query("UPDATE environments SET browser=true,status='offline' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for id in [first, second] {
+        sqlx::query("INSERT INTO browser_sessions(id,environment_id,env_generation,profile,origin,endpoint,state,close_reason,opened_at,last_used_at,closed_at) SELECT $1,id,generation,'Old closed profile','announced','', 'closed','environment_stopped',$3,$3,$3 FROM environments WHERE id=$2")
+            .bind(id).bind(s.on.environment).bind(now-chrono::Duration::days(2)).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let discoveries = s.rig.commands.issued_of("browser.look");
+    let query: EnvironmentBrowserListQuery =
+        serde_json::from_value(json!({"closed":true,"limit":1})).unwrap();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentBrowserList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.browsers.len(), 1);
+    assert_eq!(page.browsers[0].id, first.max(second));
+    let receipt = serde_json::to_value(&page.browsers[0]).unwrap();
+    assert_eq!(
+        receipt["lifecycle"]["closed_entry_expires_at"]["state"], "unreported",
+        "the old list cutoff never erased this retained record"
+    );
+    let cursor = serde_json::to_value(&page).unwrap()["next_cursor"].clone();
+    assert!(!cursor.is_null());
+    let query: EnvironmentBrowserListQuery =
+        serde_json::from_value(json!({"closed":true,"limit":1,"cursor":cursor})).unwrap();
+    let next = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentBrowserList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(next.browsers.len(), 1);
+    assert_eq!(next.browsers[0].id, first.min(second));
+    let query: EnvironmentBrowserListQuery =
+        serde_json::from_value(json!({"closed":true,"query":"absent"})).unwrap();
+    let empty = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentBrowserList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(empty.browsers.is_empty());
+    assert_eq!(
+        s.rig.commands.issued_of("browser.look"),
+        discoveries,
+        "opening retained facts never asks the native machine to rediscover programs"
+    );
 }

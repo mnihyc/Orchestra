@@ -686,13 +686,13 @@ async fn a_provider_on_a_key_the_server_holds_runs_on_the_machine_it_was_registe
         .token(&s.ada.token)
         .body(&CreateThread {
             name: Some("On the machine".to_owned()),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: made.base.id,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                s.on.agent,
+                made.base.id,
+                None,
+            )),
             model: Some(rig::MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })
