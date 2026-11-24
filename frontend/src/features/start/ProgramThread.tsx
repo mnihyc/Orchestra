@@ -1,4 +1,5 @@
 /** The ordinary topic creator can start a declared no-environment program. */
+import { askTargetIdentity } from '@/features/ask/modelChoices';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
@@ -8,7 +9,7 @@ import { nodeQuery } from '@/api/nodes';
 import { createThread } from '@/api/threads';
 import { AskModelChoice } from '@/features/ask/ModelChoice';
 import type { PlaceRef } from '@/features/navigation/places';
-import type { AskModel, CreateThread } from '@/generated/api-types';
+import type { AskPreference, CreateThread } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { newActKey } from '@/lib/requests';
 import { Button } from '@/ui/Button';
@@ -29,13 +30,13 @@ export function ProgramThread({ parent, open, draft, onClose, onNative, prepare 
   const models = useQuery({ ...askModelsQuery(root), enabled: open && root !== '' });
   const [name, setName] = useState(draft.name ?? prepare?.initial?.name ?? '');
   const [message, setMessage] = useState(draft.message);
-  const [model, setModel] = useState<AskModel | null>(draft.program === undefined ? prepare?.initial?.program?.model ?? null : draft.program.model ?? null);
+  const [model, setModel] = useState<AskPreference | null>(draft.program === undefined ? prepare?.initial?.program?.model ?? null : draft.program.model ?? null);
   const [access, setAccess] = useState<'private' | 'defaults'>(draft.generalAccess === 'defaults' || draft.generalAccess === undefined && prepare !== undefined && prepare.initial?.access !== 'private' ? 'defaults' : 'private');
   const [first] = useState(newActKey);
   const key = useActKey();
   const listing = models.data;
   const selected = model ?? listing?.default_model ?? null;
-  const allowed = selected !== null && listing?.blocked_reason === null && listing.models.some((option) => option.allowed && option.selection.provider_id === selected.provider_id && option.selection.model === selected.model);
+  const allowed = selected !== null && listing?.blocked_reason === null && listing.models.some((option) => option.allowed && askTargetIdentity(option.selection) === askTargetIdentity(selected));
   const requiresModel = message.trim() !== '' || model !== null;
   const question = message.trim();
   const body: CreateThread = {
@@ -64,10 +65,10 @@ export function ProgramThread({ parent, open, draft, onClose, onNative, prepare 
     footer={<><Button disabled={create.isPending} onClick={onClose}>{t('common.cancel')}</Button>
       <Button variant="primary" pending={create.isPending} disabled={!ready} onClick={choose}>{t(prepare === undefined ? 'start.create' : 'sendLater.useSetup')}</Button></>}>
     <div className="flex min-w-0 flex-col gap-4 py-2" data-program-thread>
-      <div><h3 className="font-medium">{t('ask.threadProgram')}</h3><p className="text-sm text-text-muted">{t('ask.threadProgramDescription')}</p><p className="text-sm text-text-muted">{t('ask.noEnvironment')}</p></div>
+      <Input label={t('start.options.name')} value={name} disabled={create.isPending} onChange={(event) => setName(event.target.value)} />
+      <details><summary className="focus-inset cursor-pointer rounded-md text-sm text-text-muted">{t('ask.threadProgram')}</summary><div className="mt-2 flex flex-col gap-1 text-sm text-text-muted"><p>{t('ask.threadProgramDescription')}</p><p>{t('ask.noEnvironment')}</p></div></details>
       <Button size="sm" variant="ghost" className="self-start" disabled={create.isPending} onClick={() => onNative({ ...draft, name, message, program: { id: 'orch', model }, generalAccess: access })}>{t('ask.chooseNativeProgram')}</Button>
       {place.isError && <ErrorState compact error={place.error} onRetry={() => void place.refetch()} />}
-      <Input label={t('start.options.name')} value={name} disabled={create.isPending} onChange={(event) => setName(event.target.value)} />
       <AskModelChoice root={root} value={model} disabled={create.isPending || root === ''} onChange={setModel} />
       {models.isError && <ErrorState compact error={models.error} onRetry={() => void models.refetch()} />}
       {models.isSuccess && selected === null && <p className="text-sm text-text-muted">{t('ask.noModels')}</p>}

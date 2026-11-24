@@ -120,3 +120,79 @@ async fn a_held_observation_releases_its_process_owner_on_shutdown_without_waiti
     assert!(world.db.pool.is_closed());
     assert_eq!(world.commands.issued_of("turn.interrupt"), 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_scripted_effect_can_finish_while_its_original_reply_stays_held_without_replaying_it() {
+    use orch_engine::commands::Outcome;
+    use orch_link_contract::commands::{CommandResult, NodeRuntimeStart, NodeRuntimeStartResult};
+    use orch_link_contract::native_target::RuntimeSource;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let world = World::new().await;
+    let node = world.add_machine("Reply boundary node", &["node"]).await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let completed = effects.clone();
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    node.machine
+        .handler
+        .on(CommandKind::NodeRuntimeStart, move |_| {
+            completed.fetch_add(1, Ordering::SeqCst);
+            Ok(CommandResult::NodeRuntimeStart(NodeRuntimeStartResult {
+                source,
+                reused: false,
+            }))
+        });
+    node.machine
+        .handler
+        .hold_result(CommandKind::NodeRuntimeStart);
+    let id = new_id();
+    let commands = world.commands.as_engine();
+    let runtime = new_id();
+    commands
+        .issue(
+            Outgoing::new(
+                id,
+                node.id,
+                SerialKey::Runtime(runtime),
+                &NodeRuntimeStart {
+                    runtime_id: runtime,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    eventually(
+        "the scripted native effect really finished before its reply",
+        || {
+            let finished = effects.load(Ordering::SeqCst) == 1;
+            async move { finished }
+        },
+    )
+    .await;
+    assert!(
+        !world
+            .commands
+            .native_progress(node.id, id)
+            .unwrap()
+            .is_final(),
+        "holding a reply must not hold the script before its actual effect"
+    );
+    node.machine
+        .handler
+        .release_kind(CommandKind::NodeRuntimeStart);
+    let result = tokio::time::timeout(PATIENCE, commands.wait(id))
+        .await
+        .unwrap()
+        .unwrap();
+    let Outcome::Succeeded(result) = result else {
+        panic!("the original native result is preserved");
+    };
+    assert_eq!(result["source"], serde_json::json!(source));
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert_eq!(node.machine.handler.runs_of(id), 1);
+}

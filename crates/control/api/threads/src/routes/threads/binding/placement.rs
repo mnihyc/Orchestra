@@ -112,7 +112,9 @@ impl Effect for PlaceThread {
         Box::pin(async move {
             let thread = ctx.id("id")?;
             let environment = match body.choice {
-                EnvironmentChoice::Use(id) => id,
+                EnvironmentChoice::Use(target) => target.single_environment().ok_or_else(|| {
+                    invalid("use", "Choose the environment to move this thread to")
+                })?,
                 EnvironmentChoice::New(_) => {
                     return Err(invalid(
                         "new",

@@ -1,4 +1,5 @@
 /** Check the exact displayed setup against its native options; the atomic write rechecks it at admission. */
+import { ENVIRONMENT_POOL_PREFIX } from '@/features/resources/pools/environmentTarget';
 import { ApiError } from '@/api/client';
 import type { StartOptions } from '@/api/start';
 import type { ArrangementType } from '@/generated/api-types';
@@ -11,15 +12,16 @@ export interface NamedStart {
   model: string;
   effort: string | null;
   arrangement: ArrangementType;
+  environmentPool?: string | undefined;
   environment: { id: string; name: string } | null;
 }
 
 export function checkStart(offered: StartOptions, chosen: NamedStart): void {
   const reviewed = resolve(offered, { provider: chosen.provider, agent: chosen.agent, model: chosen.model,
-    effort: chosen.effort, arrangement: chosen.arrangement, environment: chosen.environment?.id ?? NEW_ENVIRONMENT }, { suggest: false, respectDefaults: true });
+    effort: chosen.effort, arrangement: chosen.arrangement, environment: chosen.environmentPool === undefined ? chosen.environment?.id ?? NEW_ENVIRONMENT : ENVIRONMENT_POOL_PREFIX + chosen.environmentPool }, { suggest: false, respectDefaults: true });
   const same = reviewed.provider?.id === chosen.provider && reviewed.agent?.id === chosen.agent
     && reviewed.model?.model_name === chosen.model && reviewed.effort === chosen.effort && reviewed.arrangement === chosen.arrangement
-    && (chosen.environment === null ? reviewed.fresh : reviewed.environment?.environment.id === chosen.environment.id);
+    && (chosen.environmentPool !== undefined ? reviewed.environmentPool === chosen.environmentPool : chosen.environment === null ? reviewed.fresh : reviewed.environment?.environment.id === chosen.environment.id);
   if (same && reviewed.missing.length === 0 && !reviewed.settling) return;
   const provider = offered.providers.find((row) => row.provider.id === chosen.provider);
   const agent = provider?.agents.find((row) => row.agent.id === chosen.agent);

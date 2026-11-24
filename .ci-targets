@@ -1,0 +1,9 @@
+fmt
+test -p orch-summarizer-model --lib
+test -p orch-engine --lib -- summaries::handoff::tests::
+test -p orch-engine --lib -- summaries::resource::tests::a_configured_model_pool_supplies_the_first_paid_title_without_a_recovery_rule
+test -p orch-engine --lib -- summaries::goal_check::tests::
+test -p orch-engine --test goals
+web typecheck
+web lint
+web test

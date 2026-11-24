@@ -9,37 +9,117 @@ use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver 
 use crate::routes::Access::Rule;
 use orch_access_contract::key_scope::{KeyAction, KeyIdentityKind, KeyTargetKind};
 use orch_access_contract::permissions::ObjectKind;
+use orch_provider_contract::capabilities::{BackendRef, OfferingRef};
 use orch_types::{Id, Json, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A selected API model; subscription-only providers cannot serve Ask.
+/// The existing credential-keeper dialogue command.
+pub const API_ROUTE: &str = "provider.generate";
+/// A tool-free program returning the same dialogue answers and read requests.
+pub const PROGRAM_ROUTE: &str = "ask.delegation";
+
+/// An exact Ask policy entry. Route, offering and placement participate in its identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskModelIdentity {
-    pub provider_id: Id,
-    pub model: String,
+    pub backend: BackendRef,
 }
 
 /// A conversation's model identity and its optional current parameter choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskModel {
-    /// The provider whose runtime keeps its credential.
-    pub provider_id: Id,
-    /// The enabled routing name.
-    pub model: String,
+    /// Exact backend accepted by the organization, including its offering and placement.
+    pub backend: BackendRef,
     /// Choices within the provider's effective constraints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Json>,
 }
 
+impl AskModelIdentity {
+    /// A model served by the credential keeper's dialogue interface.
+    pub fn api(provider: Id, model: String) -> Self {
+        Self {
+            backend: BackendRef {
+                route: API_ROUTE.into(),
+                offering: Some(OfferingRef {
+                    provider,
+                    offering: model,
+                }),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 impl From<AskModelIdentity> for AskModel {
     fn from(identity: AskModelIdentity) -> Self {
         Self {
-            provider_id: identity.provider_id,
-            model: identity.model,
+            backend: identity.backend,
             params: None,
+        }
+    }
+}
+
+/// An entry in the ordered Ask policy. A pool retains its own identity in the picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum AskTarget {
+    Backend(AskModelIdentity),
+    Pool {
+        target: orch_provider_contract::pools::Target,
+    },
+}
+
+/// The person's saved target and options, before an answer selects its actual backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum AskPreference {
+    Backend(AskModel),
+    Pool {
+        target: orch_provider_contract::pools::Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<Json>,
+    },
+}
+
+impl From<AskModelIdentity> for AskPreference {
+    fn from(identity: AskModelIdentity) -> Self {
+        Self::Backend(identity.into())
+    }
+}
+
+impl From<AskModel> for AskPreference {
+    fn from(model: AskModel) -> Self {
+        Self::Backend(model)
+    }
+}
+
+impl From<AskTarget> for AskPreference {
+    fn from(target: AskTarget) -> Self {
+        match target {
+            AskTarget::Backend(model) => Self::Backend(model.into()),
+            AskTarget::Pool { target } => Self::Pool {
+                target,
+                params: None,
+            },
+        }
+    }
+}
+
+impl AskTarget {
+    pub fn backend(&self) -> Option<&BackendRef> {
+        match self {
+            Self::Backend(model) => Some(&model.backend),
+            Self::Pool { .. } => None,
+        }
+    }
+    pub fn matches(&self, preference: &AskPreference) -> bool {
+        match (self, preference) {
+            (Self::Backend(entry), AskPreference::Backend(model)) => entry.backend == model.backend,
+            (Self::Pool { target }, AskPreference::Pool { target: chosen, .. }) => target == chosen,
+            _ => false,
         }
     }
 }
@@ -100,7 +180,7 @@ pub struct AskConversation {
     /// Current lifecycle.
     pub state: AskState,
     /// The person's model preference; null follows today's effective default on each turn.
-    pub model: Option<AskModel>,
+    pub model: Option<AskPreference>,
     /// The effective payer, independently of usage attribution to the owner.
     pub payer_id: Option<Id>,
     /// Creation time.
@@ -135,7 +215,7 @@ pub struct AskCreateBody {
     pub context: Option<String>,
     /// An allowed model; omitted to use today's effective default.
     #[serde(default)]
-    pub model: Option<AskModel>,
+    pub model: Option<AskPreference>,
     /// Owner's retention choice, clamped to the root org's bounds.
     #[serde(default)]
     pub retention_days: Option<u32>,
@@ -237,6 +317,7 @@ pub struct AskGetQuery {
 #[serde(deny_unknown_fields)]
 pub struct AskMessageBody {
     /// Reusing this value for the same sender/thread returns the same receipt.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// Ordinary composer content and references.
     pub content: Vec<crate::threads::ContentPart>,
@@ -250,7 +331,7 @@ pub struct AskMessageBody {
         deserialize_with = "crate::common::absent_or_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub model: Option<Option<AskModel>>,
+    pub model: Option<Option<AskPreference>>,
 }
 
 /// Content-free acknowledgement, safe for a write-only operation grant.
@@ -343,13 +424,71 @@ pub struct AskKeepBody {
 /// Identity-only result of Keep as thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AskKeepReply {
-    /// Source conversation; a temporary source is now kept, a permanent source remains open.
+    /// Original conversation; Copy preserves it, while a confirmed Move ends it.
     pub conversation_id: Id,
-    /// New Private thread with this conversation's history.
+    /// New thread with this conversation's history: Private for Copy, destination defaults for Move.
     pub thread_id: Id,
     /// Its authorized destination topic.
     pub topic_id: Id,
 }
+
+/// The same full-conversation copy and original native Delete reviewed together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AskMoveOutPlan {
+    /// The current caller's immutable review; confirmation repeats its authority and footprint checks.
+    pub preflight_id: Id,
+    /// The original thread's actual deletion consequences.
+    pub delete_plan: crate::duplicates::MoveOutDeletePlan,
+    /// Independent open sides that must be closed or kept before moving the main conversation.
+    pub open_side_threads: Vec<crate::nodes::NodeRef>,
+}
+
+/// Confirms the reviewed native copy and Delete, with no runtime conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AskMoveOutBody {
+    /// A current review owned by the caller and bound to this source.
+    pub preflight_id: Id,
+}
+
+const PROGRAM_MOVE_FACETS: &[Facet] = &[
+    Facet::required(
+        KeyAction::Read,
+        &[KeyTargetKind::Object(ObjectKind::Thread)],
+        Target::TypedPath {
+            parameter: "id",
+            kind: KeyTargetKind::Object(ObjectKind::Thread),
+        },
+    ),
+    Facet::required(
+        KeyAction::Manage,
+        &[KeyTargetKind::Object(ObjectKind::Thread)],
+        Target::TypedPath {
+            parameter: "id",
+            kind: KeyTargetKind::Object(ObjectKind::Thread),
+        },
+    ),
+    Facet::required(
+        KeyAction::Write,
+        &[KeyTargetKind::Object(ObjectKind::Thread)],
+        Target::Resolved("ask_move_destination"),
+    ),
+    Facet::required(
+        KeyAction::Manage,
+        &[
+            KeyTargetKind::Object(ObjectKind::Provider),
+            KeyTargetKind::Object(ObjectKind::Agent),
+            KeyTargetKind::Object(ObjectKind::Environment),
+            KeyTargetKind::Object(ObjectKind::Host),
+            KeyTargetKind::Object(ObjectKind::Machine),
+            KeyTargetKind::Object(ObjectKind::Template),
+            KeyTargetKind::Object(ObjectKind::McpServer),
+            KeyTargetKind::Object(ObjectKind::Mount),
+            KeyTargetKind::Object(ObjectKind::Skill),
+        ],
+        Target::ResolvedCollection("ask_move_deleted_resources"),
+    ),
+];
 
 /// Personal display and retention choices; the governing org is immutable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -373,7 +512,10 @@ pub struct AskModelsQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AskModelOption {
     /// The exact effective policy-list identity; parameters belong to the person.
-    pub selection: AskModelIdentity,
+    pub selection: AskTarget,
+    /// The readable pool name when this row is a pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_name: Option<String>,
     /// Ordinary readable provider identity and address.
     pub provider: Option<crate::resources::ProviderRef>,
     /// Existing native model capabilities, constraints and allowance.
@@ -404,7 +546,7 @@ pub enum AskModelsBlockedReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AskModelsReply {
     pub root_org_id: Id,
-    pub default_model: Option<AskModelIdentity>,
+    pub default_model: Option<AskTarget>,
     pub models: Vec<AskModelOption>,
     /// Null when at least one configured entry is usable.
     pub blocked_reason: Option<AskModelsBlockedReason>,
@@ -442,7 +584,7 @@ crate::endpoints! {
     AskModelsGet: GET "/ask/models", Rule("root org view and existing model, provider Use and policy resolution"), query AskModelsQuery, none, json AskModelsReply, 200,
         operation Op::facets(&[
             Facet::required(KeyAction::Read,&[KeyTargetKind::Object(ObjectKind::Org)],Target::Resolved("ask_model_root")),
-            Facet::response_content(&[KeyTargetKind::Object(ObjectKind::Provider)],Target::ResolvedCollection("ask_model_providers"))
+            Facet::response_content(&[KeyTargetKind::Object(ObjectKind::Provider), KeyTargetKind::Object(ObjectKind::Pool)],Target::ResolvedCollection("ask_model_resources"))
         ]);
     /// Begins a personal conversation with a fixed root organization.
     AskCreate: POST "/ask/conversations", Rule("owner creates in personal home with root org access"), none, json AskCreateBody, json AskReceipt, 201,
@@ -475,6 +617,12 @@ crate::endpoints! {
             Facet::required(KeyAction::Read, &[KeyTargetKind::Object(ObjectKind::Thread)], Target::TypedPath { parameter: "id", kind: KeyTargetKind::Object(ObjectKind::Thread) }),
             Facet::required(KeyAction::Write, &[KeyTargetKind::Object(ObjectKind::Thread)], Target::Resolved("ask_keep_destination"))
         ]));
+    /// Reviews a permanent built-in conversation's native copy and owner-only original Delete.
+    AskMoveOutPreview: POST "/ask/conversations/{id}/move-out/preview", Rule("actual owner, ordinary Copy and Export, destination creation and every original Delete prerequisite"), none, json AskKeepBody, json AskMoveOutPlan, 200,
+        operation Op::facets(PROGRAM_MOVE_FACETS);
+    /// Copies the complete program conversation to destination defaults and deletes its original atomically.
+    AskMoveOut: POST "/ask/conversations/{id}/move-out", Rule("current native review and all of its original Copy, destination and Delete checks"), none, json AskMoveOutBody, json AskKeepReply, 201,
+        operation Op::receipt(&Op::facets(PROGRAM_MOVE_FACETS));
     /// Permanently deletes this personal conversation.
     AskDelete: DELETE "/ask/conversations/{id}", Rule("conversation owner or root org lifecycle administrator"), none, none, none, 204,
         operation Op::facets(&[Facet::required(KeyAction::Manage, &[KeyTargetKind::Object(ObjectKind::Thread)], Target::TypedPath { parameter: "id", kind: KeyTargetKind::Object(ObjectKind::Thread) })]);
@@ -543,9 +691,13 @@ mod tests {
         let clear: AskMessageBody = serde_json::from_value(clear).unwrap();
         assert_eq!(clear.model, Some(None));
         let mut choice = body;
-        choice["model"] = serde_json::json!({"provider_id":Id::nil(),"model":"selected"});
+        let account = Id::from_u128(1);
+        choice["model"] = serde_json::json!({
+            "backend": {"route":"provider.generate","offering":{"provider":account,"offering":"selected"}}
+        });
         let choice: AskMessageBody = serde_json::from_value(choice).unwrap();
-        assert_eq!(choice.model.unwrap().unwrap().model, "selected");
+        let selected = AskModelIdentity::api(account, "selected".into());
+        assert_eq!(choice.model, Some(Some(selected.into())));
         assert!(serde_json::to_value(kept).unwrap().get("model").is_none());
         assert!(serde_json::to_value(clear).unwrap()["model"].is_null());
     }

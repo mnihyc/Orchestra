@@ -266,7 +266,8 @@ impl Run {
                         turn, self.turn,
                         "a request belongs to the turn that started its sub-agent"
                     );
-                    self.settling.printed(self.segment, turn, *printed);
+                    self.settling
+                        .printed(self.segment, self.segment, turn, *printed);
                 }
                 Heard::Placed(placement) => self.settling.placed(placement),
                 Heard::Dropped(keys) => self.settling.dropped(keys),
@@ -1729,7 +1730,7 @@ async fn however_many_requests_a_window_holds_the_ledger_loses_none() {
     for (window, from) in [(7, 0), (8, 4_500)] {
         let mut named = Vec::new();
         for n in from..from + 4_500 {
-            settling.printed(segment, owner, a_printed(n));
+            settling.printed(segment, segment, owner, a_printed(n));
             named.push(("tool-a".to_owned(), format!("m{n}")));
         }
         settling.placed(Placement {
@@ -1799,8 +1800,8 @@ async fn a_request_the_engine_would_refuse_is_no_row_of_the_ledger_and_its_cost_
         a_printed(2).request.check().is_ok(),
         "and this one it accepts"
     );
-    settling.printed(segment, owner, refused);
-    settling.printed(segment, owner, a_printed(2));
+    settling.printed(segment, segment, owner, refused);
+    settling.printed(segment, segment, owner, a_printed(2));
     settling.placed(Placement {
         window: 5,
         base_known: true,
@@ -1864,7 +1865,8 @@ async fn a_settler_that_fails_reports_what_it_decided_as_the_stream_said_and_ope
     assert_eq!(closed.stated.input_tokens, 11);
     // Nothing waits for a settler that is gone, and what is printed after is not reported: the turn that holds it
     // counted it once, in its remainder.
-    run.settling.printed(run.segment, run.turn, a_printed(9));
+    run.settling
+        .printed(run.segment, run.segment, run.turn, a_printed(9));
     run.until(2, Duration::from_millis(300)).await;
     assert_eq!(run.reported.len(), 1);
 }
@@ -1912,7 +1914,7 @@ async fn a_request_named_for_a_window_is_owed_before_the_settler_has_taken_the_n
         Arc::new(Files),
     );
     assert!(!settling.owes());
-    settling.printed(new_id(), new_id(), a_printed(1));
+    settling.printed(new_id(), new_id(), new_id(), a_printed(1));
     assert!(
         !settling.owes(),
         "a request that is printed is not owed until a window names it"

@@ -111,9 +111,9 @@ fn words(client: &str) -> serde_json::Value {
 fn a_thread(s: &Scene, name: &str) -> serde_json::Value {
     json!({
         "name": name,
-        "binding": { "agent_id": s.on.agent, "provider_id": s.on.provider },
+        "binding": { "agent_id": s.on.agent, "target":{"type":"single","resource":{"kind":"provider","id":s.on.provider}} },
         "model": rig::MODEL,
-        "environment": { "use": s.on.environment },
+        "environment": orch_api_contract::binding::EnvironmentChoice::existing(s.on.environment),
         "directory": "web",
     })
 }

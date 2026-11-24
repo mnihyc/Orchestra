@@ -19,7 +19,7 @@ use orch_api_contract::users::{
     InvitationAccept, InvitationAcceptBody, InvitationCreate, InvitationCreateBody,
     InvitationDelete, InvitationKind, InvitationList, InvitationListQuery, InvitationLookup,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
@@ -89,7 +89,7 @@ impl Scene {
             permissions: None,
             email: None,
             max_uses: Some(3),
-            expires_in_hours: Some(1),
+            expires_in_minutes: Some(60),
             note: Some(NOTE.into()),
         }
     }
@@ -138,8 +138,8 @@ struct Key {
 async fn key(world: &World, owner: Id, rules: Vec<Json>) -> Key {
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -159,8 +159,8 @@ async fn key(world: &World, owner: Id, rules: Vec<Json>) -> Key {
     Key { id, secret }
 }
 async fn legacy(world: &World, owner: Id, node: Id) -> Key {
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -204,7 +204,10 @@ async fn list(world: &World, token: &str, org: Option<Id>) -> RawReply {
         .app
         .call(InvitationList, &[])
         .token(token)
-        .query(&InvitationListQuery { org_id: org })
+        .query(&InvitationListQuery {
+            org_id: org,
+            ..Default::default()
+        })
         .send_bytes()
         .await
 }
@@ -344,7 +347,8 @@ async fn list_full(destination: Destination) {
     )
     .await;
     let org = matches!(destination, Destination::Org).then_some(s.room.root);
-    let ordinary = checked(list(s.world(), &actor.token, org).await, StatusCode::OK);
+    let ordinary =
+        checked(list(s.world(), &actor.token, org).await, StatusCode::OK)["items"].clone();
     assert!(
         ordinary
             .as_array()
@@ -352,7 +356,8 @@ async fn list_full(destination: Destination) {
             .iter()
             .any(|row| row["id"] == json!(offer.id))
     );
-    let shown = checked(list(s.world(), &caller.secret, org).await, StatusCode::OK);
+    let shown =
+        checked(list(s.world(), &caller.secret, org).await, StatusCode::OK)["items"].clone();
     assert_eq!(shown.as_array().unwrap().len(), 1);
     assert_eq!(shown[0]["id"], json!(offer.id));
     assert_eq!(shown[0]["note"], NOTE);
@@ -451,7 +456,8 @@ async fn system_inventory_reads_other_issuers_with_business_standing_without_pri
     let s = Scene::new().await;
     let offer = browser_offer(&s, Destination::System).await;
     let other = places::admin(s.world(), "otheradmin").await;
-    let ordinary = checked(list(s.world(), &other.token, None).await, StatusCode::OK);
+    let ordinary =
+        checked(list(s.world(), &other.token, None).await, StatusCode::OK)["items"].clone();
     assert!(
         ordinary
             .as_array()
@@ -465,7 +471,8 @@ async fn system_inventory_reads_other_issuers_with_business_standing_without_pri
         s.rules(Destination::System, LIST, "read", true),
     )
     .await;
-    let shown = checked(list(s.world(), &caller.secret, None).await, StatusCode::OK);
+    let shown =
+        checked(list(s.world(), &caller.secret, None).await, StatusCode::OK)["items"].clone();
     assert!(
         shown
             .as_array()
@@ -482,7 +489,8 @@ async fn system_inventory_reads_other_issuers_with_business_standing_without_pri
     let own_history = checked(
         list(s.world(), &unentitled.secret, None).await,
         StatusCode::OK,
-    );
+    )["items"]
+        .clone();
     assert!(
         own_history.as_array().unwrap().is_empty(),
         "scope supplies no system standing"

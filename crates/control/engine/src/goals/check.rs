@@ -3,10 +3,10 @@
 //!
 //! A goal is held by one claim while its report is checked ([`orch_db::queries::goals::claim_check`]), so that two
 //! processes do not ask twice and the loop waits. A claim that is not let go expires after the call's deadline, and
-//! the next look asks again. A helper that cannot be asked is tried three times, a minute apart; after that the
-//! agent's own report decides, and the line of the goal says that the check could not run.
+//! the next look asks again. A helper that cannot be asked leaves the report unchecked and the goal held for
+//! a person's decision; the agent's own claim is never accepted as an independent check.
 
-use super::{GoalError, met_in};
+use super::{GoalError, met_in, unchecked_in};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::summaries::goal_check::{self, Checked};
@@ -19,10 +19,6 @@ use orch_types::Id;
 
 /// Seconds beyond the helper call's own deadline that its claim is kept, for the commits around the call.
 const CLAIM_GRACE_SECS: i64 = 30;
-/// How many times a helper that cannot be asked is tried before the agent's report decides.
-const ATTEMPTS: i32 = 3;
-/// Seconds between those tries, per try made.
-const RETRY_SECS: i64 = 60;
 
 /// How long a look's claim on a goal holds for a check: the helper's deadline and a little more.
 pub(super) fn claim_for() -> Duration {
@@ -65,8 +61,15 @@ impl Engine {
                 _ => return Ok(()),
             }
         };
-        let checked = goal_check::ask(self, thread, &goal, &report).await?;
-        self.apply_goal_check(thread, &goal.condition, goal_id, report_id, checked)
+        let mut proof = None;
+        let checked = match goal_check::ask(self, thread, &goal, &report, &mut proof).await {
+            Ok(checked) => checked,
+            Err(error) => {
+                tracing::warn!(%error, %thread, "the independent goal check could not complete");
+                Checked::Unavailable("The independent check could not complete.".into())
+            }
+        };
+        self.apply_goal_check(thread, &goal.condition, goal_id, report_id, checked, proof)
             .await
             .map_err(|error| match error {
                 GoalError::Internal(error) => error,
@@ -82,6 +85,7 @@ impl Engine {
         goal_id: Id,
         report_id: Id,
         checked: Checked,
+        proof: Option<goal_check::PoolProof>,
     ) -> Result<(), GoalError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
@@ -103,6 +107,21 @@ impl Engine {
             {
                 return Ok(());
             }
+            let checked = if let Some(proof) = proof
+                && !proof.current(unit.conn, self).await?
+            {
+                Checked::Unavailable(
+                    "The summary pool choice changed before the verdict could be used.".into(),
+                )
+            } else {
+                checked
+            };
+            crate::summaries::facts::finish_goal(
+                unit.conn,
+                report.id,
+                matches!(&checked, Checked::Met | Checked::NotYet(_)),
+            )
+            .await?;
             match checked {
                 Checked::Met => {
                     met_in(
@@ -111,6 +130,7 @@ impl Engine {
                         &goal,
                         &report,
                         GoalCheckedBy::Helper,
+                        None,
                         None,
                     )
                     .await?;
@@ -130,27 +150,7 @@ impl Engine {
                     unit.wake(thread_id);
                 }
                 Checked::Unavailable(why) => {
-                    let tried = rows::note_check_attempt(&mut *unit.conn, report.id).await?;
-                    if tried >= ATTEMPTS {
-                        let reason = format!("the check could not run: {why}");
-                        met_in(
-                            &mut unit,
-                            &thread,
-                            &goal,
-                            &report,
-                            GoalCheckedBy::Agent,
-                            Some(&reason),
-                        )
-                        .await?;
-                    } else {
-                        rows::delay_check(
-                            &mut *unit.conn,
-                            goal.id,
-                            now + Duration::seconds(RETRY_SECS * i64::from(tried)),
-                            now,
-                        )
-                        .await?;
-                    }
+                    unchecked_in(&mut unit, &thread, &goal, &report, &why).await?;
                 }
             }
             unit.finish().await?
