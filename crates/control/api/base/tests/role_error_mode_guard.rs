@@ -15,7 +15,7 @@ use http::{Request, StatusCode};
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::access::NodeRoleCreate;
 use orch_api_contract::common::{ErrorCode, MAX_JSON_BYTES, Problem};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_db::queries::{identity, transaction_guard};
 use orch_types::new_id;
@@ -75,8 +75,8 @@ async fn a_role_error_after_a_real_guard_wait_uses_current_modern_disclosure_aft
     );
     assert!(!body.to_string().contains(protected_name));
 
-    let secret = new_token(API_TOKEN_PREFIX);
     let token_id = new_id();
+    let secret = new_api_token(token_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {

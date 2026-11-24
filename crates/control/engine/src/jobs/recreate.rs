@@ -850,15 +850,17 @@ impl Recreating {
             let exported: orch_link_contract::commands::NodeRuntimeExportResult =
                 serde_json::from_value(value).map_err(EngineError::from)?;
             let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
-            if let Some(archive) = exported.archive {
-                orch_db::queries::storage::pin_blobs(&mut tx, &[archive.hash]).await?;
-            }
+            let pins = if let Some(archive) = exported.archive {
+                orch_db::queries::storage::pin_transfer_blobs(&mut tx, &[archive.hash]).await?
+            } else {
+                Vec::new()
+            };
             jobs::merge_plan(
                 &mut tx,
                 job.id(),
                 &json!({
                     "carried": exported.archive,
-                    "carry_pins": exported.archive.map(|archive| vec![archive.hash]).unwrap_or_default(),
+                    "carry_pins": pins,
                 }),
                 job.now(),
             )
@@ -1296,9 +1298,12 @@ impl Recreating {
             )
             .await?;
         }
+        // A person who stopped or took away the old unit while the update was under way has it stay stopped.
+        let kept_stopped = plan.get("keep_old_stopped").and_then(Json::as_bool) == Some(true);
         let resume = !removed_capability
             && !guarded
             && !disabled
+            && !kept_stopped
             && (self.recipe.auto_start || !self.recipe.was_stopped);
         if resume
             && (plan.get("old_stop_requested").and_then(Json::as_bool) == Some(true)
@@ -1323,15 +1328,28 @@ impl Recreating {
             .acquire()
             .await
             .map_err(EngineError::from)?;
-        envs::set_runtime_state(
-            &mut conn,
-            old.id,
-            &envs::runtime_state::LIVE,
-            if resume { "running" } else { "stopped" },
-            None,
-            job.now(),
-        )
-        .await?;
+        // The forced Stop or removal settles the old unit under the provider lock.
+        // Its original registration must survive the undo until that decision detaches it.
+        if !kept_stopped {
+            envs::set_runtime_state(
+                &mut conn,
+                old.id,
+                &envs::runtime_state::LIVE,
+                if resume { "running" } else { "stopped" },
+                None,
+                job.now(),
+            )
+            .await?;
+            if let Target::Provider(id) = self.recipe.target {
+                providers::set_machine(
+                    &mut conn,
+                    id,
+                    if resume { old.machine_id } else { None },
+                    job.now(),
+                )
+                .await?;
+            }
+        }
         if let Target::Environment(id) = self.recipe.target {
             envs::set_status(
                 &mut conn,
@@ -1350,15 +1368,6 @@ impl Recreating {
                     .old_facts
                     .get("workspace_root")
                     .and_then(Json::as_str),
-                job.now(),
-            )
-            .await?;
-        }
-        if let Target::Provider(id) = self.recipe.target {
-            providers::set_machine(
-                &mut conn,
-                id,
-                if resume { old.machine_id } else { None },
                 job.now(),
             )
             .await?;
@@ -1695,12 +1704,9 @@ impl Engine {
             tracing::warn!(job=%row.id,%error,"kept-image cleanup waits for a later sweep");
         }
         // A provider's carried files were kept in the blob store only for the move.
-        if let Ok(pins) =
-            serde_json::from_value::<Vec<orch_types::Hash>>(row.plan["carry_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-            && let Err(error) =
-                orch_db::queries::storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now())
-                    .await
+        if let Err(error) = self
+            .release_held(row.id, &["carry_pins"], "carry_pins_released")
+            .await
         {
             tracing::warn!(%error, "a move's carried files could not be let go");
         }
