@@ -12,6 +12,18 @@ mod support;
 #[path = "kmounts_files/machine_scopes.rs"]
 mod machine_scopes;
 
+#[path = "kmounts_files/copy.rs"]
+mod copy;
+
+#[path = "kmounts_files/copy_flow.rs"]
+mod copy_flow;
+
+#[path = "kmounts_files/deletion.rs"]
+mod deletion;
+
+#[path = "kmounts_files/notifications.rs"]
+mod notifications;
+
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::mounts::*;
@@ -191,6 +203,80 @@ async fn directory_choices_on_a_machine_without_a_host_return_its_roots_and_unre
     assert!(unreported.roots.is_empty());
     assert!(unreported.direct.is_none());
     assert!(unreported.drivers.is_empty());
+}
+
+#[tokio::test]
+async fn directory_choices_reach_a_registration_holder_but_not_a_machine_viewer_without_use() {
+    use orch_db::queries::resources::access_fixtures;
+    let world = World::new().await;
+    let people = company(&world).await;
+    let machine = access_fixtures::insert_persons_machine(
+        &mut *world.conn().await,
+        people.admin.id(),
+        "Shared directory machine",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+        .bind(machine)
+        .bind(json!({"policy":{"environment.roots":["/srv/shared"]}}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    name_person(
+        &world,
+        "machine",
+        machine,
+        "machine.view",
+        people.stranger.id(),
+    )
+    .await;
+    assert_eq!(
+        world
+            .app
+            .call(MachineEnvironmentDataGet, &[&machine])
+            .token(&people.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    let entry = name_person(
+        &world,
+        "machine",
+        machine,
+        "machine.use",
+        people.stranger.id(),
+    )
+    .await;
+    let roots = world
+        .app
+        .call(MachineEnvironmentDataGet, &[&machine])
+        .token(&people.stranger.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(roots.roots.len(), 1);
+    assert_eq!(roots.roots[0].path, "/srv/shared");
+    assert!(roots.roots[0].uses.is_empty());
+    sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(MachineEnvironmentDataGet, &[&machine])
+            .token(&people.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
 }
 
 #[tokio::test]
@@ -887,6 +973,9 @@ async fn a_mount_is_created_listed_changed_and_removed_with_its_current_revision
         .app
         .call(MountDelete, &[&made.base.id])
         .token(&c.viewer.token)
+        .body(&deletion::keep(
+            &deletion::plan(&world, &c.viewer, made.base.id).await,
+        ))
         .send()
         .await
         .ok();
@@ -1027,13 +1116,15 @@ async fn a_person_adds_only_their_own_machine_location_and_other_readers_do_not_
 }
 
 #[tokio::test]
-async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
+async fn deleting_an_enabled_mount_names_the_topic_and_switches_it_off_in_one_act() {
     let world = World::new().await;
     let c = company(&world).await;
+    let project = places::make_project(&world, &c.boss, c.acme, "Build lab").await;
+    let topic = places::make_topic(&world, &c.boss, project.base.id, "Workbench").await;
     let made = world
         .app
         .call(MountCreate, &[])
-        .token(&c.viewer.token)
+        .token(&c.boss.token)
         .body(&create_body(c.acme))
         .send()
         .await
@@ -1042,7 +1133,7 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
         .unwrap();
     world
         .set_at(
-            orch_settings::Target::Node(c.acme),
+            orch_settings::Target::Node(topic.base.id),
             "env.mounts",
             json!({made.base.id.to_string(): "private"}),
         )
@@ -1050,38 +1141,66 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
     let used = world
         .app
         .call(MountUsesGet, &[&made.base.id])
-        .token(&c.viewer.token)
+        .token(&c.boss.token)
         .send()
         .await
         .ok();
     assert_eq!(used.scopes.len(), 1);
-    assert_eq!(used.scopes[0].node.id, c.acme);
+    assert_eq!(used.scopes[0].node.id, topic.base.id);
     assert_eq!(
         used.scopes[0].value,
         MountScopeValue::Mode(MountScopeMode::Private)
     );
-    let refused = world
+    let plan = deletion::plan(&world, &c.boss, made.base.id).await;
+    assert!(plan.mount_switch_off_blocked.is_none());
+    assert!(!plan.notify);
+    assert!(
+        plan.effects
+            .as_ref()
+            .unwrap()
+            .dependents
+            .iter()
+            .flat_map(|group| &group.visible)
+            .any(|place| place.name == "Workbench")
+    );
+    let accepted = world
         .app
         .call(MountDelete, &[&made.base.id])
-        .token(&c.viewer.token)
+        .token(&c.boss.token)
+        .body(&deletion::keep(&plan))
         .send()
         .await
-        .problem();
-    assert_eq!(refused.code, ErrorCode::ResourceInUse);
+        .ok();
+    let job = match accepted {
+        orch_api_contract::storage::CleanupJobResponse::Full(job) => job.id,
+        orch_api_contract::storage::CleanupJobResponse::Receipt(receipt) => receipt.id,
+    };
+    let row = orch_db::queries::jobs::job(&mut *world.conn().await, job)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        refused.extra["uses"]["scopes"][0]["node"]["id"],
-        json!(c.acme)
+        row.kind, "storage_cleanup",
+        "Delete uses the existing cleanup job"
     );
+    let enabled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key='env.mounts' AND value ? $1)",
+    )
+    .bind(made.base.id.to_string())
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!(!enabled, "a deleted mount cannot remain enabled in a place");
     assert_eq!(
         world
             .app
             .call(MountGet, &[&made.base.id])
-            .token(&c.viewer.token)
+            .token(&c.boss.token)
             .send()
             .await
-            .ok()
-            .revision,
-        made.revision
+            .problem()
+            .code,
+        ErrorCode::NotFound
     );
     assert_eq!(
         world
@@ -1343,3 +1462,138 @@ async fn data_a_copy_displaced_is_listed_until_whoever_may_remove_that_location_
 
 #[path = "kmounts_files/location_scopes.rs"]
 mod location_scopes;
+
+#[tokio::test]
+async fn mount_locations_and_additions_each_search_before_their_own_page() {
+    use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let machine =
+        fixtures::insert_persons_machine(&mut *world.conn().await, c.viewer.id(), "Paging laptop")
+            .await
+            .unwrap();
+    for index in 0..13 {
+        let mount = named_mount(&world, &c.viewer, c.acme, &format!("located-{index:02}")).await;
+        let mut conn = world.conn().await;
+        rows::set_location(
+            &mut conn,
+            &rows::LocationRow {
+                mount_id: mount.base.id,
+                machine_id: machine,
+                host_id: None,
+                host_name: None,
+                kind: "path".into(),
+                source: format!("/srv/{index}"),
+                storage: None,
+                data_kind: None,
+                created_by: c.viewer.id(),
+                created_at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        named_mount(&world, &c.viewer, c.acme, &format!("available-{index:02}")).await;
+    }
+    for collection in [
+        MachineMountCollection::Locations,
+        MachineMountCollection::Available,
+    ] {
+        let q = if collection == MachineMountCollection::Locations {
+            "located-12"
+        } else {
+            "available-12"
+        };
+        let result = world
+            .app
+            .call(MachineMountList, &[&machine])
+            .token(&c.viewer.token)
+            .query(&MachineMountListQuery {
+                collection: Some(collection),
+                q: Some(q.into()),
+                limit: Some(3),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        if collection == MachineMountCollection::Locations {
+            assert_eq!(result.locations[0].mount.name, q);
+            assert_eq!(result.locations.len(), 1);
+        } else {
+            assert_eq!(result.available[0].mount.name, q);
+            assert_eq!(result.available.len(), 1);
+        }
+        let mut cursor = None;
+        let mut count = 0;
+        loop {
+            let page = world
+                .app
+                .call(MachineMountList, &[&machine])
+                .token(&c.viewer.token)
+                .query(&MachineMountListQuery {
+                    collection: Some(collection),
+                    limit: Some(3),
+                    cursor,
+                    ..Default::default()
+                })
+                .send()
+                .await
+                .ok();
+            count += if collection == MachineMountCollection::Locations {
+                page.locations.len()
+            } else {
+                page.available.len()
+            };
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(count, 13);
+    }
+}
+
+#[tokio::test]
+async fn a_mounts_later_location_is_found_by_its_visible_machine_before_paging() {
+    use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let mount = named_mount(&world, &c.viewer, c.acme, "location-catalogue").await;
+    for index in 0..13 {
+        let machine = fixtures::insert_persons_machine(
+            &mut *world.conn().await,
+            c.viewer.id(),
+            &format!("Destination {index:02}"),
+        )
+        .await
+        .unwrap();
+        rows::set_location(
+            &mut *world.conn().await,
+            &rows::LocationRow {
+                mount_id: mount.base.id,
+                machine_id: machine,
+                host_id: None,
+                host_name: None,
+                kind: "path".into(),
+                source: format!("/srv/{index}"),
+                storage: None,
+                data_kind: None,
+                created_by: c.viewer.id(),
+                created_at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let page = world
+        .app
+        .call(MountGet, &[&mount.base.id])
+        .token(&c.viewer.token)
+        .query(&json!({"collection":"locations","q":"Destination 12","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.locations.len(), 1);
+    assert_eq!(page.locations[0].machine.name, "Destination 12");
+}

@@ -483,3 +483,91 @@ fn declared_model_efforts_bound_aliases_and_their_dropdown_projection() {
         json!([null, "low"])
     );
 }
+
+#[test]
+fn gemini_compatible_requests_keep_tier_effort_and_nested_defaults_with_per_use_overrides() {
+    let configured = model(json!({
+        "efforts":["low","high"], "default_effort":"high",
+        "service_tiers":[{"id":"priority","label":"Fast"},{"id":"flex","label":"Flex"}],
+        "default_service_tier":"priority",
+        "request_options":{"openai-chat":{"type":"object","properties":{
+            "extra_body":{"type":"object","properties":{"google":{"type":"object","properties":{
+                "cached_content":{"type":"string","default":"cachedContents/provider-default"}
+            }}}}
+        }}}
+    }));
+    let ordinary = resolve("openai-chat", &configured, &json!({}), &json!({})).unwrap();
+    assert_eq!(ordinary["service_tier"], "priority");
+    assert_eq!(ordinary["reasoning_effort"], "high");
+    assert_eq!(
+        ordinary["extra_body"]["google"]["cached_content"],
+        "cachedContents/provider-default"
+    );
+    let selected = resolve("openai-chat", &configured, &json!({}), &json!({
+        "service_tier":"flex", "effort":"low", "extra_body":{"google":{"cached_content":"cachedContents/chosen"}}
+    })).unwrap();
+    let wire = outgoing(
+        "openai-chat",
+        &configured,
+        &serde_json::to_vec(&json!({
+            "model":"gemini-model", "messages":[], "service_tier":selected["service_tier"],
+            "reasoning_effort":selected["reasoning_effort"], "extra_body":selected["extra_body"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let body: Value = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(body["service_tier"], "flex");
+    assert_eq!(body["reasoning_effort"], "low");
+    assert_eq!(
+        body["extra_body"]["google"]["cached_content"],
+        "cachedContents/chosen"
+    );
+    assert!(
+        resolve(
+            "openai-chat",
+            &configured,
+            &json!({}),
+            &json!({"service_tier":"unoffered"})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn deepseek_compatible_requests_keep_declared_thinking_defaults_without_an_invented_tier() {
+    let configured = model(json!({
+        "efforts":["none","low","high","max"], "default_effort":"high",
+        "request_options":{"openai-chat":{"type":"object","properties":{
+            "service_tier":false,
+            "thinking":{"type":"object","properties":{"type":{"enum":["enabled","disabled"],"default":"enabled"}}},
+            "response_format":{"type":"object","properties":{"type":{"enum":["text","json_object"],"default":"text"}}}
+        }}}
+    }));
+    let defaults = resolve("openai-chat", &configured, &json!({}), &json!({})).unwrap();
+    assert!(defaults.get("service_tier").is_none());
+    assert_eq!(defaults["reasoning_effort"], "high");
+    assert_eq!(defaults["thinking"]["type"], "enabled");
+    assert_eq!(defaults["response_format"]["type"], "text");
+    let selected = resolve("openai-chat", &configured, &json!({}), &json!({
+        "effort":"none", "thinking":{"type":"disabled"}, "response_format":{"type":"json_object"}
+    })).unwrap();
+    let wire = outgoing(
+        "openai-chat",
+        &configured,
+        &serde_json::to_vec(&selected).unwrap(),
+    )
+    .unwrap();
+    let body: Value = serde_json::from_slice(&wire).unwrap();
+    assert!(body.get("service_tier").is_none());
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert_eq!(body["response_format"]["type"], "json_object");
+    assert_eq!(body["reasoning_effort"], "none");
+    let form = orch_model_contract::parameters::thread::forms(&configured);
+    assert!(form["openai-chat"]["properties"].get("thinking").is_some());
+    assert!(
+        form["openai-chat"]["properties"]
+            .get("service_tier")
+            .is_none()
+    );
+}
