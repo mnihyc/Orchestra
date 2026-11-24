@@ -329,15 +329,8 @@ pub(crate) async fn replay_page(
     let Some(key) = key(ctx) else {
         return Ok(false);
     };
-    let hours =
-        i64::try_from(ctx.app.config.api.idempotency_ttl_hours).map_err(ApiError::internal)?;
-    let Some(previous) = orch_db::idempotency::find(
-        conn,
-        principal.user(),
-        key,
-        principal.now().get() - chrono::Duration::hours(hours),
-    )
-    .await?
+    let since = crate::middleware::idempotency::window_since(conn, principal.now().get()).await?;
+    let Some(previous) = orch_db::idempotency::find(conn, principal.user(), key, since).await?
     else {
         return Ok(false);
     };

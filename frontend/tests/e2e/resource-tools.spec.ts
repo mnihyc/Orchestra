@@ -159,7 +159,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await expect(page.locator('html')).toHaveAttribute('lang', locale);
     }
     const copy = locale === 'en' ? words : chinese;
-    const discovery: EnvironmentMcp = { applies: 'next_turn', servers: [], import: { allowed: true, reason: null }, found: [
+    const discovery: EnvironmentMcp = { next_cursor: null, applies: 'next_turn', servers: [], import: { allowed: true, reason: null }, found: [
       { source: 'codex', scope: 'user', name: 'http-proof', transport: 'http', directory: null, imported: null },
     ] };
     await page.route('**/api/v1/environments/*/mcp', (route) => route.fulfill({ json: discovery }));

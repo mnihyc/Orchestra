@@ -25,7 +25,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   useLocation: () => ({ pathname: '/resources/hosts/host', search: {}, searchStr: '' }),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string> }) => <a {...attributes} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/resources/ComponentUpdate', async (load) => ({ ...await load<object>(), useComponentUpdateAct: () => () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
@@ -120,4 +120,26 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   const joined = view.cache.getQueryData<typeof inventory>(inventoryKey)?.pages[0]?.items[0]?.resource;
   expect(joined).toEqual({ kind: 'host', value: fresh }); expect(view.cache.getQueryData(hostKey(fresh.id))).toEqual(fresh);
   expect(calls.read).toHaveBeenCalledTimes(1); expect(repair).not.toHaveBeenCalled(); expect(refetch).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`says first that an online host has loaded no driver, with the way to allow one (${locale})`, async () => {
+    await setLocale(locale);
+    calls.read.mockResolvedValue({ ...detailHost, drivers: [] });
+    const user = userEvent.setup(); draw(<Scene />);
+    expect(await screen.findByText(i18n.t('hosts.drivers.noneLoaded'))).toBeVisible();
+    await user.click(screen.getByRole('button', { name: i18n.t('machinePrograms.openPolicy') }));
+    expect(screen.getByRole('tab', { name: i18n.t('hosts.tabs.settings') })).toHaveAttribute('aria-selected', 'true');
+    expect(calls.read).toHaveBeenCalledTimes(1);
+  });
+}
+
+it('says nothing of drivers on a host that loaded one or whose machine is away', async () => {
+  for (const host of [detailHost, { ...detailHost, drivers: [], machine: { ...detailHost.machine, online: false } }]) {
+    calls.read.mockResolvedValue(host);
+    draw(<Scene />);
+    expect(await screen.findByRole('heading', { name: host.name, level: 1 })).toBeVisible();
+    expect(screen.queryByText(i18n.t('hosts.drivers.noneLoaded'))).not.toBeInTheDocument();
+    cleanup();
+  }
 });

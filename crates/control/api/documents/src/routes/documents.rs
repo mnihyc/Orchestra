@@ -270,9 +270,8 @@ async fn record(
     entry.org_id = Some(document.org_id);
     entry.details = details;
     if action == AuditAction::DocumentDeleted {
-        let days =
-            i64::try_from(ctx.app.config.retention.soft_delete_days).map_err(ApiError::internal)?;
-        entry.details["purge_at"] = json!(ctx.now + chrono::Duration::days(days));
+        let days = orch_settings::retention::deleted_keep_days(conn).await?;
+        entry.details["purge_at"] = json!(orch_settings::retention::purge_at(ctx.now, days));
     }
     audit::append(conn, &entry, &origin(ctx), ctx.now).await?;
     Ok(())

@@ -1,0 +1,12 @@
+test -p orch-settings-contract --lib
+test -p orch-config --lib
+test -p orch-api-core --test settings --test removal --test document_comment_edit_replay --test kfix_upload
+test -p orch-settings --test matrix_inheritance --test resolution --test writes
+test -p orchctl --bin orchctl -- operator_storage::
+test -p orch-engine --test document_folders --test trace_retention
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test -- tests/component/agent-features-editor.test.tsx tests/component/settings-policy-narrowing.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
+web test

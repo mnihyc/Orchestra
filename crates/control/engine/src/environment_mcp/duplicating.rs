@@ -192,6 +192,7 @@ impl Input {
                 Vec::new()
             },
             command: McpImport {
+                profile: None,
                 expected_fingerprint: None,
                 environment_id: None,
                 transfer: recipient.map(|(recipient, _)| McpSnapshotTransfer::Issue { recipient }),
@@ -543,7 +544,7 @@ impl Source for Stored {
             let mut machines = vec![input.source_machine(), input.target_machine()];
             machines.sort_unstable();
             machines.dedup();
-            sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE")
                 .bind(machines)
                 .execute(&mut *conn)
                 .await
@@ -829,6 +830,8 @@ impl Command {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: row.id,
                 machine_id: row.machine_id,
                 kind: &row.kind,
@@ -971,6 +974,8 @@ impl Command {
             link::insert_command_with_authority(
                 conn,
                 &NewCommand {
+                    content_transit: false,
+                    native_target: None,
                     id,
                     machine_id: cleanup.machine,
                     kind: cleanup.kind.as_str(),
@@ -999,6 +1004,7 @@ impl Command {
             scope: &json!(input.command.scope),
             directory: input.command.directory.as_deref(),
             name: &input.command.name,
+            origin: super::command_origin(&input.command),
         }
         .spec(reply, self.origin.user(), Time::new(now));
         let row = McpRow {

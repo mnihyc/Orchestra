@@ -104,6 +104,7 @@ async fn provider_wire_choices_use_the_existing_thread_setting_revision_source_a
         .call(NodeSettingSet, &[&thread, &"agent.params"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!({"provider_options:openai-responses":{"mode":"b"},"another_choice":true}),
             expected_revision: Some(0),
             locked: None,
@@ -132,6 +133,7 @@ async fn provider_wire_choices_use_the_existing_thread_setting_revision_source_a
         .call(NodeSettingSet, &[&thread, &"agent.params"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!({"provider_options:openai-responses":{"mode":"a"}}),
             expected_revision: Some(0),
             locked: None,
@@ -157,6 +159,7 @@ async fn provider_wire_choices_use_the_existing_thread_setting_revision_source_a
         .call(NodeSettingSet, &[&thread, &"agent.params"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!({"another_choice":true}),
             expected_revision: Some(revision),
             locked: None,
