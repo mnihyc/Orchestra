@@ -4,6 +4,7 @@
 //! destination comes from placement, and never from the machine publishing a report.
 
 use orch_link_contract::commands::{Cmd, SessionOpen};
+use orch_link_contract::events::Event;
 use orch_types::{Id, Json, Time, new_id};
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -51,11 +52,11 @@ pub async fn prepare(
         "archive": null, "history": null, "upto_turn_ordinal": null,
         "workspace_root": root, "instruction_root_marker": false,
         "directory": directory, "cwd": directory, "mounts": [], "model": "fake-1", "effort": null,
-        "params": {}, "approval_mode": "auto", "sandbox_mode": "workspace", "instructions": "", "memory": null,
+        "params": {}, "approval_mode": "auto", "web_action_wait_secs": 120, "sandbox_mode": "workspace", "instructions": "", "memory": null,
         "arrangement": row.try_get::<String, _>("arrangement")?, "provider": {"path":"native", "provider_id":provider},
         "exec": {"executor":row.try_get::<Option<String>, _>("executor")?, "tool_set":row.try_get::<Option<String>, _>("tool_set")?,
             "environment_id":row.try_get::<Id, _>("environment_id")?, "generation":row.try_get::<i32, _>("env_generation")?, "ticket":null},
-        "mcp": [], "orch_tools": [], "raw_events": true, "raw_after": row.try_get::<i64, _>("raw_last_n")?
+        "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": true, "raw_after": row.try_get::<i64, _>("raw_last_n")?
     })).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
     let assigned = sqlx::query("UPDATE segments SET machine_id = $3 WHERE id = $2 AND thread_id = $1 AND machine_id IS NULL")
         .bind(thread).bind(segment).bind(machine).execute(pool).await?.rows_affected();
@@ -79,4 +80,71 @@ pub async fn opened(pool: &PgPool, segment: Id, result: &Json) -> Result<(), sql
             .bind(segment).bind(native).execute(pool).await?;
     }
     Ok(())
+}
+
+/// The original native attempt of this logical turn, retained on its admitted command.
+/// A later attempt must supply its own captured producer, never replace this original source.
+pub async fn first_turn_opening(
+    pool: &PgPool,
+    thread: Id,
+    segment: Id,
+    turn: Id,
+) -> Result<Option<Id>, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_,Option<Id>>(
+        "SELECT (tool_session#>>'{native_target,target,opening_id}')::uuid FROM commands
+          WHERE kind IN ('turn.start','turn.start.fenced')
+            AND COALESCE(body#>>'{turn,turn_id}',body->>'turn_id')=$3::uuid::text
+            AND tool_session#>>'{native_target,target,thread_id}'=$1::uuid::text
+            AND tool_session#>>'{native_target,target,segment_id}'=$2::uuid::text
+          ORDER BY (tool_session#>>'{native_target,target,opening_epoch}')::bigint NULLS FIRST,created_at,id LIMIT 1",
+    ).bind(thread).bind(segment).bind(turn).fetch_optional(pool).await?.flatten())
+}
+
+/// Resolve the original report's source from its own turn/item, without reading a current slot.
+pub async fn report_opening(
+    pool: &PgPool,
+    thread: Id,
+    segment: Id,
+    event: &Event,
+    batch: &[Event],
+) -> Result<Option<Id>, sqlx::Error> {
+    match event {
+        Event::SessionOpened(opened) => return Ok(Some(opened.opening_id)),
+        Event::SessionLost(lost) => return Ok(Some(lost.opening_id)),
+        _ => {}
+    }
+    let body = event
+        .body()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    let parse = |value: &Json| value.as_str().and_then(|value| value.parse::<Id>().ok());
+    let mut turn = body.get("turn_id").and_then(parse);
+    if turn.is_none()
+        && let Some(reference) = body.get("native_ref").and_then(Json::as_str)
+    {
+        turn = batch.iter().find_map(|event| match event {
+            Event::ItemStarted(started) if started.native_ref == reference => Some(started.turn_id),
+            _ => None,
+        });
+        if turn.is_none() {
+            turn = sqlx::query_scalar::<_, Option<Id>>(
+                "SELECT turn_id FROM items WHERE thread_id=$1 AND segment_id=$2 AND native_ref=$3",
+            )
+            .bind(thread)
+            .bind(segment)
+            .bind(reference)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+        }
+    }
+    if turn.is_none()
+        && let Some(reference) = body.get("request_ref").and_then(Json::as_str)
+    {
+        turn = sqlx::query_scalar::<_,Option<Id>>("SELECT a.turn_id FROM approvals a JOIN turns t ON t.id=a.turn_id WHERE a.thread_id=$1 AND t.segment_id=$2 AND a.native_ref=$3 ORDER BY a.created_at,a.id LIMIT 1")
+            .bind(thread).bind(segment).bind(reference).fetch_optional(pool).await?.flatten();
+    }
+    match turn {
+        Some(turn) => first_turn_opening(pool, thread, segment, turn).await,
+        None => Ok(None),
+    }
 }

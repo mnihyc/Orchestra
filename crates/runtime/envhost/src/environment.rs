@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use orch_agent_contract::discovery::{McpDefinition, McpServerSpec};
-use orch_api_contract::processes::{ProcessInfo, ResourceSample};
+use orch_api_contract::processes::ProcessInfo;
 use orch_api_contract::workspace::{DirEntry, DirEntryKind, FileStat};
 use orch_driver_contract::runtime::{Resources, ToolRef};
 use orch_executor_contract::context::EnvironmentContext;
@@ -68,12 +68,13 @@ use crate::paths::{Locate, RelPath, Workspace};
 use crate::platform::{self, Dir};
 use crate::processes::{Processes, ScopeKind};
 use crate::resources::Sampler;
-use crate::search::SearchRequest;
 use crate::snapshot::{NoProgress, Progress};
 use crate::terminal::{Attachment, OpenSpec, Purpose, TerminalLinks, Terminals, find_shell};
 use crate::watch::{Change, WatchConfig, WatchMode, Watcher};
 
 mod directory_watches;
+mod file_access;
+use file_access::{FileAct, FileWalk};
 mod git_watches;
 mod retirement;
 
@@ -96,9 +97,6 @@ pub const DEFAULT_MAX_BLOB_BYTES: i64 = 8 * 1024 * 1024 * 1024;
 /// (`[limits] preview_bytes`): two mebibytes.
 pub const DEFAULT_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Above this many entries a workspace is not indexed (`[envhost] index_max_entries`).
-pub const DEFAULT_INDEX_MAX_ENTRIES: u64 = 250_000;
-
 /// How often a tree is walked again where watching falls short (`[envhost] rescan_secs`).
 pub const DEFAULT_RESCAN: Duration = Duration::from_secs(60);
 
@@ -113,9 +111,6 @@ pub const DEFAULT_ARCHIVE_TIME: Duration = Duration::from_secs(20);
 
 /// How many bytes of what a shell printed are kept for whoever takes it up again.
 pub const DEFAULT_TERMINAL_KEEP_BYTES: usize = 256 * 1024;
-
-/// The most bytes of a difference of a repository that are returned.
-pub const DEFAULT_GIT_DIFF_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// How long a run of `git` may take before it is ended: a little under the command's own 30 s.
 pub const DEFAULT_GIT_TIME: Duration = Duration::from_secs(25);
@@ -133,10 +128,6 @@ pub struct Limits {
     pub max_blob_bytes: i64,
     /// The most bytes of a text or of an entry of an archive that are read to be shown.
     pub preview_bytes: u64,
-    /// Above this many entries a workspace is not indexed.
-    pub index_max_entries: u64,
-    /// The longest one whole-tree scan is allowed before the index gives up.
-    pub index_scan_max: Duration,
     /// How often a tree is walked again where watching falls short.
     pub rescan: Duration,
     /// How often a manifest is published while files keep changing.
@@ -147,8 +138,6 @@ pub struct Limits {
     pub archive_time: Duration,
     /// How many bytes of what a shell printed are kept.
     pub terminal_keep_bytes: usize,
-    /// The most bytes of a difference of a repository that are returned.
-    pub git_diff_max_bytes: usize,
     /// How long a run of `git` may take.
     pub git_time: Duration,
 }
@@ -158,14 +147,11 @@ impl Default for Limits {
         Self {
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             preview_bytes: DEFAULT_PREVIEW_BYTES,
-            index_max_entries: DEFAULT_INDEX_MAX_ENTRIES,
-            index_scan_max: crate::index::DEFAULT_SCAN_MAX,
             rescan: DEFAULT_RESCAN,
             manifest_interval: DEFAULT_MANIFEST_INTERVAL,
             search_time: DEFAULT_SEARCH_TIME,
             archive_time: DEFAULT_ARCHIVE_TIME,
             terminal_keep_bytes: DEFAULT_TERMINAL_KEEP_BYTES,
-            git_diff_max_bytes: DEFAULT_GIT_DIFF_MAX_BYTES,
             git_time: DEFAULT_GIT_TIME,
         }
     }
@@ -174,6 +160,8 @@ impl Default for Limits {
 /// What a machine's owner has switched on for work that comes from outside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gates {
+    /// The machine's current ceiling, independent of the caller's named reach.
+    pub files_reach: orch_link_contract::policy::FileReach,
     /// Whether files may be written, renamed, copied and removed from Orch.
     pub remote_write: bool,
     /// Whether files that arrive with a message may be written under `.orch/`.
@@ -189,6 +177,7 @@ pub struct Gates {
 impl Gates {
     /// Everything on: a unit that Orch made, where nobody else's machine is at stake.
     pub const OPEN: Self = Self {
+        files_reach: orch_link_contract::policy::FileReach::Machine,
         remote_write: true,
         deliver_files: true,
         terminal: true,
@@ -198,6 +187,7 @@ impl Gates {
 
     /// Everything off: a person's machine as it is installed.
     pub const CLOSED: Self = Self {
+        files_reach: orch_link_contract::policy::FileReach::Machine,
         remote_write: false,
         deliver_files: false,
         terminal: false,
@@ -280,6 +270,8 @@ pub enum Report {
     Terminals(orch_link_contract::commands::PtyStatusResult),
     /// A manifest of the tree was uploaded.
     Manifest(EnvManifest),
+    /// A manifest transfer started or was interrupted; its content is not yet published.
+    ManifestTransfer(EnvManifest),
     /// The processes of the environment, as they are now.
     Procs {
         /// When the list was taken.
@@ -288,7 +280,7 @@ pub enum Report {
         processes: Vec<ProcessInfo>,
     },
     /// What the environment uses.
-    Stats(ResourceSample),
+    Stats(orch_link_contract::events::EnvironmentSample),
     /// A current scoped port measurement, carried only as a live report.
     Ports(orch_link_contract::ports::PortsSnapshot),
     /// A shell ended while nobody was attached to it.
@@ -325,6 +317,7 @@ impl Report {
         matches!(
             self,
             Self::Manifest(_)
+                | Self::ManifestTransfer(_)
                 | Self::BrowserState(_)
                 | Self::DisplayState(_)
                 | Self::PtyExited(_)
@@ -395,6 +388,8 @@ pub struct ManagedPlaces {
 /// What a connector tells its environment host about itself and the machine.
 #[derive(Debug, Clone)]
 pub struct HostSettings {
+    /// The connector's live decision for this particular unverified native build.
+    pub platform_review: Option<u64>,
     /// The directory connector's independently proved native controllers.
     pub process_controls: orch_driver_contract::process_limits::ProcessControls,
     /// The connector's data directory, below which the host keeps what has to outlast a run.
@@ -442,6 +437,7 @@ impl HostSettings {
     #[must_use]
     pub fn connected(data_dir: PathBuf, roots: Vec<PathBuf>) -> Self {
         Self {
+            platform_review: None,
             process_controls: Default::default(),
             data_dir,
             limits: Limits::default(),
@@ -518,7 +514,7 @@ const PUBLISH_POLL: Duration = Duration::from_secs(1);
 const MANIFEST_DOWNLOAD_MAX_BYTES: usize = 512 * 1024 * 1024;
 
 /// What is remembered of an entry of a watched directory, to tell what changed.
-type Signature = (crate::platform::Kind, i64, i64, u32, Option<String>);
+type Signature = (DirEntryKind, i64, i64, u32, Option<String>);
 
 #[derive(Debug)]
 struct DirWatch {
@@ -533,14 +529,8 @@ struct DirWatch {
 }
 
 fn signature_of(entry: &DirEntry) -> Signature {
-    let kind = match entry.kind {
-        DirEntryKind::File => crate::platform::Kind::File,
-        DirEntryKind::Dir => crate::platform::Kind::Dir,
-        DirEntryKind::Symlink => crate::platform::Kind::Symlink,
-        DirEntryKind::Other => crate::platform::Kind::Other,
-    };
     (
-        kind,
+        entry.kind,
         entry.size,
         entry.mtime.unix_millis(),
         entry.mode,
@@ -571,6 +561,7 @@ pub struct DetachReservation {
 
 /// One attached environment.
 pub struct Environment {
+    platform_review: Option<u64>,
     id: Id,
     /// Reattach/rebase never reuses another attachment's directory metadata cursors.
     directory_attachment: Id,
@@ -583,6 +574,8 @@ pub struct Environment {
     /// only then.
     scanned: AtomicBool,
     mounts: Mounts,
+    data_directories: Vec<(u64, crate::platform::FileNumber)>,
+    _home_root: Option<Dir>,
     watcher: Mutex<Option<Watcher>>,
     /// Orders initial directory resets before subsequent native change batches.
     directory_reads: tokio::sync::Mutex<()>,
@@ -602,6 +595,7 @@ pub struct Environment {
     mcp_host: Arc<McpHost>,
     git: GitTool,
     file_states: Option<Arc<crate::file_states::FileStates>>,
+    workspace_limits: orch_link_contract::commands::WorkspaceLimits,
     facts: Mutex<EnvironmentFacts>,
     variables: BTreeMap<String, String>,
     browsers: Arc<crate::browsers::Browsers>,
@@ -612,6 +606,12 @@ pub struct Environment {
     reporters: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+/// How often a recording that waits for its baseline looks again.
+const FILE_STATES_POLL: Duration = Duration::from_millis(100);
+
+/// How often a pass over a whole tree looks at whether the line of its progress has moved a tenth.
+const INDEXING_LOOK: Duration = Duration::from_secs(2);
+
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Environment")
@@ -619,6 +619,19 @@ impl std::fmt::Debug for Environment {
             .field("root", &self.files.root().root_path())
             .finish_non_exhaustive()
     }
+}
+
+fn exclusion_problem(
+    rules: &IgnoreRules,
+    workspace: &Workspace,
+) -> Option<orch_link_contract::events::ExclusionProblem> {
+    rules
+        .root_problem(workspace)
+        .map(|problem| orch_link_contract::events::ExclusionProblem {
+            path: problem.path,
+            line: problem.line.map(|line| line as u64),
+            reason: problem.reason.to_owned(),
+        })
 }
 
 fn os() -> Os {
@@ -719,6 +732,12 @@ impl Environment {
         &self.mcp_host
     }
 
+    /// Resolved working allowances for this attachment.
+    #[must_use]
+    pub fn workspace_limits(&self) -> &orch_link_contract::commands::WorkspaceLimits {
+        &self.workspace_limits
+    }
+
     /// Its index.
     #[must_use]
     pub fn index(&self) -> &Arc<Index> {
@@ -743,12 +762,13 @@ impl Environment {
         lock(&self.facts).generation
     }
 
-    /// A turn's watcher cursor, unavailable on live trees or during the first scan.
+    /// A turn's scoped watcher cursor, after the first attachment scan has settled.
     #[must_use]
     pub fn file_changes_cursor(&self) -> Option<u64> {
-        let cursor = self.index.revision();
-        (self.scanned.load(Ordering::SeqCst) && self.index.changes_since(cursor).is_some())
-            .then_some(cursor)
+        self.scanned
+            .load(Ordering::SeqCst)
+            .then(|| self.index.begin_changes())
+            .flatten()
     }
 
     /// File paths observed since a turn's cursor, with no whole-tree walk or git command.
@@ -770,6 +790,7 @@ impl Environment {
             if !self.index.state().is_full() && !git_watched {
                 watcher.disable_recursive();
                 let root = self.files.root().root_path();
+                watcher.watch_dir(root);
                 for watch in lock(&self.watches).values() {
                     watcher.watch_dir(&watch.dir.under(root));
                 }
@@ -811,6 +832,10 @@ impl Environment {
             ),
         };
         EnvironmentContext {
+            reviewed_native_system: self.platform_review.is_some()
+                && settings
+                    .as_ref()
+                    .is_some_and(|s| s.platform_review == self.platform_review),
             process_launcher: self.processes.launcher(),
             environment_id: self.id,
             generation: facts.generation,
@@ -890,6 +915,16 @@ impl Environment {
         facts.index = self.index.state().mode();
         facts.index_reason = self.index.state().reason();
         facts.index_entry_limit = self.index.state().entry_limit();
+        facts.indexing = self
+            .file_states
+            .as_ref()
+            .and_then(|states| states.indexing())
+            .map(|(done, total)| orch_link_contract::events::IndexingProgress { done, total });
+        facts.recording = self
+            .file_states
+            .as_ref()
+            .and_then(|states| states.scope_recording(&RelPath::root()));
+        facts.exclusion_problem = exclusion_problem(&self.rules, self.files.root());
         facts.mounts = self.mounts.facts();
         facts.clone()
     }
@@ -914,6 +949,10 @@ impl Environment {
         let Ok(host) = self.inner() else { return };
         match change {
             Change::Paths(paths) => {
+                self.index.observe(paths);
+                if let Some(states) = &self.file_states {
+                    states.changed(paths);
+                }
                 let mut rules = false;
                 for path in paths
                     .iter()
@@ -927,6 +966,10 @@ impl Environment {
                     .invalidate(self.id, self.directory_attachment, paths, rules);
             }
             Change::Rescan | Change::Unavailable => {
+                self.index.lost_events();
+                if let Some(states) = &self.file_states {
+                    states.invalidate("not_ready");
+                }
                 self.rules.forget_all();
                 host.directory_pages
                     .invalidate(self.id, self.directory_attachment, &[], true);
@@ -937,17 +980,20 @@ impl Environment {
     /// Turns what the watch says into the state of the index, the ignore rules and the directories
     /// somebody has open.
     async fn changed(self: &Arc<Self>, change: Change) {
+        // Until the baselines are brought up to date for this batch, a recording waits for it.
+        let refreshing = self.file_states.as_ref().map(|states| states.begin_work());
         let directory_loss = matches!(&change, Change::Rescan | Change::Unavailable);
         let (paths, mut rescan) = match change {
             Change::Paths(paths) => (paths, false),
             Change::Rescan => {
+                self.scanned.store(false, Ordering::SeqCst);
                 self.index.lost_events();
                 self.invalidate_directory_views().await;
                 (Vec::new(), true)
             }
             Change::Unavailable => {
                 self.invalidate_directory_views().await;
-                self.git_watches.changed(self, &[], true).await;
+                self.git_watches.changed(self, &[], true);
                 if let Some(states) = &self.file_states {
                     states.invalidate("live_tree");
                 }
@@ -958,8 +1004,7 @@ impl Environment {
             }
         };
         // Git shares the native batch and only rereads repositories that batch touched.
-        self.git_watches.changed(self, &paths, rescan).await;
-        self.index.observe(&paths);
+        self.git_watches.changed(self, &paths, rescan);
         // A different list of what to leave out can change what any path is: the tree is walked again.
         for path in paths
             .iter()
@@ -968,6 +1013,7 @@ impl Environment {
             self.rules
                 .forget(&path.parent().unwrap_or_else(RelPath::root));
             rescan = true;
+            self.scanned.store(false, Ordering::SeqCst);
             self.index.lost_events();
         }
         // A tree that was never walked to the end has nothing to bring up to date.
@@ -982,9 +1028,6 @@ impl Environment {
             let environment = Arc::clone(self);
             let paths = paths.clone();
             blocking(move || {
-                if !environment.index.state().is_full() {
-                    return Ok(None);
-                }
                 let outcome = if rescan {
                     environment
                         .index
@@ -996,18 +1039,6 @@ impl Environment {
                         &paths,
                     )?
                 };
-                if let Some(states) = &environment.file_states {
-                    let complete = environment
-                        .index
-                        .changes_since(environment.index.revision())
-                        .is_some();
-                    states.refresh(
-                        &environment.files,
-                        &environment.index,
-                        if rescan { None } else { Some(paths.as_slice()) },
-                        complete,
-                    )?;
-                }
                 Ok(Some(outcome))
             })
         };
@@ -1024,43 +1055,148 @@ impl Environment {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "the index could not be brought up to date"),
         }
+        // The index has the paths now: the baselines take them in by themselves, in the background,
+        // one path at a time. This handler never waits for them, so the next batch is not held up by
+        // the size of the tree.
+        if let Some(states) = &self.file_states {
+            if !rescan {
+                states.queue(&paths);
+            }
+            self.kick_file_states();
+        }
+        drop(refreshing);
         if !directory_loss {
             self.notify_directories(&paths, rescan).await;
         }
     }
 
-    /// Prepares requested file-state baselines off the path that records or starts a turn.
-    fn seed_file_states(self: &Arc<Self>) {
-        let environment = Arc::clone(self);
-        let task = tokio::spawn(async move {
-            if let Err(error) = environment.prepare_file_states().await {
-                tracing::warn!(%error, environment=%environment.id, "recorded file coverage could not be prepared");
-            }
-        });
-        lock(&self.tasks).push(task);
+    /// Keeps a handle on a task of the environment, forgetting those that ended.
+    fn track(&self, task: tokio::task::JoinHandle<()>) {
+        let mut tasks = lock(&self.tasks);
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
     }
 
-    /// Completes preparation from the existing index, without a directory walk or Git process.
-    async fn prepare_file_states(self: &Arc<Self>) -> Result<()> {
+    /// Starts the one task that brings the baselines up to date, unless it is running. It takes what
+    /// the watch said, path by path, or a pass over everything when a scope owes one, until nothing
+    /// is owed; work that waits for its time is started again when the time comes.
+    fn kick_file_states(self: &Arc<Self>) {
         let Some(states) = self.file_states.clone() else {
-            return Ok(());
+            return;
         };
-        if !self.index.state().is_full() {
-            states.invalidate("live_tree");
-            return Ok(());
+        if !states.claim_worker() {
+            return;
         }
-        if !self.initial_scan_complete() {
-            return Ok(());
-        }
+        let working = states.begin_work();
         let environment = Arc::clone(self);
-        blocking(move || {
-            let complete = environment
-                .index
-                .changes_since(environment.index.revision())
-                .is_some();
-            states.refresh(&environment.files, &environment.index, None, complete)
-        })
-        .await
+        let task = tokio::spawn(async move {
+            let drained = environment.bring_file_states_up_to_date(&states).await;
+            states.release_worker();
+            // Blocked on something else (the first walk of the tree, lost notices): whatever ends that
+            // starts this worker again. Otherwise something may have come between the last look and
+            // the release; the next worker takes its place before this one's mark of work in flight
+            // is dropped, so that a recording that waits never sees a gap between them.
+            if drained && states.has_work() {
+                environment.kick_file_states();
+            } else if drained
+                && let Some(wait) = states.next_due()
+                && states.arm_timer()
+            {
+                let later = Arc::clone(&environment);
+                let waiting = Arc::clone(&states);
+                let timer = tokio::spawn(async move {
+                    tokio::time::sleep(wait.max(FILE_STATES_POLL)).await;
+                    waiting.disarm_timer();
+                    later.kick_file_states();
+                });
+                environment.track(timer);
+            }
+            drop(working);
+        });
+        self.track(task);
+    }
+
+    /// Does what is owed to the baselines, piece by piece. True when nothing is owed any more; false
+    /// when it stopped because it cannot go on until something else has happened.
+    async fn bring_file_states_up_to_date(
+        self: &Arc<Self>,
+        states: &Arc<crate::file_states::FileStates>,
+    ) -> bool {
+        loop {
+            if !self.index.state().is_full() {
+                states.invalidate("live_tree");
+                return false;
+            }
+            // The first walk of a large tree makes the baselines by itself when it ends.
+            if !self.initial_scan_complete() {
+                return false;
+            }
+            let work = states.take_work();
+            if matches!(work, crate::file_states::Work::Nothing) {
+                return true;
+            }
+            let environment = Arc::clone(self);
+            let kept = Arc::clone(states);
+            let pass = blocking(move || {
+                let index = &environment.index;
+                let complete = index.fully_observed();
+                if !complete {
+                    // Lost notices: the index walks the tree again, and the batch that ends that walk
+                    // starts this worker again.
+                    kept.invalidate("not_ready");
+                    return Ok(false);
+                }
+                match work {
+                    crate::file_states::Work::RecordMetadata => {
+                        kept.prepare_recordings(
+                            &environment.files,
+                            environment.facts().generation,
+                            environment.inner()?.clock.time(),
+                        )?;
+                    }
+                    crate::file_states::Work::Paths(paths) => {
+                        kept.refresh(&environment.files, index, Some(paths.as_slice()), true)?;
+                    }
+                    _ => kept.reconcile(&environment.files, index, true)?,
+                }
+                Ok(true)
+            });
+            tokio::pin!(pass);
+            // A pass over a whole tree says how far it has come, a tenth at a time: one line on the
+            // environment, and a handful of reports however large the tree.
+            let mut shown: Option<u64> = None;
+            let outcome = loop {
+                tokio::select! {
+                    done = &mut pass => break done,
+                    () = tokio::time::sleep(INDEXING_LOOK) => {
+                        let step = states.indexing().map(|(done, total)| done.saturating_mul(10) / total);
+                        if step != shown {
+                            shown = step;
+                            self.announce_facts().await;
+                        }
+                    }
+                }
+            };
+            self.announce_facts().await;
+            states.calm();
+            match outcome {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(error) => {
+                    tracing::warn!(%error, environment=%self.id, "recorded file coverage could not be brought up to date");
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Asks for a pass over everything, off the path that records or starts a turn: the baselines are
+    /// looked at again by the background worker, which reads only what differs from what it kept.
+    fn seed_file_states(self: &Arc<Self>) {
+        if let Some(states) = &self.file_states {
+            states.want_everything();
+            self.kick_file_states();
+        }
     }
 
     /// A lost native baseline is an explicit invalidation, without rescanning it or inventing rows.
@@ -1086,6 +1222,7 @@ impl Environment {
                 .say(
                     self.id,
                     Report::FsChanged(FsChanged {
+                        facts: None,
                         watch_id,
                         watch_instance,
                         page: None,
@@ -1189,6 +1326,7 @@ impl Environment {
                 .say(
                     self.id,
                     Report::FsChanged(FsChanged {
+                        facts: None,
                         watch_id,
                         watch_instance: wire_instance,
                         page: None,
@@ -1214,10 +1352,13 @@ impl Environment {
         let host = self.inner()?;
         // Changes that arrive while the list is made leave the tree marked as changed.
         self.index.take_dirty();
+        let began = std::time::Instant::now();
         match self.upload_manifest(&host, sink).await {
             Ok(report) => {
-                self.publisher.published();
-                host.reports.say(self.id, Report::Manifest(report)).await;
+                self.publisher.published_taking(began.elapsed());
+                host.reports
+                    .say(self.id, Report::Manifest(report.clone()))
+                    .await;
                 Ok(Some(report))
             }
             Err(error) => {
@@ -1232,14 +1373,36 @@ impl Environment {
         let files = self.files.clone();
         let index = Arc::clone(&self.index);
         let now = host.clock.now();
-        let built = blocking(move || {
+        let (built, source_facts) = blocking(move || {
+            let facts = files.source_facts(&RelPath::root(), Time::new(now))?;
             let entries = manifest::entries_of_index(&index, files.hashes(), files.root());
             let header = manifest::header_for(files.root(), &RelPath::root(), generation, now);
-            manifest::build(&header, entries)
+            Ok((manifest::build(&header, entries)?, facts))
         })
         .await?;
-        put_bytes(sink, built.hash, built.bytes).await?;
+        let mut report = EnvManifest {
+            transfer_state: Some(orch_api_contract::workspace::FileTransferState::Transferring),
+            source_facts: None,
+            generation: Some(generation),
+            manifest_blob: built.hash,
+            file_count: built.file_count,
+            total_bytes: built.total_bytes,
+        };
+        host.reports
+            .say(self.id, Report::ManifestTransfer(report.clone()))
+            .await;
+        if let Err(error) = put_bytes(sink, built.hash, built.bytes).await {
+            report.transfer_state =
+                Some(orch_api_contract::workspace::FileTransferState::Interrupted);
+            host.reports
+                .say(self.id, Report::ManifestTransfer(report))
+                .await;
+            return Err(error);
+        }
         Ok(EnvManifest {
+            transfer_state: None,
+            source_facts: Some(source_facts),
+            generation: Some(generation),
             manifest_blob: built.hash,
             file_count: built.file_count,
             total_bytes: built.total_bytes,
@@ -1318,17 +1481,21 @@ async fn put_bytes(sink: &dyn BlobSink, hash: Hash, bytes: Vec<u8>) -> Result<()
 // The host
 
 struct HostInner {
+    // Serialize review withdrawal with an attachment admitted by that review.
+    review_transition: tokio::sync::RwLock<()>,
     #[cfg(all(test, target_os = "linux"))]
     before_record_pin: Mutex<Option<Arc<recording_admission_tests::ReadGate>>>,
     settings: RwLock<HostSettings>,
     clock: Arc<dyn Clock>,
     reports: Reports,
     directory_pages: Arc<crate::directory_pages::DirectoryPages>,
+    relay_roots: Arc<crate::relay_roots::Roots>,
     blobs: Arc<dyn BlobSink>,
     gates: Arc<GateState>,
     executors: Vec<ExecutorFactory>,
     envs: Mutex<HashMap<Id, Arc<Environment>>>,
     retiring: Mutex<HashMap<Id, Arc<retirement::Finalizer>>>,
+    storage_locks: Arc<crate::storage_locks::StorageLocks>,
 }
 
 impl HostInner {
@@ -1372,25 +1539,46 @@ impl EnvHost {
             settings.data_dir.join(".orch-tmp-directory-pages"),
             Arc::clone(&clock),
         ));
+        let relay_roots = crate::relay_roots::Roots::new(
+            &settings.data_dir,
+            Arc::clone(&clock),
+            settings.limits.clone(),
+        );
         Self {
             inner: Arc::new(HostInner {
+                review_transition: tokio::sync::RwLock::new(()),
                 #[cfg(all(test, target_os = "linux"))]
                 before_record_pin: Mutex::new(None),
                 settings: RwLock::new(settings),
                 clock,
                 reports,
                 directory_pages,
+                relay_roots,
                 blobs,
                 gates,
                 executors,
                 envs: Mutex::new(HashMap::new()),
                 retiring: Mutex::new(HashMap::new()),
+                storage_locks: Arc::default(),
             }),
         }
     }
 
     /// The environment attached under `id`.
     pub fn environment(&self, id: Id) -> Result<Arc<Environment>> {
+        if !crate::RUNTIME_VERIFIED
+            && self
+                .inner
+                .settings
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .platform_review
+                .is_none()
+        {
+            return Err(HostError::Unsupported(
+                "the machine's native system requires confirmation".into(),
+            ));
+        }
         lock(&self.inner.envs)
             .get(&id)
             .cloned()
@@ -1401,6 +1589,66 @@ impl EnvHost {
     #[must_use]
     pub fn environments(&self) -> Vec<Arc<Environment>> {
         lock(&self.inner.envs).values().cloned().collect()
+    }
+
+    /// Mounted data remains occupied through the original attachment's actual native cleanup.
+    #[must_use]
+    pub fn mount_directory_in_use(&self, device: u64, inode: crate::platform::FileNumber) -> bool {
+        let environments = lock(&self.inner.envs);
+        let retiring = lock(&self.inner.retiring);
+        let identity = (device, inode);
+        environments
+            .values()
+            .any(|environment| environment.data_directories.contains(&identity))
+            || retiring
+                .values()
+                .any(|pending| pending.mount_directories.contains(&identity))
+    }
+
+    /// The same native storage fences used before an attachment publishes its opened roots.
+    #[must_use]
+    pub fn storage_locks(&self) -> Arc<crate::storage_locks::StorageLocks> {
+        Arc::clone(&self.inner.storage_locks)
+    }
+
+    /// Reconcile the current decision after taking the transition lock, including local file changes.
+    pub async fn review_system(&self, current: impl FnOnce() -> Option<u64> + Send) -> Result<()> {
+        if crate::RUNTIME_VERIFIED {
+            return Ok(());
+        }
+        let _transition = self.inner.review_transition.write().await;
+        let reviewed = current();
+        {
+            let mut settings = self
+                .inner
+                .settings
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if reviewed.is_some() && settings.platform_review == reviewed {
+                return Ok(());
+            }
+            settings.platform_review = None;
+        }
+        let mut failure = None;
+        for env in self.environments() {
+            if let Err(error) = self
+                .env_detach(&EnvDetach {
+                    environment_id: env.id(),
+                })
+                .await
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        self.inner
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .platform_review = reviewed;
+        Ok(())
     }
 
     /// Replaces what the machine's owner has switched on, as `machine.policy.set` does.
@@ -1425,6 +1673,18 @@ impl EnvHost {
         }
         for environment in self.environments() {
             environment.mcp.set_gates(mcp);
+            if gates.files_reach != orch_link_contract::policy::FileReach::Machine {
+                let environment = Arc::clone(&environment);
+                tokio::spawn(async move {
+                    let shells = environment.terminals.list();
+                    for shell in shells
+                        .into_iter()
+                        .filter(|shell| shell.purpose == Purpose::Shell && !shell.exited)
+                    {
+                        let _ = environment.terminals.close(shell.id).await;
+                    }
+                });
+            }
             let browsers = Arc::clone(&environment.browsers);
             let displays = Arc::clone(&environment.displays);
             tokio::spawn(async move {
@@ -1495,6 +1755,11 @@ impl EnvHost {
         body: &EnvAttach,
         secrets: &BTreeMap<String, String>,
     ) -> Result<EnvironmentFacts> {
+        let _review = if crate::RUNTIME_VERIFIED {
+            None
+        } else {
+            Some(self.inner.review_transition.read().await)
+        };
         retirement::require_room(&lock(&self.inner.retiring), body.environment_id)?;
         let settings = self.inner.settings();
         let previous = lock(&self.inner.envs).get(&body.environment_id).cloned();
@@ -1502,6 +1767,7 @@ impl EnvHost {
             environment,
             first_scan,
             lost_shells,
+            data_holds: _data_holds,
         } = attach(&self.inner, &settings, body, secrets, previous.as_ref()).await?;
         let (cleanup, start) = {
             let mut environments = lock(&self.inner.envs);
@@ -1529,6 +1795,9 @@ impl EnvHost {
                 (None, None)
             }
         };
+        self.inner
+            .directory_pages
+            .configure(body.environment_id, &body.workspace);
         start_background(&environment, &settings, first_scan);
         if let Some(start) = start {
             let _ = start.send(());
@@ -1697,6 +1966,11 @@ impl EnvHost {
     /// `fs.list`: lists a directory, and watches it when the command asks.
     pub async fn fs_list(&self, body: &FsList) -> Result<FsListResult> {
         let environment = self.environment(body.environment_id)?;
+        if body.prefix.is_some() && body.watch_id.is_some() {
+            return Err(HostError::Unsupported(
+                "a completion page is read on request rather than watched".to_owned(),
+            ));
+        }
         if body.watch_id.is_some() && body.mount.is_some() {
             return Err(HostError::Unsupported(
                 "a mount is listed when it is asked for and not watched".to_owned(),
@@ -1712,8 +1986,25 @@ impl EnvHost {
                 "a watch starts with a fresh snapshot, not an old continuation".to_owned(),
             ));
         }
-        let files = environment.files_of(body.mount.as_deref())?.clone();
-        let path = files.parse(&body.path)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                body.mount.as_deref(),
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        let native_watch = body.mount.is_none()
+            && !Path::new(&body.path).is_absolute()
+            && target.files.root().root_path() == environment.files.root().root_path();
+        if body.watch_id.is_some() && !native_watch {
+            return Err(HostError::Unsupported(
+                "this native path is listed on request rather than watched".to_owned(),
+            ));
+        }
+        let files = target.files.clone();
+        let path = target.path.clone();
         let requested = body.page.as_ref();
         if requested
             .and_then(|page| page.generation)
@@ -1771,12 +2062,10 @@ impl EnvHost {
             None
         };
         let coverage = operation.admit(|| {
-            if body.mount.is_none()
-                && let Some(location) = location
-            {
+            if native_watch && let Some(location) = location {
                 match directory_watches::Capture::begin(Arc::clone(&environment), location) {
                     Ok(owner) => Ok(Some(owner as crate::directory_pages::Coverage)),
-                    // A plain immutable observation does not pretend native live activation succeeded.
+                    // Plain reads keep bounded observations when native coverage cannot be installed.
                     Err(HostError::Unsupported(_) | HostError::Busy(_))
                         if body.watch_id.is_none() =>
                     {
@@ -1788,34 +2077,49 @@ impl EnvHost {
                 Ok(None)
             }
         })?;
+        let observe_only = body.watch_id.is_none() && coverage.is_none();
         operation.cover(coverage);
         #[cfg(all(test, target_os = "linux"))]
         if registration.is_some() {
             directory_watch_tests::before_snapshot().await;
         }
-        let binding = crate::directory_pages::Binding {
-            environment: environment.id,
-            attachment: environment.directory_attachment,
-            generation: Some(environment.generation()),
-            mount: body.mount.clone(),
-            path: path.as_str().to_owned(),
-        };
+        let mut binding = target.binding(&environment, body.access, body.mount.clone());
+        binding.path = serde_json::json!([binding.path, body.prefix]).to_string();
         let cursor = requested.and_then(|page| page.cursor.as_deref());
-        let limit = requested
-            .and_then(|page| page.limit)
-            .unwrap_or(orch_link_contract::commands::FS_LIST_MAX_ENTRIES);
-        let page = self
-            .inner
-            .directory_pages
-            .read_in(
-                &operation,
-                binding,
-                files.clone(),
-                path.clone(),
-                cursor,
-                limit,
-            )
-            .await?;
+        let limit = requested.and_then(|page| page.limit).unwrap_or(
+            u32::try_from(environment.workspace_limits.directory_entries).unwrap_or(u32::MAX),
+        );
+        let mut page = if let Some(prefix) = &body.prefix {
+            self.inner
+                .directory_pages
+                .read_prefixed_in(
+                    &operation,
+                    binding,
+                    files.clone(),
+                    path.clone(),
+                    cursor,
+                    limit,
+                    prefix,
+                )
+                .await?
+        } else if observe_only && cursor.is_none() {
+            self.inner
+                .directory_pages
+                .observe_first_in(&operation, binding, files.clone(), path.clone(), limit)
+                .await?
+        } else {
+            self.inner
+                .directory_pages
+                .read_in(
+                    &operation,
+                    binding,
+                    files.clone(),
+                    path.clone(),
+                    cursor,
+                    limit,
+                )
+                .await?
+        };
         let current = self.environment(body.environment_id)?;
         if !Arc::ptr_eq(&current, &environment) {
             return Err(HostError::Changed(
@@ -1834,8 +2138,30 @@ impl EnvHost {
                 ));
             }
         }
+        #[cfg(all(test, target_os = "linux"))]
+        if observe_only && cursor.is_none() {
+            directory_watch_tests::before_snapshot().await;
+        }
         page.validate()?;
+        if native_watch {
+            environment.index.remember_page(&page.entries);
+        }
+        let mut facts = {
+            let (files, path) = (files.clone(), path.clone());
+            let observed_at = self.inner.clock.time();
+            operation
+                .blocking(move || files.source_facts(&path, observed_at))
+                .await?
+        };
+        if native_watch {
+            facts.watch = lock(&environment.watcher)
+                .as_ref()
+                .map(|watcher| watcher.facts(page.revision.to_string()));
+        }
         let observation = page.proof();
+        for entry in &mut page.entries {
+            entry.path = target.shown_path(&entry.path);
+        }
         let listing = crate::files::Listing {
             truncated: page.next_cursor.is_some(),
             entries: page.entries,
@@ -1864,6 +2190,7 @@ impl EnvHost {
                 .say(
                     environment.id,
                     Report::FsChanged(FsChanged {
+                        facts: Some(facts.clone()),
                         watch_id: registration.id(),
                         watch_instance: body.watch_instance,
                         page: Some(metadata.clone()),
@@ -1886,6 +2213,7 @@ impl EnvHost {
         observation.validate()?;
         operation.check()?;
         Ok(FsListResult {
+            facts: Some(facts),
             entries,
             truncated: listing.truncated,
             watch_instance: body.watch_instance,
@@ -1910,27 +2238,199 @@ impl EnvHost {
     /// `fs.stat`: describes one file or directory.
     pub async fn fs_stat(&self, body: &FsStat) -> Result<FileStat> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files_of(body.mount.as_deref())?.clone();
-        let path = files.parse(&body.path)?;
-        blocking(move || files.stat(&path)).await
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                body.mount.as_deref(),
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        let observed_at = self.inner.clock.time();
+        blocking(move || {
+            let mut stat = target.stat()?;
+            stat.facts = target.files.source_facts(&target.path, observed_at).ok();
+            Ok(stat)
+        })
+        .await
     }
 
-    /// `fs.fetch`: puts a file's content into the store unless the store holds it already.
+    /// `fs.fetch`: puts the currently admitted file version into the store.
     pub async fn fs_fetch(&self, body: &FsFetch, sink: &dyn BlobSink) -> Result<FsFetchResult> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files_of(body.mount.as_deref())?;
-        let path = files.parse(&body.path)?;
-        files.fetch(&path, body.expect, body.max_bytes, sink).await
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                body.mount.as_deref(),
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        target
+            .files
+            .fetch(&target.path, body.expect, body.max_bytes, sink)
+            .await
     }
 
-    /// `fs.write`: writes a file from stored content, if it is still the version the writer saw.
-    pub async fn fs_write(&self, body: &FsWrite, source: &dyn BlobSource) -> Result<FileStat> {
+    /// Runs native upload expiry maintenance, inspecting only each environment's own upload metadata.
+    pub async fn prune_file_relays(&self) {
+        if let Err(error) = self.inner.relay_roots.prune().await {
+            tracing::warn!(%error,"known native upload roots await cleanup");
+        }
+    }
+
+    /// Describes a transit file without moving any of its content to server storage.
+    pub async fn fs_relay_describe(
+        &self,
+        body: &orch_link_contract::commands::FsRelayDescribe,
+    ) -> Result<FsFetchResult> {
         let environment = self.environment(body.environment_id)?;
-        let path = environment.files.parse(&body.path)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                body.mount.as_deref(),
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        target.files.relay_describe(&target.path).await
+    }
+
+    /// Sends the opened content version directly to the browser's ranged response.
+    pub async fn fs_relay_send(
+        &self,
+        body: &orch_link_contract::commands::FsRelaySend,
+        sink: &dyn crate::blobs::RelaySink,
+    ) -> Result<()> {
+        let environment = self.environment(body.environment_id)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                body.mount.as_deref(),
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        target
+            .files
+            .relay_send(
+                &orch_link_contract::commands::FsRelaySend {
+                    path: target.path.to_string(),
+                    ..body.clone()
+                },
+                sink,
+            )
+            .await
+    }
+
+    /// Receives a browser upload into the destination's own resumable temporary file.
+    pub async fn fs_relay_receive(
+        &self,
+        body: &orch_link_contract::commands::FsRelayReceive,
+        source: &dyn crate::blobs::RelaySource,
+    ) -> Result<orch_link_contract::commands::FsRelayProgress> {
+        let environment = self.environment(body.environment_id)?;
+        self.inner.relay_roots.remember(&environment.files).await?;
         environment
             .files
-            .write(&path, body.blob, body.mode, body.expected_hash, source)
+            .relay_receive(body, source, Arc::clone(&self.inner.clock))
             .await
+    }
+
+    /// Verifies the complete private upload without extending a browser piece request.
+    pub async fn fs_relay_verify(
+        &self,
+        body: &orch_link_contract::commands::FsRelayVerify,
+    ) -> Result<orch_link_contract::commands::FsRelayVerified> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_verify(
+                body.session_id,
+                &body.receive_path,
+                Arc::clone(&self.inner.clock),
+                body.retention_secs,
+            )
+            .await
+    }
+
+    /// Prepares a received file beside its chosen destination while other environment work continues.
+    pub async fn fs_relay_prepare(
+        &self,
+        body: &orch_link_contract::commands::FsRelayPrepare,
+    ) -> Result<()> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_prepare(
+                body.session_id,
+                &body.receive_path,
+                &body.path,
+                Arc::clone(&self.inner.clock),
+                body.work.as_ref(),
+            )
+            .await
+    }
+
+    /// Publishes only a complete upload and keeps its temporary file when the destination changed.
+    pub async fn fs_relay_commit(
+        &self,
+        body: &orch_link_contract::commands::FsRelayCommit,
+    ) -> Result<FileStat> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_commit(body, Arc::clone(&self.inner.clock))
+            .await
+    }
+
+    /// Cancels the native temporary files of one upload without changing a committed destination.
+    pub async fn fs_relay_abort(
+        &self,
+        body: &orch_link_contract::commands::FsRelayAbort,
+    ) -> Result<()> {
+        if let Some(files) = self.inner.relay_roots.find(body.session_id).await? {
+            return files.relay_abort(body.session_id, &body.receive_path).await;
+        }
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_abort(body.session_id, &body.receive_path)
+            .await
+    }
+
+    /// `fs.write`: checks the mutation target independently of read reach.
+    pub async fn fs_write(&self, body: &FsWrite, source: &dyn BlobSource) -> Result<FileStat> {
+        let environment = self.environment(body.environment_id)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::Manage,
+                None,
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        let mut stat = target
+            .files
+            .write(
+                &target.path,
+                body.blob,
+                body.mode,
+                body.expected_hash,
+                source,
+            )
+            .await?;
+        stat.facts = target
+            .files
+            .source_facts(&target.path, self.inner.clock.time())
+            .ok();
+        stat.entry.path = target.shown;
+        Ok(stat)
     }
 
     /// Makes ready the directory of a thread, as the connector does when a thread starts or its
@@ -1952,38 +2452,101 @@ impl EnvHost {
     /// `fs.mkdir`: makes a directory.
     pub async fn fs_mkdir(&self, body: &FsMkdir) -> Result<FileStat> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let path = files.parse(&body.path)?;
-        if path.as_str() == orch_agent_contract::session::INSTRUCTION_ROOT_MARKER {
-            return blocking(move || crate::instruction_root::prepare(files.root(), files.gates()))
-                .await;
-        }
-        blocking(move || files.make_dir(&path)).await
+        let target = environment
+            .target(
+                body.access,
+                FileAct::Manage,
+                None,
+                &body.path,
+                FileWalk::Entry,
+            )
+            .await?;
+        blocking(move || {
+            if target.path.as_str() == orch_agent_contract::session::INSTRUCTION_ROOT_MARKER {
+                return crate::instruction_root::prepare(target.files.root(), target.files.gates());
+            }
+            let mut stat = target.files.make_dir(&target.path)?;
+            stat.entry.path = target.shown;
+            Ok(stat)
+        })
+        .await
     }
 
-    /// `fs.rename`: renames or moves a file or a directory.
-    pub async fn fs_rename(&self, body: &FsRename) -> Result<FileStat> {
+    /// `fs.rename`: both mutated endpoints require their current write reach.
+    pub async fn fs_rename(
+        &self,
+        body: &FsRename,
+    ) -> Result<orch_api_contract::workspace::FileRenameResult> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let (from, to) = (files.parse(&body.from)?, files.parse(&body.to)?);
-        blocking(move || files.rename(&from, &to)).await
+        let from = environment
+            .target(
+                body.access,
+                FileAct::Manage,
+                None,
+                &body.from,
+                FileWalk::Entry,
+            )
+            .await?;
+        let to = environment
+            .target(
+                body.access,
+                FileAct::Manage,
+                None,
+                &body.to,
+                FileWalk::Entry,
+            )
+            .await?;
+        blocking(move || {
+            let mut result = from.files.rename_into(&from.path, &to.files, &to.path)?;
+            result.stat.entry.path = to.shown;
+            Ok(result)
+        })
+        .await
     }
 
-    /// `fs.remove`: removes a file or a directory.
+    /// `fs.remove`: removes a link entry without following its target.
     pub async fn fs_remove(&self, body: &FsRemove) -> Result<()> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let path = files.parse(&body.path)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::Manage,
+                None,
+                &body.path,
+                FileWalk::Entry,
+            )
+            .await?;
         let recursive = body.recursive;
-        blocking(move || files.remove(&path, recursive)).await
+        blocking(move || target.files.remove(&target.path, recursive)).await
     }
 
-    /// `fs.copy`: copies a file, or a directory with what is in it.
+    /// `fs.copy`: read reach on the source never widens mutation reach on the destination.
     pub async fn fs_copy(&self, body: &FsCopy) -> Result<FileStat> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let (from, to) = (files.parse(&body.from)?, files.parse(&body.to)?);
-        blocking(move || files.copy(&from, &to)).await
+        let from = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                &body.from,
+                FileWalk::Entry,
+            )
+            .await?;
+        let to = environment
+            .target(
+                body.access,
+                FileAct::Manage,
+                None,
+                &body.to,
+                FileWalk::Entry,
+            )
+            .await?;
+        blocking(move || {
+            let mut stat = from.files.copy_into(&from.path, &to.files, &to.path)?;
+            stat.entry.path = to.shown;
+            Ok(stat)
+        })
+        .await
     }
 
     /// `fs.archive.list`: lists what an archive holds, without unpacking it.
@@ -1992,13 +2555,22 @@ impl EnvHost {
         body: &FsArchiveList,
     ) -> Result<orch_api_contract::workspace::ArchiveListing> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let path = files.parse(&body.path)?;
-        let inside = body.inside.clone();
-        let limit = usize::try_from(body.limit)
-            .unwrap_or(usize::MAX)
-            .min(orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_MAX as usize);
-        blocking(move || files.archive_list(&path, inside.as_deref(), limit)).await
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        let binding = target.binding(&environment, body.access, None);
+        let mut request = body.clone();
+        request.path = target.path.to_string();
+        self.inner
+            .directory_pages
+            .archive(binding, target.files, request)
+            .await
     }
 
     /// `fs.archive.read`: uploads one entry of an archive for a viewer.
@@ -2008,10 +2580,17 @@ impl EnvHost {
         sink: &dyn BlobSink,
     ) -> Result<FsArchiveReadResult> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let path = files.parse(&body.path)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
         let entry = body.entry.clone();
-        let bytes = blocking(move || files.archive_read(&path, &entry)).await?;
+        let bytes = blocking(move || target.files.archive_read(&target.path, &entry)).await?;
         let hash = Hash::of(&bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         put_bytes(sink, hash, bytes).await?;
@@ -2020,25 +2599,70 @@ impl EnvHost {
         })
     }
 
+    /// Decodes a bounded archive entry and carries it only through its command's memory relay.
+    pub async fn fs_relay_archive_read(
+        &self,
+        body: &orch_link_contract::commands::FsRelayArchiveRead,
+        sink: &dyn crate::blobs::RelaySink,
+    ) -> Result<FsArchiveReadResult> {
+        let environment = self.environment(body.environment_id)?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        let files = target.files;
+        let path = target.path;
+        let entry = body.entry.clone();
+        let limit = u64::try_from(body.max_bytes)
+            .map_err(|_| HostError::Unsupported("a preview bound cannot be negative".into()))?;
+        let bytes = blocking(move || files.archive_read_bounded(&path, &entry, limit)).await?;
+        let hash = Hash::of(&bytes);
+        let size = i64::try_from(bytes.len())
+            .map_err(|_| HostError::Unsupported("the entry size cannot be represented".into()))?;
+        sink.send(size, &mut MemoryReader::new(bytes))
+            .await
+            .map_err(|error| HostError::Content(error.to_string()))?;
+        Ok(FsArchiveReadResult {
+            blob: BlobRef { hash, size },
+        })
+    }
+
     /// `fs.search`: searches the text of the files under a directory.
     pub async fn fs_search(&self, body: &FsSearch) -> Result<FsSearchResult> {
         let environment = self.environment(body.environment_id)?;
-        let files = environment.files.clone();
-        let path = files.parse(&body.path)?;
-        let request = SearchRequest {
-            query: body.query.clone(),
-            regex: body.regex,
-            case_sensitive: body.case,
-            glob: body.glob.clone(),
-            limit: usize::try_from(body.limit).unwrap_or(usize::MAX),
-        };
-        let found = blocking(move || files.search(&path, &request)).await?;
-        let matches = found.matches.iter().map(wire).collect::<Result<Vec<_>>>()?;
-        Ok(FsSearchResult {
-            matches,
-            truncated: found.truncated,
-            searched: found.searched,
-        })
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                &body.path,
+                FileWalk::Through,
+            )
+            .await?;
+        let binding = target.binding(&environment, body.access, None);
+        let mut request = body.clone();
+        request.path = target.path.to_string();
+        let index = (target.files.root().root_path() == environment.files.root().root_path())
+            .then(|| Arc::clone(&environment.index));
+        let mut result = self
+            .inner
+            .directory_pages
+            .search(binding, target.files.clone(), request, index)
+            .await?;
+        if let Some(names) = &mut result.names {
+            for entry in names {
+                entry.path = target.shown_path(&entry.path);
+            }
+        }
+        for hit in &mut result.matches {
+            hit.path = target.shown_path(&hit.path);
+        }
+        Ok(result)
     }
 
     /// Refuses a request for the whole of a tree that is not indexed: such a tree is listed, and
@@ -2063,6 +2687,7 @@ impl EnvHost {
         sink: &dyn BlobSink,
     ) -> Result<FsManifestResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         Self::require_selection(&environment, &body.selection)?;
         let files = environment.files.clone();
         let selection = body.selection.clone();
@@ -2074,13 +2699,14 @@ impl EnvHost {
             environment.index.take_dirty();
         }
         let built = blocking(move || {
+            let facts = files.source_facts(&RelPath::root(), Time::new(now))?;
             let resolved = manifest::resolve(files.root(), &selection)?;
             let entries = manifest::collect(&files, &resolved)?;
             let header = manifest::header_for(files.root(), &resolved.root, generation, now);
-            manifest::build(&header, entries)
+            Ok((manifest::build(&header, entries)?, facts))
         })
         .await;
-        let built = match built {
+        let (built, source_facts) = match built {
             Ok(built) => built,
             Err(error) => {
                 if whole {
@@ -2090,15 +2716,52 @@ impl EnvHost {
             }
         };
         let (hash, file_count, total_bytes) = (built.hash, built.file_count, built.total_bytes);
+        if whole {
+            self.inner
+                .reports
+                .say(
+                    environment.id,
+                    Report::ManifestTransfer(EnvManifest {
+                        transfer_state: Some(
+                            orch_api_contract::workspace::FileTransferState::Transferring,
+                        ),
+                        source_facts: None,
+                        generation: Some(generation),
+                        manifest_blob: hash,
+                        file_count,
+                        total_bytes,
+                    }),
+                )
+                .await;
+        }
         if let Err(error) = put_bytes(sink, hash, built.bytes).await {
             if whole {
                 environment.index.mark_dirty();
+                self.inner
+                    .reports
+                    .say(
+                        environment.id,
+                        Report::ManifestTransfer(EnvManifest {
+                            transfer_state: Some(
+                                orch_api_contract::workspace::FileTransferState::Interrupted,
+                            ),
+                            source_facts: None,
+                            generation: Some(generation),
+                            manifest_blob: hash,
+                            file_count,
+                            total_bytes,
+                        }),
+                    )
+                    .await;
             }
             return Err(error);
         }
         if whole {
             environment.publisher.published();
             let report = EnvManifest {
+                transfer_state: None,
+                source_facts: Some(source_facts),
+                generation: Some(generation),
                 manifest_blob: hash,
                 file_count,
                 total_bytes,
@@ -2121,6 +2784,7 @@ impl EnvHost {
         body: &orch_link_contract::commands::FsMeasure,
     ) -> Result<orch_link_contract::commands::FsMeasureResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         // Invalid patterns are still errors; a whole live tree gets a reviewable refusal.
         manifest::resolve(environment.files.root(), &body.selection)?;
         if Self::require_selection(&environment, &body.selection).is_err() {
@@ -2141,10 +2805,12 @@ impl EnvHost {
         progress: &dyn Progress,
     ) -> Result<FsSnapshotResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         Self::require_selection(&environment, &body.selection)?;
         let generation = environment.facts().generation;
         let measured = self
             .fs_measure(&orch_link_contract::commands::FsMeasure {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: body.environment_id,
                 selection: body.selection.clone(),
             })
@@ -2176,6 +2842,7 @@ impl EnvHost {
         progress: &dyn Progress,
     ) -> Result<FsMaterializeResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::Manage)?;
         if body.purpose == orch_link_contract::commands::MaterializePurpose::Exact {
             environment.files.gates().require_remote_write()?;
             let states = environment.file_states.as_ref().ok_or_else(|| {
@@ -2213,6 +2880,42 @@ impl EnvHost {
         Ok(report.result)
     }
 
+    /// Publishes one complete directory if absent, or returns its retained native keep decision.
+    pub async fn fs_materialize_if_absent(
+        &self,
+        body: &orch_link_contract::commands::FsMaterializeIfAbsent,
+        source: &dyn BlobSource,
+    ) -> Result<orch_link_contract::commands::FsDirectoryCopyResult> {
+        let environment = self.environment(body.environment_id)?;
+        let states = environment.file_states.as_ref().ok_or_else(|| {
+            HostError::Unsupported("the durable directory-copy store is unavailable".into())
+        })?;
+        if let Some(result) = crate::exact_materialize::completed_if_absent(
+            states,
+            body,
+            environment.facts().generation,
+        )? {
+            return Ok(result);
+        }
+        let mut writer = MemoryWriter::with_limit(MANIFEST_DOWNLOAD_MAX_BYTES);
+        download_checked(source, body.manifest_blob, &mut writer)
+            .await
+            .map_err(|error| {
+                HostError::Content(format!("the list of files could not be had: {error}"))
+            })?;
+        let parsed = manifest::parse(&writer.into_bytes())?;
+        crate::exact_materialize::apply_if_absent(
+            &environment.files,
+            states,
+            body,
+            &parsed,
+            source,
+            environment.facts().generation,
+            self.inner.clock.as_ref(),
+        )
+        .await
+    }
+
     /// `fs.record`: publishes a complete prepared state, or a durable explained fallback.
     pub async fn fs_record(
         &self,
@@ -2233,6 +2936,7 @@ impl EnvHost {
             body,
             orch_types::new_id(),
             Time::new(until),
+            Time::new(until),
             tokio_util::sync::CancellationToken::new(),
         )
         .await?
@@ -2240,19 +2944,62 @@ impl EnvHost {
         .await
     }
 
+    /// Waits until `ready_by` for the baseline of `directory` to be ready, as long as background work that
+    /// brings it up to date is going on: when none is left and the baseline is not ready, nothing more is
+    /// coming, and the recording answers what it has.
+    async fn wait_for_file_states(
+        &self,
+        states: &Arc<crate::file_states::FileStates>,
+        environment: &Environment,
+        directory: &RelPath,
+        ready_by: Time,
+        wait_for_indexing: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        while states.needs_preparing(directory) {
+            let scanning = !environment.initial_scan_complete();
+            if !states.work_in_flight() && !scanning {
+                return Ok(());
+            }
+            // A recording before this one already waited out a pass that is still going: this one
+            // would wait the same time for the same answer, and the line of the environment would
+            // hold every start behind it.
+            if !wait_for_indexing
+                && (scanning || states.indexing().is_some() || states.is_impatient())
+            {
+                return Ok(());
+            }
+            if self.inner.clock.time() >= ready_by {
+                states.note_impatient();
+                return Ok(());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(HostError::Cancelled),
+                () = tokio::time::sleep(FILE_STATES_POLL) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Seals local state, its immutable upload source and retention before the serial key is released.
     /// The command owner signals cancellation and joins this future; it must not detach blocking work.
+    ///
+    /// A baseline that is not ready is never walked or hashed here: the pass that makes it ready runs in
+    /// the background, and this waits for it only until `ready_by`, then answers that the files are not
+    /// ready. `until` is the end of the protection of what is captured.
     pub async fn fs_record_capture(
         &self,
         body: &orch_link_contract::source::FsRecord,
         operation: Id,
         until: Time,
+        ready_by: Time,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::file_states::CapturedState> {
         if cancel.is_cancelled() {
             return Err(HostError::Cancelled);
         }
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         let Some(states) = environment.file_states.clone() else {
             return Ok(crate::file_states::CapturedState {
                 result: crate::file_states::unavailable("store_unavailable"),
@@ -2262,11 +3009,9 @@ impl EnvHost {
         };
         if !environment.index.state().is_full() {
             states.invalidate("live_tree");
-        } else if environment
-            .index
-            .changes_since(environment.index.revision())
-            .is_none()
-        {
+        } else if !environment.initial_scan_complete() {
+            states.invalidate("indexing");
+        } else if !environment.index.fully_observed() {
             states.invalidate("not_ready");
         }
         let directory = environment.files.parse(&body.directory)?;
@@ -2274,27 +3019,68 @@ impl EnvHost {
         let generation = environment.facts().generation;
         let request = body.clone();
         let kept = states.clone();
-        let cached = blocking(move || kept.store().recorded_reply(&request)).await?;
+        let cursor = environment.file_changes_cursor();
+        let attachment = environment.directory_attachment;
+        let cursor_directory = directory.to_string();
+        let cached = blocking(move || {
+            kept.store().remember_changes(
+                request.snapshot_id,
+                &cursor_directory,
+                attachment,
+                cursor,
+            )?;
+            kept.store().recorded_reply(&request)
+        })
+        .await?;
         if cancel.is_cancelled() {
             return Err(HostError::Cancelled);
         }
-        if cached.is_none() {
+        if cached.is_none()
+            && body.record_days > 0
+            && body.max_bytes > 0
+            && !states.store().has_root(body.snapshot_id)
+        {
+            let kept = states.clone();
+            let policy_directory = directory.clone();
+            let policy = crate::state_store::RecordPolicy {
+                record_days: body.record_days,
+                max_bytes: body.max_bytes,
+            };
+            blocking(move || {
+                let same = kept
+                    .store()
+                    .policy(&policy_directory)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|known| {
+                        known.record_days == policy.record_days
+                            && known.max_bytes == policy.max_bytes
+                    });
+                if same {
+                    Ok(())
+                } else {
+                    kept.store().keep_policy(&policy_directory, policy)
+                }
+            })
+            .await?;
             let needs_seed = states.request(&directory, body.max_bytes);
-            if body.record_days > 0
-                && body.max_bytes > 0
-                && !states.store().has_root(body.snapshot_id)
-                && (needs_seed || states.needs_preparing(&directory))
-            {
+            if needs_seed || states.needs_preparing(&directory) {
                 // A new directory and a re-enabled policy need their indexed baseline before
                 // this immutable identity is answered. Otherwise a scheduling race permanently
-                // freezes not_ready even though the worker completes a moment later.
-                let kept = states.clone();
-                let policy = crate::state_store::RecordPolicy {
-                    record_days: body.record_days,
-                    max_bytes: body.max_bytes,
-                };
-                blocking(move || kept.store().keep_policy(&directory, policy)).await?;
-                environment.prepare_file_states().await?;
+                // freezes not_ready even though the worker completes a moment later. The pass that
+                // makes it ready runs in the background (this command only waits for it, up to
+                // `ready_by`), so a large directory never holds the turn or the environment's line.
+                let scope = directory.clone();
+                environment.kick_file_states();
+                self.wait_for_file_states(
+                    &states,
+                    &environment,
+                    &scope,
+                    ready_by,
+                    body.wait_for_indexing,
+                    &cancel,
+                )
+                .await?;
             }
         }
         if cancel.is_cancelled() {
@@ -2318,6 +3104,7 @@ impl EnvHost {
         sink: &dyn BlobSink,
     ) -> Result<orch_link_contract::source::FsRecordReadResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         #[cfg(all(test, target_os = "linux"))]
         {
             let gate = { lock(&self.inner.before_record_pin).clone() };
@@ -2413,6 +3200,7 @@ impl EnvHost {
         body: &orch_link_contract::source::FsRecordVerify,
     ) -> Result<orch_link_contract::source::FsRecordVerifyResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         let states = environment.file_states.clone().ok_or_else(|| {
             HostError::Unsupported("the carried file-state store is unavailable".into())
         })?;
@@ -2458,6 +3246,7 @@ impl EnvHost {
         body: &orch_link_contract::source::FsDataMeasure,
     ) -> Result<orch_link_contract::source::FsDataMeasureResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         let files = self.data_files(&environment, body.part)?;
         let part = body.part;
         let measured = blocking(move || {
@@ -2472,6 +3261,7 @@ impl EnvHost {
         let recorded = if part == orch_link_contract::source::EnvironmentDataPart::FileStates {
             Some(
                 self.fs_record_verify(&orch_link_contract::source::FsRecordVerify {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: body.environment_id,
                 })
                 .await?,
@@ -2494,6 +3284,7 @@ impl EnvHost {
         progress: &dyn crate::snapshot::Progress,
     ) -> Result<orch_link_contract::commands::FsSnapshotResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::View)?;
         let files = self.data_files(&environment, body.part)?;
         crate::data_transfer::export(
             &files,
@@ -2514,6 +3305,7 @@ impl EnvHost {
         progress: &dyn crate::snapshot::Progress,
     ) -> Result<orch_link_contract::commands::FsMaterializeResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::Manage)?;
         let reservation = environment
             .file_states
             .as_ref()
@@ -2530,6 +3322,7 @@ impl EnvHost {
                 .await?;
         if body.part == orch_link_contract::source::EnvironmentDataPart::FileStates {
             self.fs_record_verify(&orch_link_contract::source::FsRecordVerify {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: body.environment_id,
             })
             .await?;
@@ -2543,6 +3336,7 @@ impl EnvHost {
         body: &orch_link_contract::source::FsRecordPrune,
     ) -> Result<orch_link_contract::source::FsRecordPruneResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::Manage)?;
         let Some(states) = environment.file_states.clone() else {
             return Ok(orch_link_contract::source::FsRecordPruneResult { removed: 0 });
         };
@@ -2559,6 +3353,7 @@ impl EnvHost {
         sink: &dyn BlobSink,
     ) -> Result<orch_link_contract::source::FsRestorePlanResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::Manage)?;
         let states = environment.file_states.clone().ok_or_else(|| {
             HostError::Unsupported("the recorded store is unavailable".to_owned())
         })?;
@@ -2611,6 +3406,7 @@ impl EnvHost {
         source: &dyn BlobSource,
     ) -> Result<orch_link_contract::source::FsRestoreResult> {
         let environment = self.environment(body.environment_id)?;
+        environment.require_file_access(body.access, FileAct::Manage)?;
         let states = environment.file_states.clone().ok_or_else(|| {
             HostError::Unsupported("the recorded store is unavailable".to_owned())
         })?;
@@ -2673,49 +3469,108 @@ impl EnvHost {
         }
     }
 
-    /// `workspace.observe`: returns end hashes from a complete watcher baseline only.
+    /// `workspace.observe`: reads the change journal independently of whole-recording coverage.
     pub async fn workspace_observe(
         &self,
         body: &orch_link_contract::source::WorkspaceObserve,
         sink: &dyn BlobSink,
     ) -> Result<orch_link_contract::source::WorkspaceObserveResult> {
         let environment = self.environment(body.environment_id)?;
-        if !environment.index.state().is_full()
-            || environment
-                .index
-                .changes_since(environment.index.revision())
-                .is_none()
-        {
-            return Ok(orch_link_contract::source::WorkspaceObserveResult {
-                end_manifest_blob: None,
-            });
-        }
+        let directory = environment.files.parse(&body.directory)?;
         let Some(states) = environment.file_states.clone() else {
             return Ok(orch_link_contract::source::WorkspaceObserveResult {
+                end_patch_blob: None,
                 end_manifest_blob: None,
+                changed_paths: None,
+                changed_paths_complete: false,
             });
         };
-        let files = environment.files.clone();
-        let directory = files.parse(&body.directory)?;
-        let generation = environment.facts().generation;
-        let now = self.inner.clock.time();
-        let observed =
-            blocking(move || states.observe(&files, &directory, generation, now)).await?;
-        let Some(manifest) = observed else {
-            return Ok(orch_link_contract::source::WorkspaceObserveResult {
-                end_manifest_blob: None,
-            });
-        };
-        let size = i64::try_from(manifest.bytes.len())
-            .map_err(|_| HostError::Unsupported("an end manifest is too large".to_owned()))?;
-        let hash = manifest.hash;
-        let mut reader = crate::blobs::MemoryReader::new(manifest.bytes);
-        sink.put(hash, size, &mut reader)
-            .await
-            .map_err(|error| HostError::Content(error.to_string()))?;
-        Ok(orch_link_contract::source::WorkspaceObserveResult {
-            end_manifest_blob: Some(hash),
+        if let Some(sealed) = &body.sealed {
+            let mut result = sealed.clone();
+            if let Some(patch) = sealed.end_patch_blob {
+                let files = environment.files.clone();
+                let scope = directory.clone();
+                let generation = environment.generation();
+                let kept = states.clone();
+                let manifest =
+                    blocking(move || kept.publish_end_patch(&files, &scope, generation, patch))
+                        .await?;
+                let hash = manifest.hash;
+                let size = i64::try_from(manifest.bytes.len())
+                    .map_err(|_| HostError::Unsupported("end metadata is too large".into()))?;
+                let mut reader = crate::blobs::MemoryReader::new(manifest.bytes);
+                sink.put(hash, size, &mut reader)
+                    .await
+                    .map_err(|error| HostError::Content(error.to_string()))?;
+                result.end_manifest_blob = Some(hash);
+            } else if let Some(hash) = sealed.end_manifest_blob {
+                let store = states.store().clone();
+                let input = blocking(move || store.manifest_input(hash)).await?;
+                input.publish(sink).await?;
+            }
+            return Ok(result);
+        }
+        let snapshot = body.before_snapshot_id;
+        let scope = directory.clone();
+        let watched = environment.clone();
+        let kept = states.clone();
+        let changed_paths = blocking(move || {
+            let Some(snapshot) = snapshot else {
+                return Ok(None);
+            };
+            let Some(cursor) = kept.store().changes_cursor(
+                snapshot,
+                scope.as_str(),
+                watched.directory_attachment,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(watched.file_changes_since(cursor).map(|paths| {
+                paths
+                    .into_iter()
+                    .filter(|path| !path.has_component(".git"))
+                    .filter(|path| {
+                        !watched.rules.is_ignored(
+                            watched.files.root(),
+                            path,
+                            watched
+                                .index
+                                .get(path)
+                                .is_some_and(|entry| entry.kind == platform::Kind::Dir),
+                        )
+                    })
+                    .filter_map(|path| {
+                        path.strip_prefix(&scope)
+                            .filter(|relative| !relative.is_root())
+                            .map(|relative| relative.to_string())
+                    })
+                    .collect()
+            }))
         })
+        .await?;
+        let mut result = orch_link_contract::source::WorkspaceObserveResult {
+            end_patch_blob: None,
+            end_manifest_blob: None,
+            changed_paths,
+            changed_paths_complete: environment.index.fully_observed(),
+        };
+        if !environment.index.state().is_full() || !environment.index.fully_observed() {
+            return Ok(result);
+        }
+        let files = environment.files.clone();
+        let generation = environment.generation();
+        let now = self.inner.clock.time();
+        match blocking(move || states.seal_end(&files, &directory, generation, now)).await {
+            Ok((whole, patch)) => {
+                result.end_manifest_blob = whole;
+                result.end_patch_blob = patch;
+            }
+            Err(error) => {
+                tracing::debug!(%error, "the end keeps its observed paths without complete recorded metadata")
+            }
+        }
+        Ok(result)
     }
 
     // ------------------------------------------------------------------ git
@@ -2729,6 +3584,7 @@ impl EnvHost {
         Self::require_selection(&environment, &body.selection)?;
         let measured = self
             .fs_measure(&orch_link_contract::commands::FsMeasure {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: body.environment_id,
                 selection: body.selection.clone(),
             })
@@ -2999,37 +3855,52 @@ impl EnvHost {
         body: &GitStatus,
     ) -> Result<orch_api_contract::workspace::GitStatus> {
         let environment = self.environment(body.environment_id)?;
-        let path = body
-            .path
-            .as_deref()
-            .map(|text| environment.files.parse(text))
-            .transpose()?;
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                body.path.as_deref().unwrap_or(""),
+                FileWalk::Through,
+            )
+            .await?;
+        let path = Some(target.path.clone());
         if let Some(watch) = body.watch_id {
+            if Path::new(body.path.as_deref().unwrap_or("")).is_absolute()
+                || target.files.root().root_path() != environment.files.root().root_path()
+            {
+                return Err(HostError::Unsupported(
+                    "this native repository is read on request rather than watched".to_owned(),
+                ));
+            }
             environment.git_watches.register(watch, path.clone())?;
             environment.follow_index_with_watches();
             return environment.git_watches.read(&environment, watch).await;
         }
-        let status = environment
+        target
             .files
             .git_status_at(&environment.git, path.as_ref())
-            .await?;
-        Ok(status)
+            .await
     }
 
-    /// `git.diff`: the unified difference of the repository.
+    /// `git.diff`: binds the native file selection to the current read reach.
     pub async fn git_diff(&self, body: &GitDiff) -> Result<GitDiffResult> {
         let environment = self.environment(body.environment_id)?;
-        let path = match &body.path {
-            Some(text) => Some(environment.files.parse(text)?),
-            None => None,
-        };
-        environment
-            .files
-            .git_diff(
-                &environment.git,
-                path.as_ref(),
-                body.staged.unwrap_or(false),
+        let target = environment
+            .target(
+                body.access,
+                FileAct::View,
+                None,
+                body.path.as_deref().unwrap_or(""),
+                FileWalk::Through,
             )
+            .await?;
+        let binding = target.binding(&environment, body.access, None);
+        let mut request = body.clone();
+        request.path = body.path.as_ref().map(|_| target.path.to_string());
+        self.inner
+            .directory_pages
+            .difference(binding, target.files, environment.git.clone(), request)
             .await
     }
 
@@ -3122,6 +3993,9 @@ impl EnvHost {
     pub async fn pty_open(&self, body: &PtyOpen) -> Result<PtyOpenResult> {
         let environment = self.environment(body.environment_id)?;
         self.inner.gates.require_terminal()?;
+        if self.inner.gates.get().files_reach != orch_link_contract::policy::FileReach::Machine {
+            return Err(HostError::FileReachDenied);
+        }
         let settings = self.inner.settings();
         let files = &environment.files;
         let cwd = files.target_of(&body.cwd)?;
@@ -3146,6 +4020,10 @@ impl EnvHost {
             record: body.record,
         };
         let opened = environment.terminals.open(spec)?;
+        if self.inner.gates.get().files_reach != orch_link_contract::policy::FileReach::Machine {
+            let _ = environment.terminals.close(body.terminal_id).await;
+            return Err(HostError::FileReachDenied);
+        }
         let service = Service::Pty {
             terminal_id: body.terminal_id,
         }
@@ -3219,6 +4097,16 @@ impl EnvHost {
                 .iter()
                 .any(|t| t.id == terminal_id)
             {
+                if environment
+                    .terminals
+                    .list()
+                    .iter()
+                    .any(|shell| shell.id == terminal_id && shell.purpose == Purpose::Shell)
+                    && self.inner.gates.get().files_reach
+                        != orch_link_contract::policy::FileReach::Machine
+                {
+                    return Err(HostError::FileReachDenied);
+                }
                 return environment.terminals.attach(terminal_id, control);
             }
         }
@@ -3690,8 +4578,12 @@ async fn report_loop(environment: Weak<Environment>, interval: Duration, measure
         };
         match measure {
             Measure::Stats => {
+                let generation = environment.generation();
                 let sampler = Arc::clone(&environment.sampler);
-                if let Ok(sample) = tokio::task::spawn_blocking(move || sampler.sample()).await {
+                if let Ok(sample) =
+                    tokio::task::spawn_blocking(move || sampler.sample_for_attachment(generation))
+                        .await
+                {
                     host.reports
                         .say(environment.id, Report::Stats(sample))
                         .await;
@@ -3724,29 +4616,30 @@ struct Attached {
     environment: Arc<Environment>,
     first_scan: Option<FirstScan>,
     lost_shells: Vec<Id>,
+    data_holds: Vec<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 /// Opens the workspace root and finds out how it spells its names.
 fn open_workspace(configured: &Path, allowed: Option<&[PathBuf]>) -> Result<(Workspace, bool)> {
-    if let Some(roots) = allowed {
-        let real = std::fs::canonicalize(configured)
-            .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
-        if !roots
-            .iter()
-            .any(|root| std::fs::canonicalize(root).is_ok_and(|root| real.starts_with(root)))
-        {
-            return Err(HostError::RootNotAllowed(format!(
-                "this machine's owner does not offer {}",
-                configured.display()
-            )));
-        }
-    }
-    let dir = Dir::open_path(configured)
-        .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
+    let workspace = match allowed {
+        Some(roots) => Workspace::open_under_roots(
+            configured,
+            roots,
+            path_style(),
+            platform::DEFAULT_CASE_SENSITIVE,
+        )?,
+        None => Workspace::open(
+            configured,
+            &[],
+            path_style(),
+            platform::DEFAULT_CASE_SENSITIVE,
+        )?,
+    };
+    let dir = workspace.root_dir()?;
     let case_sensitive =
         Workspace::probe_case_sensitivity(&dir).unwrap_or(platform::DEFAULT_CASE_SENSITIVE);
     Ok((
-        Workspace::open(configured, &[], path_style(), case_sensitive)?,
+        workspace.with_case_sensitivity(case_sensitive),
         case_sensitive,
     ))
 }
@@ -3768,7 +4661,20 @@ async fn attach(
         ));
     }
     if !crate::RUNTIME_VERIFIED {
-        return Err(HostError::Unsupported("the environment runtime is declared for Linux; this platform awaits native containment and process verification".into()));
+        if settings.platform_review.is_none() || settings.managed.is_some() {
+            return Err(HostError::Unsupported(
+                "the machine's native system requires confirmation".into(),
+            ));
+        }
+        if body
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| !mounts.is_empty())
+        {
+            return Err(HostError::Unsupported(
+                "native mount enforcement is unavailable on this system".into(),
+            ));
+        }
     }
     // The controller supplies the current or candidate generation at attach time.
     // Managed connectors also start before that generation is known to their host settings.
@@ -3811,33 +4717,51 @@ async fn attach(
         let (configured, allowed) = (configured.clone(), settings.allowed_roots.clone());
         blocking(move || open_workspace(&configured, allowed.as_deref())).await?
     };
-    let rules = Arc::new(IgnoreRules::new(&body.ignore, case_sensitive));
-    for rejected in rules.rejected() {
-        tracing::warn!(pattern = %rejected, "an ignore pattern is not a pattern and is left out");
+    let rules = Arc::new(IgnoreRules::with_limits(
+        &body.ignore,
+        case_sensitive,
+        body.workspace.ignore_max_bytes,
+        body.workspace.ignore_cache_bytes,
+    ));
+    if !rules.rejected().is_empty() {
+        tracing::warn!(
+            count = rules.rejected().len(),
+            "configured exclusions are invalid; their scope remains unavailable"
+        );
     }
+    let mut file_limits = settings.limits.clone();
+    file_limits.search_time = Duration::from_secs(body.workspace.search_slice_secs);
     let files = Files::workspace(
         workspace,
         Arc::clone(&rules),
         Arc::new(HashCache::new()),
-        settings.limits.clone(),
+        file_limits,
         Arc::clone(&host.gates),
     );
+
+    files.start_relay_cleanup(Arc::clone(&host.clock));
 
     // The tree: indexed, or listed live. A walk that outlasts the wait goes on by itself.
     let index = Arc::new(Index::with_scan_limit(
         body.index,
-        settings.limits.index_max_entries,
-        settings.limits.index_scan_max,
+        body.workspace.index_entries,
+        Duration::from_secs(body.workspace.index_scan_secs),
     ));
     let mut first_scan = None;
     if index.state().is_full() {
-        let (index, files, rules) = (Arc::clone(&index), files.clone(), Arc::clone(&rules));
-        let mut walk = tokio::task::spawn_blocking(move || index.scan(files.root(), &rules));
+        let (scanning, files, rules) = (Arc::clone(&index), files.clone(), Arc::clone(&rules));
+        let mut walk = tokio::task::spawn_blocking(move || scanning.scan(files.root(), &rules));
         match tokio::time::timeout(ATTACH_SCAN_WAIT, &mut walk).await {
             Ok(finished) => {
-                finished.map_err(|error| {
+                match finished.map_err(|error| {
                     HostError::Internal(format!("a task of the host failed: {error}"))
-                })??;
+                })? {
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "initial workspace coverage is unavailable; live file acts remain available");
+                        index.give_up(crate::index::LiveReason::Unreadable);
+                    }
+                }
             }
             Err(_) => first_scan = Some(walk),
         }
@@ -3889,6 +4813,22 @@ async fn attach(
         )?,
         (None, _) => Mounts::none(),
     };
+
+    let mut data_directories: std::collections::BTreeSet<_> =
+        mounts.directory_identities().collect();
+    let workspace_identity = files.root().root_meta()?;
+    data_directories.insert((workspace_identity.dev, workspace_identity.ino));
+    let home_root = home.as_ref().and_then(|path| Dir::open_path(path).ok());
+    if let Some(home) = &home_root
+        && let Ok(actual) = home.stat_self()
+    {
+        data_directories.insert((actual.dev, actual.ino));
+    }
+    let data_holds = host
+        .storage_locks
+        .hold_directories(data_directories.iter().copied())
+        .await?;
+    let data_directories = data_directories.into_iter().collect();
 
     // Kept browser profiles belong outside the workspace and never enter a snapshot or a fork.
     let browser_directory = if settings.managed.is_some() {
@@ -3949,7 +4889,9 @@ async fn attach(
                 settings.managed.is_some(),
             )
         });
-    displays.recover_owned().await;
+    if !cfg!(windows) {
+        displays.recover_owned().await;
+    }
     displays.set_allowed(settings.gates.vnc).await;
 
     // What the environment's commands find in their environment: its variables, and its secrets
@@ -3992,7 +4934,7 @@ async fn attach(
         Some(old) => Arc::clone(&old.executors),
         None => {
             let registry = Arc::new(Executors::new());
-            for factory in &host.executors {
+            for factory in host.executors.iter().filter(|_| !cfg!(windows)) {
                 registry.register(factory()).await?;
             }
             registry
@@ -4124,6 +5066,9 @@ async fn attach(
         index: index.state().mode(),
         index_reason: index.state().reason(),
         index_entry_limit: index.state().entry_limit(),
+        indexing: None,
+        recording: None,
+        exclusion_problem: exclusion_problem(&rules, files.root()),
         mounts: mounts.facts(),
         private_views: false,
         suspend: platform::CAN_SUSPEND,
@@ -4163,6 +5108,7 @@ async fn attach(
         }
     };
     let environment = Arc::new(Environment {
+        platform_review: settings.platform_review,
         id: body.environment_id,
         directory_attachment: orch_types::new_id(),
         directory_operations: crate::directory_pages::Attachment::new(),
@@ -4172,6 +5118,8 @@ async fn attach(
         index,
         scanned: AtomicBool::new(first_scan.is_none()),
         mounts,
+        data_directories,
+        _home_root: home_root,
         watcher: Mutex::new(None),
         directory_reads: tokio::sync::Mutex::new(()),
         watches: Mutex::new(
@@ -4195,6 +5143,7 @@ async fn attach(
         mcp_host,
         git,
         file_states,
+        workspace_limits: body.workspace.clone(),
         facts: Mutex::new(facts),
         variables,
         browsers,
@@ -4209,6 +5158,7 @@ async fn attach(
         environment,
         first_scan,
         lost_shells,
+        data_holds,
     })
 }
 
@@ -4247,15 +5197,13 @@ fn start_background(
         facts.index_reason = environment.index.state().reason();
         facts.index_entry_limit = environment.index.state().entry_limit();
     }
+    watcher.watch_dir(&root);
     for watch in lock(&environment.watches).values() {
         watcher.watch_dir(&watch.dir.under(&root));
     }
     *lock(&environment.watcher) = Some(watcher);
     if !environment.git_watches.is_empty() {
-        let current = Arc::clone(environment);
-        lock(&environment.tasks).push(tokio::spawn(async move {
-            current.git_watches.changed(&current, &[], true).await;
-        }));
+        environment.git_watches.changed(environment, &[], true);
     }
     if first_scan.is_none() {
         environment.seed_file_states();

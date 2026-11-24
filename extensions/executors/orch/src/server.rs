@@ -156,8 +156,8 @@ impl OrchExec {
 
     /// Why the executor cannot be started in this environment, if it cannot.
     fn unavailable(env: &EnvironmentContext) -> Option<String> {
-        if env.os != orch_agent_contract::facts::Os::Linux {
-            return Some("this executor is declared for Linux; this host's native execution has not been verified".into());
+        if let Some(reason) = env.native_execution_refusal() {
+            return Some(reason.into());
         }
         if env.data_dir.trim().is_empty() {
             return Some("the environment gave the executor no directory of its own".to_owned());
