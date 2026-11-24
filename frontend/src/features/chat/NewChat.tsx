@@ -5,8 +5,8 @@
  * The same picker adds people to a group, where a person from outside the org may be named too and
  * joins as a guest, who sees that chat and nothing else of the org.
  */
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { Check, Search } from 'lucide-react';
+import { useInfiniteQuery } from '@tanstack/react-query';
+import { Check } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -20,24 +20,22 @@ import { Select } from '@/ui/Select';
 import { Switch } from '@/ui/Switch';
 import { UserChip } from '@/ui/UserChip';
 import { HelpHint } from '@/ui/HelpHint';
-import { Pagination } from '@/ui/Pagination';
-import { EmptyState } from '@/ui/EmptyState';
-import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
+import { ErrorState } from '@/ui/ErrorState';
 
-import { createChat, GROUP_NAME_MAX_CHARS, PEOPLE_SEARCH_MIN_CHARS, peopleQuery } from '@/api/chats';
-import { membersQuery } from '@/api/directory';
+import { createChat, GROUP_NAME_MAX_CHARS } from '@/api/chats';
+import { personPickerQuery } from '@/api/access';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
+import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 import { ApiError } from '@/api/client';
 import type { Chat } from '@/api/chat-contract';
 import type { UserRef } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { useDebounced } from '@/lib/debounce';
 import { Button } from '@/ui/Button';
-import { cx } from '@/ui/cx';
 import { Dialog } from '@/ui/Dialog';
 import { useErrorText } from '@/ui/errorText';
 import { InlineAlert } from '@/ui/InlineAlert';
-import { fieldBoxClasses, Input } from '@/ui/Input';
-import { Skeleton } from '@/ui/Skeleton';
+import { Input } from '@/ui/Input';
 
 export interface PeoplePickerProps {
   orgId: string;
@@ -54,66 +52,34 @@ export interface PeoplePickerProps {
 /** A searchable list of the org's people with those who are chosen marked. */
 export function PeoplePicker({ orgId, chosen, onToggle, exclude, guests, me, disabled = false }: PeoplePickerProps) {
   const { t } = useTranslation();
-  const [query, setQuery] = useState('');
-  const settled = useDebounced(query).trim();
-  const members = useInfiniteQuery(membersQuery(orgId, { direct: false, q: settled }));
-  const outside = useQuery({ ...peopleQuery(null, settled), enabled: guests && Array.from(settled).length >= PEOPLE_SEARCH_MIN_CHARS });
-  const insiders = (members.data?.pages.flatMap((page) => page.items.map((member) => member.user)) ?? []).filter((user) => user.id !== me && !exclude.has(user.id));
-  const insiderIds = new Set(insiders.map((user) => user.id));
-  const strangers = (outside.data ?? []).filter((user) => user.id !== me && !exclude.has(user.id) && !insiderIds.has(user.id));
-  const row = (user: UserRef, guest: boolean) => {
-    const on = chosen.some((one) => one.id === user.id);
-    return (
-      <button
-        key={user.id}
-        type="button"
-        aria-pressed={on}
-        disabled={disabled}
-        onClick={() => onToggle(user)}
-        className={cx('focus-inset flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-base hover:bg-bg-muted', on && 'bg-accent-subtle')}
-      >
-        <UserChip user={user} size={24} card={false} />
-        <span className="truncate text-sm text-text-muted">@{user.username}</span>
-        <span className="ml-auto flex shrink-0 items-center gap-2">
-          {guest && <span className="rounded-sm bg-bg-muted px-1 text-xs text-text-muted">{t('chat.people.guestChip')}</span>}
-          {/* A mark and not only a tint: a choice is not told by colour alone. */}
-          {on && <Check aria-hidden size={16} className="text-accent-text" />}
-        </span>
-      </button>
-    );
-  };
-  return (
-    <div className="flex flex-col gap-2">
-      <label className="relative block">
-        <span className="sr-only">{t('chat.people.search')}</span>
-        <Search aria-hidden size={16} className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-text-subtle" />
-        <input
-          type="search"
-          disabled={disabled}
-          value={query}
-          autoComplete="off"
-          placeholder={t('chat.people.search')}
-          onChange={(event) => setQuery(event.target.value)}
-          className={`${fieldBoxClasses} input-leading-icon`}
-        />
-      </label>
-      <div role="group" aria-label={t('chat.people.found')} className="flex max-h-[30dvh] min-h-16 flex-col gap-1 overflow-y-auto rounded-lg border border-border p-1">
-        {members.isError ? <ErrorState compact error={members.error} onRetry={() => void members.refetch()} /> : members.isPending ? (
-          <Skeleton className="h-8 w-full" />
-        ) : insiders.length === 0 && strangers.length === 0 ? (
-          <EmptyState compact className="px-2" title={t('chat.people.none')} />
-        ) : (
-          <>
-            {insiders.map((user) => row(user, false))}
-            {strangers.map((user) => row(user, true))}
-          </>
-        )}
-      </div>
-      {outside.isError && <ErrorAlert error={outside.error} action={<Button size="sm" onClick={() => void outside.refetch()}>{t('common.tryAgain')}</Button>} />}
-      <Pagination hasMore={members.hasNextPage} loading={members.isFetchingNextPage} error={members.error} onMore={() => void members.fetchNextPage()} />
-      {guests && <HelpHint term={t('chat.people.guestChip')} what={t('chat.people.guestHint')} />}
-    </div>
-  );
+  const [query, setQuery] = useState(''), [open, setOpen] = useState(false);
+  const settled = useDebounced(query.trim()), waiting = query.trim() !== settled;
+  const source = personPickerQuery(settled, orgId, guests);
+  const people = useInfiniteQuery({ ...source, enabled: open && !waiting });
+  usePickerCursorRestart(people, source.queryKey);
+  const pages = open && !waiting ? people.data?.pages ?? [] : [];
+  const chosenIds = new Set(chosen.map((user) => user.id));
+  const hits = pages.flatMap((page) => page.items).filter((user) => user.kind === 'human' && user.id !== me && !exclude.has(user.id) && !chosenIds.has(user.id));
+  const members = new Set(pages.flatMap((page) => page.org_member_ids ?? []));
+  return <div className="flex min-w-0 flex-col gap-2">
+    {chosen.length > 0 && <div className="flex max-h-[20dvh] flex-wrap gap-1 overflow-y-auto" aria-label={t('chat.people.found')}>
+      {chosen.map((user) => <button key={user.id} type="button" aria-label={user.display_name} aria-pressed disabled={disabled}
+        className="focus-inset flex min-w-0 items-center gap-1 rounded-md bg-accent-subtle px-2 py-1 text-sm" onClick={() => onToggle(user)}>
+        <UserChip user={user} size={24} card={false} /><Check aria-hidden size={16} className="shrink-0 text-accent-text" />
+      </button>)}
+    </div>}
+    <ResourcePickerLookup pickerKey="chat-people" label={t('chat.people.search')} query={query} onQueryChange={setQuery} onOpenChange={setOpen}
+      disabled={disabled} groupHomes={false} filterLocal={false} placeholder={t('chat.people.search')} displayValue=""
+      loading={waiting || people.isFetching && !people.isFetchingNextPage} empty={t('chat.people.none')}
+      groups={[{ id: 'chat-people', label: t('chat.people.found'), options: hits.map((user) => ({ value: user.id, text: user.display_name,
+        resource: { kind: 'user', id: user.id }, label: <UserChip user={user} size={24} card={false} />,
+        description: <span className="flex gap-2"><span>@{user.username}</span>{guests && !members.has(user.id) && <span>{t('chat.people.guestChip')}</span>}</span>,
+      })) }]}
+      footer={people.isError ? <ErrorState compact error={people.error} onRetry={() => { void (people.isFetchNextPageError ? people.fetchNextPage() : people.refetch()); }} />
+        : people.hasNextPage ? <Button size="sm" variant="ghost" pending={people.isFetchingNextPage} onClick={() => { void people.fetchNextPage(); }}>{t('ui.pagination.more')}</Button> : undefined}
+      onSelect={(option) => { const user = hits.find((one) => one.id === option.value); if (user !== undefined) { setOpen(false); onToggle(user); setQuery(''); } }} />
+    {guests && <HelpHint term={t('chat.people.guestChip')} what={t('chat.people.guestHint')} />}
+  </div>;
 }
 
 export interface NewChatProps {
@@ -178,11 +144,12 @@ function NewChatDialog({ open, onOpenChange, orgId, me, onOpened, defaultHome = 
     footer={<><Button variant="ghost" disabled={pending} onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
       <Button action="newMessage" variant="primary" pending={pending} blocked={chosen.length === 0 || group && nameTooLong} onClick={() => void submit()}>{title}</Button></>}>
     <div className="flex min-w-0 flex-col gap-3">
+      {group && <Input label={t('chat.new.name')} optional value={name} onChange={(event) => { setName(event.target.value); setError(null); }} disabled={pending}
+        error={nameTooLong ? t('chat.new.nameTooLong', { number: formatNumber(GROUP_NAME_MAX_CHARS, locale) }) : undefined} />}
       <Switch label={t('chat.new.asGroup')} checked={group} disabled={pending || chosen.length > 1}
         tooltip={chosen.length > 1 ? t('chat.new.multipleGroup') : undefined} onCheckedChange={(value) => { setGroup(value); setError(null); }} />
       <PeoplePicker orgId={orgId} chosen={chosen} onToggle={toggle} exclude={new Set()} guests={false} me={me} disabled={pending} />
-      {group && <><Input label={t('chat.new.name')} optional value={name} onChange={(event) => { setName(event.target.value); setError(null); }} disabled={pending}
-        error={nameTooLong ? t('chat.new.nameTooLong', { number: formatNumber(GROUP_NAME_MAX_CHARS, locale) }) : undefined} />
+      {group && <>
         <PlacePicker label={t('chat.group.home')} value={home} onChange={setHome} rootOrgId={orgId} includeThreads disabled={pending} />
         {home === null && <span className="text-sm text-text-muted">{t('chat.new.rootHome')}</span>}
         <Select<'private' | 'public'> label={t('chat.group.visibility')} value={visibility} disabled={pending} onValueChange={setVisibility}

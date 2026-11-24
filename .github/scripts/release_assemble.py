@@ -27,6 +27,8 @@ def assemble(inputs, out):
         for key in ("project", "schema_version", "tag", "version", "commit", "link_protocol", "connector_minimum", "harness_builds", "images"):
             if listing[key] != first[key]:
                 raise ValueError(f"the architecture manifests differ in {key}")
+        if listing.get("deploy_files") != first.get("deploy_files"):
+            raise ValueError("the architecture manifests differ in deploy_files")
     if out.exists() and any(out.iterdir()):
         raise ValueError("the output directory must be empty")
     out.mkdir(parents=True, exist_ok=True)

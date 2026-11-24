@@ -16,7 +16,7 @@ import { deferred } from '../unit/continuation-fixtures';
 import { detailEnvironment } from './resource-detail-fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const environment = detailEnvironment;
 const target: LibraryTarget = { object: { kind: 'environment', id: environment.id }, version_id: null };
 const facts = (count = 3): ResourceFacts => ({ subject: { kind: 'resource', object: target.object }, as_of: new Date().toISOString(),
