@@ -94,7 +94,7 @@ test('the workbench round an org, a thread, usage and an unknown address', async
   // Arranged for the code, with every area open.
   await page.getByRole('button', { name: 'Layout' }).click();
   await page.getByRole('menuitem', { name: 'Code' }).click();
-  await expect(page.getByRole('tablist', { name: 'Bottom' })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Bottom panel' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.goto('/usage');
@@ -156,10 +156,10 @@ test('the workbench is worked by keyboard alone: from area to area, into the tre
   await page.locator('[data-workbench-bar="right"]').getByRole('button', { name: 'Outline', exact: true }).focus();
   await page.keyboard.press('Shift+F10');
   await page.getByRole('menuitem', { name: 'Move to', exact: true }).press('ArrowRight');
-  await page.getByRole('menuitem', { name: 'Bottom', exact: true }).press('Enter');
-  await page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Bottom panel', exact: true }).press('Enter');
+  await page.getByRole('tablist', { name: 'Bottom panel', exact: true }).getByRole('tab', { name: 'Terminal', exact: true }).click();
   await page.keyboard.press('Alt+2');
-  const movedOutline = page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Outline · Main thread · Fix login', exact: true });
+  const movedOutline = page.getByRole('tablist', { name: 'Bottom panel', exact: true }).getByRole('tab', { name: 'Outline · Main thread · Fix login', exact: true });
   await expect(movedOutline).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Alt+w');
   await expect(movedOutline).toHaveCount(0);

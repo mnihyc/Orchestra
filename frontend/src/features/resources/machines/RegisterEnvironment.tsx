@@ -103,7 +103,7 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
         <DataSourcesEditor machine={machine.id} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={register.isPending} />
         <HomePicker value={home} onChange={setHome} disabled={register.isPending}
           defaultChoice={t(defaultHomeName===''?'resourceGroups.machineHome':'resourceGroups.machineHomeNamed',{name:defaultHomeName})}
-          places={(machineHome.home === null || machineHome.home === undefined) || machineHome.home.redacted ? [] : [{id:machineHome.home.id,name:defaultHomeName}]} />
+          places={(machineHome.home === null || machineHome.home === undefined) || machineHome.home.redacted ? [] : [{id:machineHome.home.id,name:defaultHomeName,kind:machineHome.home.kind}]} />
         <Switch
           label={t('machines.environment.remoteWrite')}
           help={<Hint id="env-remote-write" />}

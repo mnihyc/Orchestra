@@ -7,6 +7,7 @@ SELECT kind, id, place, at FROM (
     (SELECT 'thread'::text AS kind, t.node_id AS id, t.node_id AS place, t.last_activity_at AS at
        FROM threads t
       WHERE t.side_of IS NULL AND t.last_activity_at IS NOT NULL
+        AND NOT delegated_execution_only(t.node_id)
         AND (t.last_activity_at, t.node_id) <=
             (COALESCE($2::timestamptz, 'infinity'::timestamptz),
              COALESCE($3::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid))
@@ -22,7 +23,7 @@ SELECT kind, id, place, at FROM (
     (SELECT 'thread'::text, n.id, n.id, n.updated_at
        FROM nodes n JOIN threads t ON t.node_id = n.id
       WHERE n.kind = 'thread' AND n.deleted_at IS NULL AND n.archived_at IS NULL
-        AND t.side_of IS NULL AND t.last_activity_at IS NULL AND $1 = ANY(n.path)
+        AND t.side_of IS NULL AND NOT delegated_execution_only(t.node_id) AND t.last_activity_at IS NULL AND $1 = ANY(n.path)
         AND (n.updated_at, n.id) <=
             (COALESCE($2::timestamptz, 'infinity'::timestamptz),
              COALESCE($3::uuid, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid))
