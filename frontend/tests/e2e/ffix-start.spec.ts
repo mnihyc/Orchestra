@@ -69,7 +69,7 @@ test('typing in a topic whose defaults are whole starts a thread with one Enter,
     binding: { agent_id: RUNS_ON.codex, provider_id: RUNS_ON.openAiKey, arrangement: 'separated' },
     model: MODEL,
     effort: 'high',
-    environment: { use: RUNS_ON.workspace },
+    environment: { use: { type: 'single', resource: { kind: 'environment', id: RUNS_ON.workspace } } },
     first_input: { content: [{ type: 'text', text }] },
   });
   // The topic had everything it needed: no topic and no environment were made.
@@ -192,10 +192,11 @@ test('a successful custom setup is remembered after a reload without writing pla
   await starterBox(page).fill('Check the idle stop');
   await starter(page).getByRole('button', { name: 'Thread setup', exact: true }).click();
   const form = startDialog(page, 'Idle-stop rework');
-  await form.getByRole('combobox', { name: 'Provider', exact: true }).click();
-  await page.getByRole('option', { name: /Team Anthropic/ }).click();
-  await form.getByRole('combobox', { name: 'Agent', exact: true }).click();
-  await page.getByRole('option', { name: 'Scripted agent', exact: true }).click();
+  // The provider is the model's: choosing a model of Team Anthropic chooses it.
+  await form.getByRole('button', { name: /^Model:/ }).click();
+  await page.getByRole('dialog', { name: 'Model', exact: true }).getByRole('menuitemradio', { name: /Claude Sonnet 5/ }).click();
+  await form.getByRole('button', { name: /^Agent:/ }).click();
+  await page.getByRole('menuitemradio', { name: 'Scripted agent', exact: true }).click();
   await form.getByRole('button', { name: 'Create thread', exact: true }).click();
   await openedThread(page);
   await page.goto(`/topic/${ACME.idleStop}`);
@@ -236,7 +237,7 @@ test('a person who cannot set place defaults can still start with one Enter and 
   expect(await requestsOf('PUT', /\/default-environment$/)).toHaveLength(0);
   // Only the fixture's owned environment was made; both starts reuse it.
   expect(await requestsOf('POST', /\/environments$/)).toHaveLength(prepared);
-  for (const request of await requestsOf('POST', /\/topics\/[^/]+\/threads$/)) expect(request.body).toMatchObject({ environment: { use: own.id } });
+  for (const request of await requestsOf('POST', /\/topics\/[^/]+\/threads$/)) expect(request.body).toMatchObject({ environment: { use: { type: 'single', resource: { kind: 'environment', id: own.id } } } });
 });
 
 test('where no harness has reported what it can do, the starter says so, offers nothing that cannot run, and comes alive when the report arrives', async ({ page }) => {
@@ -256,10 +257,10 @@ test('where no harness has reported what it can do, the starter says so, offers 
   await panel.getByRole('button', { name: 'Thread setup' }).click();
   const dialog = startDialog(page, 'Idle-stop rework');
   await expect(dialog.getByRole('button', { name: 'Create thread' })).toBeDisabled();
-  await dialog.getByRole('combobox', { name: 'Agent', exact: true }).click();
-  const unreported = page.getByRole('option', { name: 'Codex', exact: true });
-  await expect(unreported).toHaveAttribute('aria-disabled', 'true');
-  await expect(unreported).toHaveAccessibleDescription('its agent program has not reported yet');
+  await dialog.getByRole('button', { name: /^Agent:/ }).click();
+  const unreported = page.getByRole('menuitemradio', { name: /^Codex/ });
+  await expect(unreported).toBeDisabled();
+  await expect(unreported.locator('xpath=ancestor::li')).toContainText('not reported yet');
   await page.keyboard.press('Escape');
   await expect(arrangements(page)).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Cancel' }).click();
@@ -281,10 +282,10 @@ test('a profile that has not reported is waited for, and one that has is offered
   const panel = starter(page).getByRole('group', { name: 'What is missing' });
   await expect(panel).toContainText('Codex has not reported its capabilities');
   // What can run is offered, and what cannot is not among it.
-  await panel.getByRole('combobox', { name: 'Agent' }).click();
-  await expect(page.getByRole('option', { name: 'Scripted agent', exact: true })).toBeVisible();
-  await expect(page.getByRole('option', { name: 'Codex', exact: true })).toHaveCount(0);
-  await page.getByRole('option', { name: 'Scripted agent', exact: true }).click();
+  await panel.getByRole('button', { name: /^Agent:/ }).click();
+  await expect(page.getByRole('menuitemradio', { name: 'Scripted agent', exact: true })).toBeVisible();
+  await expect(page.getByRole('menuitemradio', { name: /^Codex/ })).toHaveCount(0);
+  await page.getByRole('menuitemradio', { name: 'Scripted agent', exact: true }).click();
   for (const [field, name] of Object.entries({ agent: 'Scripted agent', provider: 'OpenAI key', model: 'GPT-5.4' })) await expect(starter(page).locator(`[data-start-value="${field}"]`).getByText(name, { exact: true })).toBeVisible();
 });
 
@@ -343,10 +344,10 @@ test('a way that cannot be had is off with the server’s reason, and a refusal 
   await page.mouse.move(0, 0);
 
   // A model that the provider lists and the person may not use is there too, off, with why.
-  await startDialog(page).getByRole('combobox', { name: 'Model' }).click();
-  const closedModel = page.getByRole('option', { name: 'GPT-4.1', exact: true });
+  await startDialog(page).getByRole('button', { name: /^Model:/ }).click();
+  const closedModel = page.getByRole('menuitemradio', { name: 'GPT-4.1', exact: true });
   await expect(closedModel).toBeDisabled();
-  await expect(closedModel).toContainText('it is switched off');
+  await expect(closedModel.locator('xpath=ancestor::li')).toContainText('switched off');
   await page.keyboard.press('Escape');
 
   // The environment loses what the harness works through after the answer was read: the server refuses the way that was ticked.
@@ -370,7 +371,7 @@ test('a new environment is made from the dialog, chosen, and the thread is start
   await make.getByRole('combobox', { name: 'Host' }).click();
   const closed = page.getByRole('option', { name: /build-host/ });
   await expect(closed).toBeDisabled();
-  await expect(closed).toContainText('Not accepting new units');
+  await expect(closed).toContainText('Not accepting new environments');
   await page.keyboard.press('Escape');
 
   await make.getByRole('textbox', { name: 'Name' }).fill('Scratch');
@@ -383,8 +384,9 @@ test('a new environment is made from the dialog, chosen, and the thread is start
 
   await startDialog(page).getByRole('button', { name: 'Create thread' }).click();
   await openedThread(page);
-  const request = (await requestsOf('POST', new RegExp(`/topics/${ACME.fixLogin}/threads$`)))[0]?.body as { environment?: { use?: string } };
-  expect(request.environment?.use).not.toBe(RUNS_ON.workspace);
+  const request = (await requestsOf('POST', new RegExp(`/topics/${ACME.fixLogin}/threads$`)))[0]?.body as { environment?: { use?: { resource: { id: string } } } };
+  expect(request.environment?.use?.resource.id).toBeTruthy();
+  expect(request.environment?.use?.resource.id).not.toBe(RUNS_ON.workspace);
   await expect(page.getByRole('contentinfo', { name: 'Status' }).getByRole('button', { name: 'Environment: Scratch', exact: true })).toBeVisible();
 });
 

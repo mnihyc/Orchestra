@@ -162,9 +162,15 @@ async fn a_thread_with_history_is_sent_to_a_switch_and_is_left_as_it_is() {
         .problem();
     assert_eq!(refused.code, ErrorCode::ThreadUseSwitch);
     let elsewhere = another_environment(&s, "Second", Some(s.rig.machine_id)).await;
-    let refused = place(&s, &s.ada, thread, EnvironmentChoice::Use(elsewhere), None)
-        .await
-        .problem();
+    let refused = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(elsewhere),
+        None,
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::ThreadUseSwitch);
     let (segment_agent, segment_provider, segment_environment, _) = segment_of(&s, thread).await;
     assert_eq!(
@@ -314,7 +320,7 @@ async fn somebody_who_does_not_manage_the_thread_is_refused_with_what_is_missing
         &s,
         &s.cai,
         thread,
-        EnvironmentChoice::Use(s.on.environment),
+        EnvironmentChoice::existing(s.on.environment),
         None,
     )
     .await
@@ -449,7 +455,7 @@ async fn a_thread_without_history_is_put_into_another_environment_that_its_calle
         &s,
         &s.ada,
         thread,
-        EnvironmentChoice::Use(second),
+        EnvironmentChoice::existing(second),
         Some("api/v2"),
     )
     .await
@@ -483,7 +489,7 @@ async fn a_thread_that_joins_an_environment_without_naming_a_directory_gets_the_
                 arrangement: None,
             }),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(second)),
+            environment: Some(EnvironmentChoice::existing(second)),
             directory: Some("shared/dir".to_owned()),
             ..CreateThread::default()
         })
@@ -492,9 +498,15 @@ async fn a_thread_that_joins_an_environment_without_naming_a_directory_gets_the_
         .ok()
         .into_full()
         .unwrap();
-    let put = place(&s, &s.ada, thread, EnvironmentChoice::Use(second), None)
-        .await
-        .ok();
+    let put = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(second),
+        None,
+    )
+    .await
+    .ok();
     assert_eq!(put.directory, "shared/dir");
 }
 
@@ -541,7 +553,7 @@ async fn a_thread_is_made_in_an_environment_only_where_the_entry_lets_work_run()
                     arrangement: None,
                 }),
                 model: Some(MODEL.to_owned()),
-                environment: Some(EnvironmentChoice::Use(environment)),
+                environment: Some(EnvironmentChoice::existing(environment)),
                 directory: Some("dan/dir".to_owned()),
                 ..CreateThread::default()
             })
@@ -564,7 +576,7 @@ async fn a_directory_that_leaves_the_workspace_is_refused() {
             &s,
             &s.ada,
             thread,
-            EnvironmentChoice::Use(second),
+            EnvironmentChoice::existing(second),
             Some(directory),
         )
         .await
@@ -579,7 +591,7 @@ async fn an_environment_the_caller_does_not_manage_is_refused_with_what_is_missi
     let thread = s.thread().await.base.id;
     names(&s, "node", thread, "thread.manage", &s.eve, json!({})).await;
     let hers = a_directory_on_a_machine(&s, "Ada's laptop").await;
-    let refused = place(&s, &s.eve, thread, EnvironmentChoice::Use(hers), None)
+    let refused = place(&s, &s.eve, thread, EnvironmentChoice::existing(hers), None)
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
@@ -592,9 +604,15 @@ async fn an_environment_the_agent_cannot_work_in_is_refused_and_the_thread_stays
     let thread = s.thread().await.base.id;
     // On no machine, the harness cannot run beside its tools, and nothing offers it a way.
     let nowhere = another_environment(&s, "Nowhere", None).await;
-    let refused = place(&s, &s.ada, thread, EnvironmentChoice::Use(nowhere), None)
-        .await
-        .problem();
+    let refused = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(nowhere),
+        None,
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::BindingIncompatible);
     assert!(refused.extra.get("reason").is_some());
     let (_, _, segment_environment, _) = segment_of(&s, thread).await;
@@ -611,9 +629,15 @@ async fn an_environment_whose_removal_is_scheduled_takes_no_thread() {
         .execute(s.rig.db.pool())
         .await
         .unwrap();
-    let refused = place(&s, &s.ada, thread, EnvironmentChoice::Use(doomed), None)
-        .await
-        .problem();
+    let refused = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(doomed),
+        None,
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::RequestInvalid);
 }
 

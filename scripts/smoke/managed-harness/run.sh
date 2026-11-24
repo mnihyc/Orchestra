@@ -276,7 +276,7 @@ EOF
 # thread NAME AGENT DIRECTORY: a thread of the harness in the environment, its key at the provider.
 make_thread() {
   call POST "/topics/$TOPIC/threads" "$(jq -cn --arg name "$1" --arg agent "$2" --arg provider "$PROVIDER" --arg env "$ENV_ID" --arg dir "$3" \
-    '{name:$name,binding:{agent_id:$agent,provider_id:$provider,arrangement:"key_separated"},model:"mock-large",environment:{use:$env},directory:$dir}')" | jq -r .id
+    '{name:$name,binding:{agent_id:$agent,provider_id:$provider,arrangement:"key_separated"},model:"mock-large",environment:{use:{type:"single",resource:{kind:"environment",id:$env}}},directory:$dir}')" | jq -r .id
 }
 # turn THREAD TEXT FILE OPTION: one turn through the socket of the web edge, every approval decided as the person would,
 # with the option of that name: each harness's adapter names the ways to allow a request.
@@ -304,7 +304,7 @@ expect "and belongs to the account of the unit" "agent" "$(docker exec "$UNIT" s
 
 # Looked at, not yet judged: what a thread of Codex is bound as when nobody names an arrangement.
 UNNAMED="$(call POST "/topics/$TOPIC/threads" "$(jq -cn --arg agent "$CODEX_AGENT" --arg provider "$PROVIDER" --arg env "$ENV_ID" \
-  '{name:"Codex, no arrangement named",binding:{agent_id:$agent,provider_id:$provider},model:"mock-large",environment:{use:$env},directory:"unnamed"}')" | jq -r .id)"
+  '{name:"Codex, no arrangement named",binding:{agent_id:$agent,provider_id:$provider},model:"mock-large",environment:{use:{type:"single",resource:{kind:"environment",id:$env}}},directory:"unnamed"}')" | jq -r .id)"
 say "INFO a thread of Codex made without naming an arrangement is bound as: $(call GET "/nodes/$UNNAMED" | jq -c '{arrangement: .binding.arrangement, executor: .binding.isolation.executor}')"
 
 step "a thread of Claude Code whose harness runs in the unit, and a turn of it"
@@ -394,7 +394,7 @@ if [ -n "${ORCH_HARNESS_REAL_ENV:-}" ]; then
     real_provider_is_ready || { say "the provider is not ready: no request is made to $pair"; continue; }
     IFS=: read -r kind agent model title <<< "$pair"
     thread="$(call POST "/topics/$TOPIC/threads" "$(jq -cn --arg name "$title, a real model" --arg agent "$agent" --arg provider "$REAL_PROVIDER" --arg env "$ENV_ID" --arg model "$model" --arg dir "real-$kind" \
-      '{name:$name,binding:{agent_id:$agent,provider_id:$provider,arrangement:"key_separated"},model:$model,environment:{use:$env},directory:$dir}')" | jq -r .id)"
+      '{name:$name,binding:{agent_id:$agent,provider_id:$provider,arrangement:"key_separated"},model:$model,environment:{use:{type:"single",resource:{kind:"environment",id:$env}}},directory:$dir}')" | jq -r .id)"
     check "$kind: a thread on the real model" test -n "$thread" -a "$thread" != null
     if turn "$thread" "Reply with the single word: ready" "$WORK/real-$kind.jsonl" once; then pass "$kind: the turn completed"; else fail "$kind: the turn completed"; cat "$WORK/real-$kind.jsonl" >&2; fi
     check "$kind: the model answered" jq -e 'select(.event == "item" and .kind == "agent_message" and (.summary | test("ready"; "i")))' "$WORK/real-$kind.jsonl"

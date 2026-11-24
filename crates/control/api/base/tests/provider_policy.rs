@@ -63,7 +63,7 @@ async fn owning_a_provider_does_not_bypass_the_destinations_address_policy_at_cr
                 arrangement: None,
             }),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()

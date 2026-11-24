@@ -154,7 +154,7 @@ subscription_case() {
       subscription_require "$kind: the chosen model is explicitly enabled" api PATCH "/providers/$provider/models/$model_id" '{"enabled":true}' || return 1
     fi
     thread="$(call POST "/topics/$SUBSCRIPTION_TOPIC/threads" "$(jq -cn --arg kind "$kind" --arg provider "$provider" --arg agent "$agent" --arg env "$ENV_ID" --arg model "$model" \
-      '{name:("Subscription proof: " + $kind),binding:{provider_id:$provider,agent_id:$agent,arrangement:"separated"},environment:{use:$env},directory:("subscription-" + $kind),model:$model}')" | jq -r .id)"
+      '{name:("Subscription proof: " + $kind),binding:{provider_id:$provider,agent_id:$agent,arrangement:"separated"},environment:{use:{type:"single",resource:{kind:"environment",id:$env}}},directory:("subscription-" + $kind),model:$model}')" | jq -r .id)"
     subscription_uuid "$thread" || return 1
     log="$WORK/subscription-$mode-$kind-first.jsonl"
     subscription_turn "$thread" "$log" || { fail "$kind: the first real subscription turn did not complete"; return 1; }

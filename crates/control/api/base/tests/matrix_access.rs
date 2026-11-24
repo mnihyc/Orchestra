@@ -226,7 +226,7 @@ async fn run(
                 arrangement: None,
             }),
             model: Some(MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(scene.on.environment)),
+            environment: Some(EnvironmentChoice::existing(scene.on.environment)),
             access: Some(ThreadAccess::Change(preset(
                 catalogue,
                 topic,

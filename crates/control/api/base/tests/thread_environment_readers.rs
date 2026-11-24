@@ -32,7 +32,7 @@ fn body(s: &Scene, environment: Id) -> CreateThread {
         name: Some("Readers welcomed at birth".into()),
         binding: Some(CreateThreadBinding { agent_id: s.on.agent, provider_id: s.on.provider, arrangement: None }),
         model: Some(MODEL.into()),
-        environment: Some(EnvironmentChoice::Use(environment)),
+        environment: Some(EnvironmentChoice::existing(environment)),
         prepare_source: Some(false),
         agent_access: Some(AgentAccessChoice { where_: AgentAccessWhere::Nothing, parts: Default::default() }),
         access: Some(ThreadAccess::Change(serde_json::from_value(json!({
@@ -512,7 +512,11 @@ async fn a_stricter_environment_external_lifetime_refuses_the_gift_without_hidin
     .id;
     for (place, key, value) in [
         (s.tree.org.base.id, "sharing.allow_external", json!(true)),
-        (s.tree.topic.base.id, "sharing.external_max_days", json!(1)),
+        (
+            s.tree.topic.base.id,
+            "sharing.external_max_minutes",
+            json!(1440),
+        ),
     ] {
         orch_db::queries::settings::put(
             &mut *s.rig.world.conn().await,

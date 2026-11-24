@@ -156,6 +156,240 @@ fn wanted(team: &Team, name: &str) -> NewEnvironment {
     }
 }
 
+#[tokio::test]
+async fn ten_creations_through_a_lent_host_pool_share_one_last_slot_and_keep_the_admitted_host() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    contend_for_one_pool_slot(
+        &world,
+        &t,
+        &[&t.c.viewer],
+        ("user", Some(t.c.viewer.id()), None),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn three_people_share_one_last_host_pool_slot_across_ten_concurrent_creations() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    let second = places::person(&world, "second-builder").await;
+    let third = places::person(&world, "third-builder").await;
+    for person in [&second, &third] {
+        places::join(&world, t.c.acme, t.c.acme, person, "viewer", &t.c.boss).await;
+    }
+    contend_for_one_pool_slot(
+        &world,
+        &t,
+        &[&t.c.viewer, &second, &third],
+        ("role", Some(t.topic), Some("developer")),
+    )
+    .await;
+}
+
+async fn contend_for_one_pool_slot(
+    world: &World,
+    t: &Team,
+    builders: &[&Who],
+    holder: (&str, Option<Id>, Option<&str>),
+) {
+    use orch_access_contract::permissions::Permission;
+    use orch_provider_contract::pools::{Kind, Target};
+    use std::sync::Arc;
+    let other = a_host(world, &t.c.admin, t.c.acme, "Second build box", 32768).await;
+    for person in builders {
+        places::give_role(world, t.topic, person, "developer", &t.c.boss).await;
+        resources::name_person(world, "template", t.template, "template.use", person.id()).await;
+    }
+    let mut conn = world.conn().await;
+    let pool = fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(t.c.admin.id()),
+        Some(t.c.acme),
+        "Shared build hosts",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Pool.into(),
+            id: pool,
+        },
+        t.c.admin.id(),
+        NewAccess::OnlyMe,
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool)
+        .bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":true,"members":[],"config":{}}))
+        .execute(&mut *conn).await.unwrap();
+    for (position, host) in [t.host, other].into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,$3,$4,true)",
+        )
+        .bind(pool)
+        .bind(orch_types::new_id())
+        .bind(i64::try_from(position).unwrap())
+        .bind(json!({"type":"single","resource":{"kind":"host","id":host}}))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO pool_lending(id,resource_kind,resource_id,giver_id,matcher,options) VALUES($1,'host',$2,$3,$4,'{}')")
+            .bind(orch_types::new_id()).bind(host).bind(t.c.admin.id()).bind(json!({"kind":"pool","pool_id":pool})).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let entry =
+        resources::name_on_page(world, "pool", pool, Permission::PoolUse.as_str(), holder).await;
+    sqlx::query("UPDATE permission_entries SET options=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(json!({"host":{"max_environments":1}}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    {
+        let mut conn = world.conn().await;
+        for person in builders {
+            let principal = orch_authz::Principal::load(
+                &mut conn,
+                orch_authz::Caller::session(person.id()),
+                Time::new(world.now()),
+            )
+            .await
+            .unwrap();
+            let allowances = orch_authz::pools::pool_allowances(
+                &mut conn,
+                &principal,
+                pool,
+                Some(t.topic),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                allowances
+                    .iter()
+                    .any(|(source, bounds)| *source == Some(entry)
+                        && bounds.host.max_environments == Some(1)),
+                "every contender must hold the same limited pool grant before the race"
+            );
+        }
+    }
+    let target = Target::Pool {
+        id: pool,
+        kind: Kind::Host,
+    };
+    let barrier = Arc::new(tokio::sync::Barrier::new(10));
+    let mut requests = Vec::new();
+    for index in 0..10 {
+        let app = world.app.clone();
+        let person = builders[index % builders.len()];
+        let actor = person.id();
+        let token = person.token.clone();
+        let barrier = barrier.clone();
+        let mut body = wanted(t, &format!("Pool last slot {index}"));
+        body.host_id = Some(Some(target.clone()));
+        requests.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let reply = app
+                .call(EnvironmentCreate, &[])
+                .token(&token)
+                .body(&body)
+                .send_bytes()
+                .await;
+            (actor, reply)
+        }));
+    }
+    let mut admitted = Vec::new();
+    for request in requests {
+        let (actor, reply) = request.await.unwrap();
+        if reply.status.as_u16() == 201 {
+            admitted.push(actor);
+        } else {
+            let problem: orch_api_contract::common::Problem =
+                serde_json::from_slice(&reply.raw).unwrap();
+            assert_eq!(
+                problem.code,
+                ErrorCode::PlanBlocked,
+                "{}",
+                String::from_utf8_lossy(&reply.raw)
+            );
+        }
+    }
+    assert_eq!(
+        admitted.len(),
+        1,
+        "the post-lock count holds across both physical hosts"
+    );
+    let (environment, chosen, leaf): (Id, Id, serde_json::Value) = sqlx::query_as(
+        "SELECT e.id,(j.plan->>'admitted_host')::uuid,c.leaf FROM environments e
+         JOIN jobs j ON j.environment_id=e.id AND j.kind='environment_provision'
+         JOIN pool_choices c ON c.id=(j.plan->>'pool_choice')::uuid
+         WHERE e.name LIKE 'Pool last slot %'",
+    )
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!([t.host, other].contains(&chosen));
+    assert_eq!(leaf, json!({"kind":"host","id":chosen}));
+    let counted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM environment_creation_entries WHERE environment_id=$1 AND entry_id=$2",
+    )
+    .bind(environment)
+    .bind(entry)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(counted, 1);
+    let actors: Vec<_> = builders.iter().map(|person| person.id()).collect();
+    let choices: Vec<Id> = sqlx::query_scalar(
+        "SELECT actor_id FROM pool_choices WHERE actor_id=ANY($1) AND source->>'kind'='environment_creation'",
+    )
+    .bind(&actors[..])
+    .fetch_all(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        choices, admitted,
+        "failed creations roll their draws and rotation back"
+    );
+    sqlx::query(
+        "UPDATE pools SET definition=jsonb_set(definition,'{enabled}','false') WHERE id=$1",
+    )
+    .bind(pool)
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    resources::name_person(world, "host", t.host, "host.use", t.c.viewer.id()).await;
+    let mut body = wanted(t, "Closed pool cannot become automatic");
+    body.host_id = Some(Some(target));
+    let refused = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.viewer.token)
+        .body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::PlanBlocked);
+    body.name = Some("Explicit single host remains available".into());
+    body.host_id = Some(Some(Target::host(t.host)));
+    assert_eq!(
+        world
+            .app
+            .call(EnvironmentCreate, &[])
+            .token(&t.c.viewer.token)
+            .body(&body)
+            .send()
+            .await
+            .status
+            .as_u16(),
+        201
+    );
+}
+
 /// A reported forwarded harness: the template's executor promise is checked again at actual admission.
 async fn start_binding(world: &World, t: &Team) -> orch_api_contract::nodes::CreateThreadBinding {
     let owner = &t.c.admin;
@@ -708,7 +942,7 @@ async fn an_explicit_empty_live_executor_report_overrules_the_templates_initial_
         .body(&CreateThread {
             binding: Some(binding),
             model: Some("atomic-1".into()),
-            environment: Some(EnvironmentChoice::Use(environment.base.id)),
+            environment: Some(EnvironmentChoice::existing(environment.base.id)),
             ..Default::default()
         })
         .send()
@@ -832,7 +1066,7 @@ async fn creation_in_an_explicit_place_works_with_multiple_orgs_and_a_missing_pl
             .any(|fault| fault["path"] == "home_node_id")
     );
     request.home_node_id = Some(t.topic);
-    request.host_id = Some(Some(t.host));
+    request.host_id = Some(Some(orch_provider_contract::pools::Target::host(t.host)));
     let made = world
         .app
         .call(EnvironmentCreate, &[])
@@ -847,7 +1081,10 @@ async fn creation_in_an_explicit_place_works_with_multiple_orgs_and_a_missing_pl
     assert_eq!(made.template.unwrap().id, t.template);
     // The host it was asked for is its own value; it is shown as its host once its unit has volumes
     // there.
-    assert_eq!(made.config["env.host_id"], json!(t.host));
+    assert_eq!(
+        made.config["env.host_id"],
+        json!(orch_provider_contract::pools::Target::host(t.host))
+    );
     assert!(made.host.is_none());
 }
 
@@ -1123,10 +1360,36 @@ async fn restart_is_one_manager_job_on_the_existing_unit_and_rejects_an_overlap_
         .send()
         .await;
     assert_eq!(malformed.status, 400);
+    let key_id = orch_types::new_id();
+    // A key is bound to its stored identity: the bearer carries the row's ID.
+    let key = orch_api_core::middleware::authentication::new_api_token(key_id);
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"environment","id":made.base.id,"reach":"self"},
+            "allow":[{"operation":"EnvironmentRestart","actions":["manage"]}]
+        }]}))
+        .unwrap();
+    assert!(policy.validate().is_empty());
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut *world.conn().await,
+        &orch_db::queries::identity::NewApiToken {
+            id: key_id,
+            user_id: t.c.admin.id(),
+            name: "Only this restart",
+            token_hash: &orch_api_core::middleware::authentication::token_hash(&key),
+            scopes: &[],
+            node_id: None,
+            at: world.now(),
+            expires_at: None,
+        },
+        Some(&json!(policy)),
+    )
+    .await
+    .unwrap();
     let reply = world
         .app
         .call(EnvironmentRestart, &[&made.base.id])
-        .token(&t.c.admin.token)
+        .token(&key)
         .body(&EnvironmentRestartBody {
             mode: EnvironmentRestartMode::Wait,
         })
@@ -1142,6 +1405,19 @@ async fn restart_is_one_manager_job_on_the_existing_unit_and_rejects_an_overlap_
     assert_eq!(row.plan["runtime"], json!(runtime));
     assert_eq!(row.plan["restart_mode"], "wait");
     assert_eq!(row.created_by, Some(t.c.admin.id()));
+    assert!(
+        orch_engine::jobs::lifecycle_commands::environment::present(&row),
+        "the deferred restart must retain its own operation instead of a caller-only fallback"
+    );
+    let retained: orch_engine::operation_scope::http_origin::HttpOrigin =
+        serde_json::from_value(row.plan["environment_lifecycle"]["accepted"].clone()).unwrap();
+    assert_eq!(retained.origin().operation(), "EnvironmentRestart");
+    assert_eq!(retained.origin().user(), t.c.admin.id());
+    assert!(
+        matches!(retained.credential(),
+        orch_engine::operation_scope::request_origin::Credential::Token { id, .. } if *id == key_id),
+        "the actual original key must survive into later native phases"
+    );
     let overlap = world
         .app
         .call(EnvironmentRestart, &[&made.base.id])
@@ -1175,6 +1451,48 @@ async fn make(world: &World, team: &Team, by: &Who, name: &str) -> Environment {
 }
 
 #[tokio::test]
+async fn a_known_unit_recipe_remains_a_unit_when_its_hosts_driver_report_is_missing() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_provider_contract::pools::Target::host(t.host)),
+        )
+        .await;
+    let made = make(&world, &t, &t.c.admin, "Waiting for driver report").await;
+    sqlx::query("UPDATE hosts SET drivers='{}'::jsonb WHERE id=$1")
+        .bind(t.host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let shown = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        shown.facts["environment_descriptor"]["lifecycle"],
+        json!("unit"),
+        "the template recipe is independent of a cached native driver report"
+    );
+    assert!(
+        shown.facts["environment_descriptor"]["name"].is_null(),
+        "missing native support is not invented"
+    );
+    let mut conn = world.conn().await;
+    assert!(
+        orch_db::queries::environment_facts::has_unit(&mut conn, made.base.id)
+            .await
+            .unwrap(),
+        "Start and Stop do not misclassify the unit as a directory"
+    );
+}
+
+#[tokio::test]
 async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_read() {
     let world = World::new().await;
     let t = team(&world).await;
@@ -1187,7 +1505,7 @@ async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_r
     let making = make(&world, &t, &t.c.admin, "Committed before response");
     let inspect = async {
         rig::eventually("the response's blocked component update read", || async {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates%')")
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id%FROM component_updates%')")
                 .fetch_one(&world.db.pool).await.unwrap()
         }).await;
         let committed: (Id, Id) = sqlx::query_as(
@@ -1233,6 +1551,8 @@ async fn confirmed_immediate_delete_returns_its_durable_job_and_no_predicted_exp
             .query(&EnvironmentDeleteQuery {
                 confirm: "Delete now".into(),
                 at: None,
+                expected_keep_days: None,
+                expected_revision: None,
             });
         async move { request.send().await }
     };
@@ -1374,7 +1694,7 @@ async fn a_host_that_is_named_and_cannot_take_the_environment_is_not_replaced_by
         .await
         .unwrap();
     let mut asking = wanted(&t, "Main");
-    asking.host_id = Some(Some(busy));
+    asking.host_id = Some(Some(orch_provider_contract::pools::Target::host(busy)));
     let blocked = world
         .app
         .call(EnvironmentCreate, &[])
@@ -1612,6 +1932,24 @@ async fn the_places_of_a_topic_are_the_hosts_the_caller_may_use_with_why_one_can
     assert_eq!(hosts[0].owner.as_ref().unwrap().username, "admin");
     assert_eq!(hosts[0].host.address, "acme.admin.Build box");
     assert_eq!(hosts[0].capacity.memory_mb, 16_384);
+    let captured = hosts[0]
+        .calculation
+        .as_ref()
+        .expect("the scheduler supplies its calculation");
+    assert_eq!(captured.capacities.memory_mb, 16_384);
+    assert!(
+        captured.capacities_as_of.is_none(),
+        "fixture declarations carry no report date"
+    );
+    let mut old = serde_json::to_value(hosts[0]).unwrap();
+    old.as_object_mut().unwrap().remove("calculation");
+    assert!(
+        serde_json::from_value::<orch_api_contract::environment::PlaceHost>(old)
+            .unwrap()
+            .calculation
+            .is_none()
+    );
+
     assert!(!hosts[1].usable && !hosts[1].automatic);
     assert_eq!(hosts[1].reasons, [HostReason::Unschedulable]);
     let environments: Vec<_> = listed
@@ -1752,7 +2090,8 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         .token(&t.c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -1762,6 +2101,45 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         Some(&second.base.id),
         "the default first"
     );
+    let searched = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: Some("First".into()),
+            limit: Some(1),
+            cursor: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(searched.items.len(), 1);
+    assert_eq!(searched.items[0].base.id, first.base.id);
+    let one = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(one.items[0].base.id, second.base.id);
+    let rest = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            limit: Some(1),
+            cursor: one.next_cursor,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(rest.items[0].base.id, first.base.id);
     assert_ne!(first.base.id, second.base.id);
     // Only whoever manages the topic names its default, and nothing changes for the rest.
     let refused = set(Some(first.base.id), &t.c.viewer).await.problem();
@@ -1772,7 +2150,8 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         .token(&t.c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(still[0].base.id, second.base.id);
     let cleared = set(None, &t.c.admin).await.ok();
     assert_eq!(cleared.default_environment_id, None);
@@ -1909,6 +2288,8 @@ async fn keeping_awake_counts_as_activity_and_keeping_withdraws_a_removal_that_h
         .query(&EnvironmentDeleteQuery {
             confirm: "Main".to_owned(),
             at: Some(Time::new(world.now() + chrono::Duration::days(1))),
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await
@@ -1931,6 +2312,200 @@ async fn keeping_awake_counts_as_activity_and_keeping_withdraws_a_removal_that_h
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
+}
+
+#[tokio::test]
+async fn running_native_work_defers_the_reported_idle_deadline_until_the_work_ends() {
+    use orch_db::queries::threads::{self, NewSegment};
+    use orch_link_contract::background::{BackgroundTask, BackgroundTaskKind, BackgroundTaskState};
+
+    let world = World::new().await;
+    let t = team(&world).await;
+    let made = make(&world, &t, &t.c.admin, "Native work").await;
+    let binding = start_binding(&world, &t).await;
+    sqlx::query("UPDATE jobs SET state='cancelled',finished_at=now() WHERE environment_id=$1")
+        .bind(made.base.id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,unit_name,environment_id,driver,template_id,spec_hash,generation,state,volumes) VALUES($1,'environment',$2,'idle-work-unit',$3,'docker',$4,$5,1,'running','{}')")
+        .bind(orch_types::new_id()).bind(t.host).bind(made.base.id).bind(t.template).bind([0_u8;32].as_slice())
+        .execute(&world.db.pool).await.unwrap();
+    sqlx::query("UPDATE environments SET status='running',generation=1,config=$2,last_activity_at=$3 WHERE id=$1")
+        .bind(made.base.id).bind(json!({"env.idle_stop_minutes":60})).bind(world.now()-chrono::Duration::hours(2))
+        .execute(&world.db.pool).await.unwrap();
+    let idle: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        idle.idle_stop_at.is_some(),
+        "the fixture has an enabled unit idle policy"
+    );
+
+    let thread = orch_types::new_id();
+    let segment = orch_types::new_id();
+    let item = orch_types::new_id();
+    let mut conn = world.conn().await;
+    assert!(
+        threads::insert_thread(
+            &mut conn,
+            thread,
+            t.topic,
+            "Background work",
+            t.c.admin.id(),
+            world.now()
+        )
+        .await
+        .unwrap()
+    );
+    threads::insert_segment(
+        &mut conn,
+        &NewSegment {
+            id: segment,
+            thread_id: thread,
+            agent_id: binding.agent_id,
+            provider_id: binding.provider_id,
+            environment_id: made.base.id,
+            env_generation: 1,
+            arrangement: "separated",
+            executor: Some("orch-exec"),
+            tool_set: None,
+            credential_path: "forwarded",
+            native_session_ref: Some("idle-work-session"),
+            started_by: Some(t.c.admin.id()),
+            started_at: world.now(),
+        },
+        1,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE threads SET environment_id=$2,current_segment_id=$3,agent_id=$4,provider_id=$5,state='idle' WHERE node_id=$1")
+        .bind(thread).bind(made.base.id).bind(segment).bind(binding.agent_id).bind(binding.provider_id).execute(&mut *conn).await.unwrap();
+    let task = BackgroundTask {
+        id: "native-work".into(),
+        run_id: None,
+        native_item_ref: "background-item".into(),
+        origin_turn: orch_types::new_id(),
+        kind: BackgroundTaskKind::Command,
+        label: "Indexing".into(),
+        name: None,
+        nickname: None,
+        role: None,
+        state: BackgroundTaskState::Running,
+        exit_code: None,
+        can_end: false,
+    };
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,stream,kind,status,payload,seq_created,seq_updated) VALUES($1,$2,$3,'main','tool_call','completed',$4,1,1)")
+        .bind(item).bind(thread).bind(segment).bind(json!({"name":"run","arguments":{},"background_tasks":{"work":{"task":task}}}))
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let held: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        held.idle_stop_at.is_none(),
+        "running native work holds the idle stop"
+    );
+    assert_eq!(
+        serde_json::to_value(&held).unwrap()["idle_stop_deferred"],
+        true
+    );
+
+    sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
+        .bind(made.base.id)
+        .bind(json!({"env.idle_stop_minutes":0}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let off: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&off).unwrap()["idle_stop_deferred"],
+        false,
+        "an off policy is not a deferred stop"
+    );
+    sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
+        .bind(made.base.id)
+        .bind(json!({"env.idle_stop_minutes":60}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{background_tasks,work,task,state}', '\"completed\"') WHERE id=$1").bind(item).execute(&world.db.pool).await.unwrap();
+    let ready: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(ready.idle_stop_at.is_some());
+    assert_eq!(
+        serde_json::to_value(&ready).unwrap()["idle_stop_deferred"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn a_removal_uses_the_previewed_recovery_window_and_refuses_a_changed_policy_before_effects()
+{
+    let mut config = orch_config::ServerConfig::default();
+    config.retention.soft_delete_days = 1;
+    let world = World::with(config).await;
+    let t = team(&world).await;
+    sqlx::query("DELETE FROM settings WHERE key='env.removed_keep_days'")
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let made = make(&world, &t, &t.c.admin, "Recovery window").await;
+    sqlx::query("UPDATE jobs SET state='cancelled',finished_at=$2 WHERE environment_id=$1")
+        .bind(made.base.id)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&made).unwrap()["removal_keep_days"],
+        1,
+        "the displayed default is bounded by deployment retention"
+    );
+    sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,'env.removed_keep_days','0') ON CONFLICT(node_id,key) DO UPDATE SET value='0'")
+        .bind(t.c.acme).execute(&world.db.pool).await.unwrap();
+    let refused = world.app.call(EnvironmentDelete, &[&made.base.id]).token(&t.c.admin.token)
+        .query(&json!({"confirm":"Recovery window","expected_keep_days":1,"expected_revision":made.revision}))
+        .send().await.problem();
+    assert_eq!(refused.code, ErrorCode::ConflictStaleRevision);
+    let current: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        current.remove_at.is_none(),
+        "no removal was accepted under a different promise"
+    );
+    assert_eq!(
+        serde_json::to_value(&current).unwrap()["removal_keep_days"],
+        0
+    );
+    let accepted: Environment = world.app.call(EnvironmentDelete, &[&made.base.id]).token(&t.c.admin.token)
+        .query(&json!({"confirm":"Recovery window","expected_keep_days":0,"expected_revision":current.revision}))
+        .send().await.ok();
+    assert_eq!(accepted.removal.unwrap().keep_days, 0);
 }
 
 #[tokio::test]
@@ -2006,10 +2581,12 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .token(&t.c.admin.token)
         .query(&HostRuntimeListQuery {
             kind: Some(UnitKind::Environment),
+            ..Default::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].unit_name, "orch-environment-0123456789ab");
     assert_eq!(listed[0].environment.as_ref().unwrap().id, made.base.id);
@@ -2020,10 +2597,12 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .token(&t.c.admin.token)
         .query(&HostRuntimeListQuery {
             kind: Some(UnitKind::Provider),
+            ..Default::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(providers.is_empty());
     // Somebody who does not manage the host sees nothing of it.
     let refused = world
@@ -2043,11 +2622,37 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "another".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
         .problem();
     assert_eq!(wrong.code, ErrorCode::RequestInvalid);
+    // By force is for a provider's unit: for an environment's it is refused with its reason, and changes nothing.
+    let forced = world
+        .app
+        .call(HostRuntimeDelete, &[&t.host, &runtime])
+        .token(&t.c.admin.token)
+        .query(&HostRuntimeDeleteQuery {
+            confirm: "orch-environment-0123456789ab".to_owned(),
+            volumes: None,
+            force: Some(true),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(forced.code, ErrorCode::PlanBlocked);
+    assert_eq!(
+        forced
+            .extra
+            .get("reason")
+            .and_then(|reason| reason.as_str()),
+        Some("force_environment")
+    );
+    assert_eq!(
+        forced.extra.get("can_force"),
+        Some(&serde_json::Value::Bool(false))
+    );
     world
         .app
         .call(HostRuntimeDelete, &[&t.host, &runtime])
@@ -2055,6 +2660,7 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "orch-environment-0123456789ab".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
@@ -2144,5 +2750,211 @@ async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_
         implicit.code,
         ErrorCode::EnvironmentNoneUsable,
         "{implicit:?}"
+    );
+}
+
+#[tokio::test]
+async fn choosing_another_template_checks_the_agent_and_host_that_will_actually_start() {
+    use orch_api_contract::binding::NodeBindingOptionsGet;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let alternate = a_template(&world, &t.c.admin, t.c.acme, "Agent ready").await;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{exec,offers}','[]') WHERE id=$1")
+        .bind(t.template)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_provider_contract::pools::Target::host(
+                orch_types::new_id()
+            )),
+        )
+        .await;
+    for (template, host, automatic, ready) in [
+        (t.template, Some(t.host), false, false),
+        (alternate, Some(t.host), false, true),
+        (alternate, Some(orch_types::new_id()), false, false),
+        (alternate, None, false, false),
+        (alternate, None, true, true),
+    ] {
+        let mut query =
+            json!({ "environment_new": true, "template_id": template, "host_auto": automatic });
+        if let Some(host) = host {
+            query["host_id"] = json!(host);
+        }
+        let offered = world
+            .app
+            .call(NodeBindingOptionsGet, &[&t.topic])
+            .token(&t.c.admin.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        let agent = offered
+            .providers
+            .iter()
+            .find(|row| row.provider.id == binding.provider_id)
+            .unwrap()
+            .agents
+            .iter()
+            .find(|row| row.agent.id == binding.agent_id)
+            .unwrap();
+        assert_eq!(
+            agent.usable, ready,
+            "the exact chosen template and host decide readiness"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_pool_manager_cancels_only_its_pending_placements_while_direct_host_users_keep_working() {
+    use orch_api_contract::{
+        environment::EnvironmentCreateResponse,
+        pools::{PoolUpdate, PoolUpdateBody},
+    };
+    use orch_provider_contract::pools::{Kind, Target};
+    let world = World::new().await;
+    let t = team(&world).await;
+    places::give_role(&world, t.topic, &t.c.viewer, "developer", &t.c.boss).await;
+    resources::name_person(
+        &world,
+        "template",
+        t.template,
+        "template.use",
+        t.c.viewer.id(),
+    )
+    .await;
+    resources::name_person(&world, "host", t.host, "host.use", t.c.viewer.id()).await;
+    let mut conn = world.conn().await;
+    let pool = fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(t.c.admin.id()),
+        Some(t.c.acme),
+        "Pending build pool",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Pool.into(),
+            id: pool,
+        },
+        t.c.admin.id(),
+        NewAccess::OnlyMe,
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool)
+        .bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,"members":[],"config":{}}))
+        .execute(&mut *conn).await.unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(orch_types::new_id())
+    .bind(json!({"type":"single","resource":{"kind":"host","id":t.host}}))
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    resources::name_person(&world, "pool", pool, "pool.use", t.c.viewer.id()).await;
+    let mut jobs = Vec::new();
+    for (name, target) in [
+        (
+            "Pending through pool",
+            Target::Pool {
+                id: pool,
+                kind: Kind::Host,
+            },
+        ),
+        ("Pending directly", Target::host(t.host)),
+    ] {
+        let mut body = wanted(&t, name);
+        body.host_id = Some(Some(target));
+        let made = world
+            .app
+            .call(EnvironmentCreate, &[])
+            .token(&t.c.viewer.token)
+            .body(&body)
+            .send()
+            .await
+            .ok();
+        let environment = match made {
+            EnvironmentCreateResponse::Full(environment) => environment.base.id,
+            EnvironmentCreateResponse::Receipt(receipt) => receipt.environment_id,
+        };
+        let id: Id = sqlx::query_scalar(
+            "SELECT id FROM jobs WHERE environment_id=$1 AND kind='environment_provision'",
+        )
+        .bind(environment)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        jobs.push(id);
+    }
+    world
+        .app
+        .call(PoolUpdate, &[&pool])
+        .token(&t.c.admin.token)
+        .body(&PoolUpdateBody {
+            expected_revision: 1,
+            name: "Pending build pool".into(),
+            description: String::new(),
+            enabled: false,
+            policy: Some(orch_provider_contract::pools::Policy::RoundRobin),
+            lend_members: false,
+            config: None,
+        })
+        .send()
+        .await
+        .ok();
+    let mut conn = world.conn().await;
+    let pooled = orch_db::queries::jobs::job(&mut conn, jobs[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let direct = orch_db::queries::jobs::job(&mut conn, jobs[1])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pooled.created_by, Some(t.c.viewer.id()));
+    assert_eq!(direct.created_by, Some(t.c.viewer.id()));
+    assert!(pooled.plan["pool_choice"].is_string());
+    assert!(direct.plan["pool_choice"].is_null());
+    assert!(
+        pooled.cancel_requested(),
+        "the manager closes the actual admitted pool job even when its actor still has direct Host Use"
+    );
+    assert!(
+        !direct.cancel_requested(),
+        "the direct peer does not borrow the pool's stop"
+    );
+    let disabled: bool = sqlx::query_scalar("SELECT disabled FROM hosts WHERE id=$1")
+        .bind(t.host)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert!(!disabled);
+    drop(conn);
+    let mut body = wanted(&t, "Direct work after pool disable");
+    body.host_id = Some(Some(Target::host(t.host)));
+    assert_eq!(
+        world
+            .app
+            .call(EnvironmentCreate, &[])
+            .token(&t.c.viewer.token)
+            .body(&body)
+            .send()
+            .await
+            .status
+            .as_u16(),
+        201
     );
 }

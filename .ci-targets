@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/unit/start-choices.test.ts tests/component/start-submit.test.tsx tests/component/start-environment-options.test.tsx tests/component/imported-thread-setup.test.tsx tests/component/start-receipt.test.tsx tests/unit/creation-receipt-helpers.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

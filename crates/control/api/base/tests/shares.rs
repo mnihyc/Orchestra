@@ -106,7 +106,7 @@ async fn thread_in(s: &Scene, by: &Who, topic: Id, name: &str) -> Thread {
                 arrangement: None,
             }),
             model: Some(rig::MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

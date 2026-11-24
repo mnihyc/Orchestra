@@ -14,7 +14,7 @@ use orch_api_contract::binding::EnvironmentChoice;
 use orch_api_contract::nodes::{
     CreateThread, CreateThreadBinding, ThreadCreate, TopicCreate, TopicCreateBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 use orch_db::queries::resources::access_fixtures as fixtures;
@@ -36,12 +36,13 @@ pub(crate) async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> String {
     let scope: orch_access_contract::key_scope::KeyScope =
         serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let scope = serde_json::to_value(scope).unwrap();
     create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Creator control",
             token_hash: &token_hash(&secret),
@@ -65,7 +66,7 @@ pub(crate) fn body(s: &Scene) -> CreateThread {
             arrangement: None,
         }),
         model: Some(MODEL.into()),
-        environment: Some(EnvironmentChoice::Use(s.on.environment)),
+        environment: Some(EnvironmentChoice::existing(s.on.environment)),
         prepare_source: Some(false),
         agent_access: Some(orch_api_contract::nodes::AgentAccessChoice {
             where_: orch_api_contract::nodes::AgentAccessWhere::Nothing,

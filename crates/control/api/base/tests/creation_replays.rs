@@ -1424,6 +1424,7 @@ async fn an_upload_session_creation_replays_its_generated_acknowledgement_and_ad
     let w = Desk::new().await;
     let token = new_id().to_string();
     let input = UploadSessionCreateBody {
+        to: None,
         size: 3,
         name: "one-upload.bin".into(),
         media_type: None,
@@ -1610,7 +1611,7 @@ async fn compound_project_start_replays_its_topic_and_first_thread_as_one_creati
                 arrangement: None,
             }),
             model: Some(rig::MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("web".into()),
             ..Default::default()
         }),
@@ -1944,7 +1945,7 @@ async fn repeated_thread_creation_returns_one_thread_and_current_read_only_or_re
             arrangement: None,
         }),
         model: Some(rig::MODEL.into()),
-        environment: Some(EnvironmentChoice::Use(s.on.environment)),
+        environment: Some(EnvironmentChoice::existing(s.on.environment)),
         directory: Some("web".into()),
         ..CreateThread::default()
     };

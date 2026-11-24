@@ -409,7 +409,7 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
                 arrangement: None,
             }),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(made.base.id)),
+            environment: Some(EnvironmentChoice::existing(made.base.id)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

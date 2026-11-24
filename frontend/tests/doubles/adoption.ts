@@ -96,7 +96,7 @@ export class AdoptionWorld implements Part {
     const made = this.world.threads.handle(person, 'POST', `/topics/${topicId}/threads`, new URLSearchParams(), {
       name: plan.name,
       binding: { provider_id: body.provider_id, agent_id: body.agent_id },
-      environment: { use: plan.environment.id },
+      environment: { use: { type: 'single', resource: { kind: 'environment', id: plan.environment.id } } },
       directory: plan.directory ?? '',
       model: plan.model ?? this.world.resources.modelsOf(String(body.provider_id)).find((model) => model.enabled)?.model_name,
     });
