@@ -1,3 +1,4 @@
+import { resourceImpactQuery } from '@/api/resource-impact';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 import { CopySetupResult, mcpCopySetup } from '@/features/duplicate/CopySetup';
@@ -12,6 +13,9 @@ import { Plug, Pencil, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { deleteMcp, mcpQuery, reimportMcp } from '@/api/resource-tools';
+import type { McpServer } from '@/generated/api-types';
+import { UpdateNotify } from '@/features/change/UpdateNotify';
+import { LibraryCounts } from '@/features/resources/Library';
 import { copyLinkAct, entriesOf, managedAct, shareAct } from '@/features/resources/acts';
 import { ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { Facts } from '@/features/resources/Facts';
@@ -37,6 +41,7 @@ import { connection } from './definition';
 import { McpOfferings } from './Offerings';
 import { McpEnabledIn } from './Enabled';
 import { mcpProgram } from './words';
+import { ApplicationPreview } from '@/features/storage/Impact';
 
 export { MCP_TABS, type McpTab };
 
@@ -49,7 +54,6 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
   const [removing, setRemoving] = useState(false);
   const [localTab, setLocalTab] = useState<McpTab>('overview');
   const reimport = useMutation({ mutationFn: () => reimportMcp(id) });
-  const remove = useMutation({ mutationFn: () => deleteMcp(id), onSuccess: () => { void navigate({ to: '/resources/mcp' }); } });
   if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const server = query.data;
   const entry = connection(readObject(JSON.stringify(server.spec)) ?? {});
@@ -87,7 +91,7 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
       ]),
     ]} /><JsonTree value={server.spec} label={t('resourceDetails.mcp.form.json')} /></ResourceDetails>
   </>;
-  return <Page><PageHeader adminAccess={server.access.admin_access} ownership={server} opening={{ kind: 'mcp_server', id: server.id }} back={back} title={server.name} lead={server.description} mark={<PlaceMark><Plug aria-hidden /></PlaceMark>}
+  return <Page><PageHeader compactResource facts={[t(server.enabled ? 'resourceDetails.on' : 'resourceDetails.off')]} adminAccess={server.access.admin_access} ownership={server} opening={{ kind: 'mcp_server', id: server.id }} back={back} title={server.name} lead={server.description} mark={<PlaceMark><Plug aria-hidden /></PlaceMark>}
     actions={<HeadingActs admin={admin} name={server.name} primary={null} edit={shown === 'settings' ? null : edit} menu={menu} />} />
     <Tabs label={t('resourceDetails.layout.tabs')} value={shown} onValueChange={onTab ?? setLocalTab} panelClassName="pt-4" tabs={[
       { value: 'overview', label: t('resourceDetails.overview'), panel: overview },
@@ -98,6 +102,29 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
       { value: 'access', label: t('agents.tabs.access'), panel: <ResourceAccess access={server.access} target={target} /> },
     ]} />
     {editing && <EditMcp server={server} onClose={() => setEditing(false)} />}
-    <ConfirmDialog admin={admin} open={removing} onOpenChange={setRemoving} title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: server.name })} confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</ConfirmDialog>
+    {removing && <DeleteMcpDialog server={server} onClose={() => setRemoving(false)} onRemoved={() => { void navigate({ to: '/resources/mcp' }); }} />}
   </Page>;
+}
+
+export function DeleteMcpDialog({ server, onClose, onRemoved }: { server: McpServer; onClose: () => void; onRemoved: () => void }) {
+  const { t } = useTranslation();
+  const impact = useQuery(resourceImpactQuery({ object: { kind: 'mcp_server', id: server.id }, model_id: null }, {operation_notice:true}));
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!==undefined)setNotifyChoice({review,value});};
+  const remove = useMutation({ mutationFn: () => notify && impact.data?.notification
+    ? deleteMcp(server.id, {notify:true, notification_review:impact.data.notification.preview_id})
+    : deleteMcp(server.id), onSuccess: onRemoved });
+  return <ConfirmDialog open onOpenChange={(next) => { if (!next) onClose(); }}
+    admin={adminSpec(server, server.environment === null ? 'mcp.manage' : 'environment.manage')}
+    title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: impact.data?.name ?? server.name })}
+    confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger
+    pending={remove.isPending} error={remove.error}
+    onConfirm={() => remove.mutate()}
+    footerStart={<UpdateNotify audience={impact.data?.notification?.audience} checked={notify} onChange={setNotify} disabled={remove.isPending} />}>
+    <div className="flex flex-col gap-2">
+      <span>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</span>
+      {impact.isPending ? <SkeletonRows read={impact} rows={2} /> : impact.isError ? <ErrorState compact error={impact.error} onRetry={() => void impact.refetch()} /> : <><LibraryCounts facts={impact.data.facts} /><ApplicationPreview read={impact} kind="delete" /></>}
+    </div>
+  </ConfirmDialog>;
 }

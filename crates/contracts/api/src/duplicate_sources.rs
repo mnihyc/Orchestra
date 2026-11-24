@@ -436,31 +436,6 @@ pub const CHAT: Declaration<Source> = Declaration {
     ],
 };
 
-/// The audience preview selects only the current real group; it creates no destination.
-pub const CHAT_PREVIEW: Declaration<Source> = Declaration {
-    operation: "ChatDuplicatePreview",
-    bindings: &[
-        Binding {
-            source: Source::Subject,
-            target: Target::TypedPath {
-                parameter: "id",
-                kind: Identity(KeyIdentityKind::Chat),
-            },
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::PreviewContent,
-            target: Target::TypedPath {
-                parameter: "id",
-                kind: Identity(KeyIdentityKind::Chat),
-            },
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-    ],
-};
-
 /// The native host registration and its actual new creation home.
 pub const HOST_MOVE: Declaration<Source> = Declaration {
     operation: "HostMoveOut",

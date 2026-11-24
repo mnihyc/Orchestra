@@ -1,0 +1,13 @@
+test -p orch-api-core --test chat_duplicates
+test -p orch-api-core --test kmounts_files
+test -p orch-api-core --test kmounts_mcp
+test -p orch-api-core --test mcp_delete_scopes
+test -p orch-api-core --test providers
+test -p orch-api-core --test everything_resources -- figures_scopes::
+test -p orch-api-core --lib
+test -p orch-engine --lib -- notifications::
+test -p orch-settings-contract --lib
+web typecheck
+web lint
+web test
+web-e2e --grep 'sends a link without granting anyone access|lists who reaches it|list of who reaches it'

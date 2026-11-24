@@ -45,6 +45,7 @@ use orch_api_contract::resource_facts::FactSubject;
 use orch_api_contract::resource_facts::FactTarget;
 
 use orch_api_contract::resource_facts::ResourceImpact;
+use orch_api_contract::resource_facts::ResourceImpactQuery;
 
 use orch_api_contract::resource_facts::ResourceUseKind;
 
@@ -71,6 +72,7 @@ use orch_engine::resource_facts::RawFacts;
 use orch_engine::resource_facts::UseRequest;
 
 use orch_engine::resource_facts::activity;
+use orch_engine::resource_facts::applications;
 
 use orch_engine::resource_facts::library::RecordedUses;
 
@@ -102,7 +104,14 @@ pub(super) struct CurrentImpact {
     raw: Vec<RawFacts>,
     visibility: PreparedVisibility,
     activity: activity::PreparedProjection,
+    applications: applications::Applications,
+    application_managers: HashSet<ObjectRef>,
     stopping: bool,
+    notification: Option<(
+        Id,
+        super::lifecycle_notifications::Review,
+        super::notices::PreparedNotice,
+    )>,
     displays: BTreeMap<Id, orch_api_contract::threads::ThreadDisplay>,
 }
 
@@ -398,12 +407,20 @@ async fn require_impact(
     principal: &Principal,
     target: &FactTarget,
 ) -> ApiResult<String> {
-    let source = facts::authorities(conn, principal, &[target.object.id])
+    let governor = super::lifecycle_notifications::subject(conn, target.object).await?;
+    let source = facts::authorities(conn, principal, &[governor.id])
         .await
         .map_err(engine_error)?
         .into_iter()
-        .find(|row| row.resource.object() == target.object && (row.readable || row.manageable))
+        .find(|row| row.resource.object() == governor && (row.readable || row.manageable))
         .ok_or_else(ApiError::not_found)?;
+    if governor != target.object {
+        return orch_db::queries::resources::mcp::servers(conn, &[target.object.id])
+            .await?
+            .pop()
+            .map(|row| row.name)
+            .ok_or_else(ApiError::not_found);
+    }
     if let Some(model) = target.model_id {
         sqlx::query_scalar("SELECT COALESCE(NULLIF(display_name,''),model_name) FROM provider_models WHERE provider_id=$1 AND id=$2")
             .bind(target.object.id).bind(model).fetch_optional(&mut *conn).await.map_err(DbError::from)?.ok_or_else(ApiError::not_found)
@@ -431,7 +448,7 @@ fn work_memberships(value: &activity::PreparedProjection) -> HashSet<WorkMembers
 
 impl native::Selected for Impact {
     type Source = Source;
-    type Query = ((), FactTarget);
+    type Query = (ResourceImpactQuery, FactTarget);
     type Value = CurrentImpact;
     type Reply = ResourceImpact;
     const DECLARATION: &'static Declaration<Source> = &sources::IMPACT;
@@ -439,29 +456,88 @@ impl native::Selected for Impact {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        (_, target): &'a Self::Query,
+        (query, target): &'a Self::Query,
     ) -> BoxFuture<'a, ApiResult<(CurrentImpact, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
+            if query.skill_publication == Some(true) && target.object.kind != ObjectKind::Skill {
+                return Err(ApiError::invalid("skill_publication", "requires a skill"));
+            }
             if !matches!(
                 target.object.kind,
-                ObjectKind::Provider | ObjectKind::Agent | ObjectKind::Environment
+                ObjectKind::Provider
+                    | ObjectKind::Agent
+                    | ObjectKind::Environment
+                    | ObjectKind::McpServer
+                    | ObjectKind::Mount
+                    | ObjectKind::Skill
+                    | ObjectKind::Template
             ) || target.model_id.is_some() && target.object.kind != ObjectKind::Provider
             {
                 return Err(ApiError::invalid(
                     "object",
-                    "must be a provider, profile, environment or a model of its provider",
+                    "must be a provider, profile, environment, MCP server, mount, skill, template or provider model",
                 ));
             }
-            let mut bound = roots(subjects::select(conn, &[target.object]).await?, false)?;
+            let selected = subjects::select(conn, &[target.object]).await?;
+            let parents = selected
+                .iter()
+                .filter_map(|subject| subject.environment.clone())
+                .collect::<Vec<_>>();
+            let mut bound = roots(selected, false)?;
+            bound.push(native::Facts::collection(
+                Source::OwnedEnvironments,
+                if parents.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![(KeyTargetKind::Object(ObjectKind::Environment), parents)]
+                },
+            ));
             let known = native::bind_known(ctx, &sources::IMPACT, &bound)?;
             let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
             let name = require_impact(conn, &principal, target).await?;
             let at = principal.now();
-            let raw = vec![
-                facts::target_dependents(conn, target, at)
+            let current = facts::target_dependents(conn, target, at)
+                .await
+                .map_err(engine_error)?;
+            let applications = applications::read_for_change(
+                &ctx.app.engine,
+                conn,
+                target.object.kind,
+                &current,
+                query.skill_publication == Some(true),
+            )
+            .await
+            .map_err(engine_error)?;
+            let mut raw = vec![current];
+            raw.extend(
+                applications
+                    .groups
+                    .iter()
+                    .map(|group| group.facts().clone()),
+            );
+            let application_ids = applications
+                .groups
+                .iter()
+                .filter(|group| {
+                    group.when
+                        == orch_api_contract::resource_facts::ResourceApplicationWhen::Updated
+                })
+                .flat_map(|group| group.members())
+                .map(|(_, object)| object.id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let application_managers = if application_ids.is_empty() {
+                HashSet::new()
+            } else {
+                facts::authorities(conn, &principal, &application_ids)
                     .await
-                    .map_err(engine_error)?,
-            ];
+                    .map_err(engine_error)?
+                    .into_iter()
+                    .filter(|authority| authority.manageable)
+                    .map(|authority| authority.resource.object())
+                    .collect()
+            };
             let mut visibility =
                 facts::prepare_projection(conn, &principal, Policy::default(), &raw)
                     .await
@@ -480,12 +556,21 @@ impl native::Selected for Impact {
             bound.push(names);
             let threads: BTreeSet<_> = visibility
                 .named_edges(&raw)
-                .filter(|(_, edge)| edge.relation == DependentRelation::Binding)
+                .filter(|(_, edge)| {
+                    matches!(
+                        edge.relation,
+                        DependentRelation::Binding | DependentRelation::Attachment
+                    )
+                })
                 .filter_map(|(_, edge)| {
                     edge.object
                         .filter(|object| object.kind == ObjectKind::Thread)
                         .map(|object| object.id)
                 })
+                .collect();
+            let named_dependencies = visibility
+                .named_edges(&raw)
+                .filter_map(|(_, edge)| edge.object.map(|object| object.id))
                 .collect();
             let displays = node_view::refs(
                 conn,
@@ -500,6 +585,32 @@ impl native::Selected for Impact {
             let stopping = activity::stopping(conn, target)
                 .await
                 .map_err(engine_error)?;
+            let governor = super::lifecycle_notifications::subject(conn, target.object).await?;
+            let notification = if query.operation_notice == Some(true)
+                && facts::authorities(conn, &principal, &[governor.id])
+                    .await
+                    .map_err(engine_error)?
+                    .iter()
+                    .any(|source| source.resource.object() == governor && source.manageable)
+            {
+                super::notices::prepare(conn, &principal, target, &raw[0], &named_dependencies)
+                    .await?
+                    .map(|notice| {
+                        (
+                            orch_types::new_id(),
+                            super::lifecycle_notifications::Review {
+                                object: target.object,
+                                model_id: target.model_id,
+                                governor,
+                                nameable: notice.visible.clone(),
+                                audience: notice.people.clone(),
+                            },
+                            notice,
+                        )
+                    })
+            } else {
+                None
+            };
             Ok((
                 CurrentImpact {
                     target: target.clone(),
@@ -507,7 +618,10 @@ impl native::Selected for Impact {
                     raw,
                     visibility,
                     activity,
+                    applications,
+                    application_managers,
                     stopping,
+                    notification,
                     displays,
                 },
                 bound,
@@ -540,9 +654,36 @@ impl native::Selected for Impact {
                 name: value.name.clone(),
                 facts,
                 activity: value.activity.project(),
+                applications: value
+                    .applications
+                    .groups
+                    .iter()
+                    .filter_map(|group| {
+                        group.project(&value.visibility, &value.application_managers)
+                    })
+                    .collect(),
+                application_complete: value.applications.complete
+                    && value.raw.iter().all(|facts| facts.dependents_complete),
                 stopping: value.stopping,
                 thread_displays: value.displays.clone(),
+                notification: match &value.notification {
+                    Some((id, _, notification)) => Some(notification.project(conn, *id).await?),
+                    None => None,
+                },
             })
+        })
+    }
+    fn after_read<'a>(
+        ctx: &'a Ctx,
+        accepted: &'a Caller,
+        _query: &'a Self::Query,
+        value: &'a CurrentImpact,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            if let Some((id, review, _)) = &value.notification {
+                super::lifecycle_notifications::retain(ctx, accepted.user(), *id, review).await?;
+            }
+            Ok(())
         })
     }
     fn check_opened<'a>(
@@ -554,10 +695,43 @@ impl native::Selected for Impact {
         fresh: &'a CurrentImpact,
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move {
-            if opened.target != fresh.target
+            if opened
+                .notification
+                .as_ref()
+                .map(|(_, review, _)| &review.audience)
+                != fresh
+                    .notification
+                    .as_ref()
+                    .map(|(_, review, _)| &review.audience)
+                || opened.target != fresh.target
                 || !memberships(&opened.raw, &opened.visibility)
                     .is_subset(&memberships(&fresh.raw, &fresh.visibility))
                 || !work_memberships(&opened.activity).is_subset(&work_memberships(&fresh.activity))
+                || !opened
+                    .applications
+                    .groups
+                    .iter()
+                    .flat_map(|group| group.members())
+                    .collect::<HashSet<_>>()
+                    .is_subset(
+                        &fresh
+                            .applications
+                            .groups
+                            .iter()
+                            .flat_map(|group| group.members())
+                            .collect::<HashSet<_>>(),
+                    )
+                || !opened
+                    .application_managers
+                    .is_subset(&fresh.application_managers)
+            {
+                return Ok(false);
+            }
+            if let Some((_, _, notification)) = &opened.notification
+                && !fresh
+                    .notification
+                    .as_ref()
+                    .is_some_and(|(_, _, fresh)| notification.preserves(fresh))
             {
                 return Ok(false);
             }

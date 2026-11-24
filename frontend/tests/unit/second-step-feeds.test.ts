@@ -46,7 +46,7 @@ it('keeps a refused feed closed for renewal or a wrong code, and resubscribes af
   const wire = ServerSocket.latest;
   if (wire === undefined) throw new Error('signing in must open the live connection');
   wire.onopen?.();
-  wire.say({ op: 'ready', connection_id: 'c1', user_id: me.id, server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b1' });
+  wire.say({ op: 'ready', connection_id: 'c1', user_id: me.id, server_time: '', access_expires_at: '', heartbeat_secs: 25, max_client_frame_bytes:16*1024, build: 'b1' });
   const subscription = socket.subscribe('org:held', { since: () => null, onFrame: vi.fn() });
   const first = wire.subscriptions()[0];
   if (first === undefined) throw new Error('the visible feed must be requested');

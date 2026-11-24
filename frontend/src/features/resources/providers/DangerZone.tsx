@@ -11,8 +11,9 @@ import { Ban, CirclePlay } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { NotifyPeople } from '@/features/notifications/NotifyPeople';
 import { resourceImpactQuery } from '@/api/resource-impact';
-import { ImpactCounts } from '@/features/storage/Impact';
+import { StopTip } from '@/features/storage/Impact';
 import { useResourceEnable } from '@/features/storage/Enable';
 import { openChange } from '@/features/change/target';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
@@ -28,10 +29,13 @@ import { toast } from '@/ui/Toast';
 
 export function DisableProviderDialog({ provider, open, onClose }: { provider: Provider; open: boolean; onClose: () => void }) {
   const { t } = useTranslation();
-  const impact=useQuery({...resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:null}),enabled:open});
+  const impact=useQuery({...resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:null}, {operation_notice:true}),enabled:open});
   const [note,setNote]=useState('');
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!==undefined)setNotifyChoice({review,value});};
   const disable = useMutation({
-    mutationFn: () => note.trim()===''?disableProvider(provider.id):disableProvider(provider.id,note.trim()),
+    mutationFn: () => notify ? disableProvider(provider.id,note.trim()||undefined,{notify:true,...(impact.data?.notification?.preview_id===undefined?{}:{notification_review:impact.data.notification.preview_id})}) : note.trim()===''?disableProvider(provider.id):disableProvider(provider.id,note.trim()),
     onSuccess: () => {
       toast({ tone: 'success', title: t('providers.danger.disabled', { name: provider.name }) });
       onClose();
@@ -45,22 +49,25 @@ export function DisableProviderDialog({ provider, open, onClose }: { provider: P
       admin={adminSpec(provider, 'provider.manage')}
       confirmLabel={t('providers.danger.disableConfirm', { name: provider.name })}
       danger
+      footerStart={<NotifyPeople plan={impact.data?.notification} value={notify} onChange={setNotify} disabled={disable.isPending||impact.isFetching}/>}
       pending={disable.isPending}
       error={disable.error ?? undefined}
-      disabled={impact.isPending||impact.isError}
       onConfirm={() => disable.mutate()}
     >
-      <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={note} onChange={(event)=>setNote(event.target.value)} disabled={disable.isPending} /><ArticleGuideLink article="pause-and-switch" heading="disable" title={t('resourceImpact.guide')} /></div>
+      <div className="flex flex-col gap-3">{(impact.isPending || impact.isError) && <span className="text-sm text-warning-text">{t('resourceImpact.stopTip')}</span>}{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<StopTip impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={note} onChange={(event)=>setNote(event.target.value)} disabled={disable.isPending} /><ArticleGuideLink article="pause-and-switch" heading="disable" title={t('resourceImpact.guide')} /></div>
     </ConfirmDialog>
   );
 }
 
 export function DeleteProviderDialog({ provider, open, onClose, afterDelete }: { provider: Provider; open: boolean; onClose: () => void; afterDelete?: () => void }) {
   const { t } = useTranslation();
-  const impact=useQuery({...resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:null}),enabled:open});
+  const impact=useQuery({...resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:null}, {operation_notice:true}),enabled:open});
   const [typed,setTyped]=useState('');
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!==undefined)setNotifyChoice({review,value});};
   const remove = useMutation({
-    mutationFn: () => deleteProvider(provider.id),
+    mutationFn: () => notify ? deleteProvider(provider.id,{notify:true,...(impact.data?.notification?.preview_id===undefined?{}:{notification_review:impact.data.notification.preview_id})}) : deleteProvider(provider.id),
     onSuccess: () => {
       toast({ tone: 'success', title: t('providers.danger.deleted', { name: provider.name }) });
       onClose();
@@ -75,13 +82,14 @@ export function DeleteProviderDialog({ provider, open, onClose, afterDelete }: {
       admin={adminSpec(provider, 'provider.manage')}
       confirmLabel={t('providers.danger.deleteConfirm', { name: provider.name })}
       danger
+      footerStart={<NotifyPeople plan={impact.data?.notification} value={notify} onChange={setNotify} disabled={remove.isPending||impact.isFetching}/>}
       pending={remove.isPending}
       error={remove.error ?? undefined}
-      disabled={impact.isPending||impact.isError||typed!==(impact.data.name)}
+      disabled={typed!==(impact.data?.name ?? provider.name)}
       onConfirm={() => remove.mutate()}
     >
       <span className="flex flex-col gap-2">
-        {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="delete" />}
+        {(impact.isPending || impact.isError) && <span className="text-sm text-warning-text">{t('resourceImpact.stopTip')}</span>}{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<StopTip impact={impact.data} kind="delete" />}
         <span>{t('resourceImpact.deleteKeeps')}</span>
         <span>{provider.kind === 'subscription' ? t('providers.danger.deleteToken') : t('providers.danger.deleteKey')}</span>
         <Button variant="ghost" size="sm" onClick={()=>{onClose();openChange({kind:'provider',id:provider.id,name:provider.name},{kind:'switch'});}}>{t('resourceImpact.switchFirst')}</Button>
