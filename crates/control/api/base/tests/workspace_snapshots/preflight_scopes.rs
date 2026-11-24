@@ -455,7 +455,11 @@ async fn preflight_commands_keep_private_exact_origin_evidence_and_unchanged_nat
     assert_eq!(seen.len(), 1);
     assert_eq!(
         seen[0].body,
-        json!({"environment_id":site.environment,"selection":{"include":["web"],"exclude":[]}})
+        json!({
+            "environment_id": site.environment,
+            "selection": {"include": ["web"], "exclude": []},
+            "access": {"view": "roots", "manage": "roots"}
+        })
     );
     let authority =
         orch_db::queries::link::command_authority(&mut *site.world.conn().await, seen[0].id)

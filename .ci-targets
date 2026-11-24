@@ -1,0 +1,13 @@
+test -p orch-agent-programs --lib
+test -p orch-adapter-acp --lib
+test -p orch-adapter-acp --test turns
+test -p orch-adapter-acp --test generic_suite
+test -p orch-connector --bin orch-connector -- composition::
+test -p orch-connector --test program -- the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_stops_when_told
+test -p orch-protocol-google-interactions --lib
+test -p orch-image-backends --lib
+test -p orch-api-core --test provider_setup
+test -p orch-connector-core --lib -- gemini_search_keeps_its_host_tools
+web typecheck
+web lint
+web test

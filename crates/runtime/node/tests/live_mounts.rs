@@ -139,6 +139,7 @@ impl EnvironmentDriver for LiveDriver {
 
 fn mount() -> MountSpec {
     MountSpec {
+        resource_id: None,
         name: "data".into(),
         kind: MountKind::Volume,
         source: "orch-test-live-data".into(),

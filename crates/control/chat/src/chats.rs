@@ -1380,6 +1380,8 @@ pub enum Scope {
     /// The chats of the tree's nodes that the caller can read and that have
     /// messages.
     Nodes,
+    /// The same readable node chats, including destinations before their first message.
+    EmptyNodes,
 }
 
 /// A page of a list of chats.
@@ -1469,8 +1471,17 @@ async fn list_matching(
                 rows::others_among_selected(conn, me, root, &orgs, cursor, limit + 1, selected)
                     .await?
             }
-            Scope::Nodes => {
-                return list_nodes(conn, act, root, after, limit, selected).await;
+            Scope::Nodes | Scope::EmptyNodes => {
+                return list_nodes(
+                    conn,
+                    act,
+                    root,
+                    after,
+                    limit,
+                    selected,
+                    matches!(scope, Scope::EmptyNodes),
+                )
+                .await;
             }
         };
         let next = page.last().map(|row| After {
@@ -1556,6 +1567,7 @@ async fn list_nodes(
     after: Option<After>,
     limit: i64,
     selected: Option<&[Id]>,
+    include_empty: bool,
 ) -> Result<Listed, Error> {
     use orch_access_contract::permissions::PermissionName;
     use orch_authz::{Act, Policy, nodes};
@@ -1564,11 +1576,14 @@ async fn list_nodes(
     let mut cursor = after;
     loop {
         let batch =
-            rows::node_chats_with_messages_selected(conn, root, cursor, LIST_STEP, selected)
+            rows::node_chats_selected(conn, root, cursor, LIST_STEP, selected, include_empty)
                 .await?;
         let exhausted = i64::try_from(batch.len()).is_ok_and(|count| count < LIST_STEP);
         let Some(last) = batch.last() else { break };
-        cursor = last.last_message_at.map(|at| After { at, id: last.id });
+        cursor = Some(After {
+            at: last.active_at(),
+            id: last.id,
+        });
         let ids: Vec<Id> = batch.iter().filter_map(|chat| chat.node_id).collect();
         let readable: Vec<Id> = nodes::holding(
             conn,
