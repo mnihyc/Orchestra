@@ -412,3 +412,236 @@ async fn a_database_that_has_no_schema_yet_is_told_to_wait_for_the_api() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_local_public_address_reset_recovers_the_file_seed_without_an_api_or_a_working_hostname()
+ {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let world = Deployment::new().await;
+    let db = world.db();
+    let seed = PublicAddresses {
+        public_url: "https://orch.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    let broken = PublicAddresses {
+        public_url: "https://unreachable.invalid".into(),
+        alternate_urls: vec!["https://another.invalid".into()],
+    };
+    let Write::Written(selected) = public_addresses::publish(
+        &mut db.acquire().await.unwrap(),
+        &broken,
+        before.revision,
+        None,
+        clock::start(),
+    )
+    .await
+    .unwrap() else {
+        panic!("current revision")
+    };
+    assert_eq!(
+        world
+            .run(&["public-address", "get"])
+            .await
+            .succeeded()
+            .trim(),
+        broken.public_url
+    );
+    let mut command = world.command();
+    command
+        .env("ORCH_URL", &broken.public_url)
+        .env("ORCH_TOKEN", "DO_NOT_PRINT_THIS_CREDENTIAL");
+    let run = support::run(
+        command,
+        &[
+            "public-address",
+            "reset",
+            "--config",
+            world.config().to_str().unwrap(),
+        ],
+    )
+    .await;
+    run.succeeded();
+    assert!(!format!("{}{}", run.out, run.err).contains("DO_NOT_PRINT_THIS_CREDENTIAL"));
+    let after = public_addresses::read(&mut db.acquire().await.unwrap(), &broken, clock::start())
+        .await
+        .unwrap();
+    assert_eq!(after.addresses, seed);
+    assert!(after.from_file_seed && after.revision > selected.revision);
+    let row = orch_db::queries::settings::row(
+        &mut db.acquire().await.unwrap(),
+        None,
+        public_addresses::KEY,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(row.value["selected"].is_null());
+    assert_eq!(
+        world
+            .run(&["public-address", "get"])
+            .await
+            .succeeded()
+            .trim(),
+        "https://orch.test"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_explicit_local_reset_republishes_a_changed_file_seed() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses;
+    let world = Deployment::new().await;
+    let db = world.db();
+    let seed = PublicAddresses {
+        public_url: "https://orch.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    std::fs::write(world.config(), "[system]\npublic_url = \"https://restored.test\"\nalternate_urls = [\"http://192.0.2.15:8080\"]\n").unwrap();
+    assert_eq!(
+        world
+            .run(&["public-address", "get"])
+            .await
+            .succeeded()
+            .trim(),
+        seed.public_url
+    );
+    // A current address was already admitted by publication; adopting it as the new file seed
+    // changes its source and revision, and needs no unavailable old HTTP hostname.
+    let admitted = PublicAddresses {
+        public_url: "https://restored.test".into(),
+        alternate_urls: vec!["http://192.0.2.15:8080".into()],
+    };
+    public_addresses::publish(
+        &mut db.acquire().await.unwrap(),
+        &admitted,
+        before.revision,
+        None,
+        clock::start(),
+    )
+    .await
+    .unwrap();
+    world.run(&["public-address", "reset"]).await.succeeded();
+    let after = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    assert_eq!(after.addresses.public_url, "https://restored.test");
+    assert_eq!(after.addresses.alternate_urls, ["http://192.0.2.15:8080"]);
+    assert!(after.from_file_seed && after.revision > before.revision);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_invalid_file_address_cannot_disable_the_committed_address_or_reset_it_halfway() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses;
+    let world = Deployment::new().await;
+    let db = world.db();
+    let seed = PublicAddresses {
+        public_url: "https://orch.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    std::fs::write(world.config(), "[system]\npublic_url = \"not an origin\"\n").unwrap();
+    assert_eq!(
+        world
+            .run(&["public-address", "get"])
+            .await
+            .succeeded()
+            .trim(),
+        "https://orch.test"
+    );
+    let reset = world.run(&["public-address", "reset"]).await;
+    assert_ne!(reset.code, 0);
+    assert!(reset.out.is_empty());
+    assert!(reset.err.contains("public_url"));
+    assert_eq!(
+        public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+            .await
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_unprepared_file_origin_cannot_be_published_by_recovery() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses;
+    let world = Deployment::new().await;
+    let db = world.db();
+    let seed = PublicAddresses {
+        public_url: "https://orch.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    std::fs::write(
+        world.config(),
+        "[system]\npublic_url = \"https://unprepared.invalid\"\n",
+    )
+    .unwrap();
+    let refused = world.run(&["public-address", "reset"]).await;
+    assert_ne!(refused.code, 0);
+    assert!(refused.out.is_empty());
+    assert_eq!(
+        public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+            .await
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_novel_file_seed_is_proved_through_the_shared_native_preparer_before_recovery_commits_it()
+{
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses;
+    let world = Deployment::new().await;
+    let db = world.db();
+    let seed = PublicAddresses {
+        public_url: "https://orch.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    let api = Api::serve(&db).await;
+    let authority = api.app.app.link.certificates().authority();
+    orch_pki::certificates::write_private_file(
+        &world.secrets_dir().join("orch_ca_key.pem"),
+        &authority.key_pem(),
+    )
+    .unwrap();
+    orch_pki::certificates::write_file(
+        &world.secrets_dir().join("orch_ca_cert.pem"),
+        &authority.certificate_pem(),
+    )
+    .unwrap();
+    std::fs::write(
+        world.config(),
+        format!("[system]\npublic_url = \"{}\"\n", api.url),
+    )
+    .unwrap();
+    assert_eq!(
+        world
+            .run(&["public-address", "get"])
+            .await
+            .succeeded()
+            .trim(),
+        seed.public_url
+    );
+    world.run(&["public-address", "reset"]).await.succeeded();
+    let after = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, clock::start())
+        .await
+        .unwrap();
+    assert_eq!(after.addresses.public_url, api.url);
+    assert!(after.from_file_seed && after.revision > before.revision);
+}

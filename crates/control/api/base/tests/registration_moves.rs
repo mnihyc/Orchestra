@@ -24,6 +24,79 @@ struct Scene {
     machine: Id,
     target: Id,
 }
+
+#[tokio::test]
+async fn moving_a_server_registration_confirms_new_host_use_and_keeps_private_moves_quiet() -> Proof
+{
+    use orch_db::queries::access::{PageKey, testing::add_entry};
+    for shared in [false, true] {
+        let s = Scene::new("host").await?;
+        sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+            .bind(s.source)
+            .execute(&s.world.db.pool)
+            .await?;
+        if shared {
+            orch_db::queries::access::testing::insert_member(
+                &mut *s.world.conn().await,
+                s.target,
+                s.company.viewer.id(),
+                s.target,
+            )
+            .await?;
+            add_entry(
+                &mut *s.world.conn().await,
+                &PageKey::new("node", s.target, "defaults"),
+                "any",
+                "host.use",
+                ("user", Some(s.company.viewer.id()), None),
+                None,
+                s.world.now(),
+            )
+            .await?;
+        }
+        let plan: MoveOutDeletePlan =
+            serde_json::from_value(ok(&s.preview(&s.company.boss.token).await)?)?;
+        let before = s.registration().await?;
+        let reply = s.apply(&s.company.boss.token, plan.clone()).await;
+        if shared {
+            let problem = reply.problem();
+            assert_eq!(
+                problem.code,
+                orch_api_contract::common::ErrorCode::ConflictConfirmationRequired
+            );
+            assert_eq!(s.home().await?, Some(s.company.acme));
+            assert_eq!(s.registration().await?, before);
+            let proof = problem.extra["server_host_use"]["confirmation"]
+                .as_str()
+                .unwrap();
+            let body = MoveOutBody {
+                copy: s.body(),
+                delete_plan: MoveOutConfirmation {
+                    revision: plan.revision,
+                    stamp: plan.stamp,
+                },
+            };
+            s.world
+                .app
+                .call(api::HostMoveOut, &[&s.source])
+                .token(&s.company.boss.token)
+                .header("orch-server-host-use-confirmed", proof)
+                .body(&body)
+                .send()
+                .await
+                .ok();
+        } else {
+            ok(&reply)?;
+        }
+        assert_eq!(s.home().await?, Some(s.target));
+        assert_eq!(
+            s.registration().await?,
+            before,
+            "the warning never turns a move into a new enrollment"
+        );
+    }
+    Ok(())
+}
 impl Scene {
     async fn new(kind: &'static str) -> Proof<Self> {
         let world = World::new().await;

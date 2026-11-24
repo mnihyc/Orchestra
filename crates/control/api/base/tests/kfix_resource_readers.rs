@@ -187,6 +187,7 @@ async fn access_management_alone_reads_pages_people_effective_access_and_history
                 .call(PermissionPeopleList, &[&object, &id])
                 .token(&who.token)
                 .query(&PermissionPeopleListQuery {
+                    q: None,
                     holder: "admins".to_owned(),
                     limit: None,
                     cursor: None,
@@ -231,7 +232,7 @@ async fn an_actual_provider_creation_leaves_its_home_admin_the_permission_page_w
         .call(ProviderCreate, &[])
         .token(&company.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Private key".to_owned(),
             home_id: company.acme,
             access: None,
