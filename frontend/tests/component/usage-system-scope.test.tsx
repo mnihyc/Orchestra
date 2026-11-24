@@ -1,11 +1,13 @@
 /** System is a local scope choice, never a fabricated name result or a fallback to personal usage. */
+import type { NameSearch } from '@/api/search';
+import { pickerNamePage } from './picker-name-fixture';
 import { cleanup, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ScopePicker } from '@/features/usage/ScopePicker';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
-vi.mock('@/api/search', () => ({ namesQuery: () => ({ queryKey: ['system-scope-names'], queryFn: () => Promise.resolve([]) }) }));
+vi.mock('@/api/search', () => ({ pickerNamesQuery: (s: NameSearch) => pickerNamePage(s, () => []) }));
 afterEach(async () => { cleanup(); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`offers active system reach through the same scope combobox (${locale})`, async () => {

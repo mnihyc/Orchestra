@@ -8,17 +8,23 @@ summary: Understand disabling, enabling, switching and deleting resources and th
 
 # Pause, switch and remove
 
+This page shows how to pause a provider, a profile or an environment, what happens to the messages waiting for it, and how switching and removing differ.
+
 ## Disable
 
 Disable pauses a provider, agent profile, model or environment. Running turns stop through the usual interrupt. Each thread records the resource and the person who switched it off. Usage already spent stays recorded.
 
-Waiting messages keep their order and their authors. They stay bound to the resource. Disabling does not hold them as a person's Stop does. The provider or environment units stop after their turns, keeping their volumes and sign-in.
+Waiting messages keep their order and their authors. They stay bound to the resource. Disabling does not hold them as a person's Stop does. The containers of a provider or environment stop after their turns, keeping their volumes and sign-in.
 
 Accepted summary and embedding requests stop too. A stopped request cannot start later just because its resource was enabled again.
 
 The provider, profile and model dialogs accept one optional note. It appears in waiting threads and the stop history.
 
+Provider and model dialogs also offer Notify people. The choice starts from Operation notices and remains yours to change. For a model, its thread owners and provider managers are the affected people. Each person gets at most one Inbox item, updated as the stop finishes.
+
 Open a count to see the affected threads. Names you cannot see stay a count.
+
+Mount Edit offers the same Notify choice when Enabled changes. A normal label or attachment-setting edit sends no notice. The current affected environment holders and mount managers receive one grouped item; the person saving receives none. Repeating the enabled value creates no new notice.
 
 ## Enable
 
@@ -43,5 +49,7 @@ A source that is switched off can still be left. A target provider, model, profi
 Deleting a provider or profile stops its turns and keeps its history and usage. Threads can stay bound and wait for a switch. The stored server key is erased and native sign-out is requested. A machine that cannot sign out still needs cleanup there. A pasted vendor credential can still need revocation at its vendor.
 
 The provider dialog counts the affected work and asks for its name. Switch its threads first opens the separate switch. Delete makes no thread choices.
+
+Deleting a model ends that model’s membership and keeps its threads, history and usage. The model dialog offers the same explicit Notify choice for that model’s affected people.
 
 For kept files and other leftovers, use [Storage cleanup](storage-cleanup.md#clean-up-kept-items).

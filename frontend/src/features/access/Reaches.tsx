@@ -82,17 +82,14 @@ function Person({ person }: { person: ReachPerson }) {
 /** On an environment's page, one sentence about who talks to the agents that work there, and the count of everybody who reaches into it, which opens the list. */
 export function EnvironmentReachLine({ target }: { target: AccessTarget }) {
   const { t } = useTranslation();
-  const reach = useQuery(environmentReachQuery(target.id));
   const [open, setOpen] = useState(false);
-  const count = reach.data === undefined ? null : reach.data.people.length + reach.data.hidden;
+  const reach = useQuery({ ...environmentReachQuery(target.id), enabled: open });
   return (
     <div className="flex flex-wrap items-baseline gap-x-2 text-sm text-text-muted">
       <span>{t('access.reaches.talking')}</span>
-      {count !== null && (
-        <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
-          {t('access.reaches.whoReaches', { count })}
+      <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
+          {t('access.reaches.show')}
         </Button>
-      )}
       {open && (
         <Dialog open onOpenChange={(next) => !next && setOpen(false)} size="md" title={t('access.reaches.whoTitle', { name: target.name })} description={t('access.reaches.whoLead')}>
           {reach.isPending ? (
