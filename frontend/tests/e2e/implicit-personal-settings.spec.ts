@@ -5,7 +5,7 @@ import type { PersonalSkillsPolicyView, ThreadKnowledgeView } from '../../src/ap
 import { ACME } from '../doubles/fixtures';
 import { showWorkbenchView } from './workbench-support';
 import { language } from './ask-support';
-import { scenario } from './support';
+import { readsOneByOne, scenario } from './support';
 
 const words = {
   en: { mail: 'Code by mail', policy: 'Not allowed by sign-in policy', remove: 'Switch off the code by mail' },
@@ -27,6 +27,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const value = await response.json() as Me;
       await route.fulfill({ response, json: person(value) });
     });
+    await readsOneByOne(page);
     for (const path of ['/me/bootstrap', '/me/authority']) {
       await page.route(`**/api/v1${path}`, async (route) => {
         const response = await route.fetch();

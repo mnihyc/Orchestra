@@ -1,0 +1,4 @@
+web-e2e tests/e2e/admin.spec.ts --grep "a system admin finds Management|makes a link to a new password" --retries=0 --reporter=line
+web-e2e tests/e2e/invitation-creation-replay.spec.ts --grep "system/link/en/400/light|system/email/zh-CN/1440/dark" --retries=0 --reporter=line
+web-e2e tests/e2e/openings.spec.ts tests/e2e/first-wave-edge.spec.ts tests/e2e/last-place.spec.ts --retries=0 --reporter=line
+web-e2e tests/e2e/thread.spec.ts tests/e2e/measure-pages.spec.ts tests/e2e/workbench-grid.spec.ts --grep "a returning thread can use its shell worker|a folded opening fills|the shipped cold page fetches only its locale|a searchable exact-target locator|browser Back paints the retained provider" --retries=0 --reporter=line

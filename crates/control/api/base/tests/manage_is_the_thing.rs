@@ -364,6 +364,8 @@ async fn an_environment_is_deleted_by_its_manage_alone() {
     let query = EnvironmentDeleteQuery {
         confirm: "Main".to_owned(),
         at: None,
+        expected_keep_days: None,
+        expected_revision: None,
     };
     let refused = world
         .app

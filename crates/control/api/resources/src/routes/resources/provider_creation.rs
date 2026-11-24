@@ -85,7 +85,11 @@ fn machine_request(machine: Id, home: Id, body: MachineProviderCreateBody) -> Cr
             home_id: home,
             agent_id,
             sources,
-            runtime_machine_id: Some(machine),
+            runtime_location: Some(
+                orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                    machine_id: machine,
+                },
+            ),
             key_machine_id: Some(machine),
             access: None,
             arrangements: None,
@@ -103,7 +107,11 @@ fn machine_request(machine: Id, home: Id, body: MachineProviderCreateBody) -> Cr
             home_id: home,
             upstreams,
             sources,
-            runtime_machine_id: Some(machine),
+            runtime_location: Some(
+                orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                    machine_id: machine,
+                },
+            ),
             key_machine_id: Some(machine),
             access: None,
             arrangements: None,
@@ -233,12 +241,11 @@ pub(super) fn machine<'a>(
 }
 
 /// Record only an explicit creation home; automatic discovery/default selection stays unpinned.
-pub(super) async fn pin_home(
+pub(super) async fn select_initial_credential_home(
     conn: &mut Conn,
     provider: Id,
     operands: &Operands,
     owner: Id,
-    at: orch_types::Time,
 ) -> ApiResult<()> {
     if operands.duplicate.is_some()
         && matches!(&operands.request, CreateProvider::Subscription { .. })
@@ -250,14 +257,6 @@ pub(super) async fn pin_home(
         return Err(ApiError::internal(
             "the new subscription cannot select its own credential home",
         ));
-    }
-    if operands.home_overridden {
-        sqlx::query("UPDATE providers SET home_overridden_at=$2 WHERE id=$1")
-            .bind(provider)
-            .bind(at.get())
-            .execute(conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
     }
     Ok(())
 }
