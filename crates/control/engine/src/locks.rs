@@ -24,7 +24,7 @@ use crate::unit::Unit;
 use orch_api_contract::nodes::{JobRef, JobState};
 use orch_db::Conn;
 use orch_db::queries::approvals as approval_queries;
-use orch_db::queries::jobs::{JobRow, forks};
+use orch_db::queries::jobs::{JobRow, changes, forks};
 use orch_db::queries::threads::{self, StateChange, thread_state};
 use orch_types::Id;
 
@@ -72,11 +72,7 @@ impl Lock {
 
 /// The hold on a thread, if an open job has one.
 pub async fn lock_of(conn: &mut Conn, thread: Id) -> Result<Option<Lock>, EngineError> {
-    let job = match forks::lock_of(conn, thread).await? {
-        Some(job) => Some(job),
-        None => retained_preparation(conn, thread).await?,
-    };
-    let Some(job) = job else {
+    let Some(job) = changes::thread_hold_or_preparation(conn, thread).await? else {
         return Ok(None);
     };
     let holding = if job.kind == crate::jobs::continuation::KIND {
@@ -99,28 +95,12 @@ pub async fn held_by(conn: &mut Conn, thread: Id) -> Result<Option<Id>, EngineEr
     Ok(lock_of(conn, thread).await?.map(|lock| lock.job.id))
 }
 
-/// One indexed guard/job lookup, only for a born target whose preparation never
-/// committed. A failed job is meaningful status; browsing cannot make it ready.
-async fn retained_preparation(conn: &mut Conn, thread: Id) -> Result<Option<JobRow>, EngineError> {
-    let job: Option<Id> = sqlx::query_scalar(
-        "SELECT preparation_job FROM thread_native_guards WHERE thread_id=$1 AND NOT ready",
-    )
-    .bind(thread)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(orch_db::DbError::from)?
-    .flatten();
-    match job {
-        Some(job) => Ok(orch_db::queries::jobs::job(conn, job).await?),
-        None => Ok(None),
-    }
-}
-
 /// A job in the few words a locked thing carries.
 #[must_use]
 pub fn job_ref(row: &JobRow) -> JobRef {
     let (progress, _) = read_progress(row);
     JobRef {
+        clone: None,
         id: row.id,
         kind: row.kind.clone(),
         state: match row.state.as_str() {

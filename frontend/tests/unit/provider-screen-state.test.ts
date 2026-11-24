@@ -5,6 +5,7 @@ import { knownPlaces } from '@/lib/placeLabel';
 import { endpointsNeedNoKey } from '@/features/resources/providers/details';
 import { providerLabels,providerPickerLabels } from '@/features/resources/providers/labels';
 import { PROVIDER_NEXT, providerState, providerWhat } from '@/features/resources/providers/state';
+import { formatTimeOfDay } from '@/lib/time';
 import { PLAN_NOW, planProvider } from './provider-plan-fixtures';
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
 
@@ -78,9 +79,54 @@ for (const language of ['en','zh-CN'] as const) describe('QS-029 setup in ' + la
     provider.status_detail='The keeping machine needs its endpoint configuration reviewed.';
     expect(state(provider).detail).toBe(provider.status_detail);
   });
+  it('says that a managed provider\'s container could not be made, and why, before it asks for a sign-in', () => {
+    const provider=planProvider({status:'needs_setup',status_detail:'its runtime could not be made: The recorded host connector is no longer running.'});
+    provider.facts.credential=null;
+    expect(state(provider)).toMatchObject({text:t('providers.phrase.needsRuntime'),detail:provider.status_detail,next:'runtime'});
+    expect(PROVIDER_NEXT[state(provider).next ?? 'settings'].tab).toBe('runtime');
+    provider.status_detail='its runtime could not be made (starting): The host is offline.';
+    expect(state(provider)).toMatchObject({detail:provider.status_detail,next:'runtime'});
+    provider.status_detail='making its runtime was cancelled';
+    expect(state(provider)).toMatchObject({detail:provider.status_detail,next:'runtime'});
+    // A new provider that nothing has failed for still begins at its sign-in, which starts its container.
+    provider.status_detail=null;
+    expect(state(provider)).toMatchObject({text:t('providers.phrase.needsSignIn'),next:'signIn'});
+  });
   it('points to the runtime when its key and models are ready but no managed runtime exists', () => {
     const provider=planProvider({kind:'api',status:'needs_setup',key_set:true,upstreams:[keyEndpoint],
       models:[{ ...MODEL_ESTIMATE,id:'model',model_name:'example',display_name:'Example',parameters:{},groups:[],enabled:true,source:'manual'}]});
     expect(state(provider)).toMatchObject({text:t('providers.phrase.needsRuntime'),detail:t('providers.overview.needsRuntimeLead'),next:'runtime'});
   });
+});
+
+for (const language of ['en', 'zh-CN'] as const) it(`distinguishes observed vendor quota from refused calls in ${language}`, () => {
+  const t = i18n.getFixedT(language);
+  const current = (status: 'exhausted' | 'disabled' | 'error') => providerState(planProvider({ status, status_detail: null }), t, { locale: language, timeZone: 'UTC' }, PLAN_NOW);
+  expect(current('exhausted').text).toContain(language === 'en' ? 'Vendor limit reported' : '厂商报告已达限额');
+  expect(current('exhausted').text).toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+  expect(current('disabled').text).not.toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+  expect(current('error').text).not.toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+});
+
+for (const language of ['en', 'zh-CN'] as const) it(`says a provider whose plan window is full takes no turn until that window resets, in ${language}`, () => {
+  const t = i18n.getFixedT(language);
+  const context = { locale: language, timeZone: 'UTC' };
+  const resets = '2026-10-14T16:50:00.000Z';
+  const base = planProvider({ status: 'ready' });
+  // A credential far from lapsing, so that nothing else colours the state.
+  const facts = { ...base.facts, credential: base.facts.credential === null ? null : { ...base.facts.credential, expires_at: '2027-01-01T00:00:00.000Z' } };
+  const full = (window: Partial<NonNullable<typeof facts.windows>[number]>, more: Partial<typeof facts> = {}) => planProvider({ status: 'ready',
+    facts: { ...facts, ...more, windows: [{ ...facts.windows[0]!, used_percent: 100, resets_at: resets, reset_not_started: null, ...window }] } });
+  const state = (provider: ReturnType<typeof planProvider>) => providerState(provider, t, context, PLAN_NOW);
+  expect(state(planProvider({ status: 'ready', facts }))).toMatchObject({ tone: 'success', text: t('providers.phrase.ready') });
+  // "5h 100% · Limit reached · resets in 4h 50m" on its card: the state says the same, with when it can take a turn again.
+  expect(state(full({}))).toMatchObject({ tone: 'warning', text: t('providers.phrase.limitUntil', { time: formatTimeOfDay(resets, context, PLAN_NOW) }), next: null });
+  // A window of one family of models leaves the others; a reading too old to trust and a window already reset say nothing.
+  expect(state(full({ model_family: 'Fable' })).text).toBe(t('providers.phrase.ready'));
+  expect(state(full({}, { field_times: { ...facts.field_times, windows: '2026-10-14T09:00:00.000Z' } })).text).toBe(t('providers.phrase.ready'));
+  expect(state(full({ resets_at: '2026-10-14T11:00:00.000Z' })).text).toBe(t('providers.phrase.ready'));
+  // Extra usage that is on and has room carries turns past the window.
+  const extra = { enabled: true, limit_reached: false, disabled_reason: null, limit: '20', used: '2', used_percent: 10, unit: 'USD', decimal_places: 2 };
+  expect(state(full({}, { extra_usage: extra })).text).toBe(t('providers.phrase.ready'));
+  expect(state(full({}, { extra_usage: { ...extra, limit_reached: true } })).tone).toBe('warning');
 });
