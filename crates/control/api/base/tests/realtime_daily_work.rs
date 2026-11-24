@@ -304,7 +304,7 @@ async fn a_new_thread_enters_the_existing_tree_from_its_create_route() {
                 arrangement: None,
             }),
             model: Some(MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(rig.environment)),
+            environment: Some(EnvironmentChoice::existing(rig.environment)),
             directory: Some("web".into()),
             ..CreateThread::default()
         })

@@ -7,11 +7,12 @@
  * nothing of theirs stays in the page's query cache.
  */
 import { QueryClientProvider } from '@tanstack/react-query';
-import { createRouter, RouterProvider } from '@tanstack/react-router';
+import { createRouter, RouterContextProvider, RouterProvider } from '@tanstack/react-router';
 import { LucideProvider } from 'lucide-react';
 
 import { meKey, metaKey } from '@/api/auth';
 import { client } from '@/api/client';
+import { pageHtmlReads } from '@/api/htmlReads';
 import { queryClient } from '@/api/query';
 import { installReaderCacheBoundary } from '@/api/readerCache';
 import type { Meta } from '@/generated/api-types';
@@ -55,7 +56,11 @@ declare module '@tanstack/react-router' {
   }
 }
 
-router.subscribe('onBeforeNavigate', () => { cancelOwnerReadConfirmations(); beginOpening(); });
+router.subscribe('onBeforeNavigate', ({ toLocation }) => {
+  pageHtmlReads()?.visit(toLocation.pathname);
+  cancelOwnerReadConfirmations();
+  beginOpening();
+});
 
 installReaderCacheBoundary(client, queryClient);
 client.onSession((event) => {
@@ -80,10 +85,12 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <LucideProvider size={ICON_SIZE} strokeWidth={ICON_STROKE}>
         <TooltipProvider>
-          <Toaster>
-            <RouterProvider router={router} />
-            <OwnerReadConfirmation />
-          </Toaster>
+          <RouterContextProvider router={router}>
+            <Toaster>
+              <RouterProvider router={router} />
+              <OwnerReadConfirmation />
+            </Toaster>
+          </RouterContextProvider>
         </TooltipProvider>
       </LucideProvider>
     </QueryClientProvider>

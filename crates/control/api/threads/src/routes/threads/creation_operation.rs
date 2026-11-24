@@ -166,7 +166,11 @@ pub(super) async fn materialize(
             .await
             .map(Some);
     }
-    if matches!(body.environment, Some(EnvironmentChoice::New(_))) {
+    if body
+        .environment
+        .as_ref()
+        .is_some_and(EnvironmentChoice::requires_birth)
+    {
         return Ok(None);
     }
     let parent = targets::node(conn, topic).await?;
@@ -189,6 +193,7 @@ pub(super) async fn materialize(
         ObjectKind::Environment,
         &[],
     )?;
+    plan.bind_empty(slot(&plan, "creator_pool_placement")?)?;
     bind(
         &mut plan,
         "creator_initial_file_threads",
@@ -258,12 +263,13 @@ pub(super) async fn materialize(
     let env = orch_db::queries::environments::thread_engine::environment(conn, environment)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let pending = orch_engine::jobs::source::preparation_pending(
-        body.prepare_source,
-        worktree.is_some(),
-        source.repository_url.is_some(),
-        env.status == "running",
-    );
+    let pending = !body.workspace_edits.is_empty()
+        || orch_engine::jobs::source::preparation_pending(
+            body.prepare_source,
+            worktree.is_some(),
+            source.repository_url.is_some(),
+            env.status == "running",
+        );
     orch_engine::operation_scope::creator_files::bind(
         conn,
         plan.shared_mut(),
@@ -391,6 +397,7 @@ pub(super) async fn materialize(
         },
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
+        workspace_edits: body.workspace_edits.clone(),
         worktree,
         titled_by_automation: name.is_none(),
         settings,
@@ -463,15 +470,40 @@ pub(crate) fn complete_staged<'a>(
         let now = orch_types::Time::new(ctx.app.clock.now());
         let principal = authorization::load_principal(conn, caller.clone(), now).await?;
         let principal = crate::sign_in::second_step::hold(conn, ctx.user()?, principal).await?;
-        let (new, mut birth, home) =
-            super::make::resolve_in(ctx, conn, &principal, topic, body, true).await?;
+        let thread = orch_types::new_id();
         let selection = if ctx.route.name == "ThreadCreate" {
             "ThreadCreate"
         } else {
             "TopicCreate.with_thread"
         };
+        let pool = match body.environment.as_ref() {
+            Some(EnvironmentChoice::Use(orch_provider_contract::pools::Target::Pool {
+                id,
+                ..
+            })) => Some(*id),
+            _ => None,
+        };
+        let principal = if let Some(pool) = pool {
+            match orch_engine::operation_scope::creators::pool_draw_principal(
+                conn, &principal, selection, topic, pool,
+            )
+            .await
+            {
+                Ok(scoped) => scoped,
+                Err(error) => return Err(super::create_failed(conn, error).await),
+            }
+        } else {
+            principal
+        };
+        let (new, mut birth, home) =
+            super::make::resolve_in(ctx, conn, &principal, topic, body, true, thread).await?;
         let prefix = match orch_engine::operation_scope::creators::Prefix::prepare(
-            conn, &principal, selection, &new, home,
+            conn,
+            &principal,
+            selection,
+            &new,
+            home,
+            pool.map(|root| (root, thread)),
         )
         .await
         {
@@ -486,7 +518,7 @@ pub(crate) fn complete_staged<'a>(
                 prefix,
                 &new,
                 &birth,
-                orch_types::new_id(),
+                thread,
                 principal.now().get(),
             )
             .await;

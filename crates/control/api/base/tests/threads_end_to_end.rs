@@ -95,7 +95,7 @@ async fn a_thread_goes_from_its_making_to_the_agents_answer_through_the_whole_sy
                 arrangement: None,
             }),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(on.environment)),
+            environment: Some(EnvironmentChoice::existing(on.environment)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

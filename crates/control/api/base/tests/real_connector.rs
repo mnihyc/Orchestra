@@ -378,7 +378,8 @@ struct Sent {
 struct SealingCommands {
     machines: Mutex<HashMap<Id, (ControllerLink, RecipientKey)>>,
     secrets: StoredSecrets,
-    tickets: Tickets,
+    db: orch_db::Db,
+    authority: Link,
     sent: Mutex<HashMap<Id, Sent>>,
     order: Mutex<Vec<(Id, String)>>,
     clock: Arc<dyn Clock>,
@@ -388,7 +389,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -482,6 +483,42 @@ impl Commands for SealingCommands {
                 .map_err(|error| CommandsError::Other(error.to_string()))?;
             sealed.insert(id, text);
         }
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
+        let frozen = {
+            let mut conn = self
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            let serial = command.key.wire();
+            orch_db::queries::link::insert_command(
+                &mut conn,
+                &orch_db::queries::link::NewCommand {
+                    content_transit: command.content_transit,
+                    native_target: command.native_target.as_ref(),
+                    id: command.id,
+                    machine_id: command.machine,
+                    kind: command.kind.as_str(),
+                    body: &command.body,
+                    serial_key: serial.as_deref(),
+                    deadline_at: command.deadline.map_or_else(
+                        || {
+                            self.clock.now()
+                                + chrono::Duration::seconds(i64::from(command.kind.deadline_secs()))
+                        },
+                        |time| time.get(),
+                    ),
+                },
+                self.clock.now(),
+            )
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, command.id)
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?
+        };
         resolve_references(&mut body, &mut |reference| match reference {
             Reference::Secret(id) => sealed
                 .get(&id)
@@ -490,9 +527,19 @@ impl Commands for SealingCommands {
             Reference::Ticket(more) => {
                 let wanted: TicketWanted = serde_json::from_value(Json::Object(more.clone()))
                     .map_err(|error| error.to_string())?;
-                self.tickets
-                    .for_request(&wanted, command.machine)
-                    .map_err(|error| error.to_string())
+                if let Some(facts) = &frozen {
+                    let scope = Tickets::command_scope(facts, &wanted, command.machine)
+                        .map_err(|error| error.to_string())?;
+                    self.authority
+                        .tickets()
+                        .for_session_request(&wanted, command.machine, &scope)
+                        .map_err(|error| error.to_string())
+                } else {
+                    self.authority
+                        .tickets()
+                        .for_request(&wanted, command.machine)
+                        .map_err(|error| error.to_string())
+                }
             }
         })
         .map_err(CommandsError::Other)?;
@@ -500,19 +547,37 @@ impl Commands for SealingCommands {
         let deadline = command.deadline.unwrap_or_else(|| {
             Time::new(now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
         });
-        let cmd = Cmd {
+        let mut cmd = Cmd {
+            authority_until: None,
+            native_members: None,
+            native_revision: None,
+
+            native_target: frozen
+                .as_ref()
+                .and_then(|facts| facts.get("native_target"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| CommandsError::Other(error.to_string()))?,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
             deadline,
             body,
         };
-        if let Some(check) = before {
-            check().map_err(CommandsError::BeforeEffect)?;
+        if let Some(facts) = &frozen {
+            cmd.set_session_facts(facts)
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+        }
+        // Preparation can wait while another reconciliation joins the same command.
+        // Publish that actual command once, as the ordinary dispatcher and Link do.
+        let mut sent = lock(&self.sent);
+        if sent.contains_key(&command.id) {
+            return Ok(());
         }
         lock(&self.order).push((command.machine, cmd.kind.clone()));
         let handle = link.commands().issue(cmd.clone());
-        lock(&self.sent).insert(
+        sent.insert(
             command.id,
             Sent {
                 cmd,
@@ -749,7 +814,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -785,10 +850,13 @@ impl Cluster {
         // and link delivery must use that same clock, rather than the fixture's fixed date.
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let master = MasterKey::new([5; 32]);
+        let authority = Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
+            .expect("a link without gateways can be made");
         let commands = Arc::new(SealingCommands {
             machines: Mutex::new(HashMap::new()),
             secrets: StoredSecrets::new(db.clone(), master.clone()),
-            tickets: Tickets::generate(Arc::clone(&clock)),
+            db: db.clone(),
+            authority: authority.clone(),
             sent: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             clock: Arc::clone(&clock),
@@ -803,13 +871,13 @@ impl Cluster {
         });
         engine.start();
         let state = Arc::new(AppState {
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             builtin_sources: old.builtin_sources.clone(),
             db: db.clone(),
             config: Arc::clone(&old.config),
             clock: Arc::clone(&clock),
-            link: Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
-                .expect("a link without gateways can be made"),
+            link: authority.clone(),
             engine: engine.clone(),
             realtime: orch_api_core::realtime::Realtime::new(&db, &clock, &old.config),
             build: BuildInfo::new("api", "0.0.0-test", "", "1"),
@@ -833,7 +901,13 @@ impl Cluster {
         // The system on the loopback; its relay believes the signatures of the tickets the engine's
         // commands carry.
         let (system, enrollment_port) = start_system().await;
-        system.hub.set_ticket_verifier(commands.tickets.verifier());
+        system
+            .hub
+            .set_ticket_verifier(authority.tickets().verifier());
+        system.hub.set_tool_authority(move |query| {
+            let authority = authority.clone();
+            async move { authority.authorize_tool_session(&query).await }
+        });
 
         // The connector is enrolled with a token, as a person would, and told what its owner allows.
         let binary = connector_binary();
@@ -1127,7 +1201,7 @@ impl Cluster {
                     arrangement: None,
                 }),
                 model: Some(MODEL.to_owned()),
-                environment: Some(EnvironmentChoice::Use(on.environment)),
+                environment: Some(EnvironmentChoice::existing(on.environment)),
                 directory: Some("web".to_owned()),
                 ..CreateThread::default()
             })
@@ -1329,22 +1403,23 @@ impl Cluster {
             },
         );
         let told: Arc<Mutex<Vec<String>>> = Arc::default();
-        let session: Arc<Mutex<Option<(Id, Id, String)>>> = Arc::default();
+        let sessions: Arc<Mutex<HashMap<Id, ScriptedSession>>> = Arc::default();
         let link = machine.link.clone();
         machine.handler.on(CommandKind::AgentStart, {
             let told = Arc::clone(&told);
             move |command| {
                 lock(&told).push(serde_json::to_string(command).unwrap());
                 Ok(CommandResult::AgentStart(AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".to_owned(),
                     descriptor: serde_json::from_value(key_separated_agent()).unwrap(),
                 }))
             }
         });
-        machine.handler.on(CommandKind::SessionOpen, {
-            let (told, session) = (Arc::clone(&told), Arc::clone(&session));
-            move |command| {
+        machine.handler.on_with_context(CommandKind::SessionOpen, {
+            let (told, sessions) = (Arc::clone(&told), Arc::clone(&sessions));
+            move |context, command| {
                 lock(&told).push(serde_json::to_string(command).unwrap());
                 let LinkCommand::SessionOpen(open) = command else {
                     unreachable!()
@@ -1359,8 +1434,33 @@ impl Cluster {
                         "this harness reaches its model through the forwarder",
                     ));
                 };
-                *lock(&session) = Some((open.thread_id, open.segment_id, ticket.clone()));
+                let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+                    &context.native_target
+                else {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the scripted open has no captured physical target",
+                    ));
+                };
+                let Some(opening) = target.opening_id.filter(|_| {
+                    target.thread_id == open.thread_id && target.segment_id == Some(open.segment_id)
+                }) else {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the scripted open changed its source",
+                    ));
+                };
+                lock(&sessions).insert(
+                    opening,
+                    ScriptedSession {
+                        thread: open.thread_id,
+                        segment: open.segment_id,
+                        opening,
+                        ticket: ticket.clone(),
+                    },
+                );
                 Ok(CommandResult::SessionOpen(SessionOpenResult {
+                    mcp: None,
                     native_session_ref: format!("native-{}", open.segment_id),
                     resumed: false,
                     import_report: None,
@@ -1369,14 +1469,39 @@ impl Cluster {
                 }))
             }
         });
-        machine.handler.on(CommandKind::TurnStart, {
-            let (told, session) = (Arc::clone(&told), Arc::clone(&session));
-            move |command| {
+        machine.handler.on_with_context(CommandKind::TurnStart, {
+            let (told, sessions) = (Arc::clone(&told), Arc::clone(&sessions));
+            move |context, command| {
                 lock(&told).push(serde_json::to_string(command).unwrap());
                 let LinkCommand::TurnStart(turn) = command else {
                     unreachable!()
                 };
-                let session = lock(&session).clone().expect("a session is open");
+                let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+                    &context.native_target
+                else {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the scripted turn has no captured physical target",
+                    ));
+                };
+                let session = target
+                    .opening_id
+                    .and_then(|opening| lock(&sessions).get(&opening).cloned())
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the original scripted producer is absent",
+                        )
+                    })?;
+                if target.thread_id != turn.thread_id
+                    || session.thread != turn.thread_id
+                    || target.segment_id != Some(session.segment)
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the scripted turn changed its source address",
+                    ));
+                }
                 tokio::spawn(harness_turn(link.clone(), session, turn.clone()));
                 Ok(CommandResult::TurnStart(Empty {}))
             }
@@ -1396,6 +1521,11 @@ impl Cluster {
             .publish(
                 &Stream::Machine,
                 &Event::MachineFacts(MachineFacts {
+                    room: None,
+                    runtime_platform: None,
+                    data_volume_bytes: None,
+                    capacity_refresh_secs: None,
+                    server_update: None,
                     data_directory: None,
                     gateway: None,
                     role_management: None,
@@ -1411,10 +1541,12 @@ impl Cluster {
                     memory_bytes: 0,
                     discovered_harnesses: None,
                     searched_harness_kinds: None,
+                    program_checks: Vec::new(),
                     harnesses: vec![MachineFactsHarness {
                         kind: "fake".to_owned(),
                         path: handler_program.clone(),
                         version: "1.0.0".to_owned(),
+                        sha256: None,
                         daemon: false,
                     }],
                     adapters: vec![MachineFactsAdapter {
@@ -1430,6 +1562,7 @@ impl Cluster {
                         agent_harnesses: vec![PolicyHarness {
                             kind: "fake".to_owned(),
                             path: handler_program,
+                            confirmation: None,
                         }],
                         ..LocalPolicy::default()
                     }),
@@ -1456,15 +1589,27 @@ struct Harness {
     _machine: ScriptedMachine,
 }
 
-/// The turn of the scripted harness: it calls the model through the tunnel its ticket opens, which has
-/// no key in it and needs none, and says what the model answered.
-async fn harness_turn(link: MachineLink, session: (Id, Id, String), turn: TurnStart) {
-    let (thread_id, segment_id, ticket) = session;
+#[derive(Clone)]
+struct ScriptedSession {
+    thread: Id,
+    segment: Id,
+    opening: Id,
+    ticket: String,
+}
+
+/// The turn uses the original opening's ticket and producer through all of its asynchronous work.
+async fn harness_turn(link: MachineLink, session: ScriptedSession, turn: TurnStart) {
+    let ScriptedSession {
+        thread: thread_id,
+        segment: segment_id,
+        opening,
+        ticket,
+    } = session;
     let stream = Stream::Session {
         thread_id,
         segment_id,
     };
-    link.publish(&stream, &rig::turn_began(turn.turn_id))
+    link.publish_from_now(Some(opening), &stream, &rig::turn_began(turn.turn_id))
         .await
         .unwrap();
     let said = match model_call(&link, &ticket, &turn).await {
@@ -1476,7 +1621,9 @@ async fn harness_turn(link: MachineLink, session: (Id, Id, String), turn: TurnSt
         rig::message_done("m1", &said),
         rig::turn_ended(turn.turn_id, TurnOutcome::Completed),
     ] {
-        link.publish(&stream, &event).await.unwrap();
+        link.publish_from_now(Some(opening), &stream, &event)
+            .await
+            .unwrap();
     }
 }
 
@@ -1597,6 +1744,8 @@ async fn a_thread_made_over_http_runs_its_turn_on_a_real_connector_that_was_give
         .ask(
             SerialKey::Provider(on.provider),
             &ProviderDiscoverModels {
+                max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default()
+                    .whole_bytes,
                 provider_id: on.provider,
                 models: None,
             },
@@ -2140,6 +2289,8 @@ async fn a_key_typed_on_the_machine_serves_a_turn_without_the_system_ever_holdin
         .ask(
             SerialKey::Provider(on.provider),
             &ProviderDiscoverModels {
+                max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default()
+                    .whole_bytes,
                 provider_id: on.provider,
                 models: None,
             },
@@ -2336,6 +2487,8 @@ async fn a_directory_of_a_real_connector_is_attached_in_each_session_and_a_turn_
         .ask(
             SerialKey::Environment(directory),
             &orch_link_contract::commands::FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: directory,
                 mount: None,
                 path: "web".to_owned(),
@@ -2412,7 +2565,7 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
                 arrangement: None,
             }),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(on.environment)),
+            environment: Some(EnvironmentChoice::existing(on.environment)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

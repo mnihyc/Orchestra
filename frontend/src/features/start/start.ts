@@ -2,23 +2,23 @@
  * its first input, any new environment and a project's new topic together, before provisioning can begin.
  * The requested environment audience is admitted in that same birth.
  */
+import { ENVIRONMENT_POOL_PREFIX, environmentTarget } from '@/features/resources/pools/environmentTarget';
 import { useMutation } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useRef, useState } from 'react';
 
-import { ApiError, client } from '@/api/client';
+import { ApiError } from '@/api/client';
 import { permissionsQuery } from '@/api/access';
 import { queryClient } from '@/api/query';
 import { createTopicAndThread } from '@/api/nodes';
 import { createThread } from '@/api/threads';
 import { generalAccessChange, type GeneralAccessPreset, indexCatalogue } from '@/features/access/model';
 import type { PlaceRef } from '@/features/navigation/places';
-import type { AgentAccessChoice, CreateThread, Thread } from '@/generated/api-types';
+import type { AgentAccessChoice, CreateThread, Thread, WorkspaceFileEdit } from '@/generated/api-types';
 import { newActKey } from '@/lib/requests';
 import { i18n } from '@/i18n';
 
 import type { Resolved } from './choices';
-import { rememberSetup } from './lastSetup';
 import { checkStart } from './admission';
 import { startOptionsKey, type StartOptions } from '@/api/start';
 
@@ -40,6 +40,8 @@ export interface StartPlan {
   directory: string;
   /** Override missing-directory repository preparation, consistently on every machine. */
   prepareSource?: boolean;
+  /** One-shot conditional files saved before their workspace exists. */
+  workspaceEdits?: WorkspaceFileEdit[];
   /** A newly made environment expires with this thread or its idle limit. */
   temporary?: boolean;
   privately: boolean;
@@ -83,24 +85,24 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
 
   const run = useMutation({
     mutationFn: async (asked: StartPlan) => {
-      const person = client.session.getState().userId;
       const plan = { ...asked, place: { ...asked.place },
+        ...(asked.workspaceEdits===undefined?{}:{workspaceEdits:structuredClone(asked.workspaceEdits)}),
         ...(asked.agentAccess === undefined ? {} : { agentAccess: { ...asked.agentAccess, parts: { ...asked.agentAccess.parts } } }) };
       const inputId = firstInput.current;
       const { place, resolved } = plan;
-      if (resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) {
+      if (resolved.missing.length > 0 || resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) {
         throw new Error('the choices are not whole');
       }
       // Freeze the values named by the visible line before topic/environment requests can update caches.
       const chosen = { agent: resolved.agent.id, provider: resolved.provider.id, model: resolved.model.model_name,
-        arrangement: resolved.arrangement, effort: resolved.effort,
+        arrangement: resolved.arrangement, effort: resolved.effort, environmentPool: resolved.environmentPool,
         environment: resolved.environment === null ? null : { id: resolved.environment.environment.id, name: resolved.environment.environment.name } };
       const newEnvironment = resolved.fresh ? structuredClone(resolved.newEnvironment ?? {}) : undefined;
       const intent = JSON.stringify({ place: place.id, provider: chosen.provider, agent: chosen.agent, model: chosen.model,
-        effort: chosen.effort, arrangement: chosen.arrangement, environment: chosen.environment?.id ?? null,
+        effort: chosen.effort, arrangement: chosen.arrangement, environment: chosen.environment?.id ?? null, environmentPool: chosen.environmentPool,
         name: plan.name, directory: plan.directory, newEnvironment, temporary: plan.temporary, prepareSource: plan.prepareSource,
         privately: plan.privately, generalAccess: plan.generalAccess, agentAccess: plan.agentAccess,
-        letIntoEnvironment: plan.letIntoEnvironment, message: plan.message });
+        letIntoEnvironment: plan.letIntoEnvironment, message: plan.message, workspaceEdits:plan.workspaceEdits });
       let thread = accepted.current?.intent === intent ? accepted.current.thread : null;
       if (thread === null) {
         setStep('check');
@@ -114,9 +116,10 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
           binding: { agent_id: chosen.agent, provider_id: chosen.provider, arrangement: chosen.arrangement },
           model: chosen.model,
           ...(chosen.effort === null ? {} : { effort: chosen.effort }),
-          environment: chosen.environment === null ? { new: { ...newEnvironment, ...(plan.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}) } } : { use: chosen.environment.id },
+          environment: chosen.environmentPool !== undefined ? { use: environmentTarget(ENVIRONMENT_POOL_PREFIX + chosen.environmentPool) } : chosen.environment === null ? { new: { ...newEnvironment, ...(plan.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}) } } : { use: environmentTarget(chosen.environment.id) },
           ...(plan.directory === '' ? {} : { directory: plan.directory }),
           ...(plan.prepareSource === undefined ? {} : { prepare_source: plan.prepareSource }),
+          ...(plan.workspaceEdits===undefined?{}:{workspace_edits:structuredClone(plan.workspaceEdits)}),
           ...(access === undefined ? {} : { access }),
           ...(plan.agentAccess === undefined ? {} : { agent_access: plan.agentAccess }),
           ...(plan.letIntoEnvironment === undefined ? {} : { let_into_environment: plan.letIntoEnvironment }),
@@ -130,7 +133,6 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
       if (environment === null) throw new Error(i18n.t('startPreflight.changed'));
       made.current = { ...made.current, environment: { id: environment.id, name: environment.name } };
       setStanding(made.current);
-      rememberSetup(person, { place: thread.topic_id, picks: { provider: chosen.provider, agent: chosen.agent, model: chosen.model, effort: chosen.effort, environment: environment.id, arrangement: chosen.arrangement } });
       return thread;
     },
     onSuccess: (thread) => {

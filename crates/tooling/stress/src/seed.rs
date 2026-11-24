@@ -841,7 +841,7 @@ async fn make_threads(
             if let Some(arrangement) = &o.arrangement {
                 binding["arrangement"] = json!(arrangement);
             }
-            let body = json!({ "name": name, "binding": binding, "model": o.model, "environment": { "use": environment } });
+            let body = json!({ "name": name, "binding": binding, "model": o.model, "environment": { "use": { "type": "single", "resource": { "kind": "environment", "id": environment } } } });
             let owner = (!org.members.is_empty()).then(|| org.members[j % org.members.len()]);
             let mut reply = match owner {
                 Some(p) => api.post(&people[p], "/topics/{id}/threads", &[&topics[topic].id], &body).await,

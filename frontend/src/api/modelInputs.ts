@@ -1,5 +1,6 @@
 /** What Orch supplied to a model for a node, exactly as it was sent: the newest first, a page at a time. */
 import { infiniteQueryOptions } from '@tanstack/react-query';
+import { libraryReader } from '@/api/resourceLibrary';
 import { api, ok } from '@/api/client';
 import type { ModelInput, ModelInputPage, ModelTextBlock } from '@/generated/api-types';
 
@@ -15,13 +16,13 @@ export async function modelInputText(record: ModelInput, block: ModelTextBlock, 
 const GIVEN_PAGE = 20;
 
 /** The records of a node, narrowed to one turn where `turn` names it. */
-export const modelInputsQuery = (node: string, turn: string | null, record: string | null = null) => infiniteQueryOptions({
-  queryKey: ['model-inputs', node, turn, record] as const,
+export const modelInputsQuery = (node: string, turn: string | null, record: string | null = null, q = '') => infiniteQueryOptions({
+  queryKey: ['model-inputs', node, turn, record, q, ...libraryReader()] as const,
   initialPageParam: null as number | null,
   queryFn: ({ signal, pageParam }): Promise<ModelInputPage> => ok(api.GET('/nodes/{id}/model-inputs', {
     params: {
       path: { id: node },
-      query: { limit: GIVEN_PAGE, ...(turn === null ? {} : { turn_id: turn }), ...(record === null ? {} : { id: record }), ...(pageParam === null ? {} : { before: pageParam }) },
+      query: { limit: GIVEN_PAGE, ...(q === '' ? {} : { q }), ...(turn === null ? {} : { turn_id: turn }), ...(record === null ? {} : { id: record }), ...(pageParam === null ? {} : { before: pageParam }) },
     },
     signal,
   })),

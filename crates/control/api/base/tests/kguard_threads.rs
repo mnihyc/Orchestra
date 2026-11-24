@@ -113,7 +113,7 @@ fn a_thread(s: &Scene, name: &str) -> serde_json::Value {
         "name": name,
         "binding": { "agent_id": s.on.agent, "provider_id": s.on.provider },
         "model": rig::MODEL,
-        "environment": { "use": s.on.environment },
+        "environment": orch_api_contract::binding::EnvironmentChoice::existing(s.on.environment),
         "directory": "web",
     })
 }

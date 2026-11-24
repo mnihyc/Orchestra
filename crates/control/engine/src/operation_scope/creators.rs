@@ -7,7 +7,8 @@
 use super::{BindingError, Prepared, blob_sources, targets};
 use crate::EngineError;
 use crate::binding::{Birth, BirthAgentAccess, CreateThreadError, NewThread};
-use orch_access_contract::key_scope::KeyTargetKind;
+use orch_access_contract::decisions::ObjectRef;
+use orch_access_contract::key_scope::{KeyResolvedTarget, KeyTargetKind};
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::nodes::{AgentAccessChoice, AgentAccessWhere};
 use orch_api_contract::operations::TargetResolver;
@@ -81,6 +82,7 @@ pub struct Prefix {
     selection: String,
     new_environment_home: Option<Id>,
     new_environment_job: Option<Id>,
+    placement: Vec<(KeyTargetKind, Vec<KeyResolvedTarget>)>,
     complete: Option<Completed>,
 }
 /// Required admission after the writer's actual Thread has been inserted.
@@ -99,6 +101,7 @@ impl Prefix {
         selection: &str,
         new: &NewThread,
         newly_created: Option<(Id, Id)>,
+        pool_draw: Option<(Id, Id)>,
     ) -> Result<Self, CreateThreadError> {
         if !matches!(
             selection,
@@ -108,7 +111,7 @@ impl Prefix {
                 "an unrelated operation cannot enter a creator prefix",
             ));
         }
-        if selection == "ThreadAdopt" && newly_created.is_some() {
+        if selection == "ThreadAdopt" && (newly_created.is_some() || pool_draw.is_some()) {
             return Err(unreadable("native adoption uses an existing Environment"));
         }
         let plan = Prepared::for_selection(selection).map_err(scope)?;
@@ -117,8 +120,43 @@ impl Prefix {
         let new_environment_home = newly_created.map(|(home, _)| home);
         let new_environment_job = newly_created.map(|(_, job)| job);
         new_environment(&mut known, conn, new_environment_home).await?;
+        let placement = match pool_draw {
+            None => Vec::new(),
+            Some((root, thread)) => {
+                let path = crate::binding::environment_pool::birth_path(
+                    conn,
+                    principal,
+                    thread,
+                    new.topic,
+                    new.environment,
+                )
+                .await?
+                .filter(|path| path.first().is_some_and(|hop| hop.pool_id == root))
+                .ok_or(CreateThreadError::OperationScope)?;
+                let objects = path
+                    .iter()
+                    .map(|hop| ObjectRef {
+                        kind: ObjectKind::Pool,
+                        id: hop.pool_id,
+                    })
+                    .chain(std::iter::once(ObjectRef {
+                        kind: ObjectKind::Environment,
+                        id: new.environment,
+                    }))
+                    .collect::<Vec<_>>();
+                let targets = targets::resource_objects(conn, &objects)
+                    .await
+                    .map_err(unreadable)?;
+                targets
+                    .into_iter()
+                    .map(|target| (target.object.kind, vec![target]))
+                    .collect()
+            }
+        };
         if selection == "ThreadAdopt" {
             crate::adoption::operation::bind_creation(conn, &mut known, new).await?;
+        } else {
+            bind_placement(&mut known, &placement)?;
         }
         // The returned partial Caller remains private in this opaque proof. It is used
         // only by the one writer's rollbackable prefix, never persisted or returned.
@@ -131,6 +169,7 @@ impl Prefix {
             selection: selection.into(),
             new_environment_home,
             new_environment_job,
+            placement,
             complete: None,
         })
     }
@@ -151,17 +190,20 @@ impl Prefix {
         new_environment(&mut plan, conn, self.new_environment_home).await?;
         if self.selection == "ThreadAdopt" {
             crate::adoption::operation::bind_creation(conn, &mut plan, new).await?;
+        } else {
+            bind_placement(&mut plan, &self.placement)?;
         }
         let env = orch_db::queries::environments::thread_engine::environment(conn, new.environment)
             .await?
             .ok_or_else(|| unreadable("the creator Environment disappeared"))?;
         let source = crate::jobs::source::resolved(conn, thread).await?;
-        let pending = crate::jobs::source::preparation_pending(
-            birth.prepare_source,
-            birth.worktree.is_some(),
-            source.repository_url.is_some(),
-            env.status == "running",
-        );
+        let pending = !birth.workspace_edits.is_empty()
+            || crate::jobs::source::preparation_pending(
+                birth.prepare_source,
+                birth.worktree.is_some(),
+                source.repository_url.is_some(),
+                env.status == "running",
+            );
         super::creator_files::bind(
             conn,
             &mut plan,
@@ -395,6 +437,51 @@ async fn require_environment(
     }
     Ok(())
 }
+fn bind_placement(
+    plan: &mut Prepared,
+    targets: &[(KeyTargetKind, Vec<KeyResolvedTarget>)],
+) -> Result<(), CreateThreadError> {
+    let slot = index(plan, "creator_pool_placement")?;
+    if targets.is_empty() {
+        plan.bind_empty(slot)
+    } else {
+        plan.bind_collection(slot, targets)
+    }
+    .map_err(scope)
+}
+
+/// Admit the requested pool and parent before reading candidates. The final writer
+/// binds every pool on the selected path and the placed environment before commit.
+pub async fn pool_draw_principal(
+    conn: &mut Conn,
+    principal: &Principal,
+    selection: &str,
+    topic: Id,
+    pool: Id,
+) -> Result<Principal, CreateThreadError> {
+    let mut known = subject_plan(conn, selection, topic).await?;
+    let target = targets::page_object(
+        conn,
+        ObjectRef {
+            kind: ObjectKind::Pool,
+            id: pool,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        targets::TargetError::Missing => CreateThreadError::OperationScope,
+        error => unreadable(error),
+    })?;
+    bind_placement(
+        &mut known,
+        &[(KeyTargetKind::Object(ObjectKind::Pool), vec![target])],
+    )?;
+    let caller = known
+        .preparation_caller(principal.caller())
+        .map_err(scope)?;
+    with_caller(conn, principal, caller).await
+}
+
 async fn subject_plan(
     conn: &mut Conn,
     selection: &str,

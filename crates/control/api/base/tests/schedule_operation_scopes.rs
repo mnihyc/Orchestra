@@ -64,12 +64,12 @@ fn editing_rules(schedule: Id, destination: Id) -> Vec<Value> {
 }
 
 async fn key(s: &Scene, owner: Id, rules: Vec<Value>) -> Key {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let now = s.rig.world.now();
     create_api_token_scoped(
@@ -121,6 +121,8 @@ fn once(s: &Scene, target: InputScheduleTarget, words: &str) -> InputScheduleCre
         target,
         content: vec![ContentPart::Text { text: words.into() }],
         native_action: None,
+        plan: false,
+        delivery: orch_api_contract::threads::Delivery::Queue,
         timing: InputTiming::Once {
             at: Time::new(s.rig.world.now() + Duration::minutes(1)),
             zone: "UTC".into(),
@@ -565,6 +567,42 @@ async fn schedule_readers_filter_actual_rows_and_keep_another_authors_definition
     let mut other = once(&s, to_thread(thread), "second private draft");
     other.name = Some("Second hidden schedule".into());
     let b = full(create(&s, &s.ada.token, &other).await, 201);
+    for row in [&a, &b] {
+        let page = s
+            .rig
+            .world
+            .app
+            .call(TopicInputScheduleList, &[&s.tree.topic.base.id])
+            .token(&s.ada.token)
+            .query(&InputScheduleListQuery {
+                q: Some(row.name.clone()),
+                page: PageQuery {
+                    limit: Some(1),
+                    cursor: None,
+                },
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, row.id);
+        assert!(page.next_cursor.is_none());
+    }
+    let another = s
+        .rig
+        .world
+        .app
+        .call(TopicInputScheduleList, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .query(&InputScheduleListQuery {
+            thread_id: Some(new_id()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(another.items.is_empty());
     let root_only = key(
         &s,
         s.ada.id(),
@@ -1064,7 +1102,7 @@ fn new_thread(s: &Scene) -> InputScheduleTarget {
                 arrangement: None,
             }),
             model: Some(rig::MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..Default::default()
         }),
     }
@@ -1220,7 +1258,7 @@ async fn a_scheduled_attachment_needs_its_accepted_keys_current_readable_byte_wi
         .app
         .app
         .blobs
-        .register(&mut conn, stored, s.rig.world.now())
+        .register(&mut conn, &stored, s.rig.world.now())
         .await
         .unwrap();
     orch_db::queries::uploads::remember(&mut conn, s.ada.id(), &stored.hash, s.rig.world.now())
@@ -1262,100 +1300,107 @@ async fn a_scheduled_attachment_needs_its_accepted_keys_current_readable_byte_wi
 }
 
 #[tokio::test]
-async fn a_scheduled_native_manage_selection_needs_manage_at_acceptance_and_when_due() {
+async fn a_scheduled_native_selection_keeps_its_declared_delivery_and_manage_boundary() {
     use orch_api_contract::native::*;
     use orch_api_contract::threads::Delivery;
 
-    let s = Scene::new().await;
-    let thread = s.thread().await.base.id;
-    s.say(
-        &s.ada,
-        thread,
-        "Open the native schedule session",
-        Delivery::Queue,
-        "native-schedule-open",
-    )
-    .await
-    .ok();
-    s.rig.run_turn(thread, 0, "ready").await;
-    hold(&s, thread).await;
-    *s.rig.commands.native.lock().unwrap() = Some(NativeCatalog {
-        revision: "scheduled-native-catalogue".into(),
-        state: NativeCatalogState::Ready,
-        actions: vec![NativeAction {
-            id: "scheduled-manage-artifact".into(),
-            name: "scheduled-context-action".into(),
-            title: "Scheduled context action".into(),
-            kind: NativeActionKind::Skill,
-            description: "Current stored action with ordinary Manage permission".into(),
-            arguments_schema: json!({"type":"object","additionalProperties":false}),
-            argument_hint: None,
-            origin: NativeOrigin {
-                kind: NativeOriginKind::Builtin,
-                name: None,
-                path: None,
-            },
-            permission: NativePermission::Manage,
-            delivery_modes: vec![NativeDelivery::Queue],
-            available: true,
-            reason: None,
-        }],
-        reason: None,
-        project_skills: NativeProjectSkills {
-            available: false,
-            reason: Some("No project discovery in this fixture".into()),
-        },
-        as_of: None,
-    });
-    let catalog = s
-        .rig
-        .world
-        .app
-        .call(ThreadNativeActionList, &[&thread])
-        .token(&s.ada.token)
-        .query(&ThreadNativeActionListQuery::default())
-        .send()
+    for (delivery, native_delivery) in [
+        (Delivery::Queue, NativeDelivery::Queue),
+        (Delivery::Steer, NativeDelivery::Steer),
+        (Delivery::Interrupt, NativeDelivery::Interrupt),
+    ] {
+        let s = Scene::new().await;
+        let thread = s.thread().await.base.id;
+        s.say(
+            &s.ada,
+            thread,
+            "Open the native schedule session",
+            Delivery::Queue,
+            "native-schedule-open",
+        )
         .await
         .ok();
-    assert_eq!(catalog.actions[0].permission, NativePermission::Manage);
-    let mut body = once(&s, to_thread(thread), SECRET);
-    body.native_action = Some(NativeInvocation {
-        action_id: catalog.actions[0].id.clone(),
-        revision: catalog.revision,
-        arguments: json!({}),
-    });
-    let base = creation_rules(s.tree.topic.base.id, "thread", thread);
-    let plain = key(&s, s.ada.id(), base.clone()).await;
-    let before = input_count(&s, thread).await;
-    denied(create(&s, &plain.secret, &body).await);
-    assert_eq!(input_count(&s, thread).await, before);
-    let mut management = base.clone();
-    management.push(rule(CREATE, "thread", thread, &["thread"], &["manage"]));
-    let author = key(&s, s.ada.id(), management).await;
-    let accepted = receipt(create(&s, &author.secret, &body).await, 201);
-    assert_eq!(
-        get(&s, accepted.id).await.definition.unwrap().native_action,
-        body.native_action
-    );
-    assert_eq!(
-        input_count(&s, thread).await,
-        before,
-        "saving the selection invokes nothing"
-    );
-    policy(&s, &author, base).await;
-    s.rig.world.advance(Duration::minutes(2));
-    assert_eq!(due(&s).await, 1);
-    assert_eq!(due(&s).await, 0);
-    let run = get(&s, accepted.id).await.last_run.unwrap();
-    assert_eq!(run.state, InputScheduleRunState::Failed);
-    assert!(run.input_id.is_none());
-    assert_eq!(input_count(&s, thread).await, before);
-    assert_eq!(
-        s.rig.turn_starts(thread).len(),
-        1,
-        "only the ordinary setup turn ran"
-    );
-    s.rig.engine.stop();
+        s.rig.run_turn(thread, 0, "ready").await;
+        hold(&s, thread).await;
+        *s.rig.commands.native.lock().unwrap() = Some(NativeCatalog {
+            revision: "scheduled-native-catalogue".into(),
+            state: NativeCatalogState::Ready,
+            actions: vec![NativeAction {
+                id: "scheduled-manage-artifact".into(),
+                name: "scheduled-context-action".into(),
+                title: "Scheduled context action".into(),
+                kind: NativeActionKind::Skill,
+                description: "Current stored action with ordinary Manage permission".into(),
+                arguments_schema: json!({"type":"object","additionalProperties":false}),
+                argument_hint: None,
+                origin: NativeOrigin {
+                    kind: NativeOriginKind::Builtin,
+                    name: None,
+                    path: None,
+                },
+                permission: NativePermission::Manage,
+                delivery_modes: vec![native_delivery],
+                available: true,
+                reason: None,
+            }],
+            reason: None,
+            project_skills: NativeProjectSkills {
+                available: false,
+                reason: Some("No project discovery in this fixture".into()),
+            },
+            as_of: None,
+        });
+        let catalog = s
+            .rig
+            .world
+            .app
+            .call(ThreadNativeActionList, &[&thread])
+            .token(&s.ada.token)
+            .query(&ThreadNativeActionListQuery::default())
+            .send()
+            .await
+            .ok();
+        assert_eq!(catalog.actions[0].permission, NativePermission::Manage);
+        let mut body = once(&s, to_thread(thread), SECRET);
+        body.delivery = delivery;
+        body.native_action = Some(NativeInvocation {
+            action_id: catalog.actions[0].id.clone(),
+            revision: catalog.revision,
+            arguments: json!({}),
+        });
+        let base = creation_rules(s.tree.topic.base.id, "thread", thread);
+        let plain = key(&s, s.ada.id(), base.clone()).await;
+        let before = input_count(&s, thread).await;
+        denied(create(&s, &plain.secret, &body).await);
+        assert_eq!(input_count(&s, thread).await, before);
+        let mut management = base.clone();
+        management.push(rule(CREATE, "thread", thread, &["thread"], &["manage"]));
+        let author = key(&s, s.ada.id(), management).await;
+        let accepted = receipt(create(&s, &author.secret, &body).await, 201);
+        assert_eq!(
+            get(&s, accepted.id).await.definition.unwrap().native_action,
+            body.native_action
+        );
+        assert_eq!(
+            input_count(&s, thread).await,
+            before,
+            "saving the selection invokes nothing"
+        );
+        policy(&s, &author, base).await;
+        s.rig.world.advance(Duration::minutes(2));
+        assert_eq!(due(&s).await, 1);
+        assert_eq!(due(&s).await, 0);
+        let run = get(&s, accepted.id).await.last_run.unwrap();
+        assert_eq!(run.state, InputScheduleRunState::Failed);
+        assert!(run.input_id.is_none());
+        assert_eq!(input_count(&s, thread).await, before);
+        assert_eq!(
+            s.rig.turn_starts(thread).len(),
+            1,
+            "only the ordinary setup turn ran"
+        );
+        s.rig.engine.stop();
+    }
 }
 
 // These continuation controls retain the real occurrence/input. They do not manufacture
@@ -1435,6 +1480,8 @@ async fn accepted_source(s: &Scene) -> (Receipt, Key, Key, Id, Id) {
         &access,
         &mut *s.rig.world.conn().await,
         &orch_engine::access::ProviderUse {
+            pool: None,
+            purpose: orch_access_contract::permissions::UsagePurpose::Turn,
             person: s.ada.id(),
             node: thread,
             provider: s.on.provider,
@@ -1679,6 +1726,8 @@ async fn a_queued_scheduled_file_command_uses_the_same_all_origin_wire_checkpoin
             )
             .unwrap(),
             scheduled_input: Some(input),
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action: Action::Prepare {
                 directory: row.workspace_dir.clone(),
                 source: serde_json::from_value::<RepositorySource>(frozen["source"].clone())
@@ -1695,6 +1744,7 @@ async fn a_queued_scheduled_file_command_uses_the_same_all_origin_wire_checkpoin
     let plan: Plan = serde_json::from_value(job.plan.clone()).unwrap();
     let command = new_id();
     let body = json!(FsStat {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: plan.environment,
         mount: None,
         path: row.workspace_dir

@@ -152,6 +152,8 @@ pub(super) async fn binding_of(
         .provider_use(
             conn,
             &ProviderUse {
+                pool: None,
+                purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                 person,
                 node: topic,
                 provider,
@@ -247,14 +249,20 @@ pub(super) async fn environment_of(
     asked: Option<&EnvironmentChoice>,
 ) -> ApiResult<Id> {
     match asked {
-        Some(EnvironmentChoice::Use(id)) => {
-            if !orch_db::queries::loss::accepts_threads(conn, *id).await? {
+        Some(EnvironmentChoice::Use(target)) => {
+            let id = target.single_environment().ok_or_else(|| {
+                invalid(
+                    "environment.use",
+                    "Choose a single existing environment for this operation",
+                )
+            })?;
+            if !orch_db::queries::loss::accepts_threads(conn, id).await? {
                 return Err(ApiError::new(
                     ErrorCode::EnvironmentUnavailable,
                     "The environment was lost or removed; choose another environment",
                 ));
             }
-            Ok(*id)
+            Ok(id)
         }
         Some(EnvironmentChoice::New(_)) => Err(invalid(
             "environment.new",
@@ -425,6 +433,7 @@ pub(crate) async fn scheduled_choices(
             agent_access: body.agent_access.into(),
             first_input: None,
             prepare_source: body.prepare_source,
+            workspace_edits: body.workspace_edits.clone(),
             worktree,
             titled_by_automation: false,
             settings,
@@ -444,6 +453,7 @@ pub(crate) async fn resolve_in(
     topic: Id,
     body: &CreateThread,
     creator_prefix: bool,
+    thread: Id,
 ) -> ApiResult<(NewThread, Birth, Option<(Id, Id)>)> {
     if body.program.is_some() {
         return Err(invalid(
@@ -495,6 +505,39 @@ pub(crate) async fn resolve_in(
     };
     let mut new_environment_home = None;
     let environment = match body.environment.as_ref().or(fallback.as_ref()) {
+        Some(EnvironmentChoice::Use(
+            target @ orch_provider_contract::pools::Target::Pool { .. },
+        )) => {
+            target
+                .validate(orch_provider_contract::pools::Kind::Environment)
+                .map_err(|reason| invalid("environment.use", &reason))?;
+            use orch_engine::binding::environment_pool::{Request, choose};
+            match choose(
+                conn,
+                &ctx.app.engine,
+                principal,
+                Request {
+                    thread,
+                    topic,
+                    target,
+                    agent: chosen.agent,
+                    provider: chosen.provider,
+                    model: body.model.as_deref(),
+                    effort: body.effort.as_deref(),
+                    arrangement: chosen.arrangement,
+                },
+            )
+            .await
+            {
+                Ok(Some(environment)) => environment,
+                Ok(None) => return Err(ApiError::new(
+                    ErrorCode::EnvironmentNoneUsable,
+                    "No available member of this environment pool accepts the selected binding.",
+                )
+                .with("reason", "pool_exhausted")),
+                Err(error) => return Err(create_failed(conn, error).await),
+            }
+        }
         Some(EnvironmentChoice::New(new)) => {
             let mut new = (**new).clone();
             let home = *new.home_node_id.get_or_insert(topic);
@@ -584,6 +627,7 @@ pub(crate) async fn resolve_in(
         agent_access: body.agent_access.into(),
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
+        workspace_edits: body.workspace_edits.clone(),
         worktree,
         titled_by_automation: body.name.is_none(),
         settings,
@@ -599,18 +643,12 @@ pub(crate) async fn create_in(
     topic: Id,
     body: &CreateThread,
 ) -> ApiResult<Thread> {
-    let (new, birth, _) = resolve_in(ctx, conn, principal, topic, body, false).await?;
+    let thread = orch_types::new_id();
+    let (new, birth, _) = resolve_in(ctx, conn, principal, topic, body, false, thread).await?;
     let made = ctx
         .app
         .engine
-        .create_thread_in_transaction(
-            conn,
-            principal.caller(),
-            &new,
-            &birth,
-            orch_types::new_id(),
-            ctx.now,
-        )
+        .create_thread_in_transaction(conn, principal.caller(), &new, &birth, thread, ctx.now)
         .await;
     let made = match made {
         Ok(made) => made,
@@ -623,6 +661,8 @@ orch_api_base::__api_bind_db6ac243da!();
 pub(super) fn worktree_of(
     body: &CreateThread,
 ) -> ApiResult<Option<orch_api_contract::source::WorktreeChoice>> {
+    orch_engine::jobs::source::validate_workspace_edits(&body.workspace_edits)
+        .map_err(|why| ApiError::invalid("workspace_edits", why))?;
     let Some(mut choice) = body.worktree.clone() else {
         return Ok(None);
     };
@@ -739,7 +779,12 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
     } else {
         false
     };
-    if automatic_new || matches!(body.environment.as_ref(), Some(EnvironmentChoice::New(_))) {
+    if automatic_new
+        || body
+            .environment
+            .as_ref()
+            .is_some_and(EnvironmentChoice::requires_birth)
+    {
         let topic = ctx.id("id")?;
         let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
         let principal = guard.into_principal();
@@ -830,6 +875,7 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
         agent_access: body.agent_access.into(),
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
+        workspace_edits: body.workspace_edits.clone(),
         worktree: worktree.clone(),
         titled_by_automation: name.is_none(),
         settings,
@@ -846,15 +892,21 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
             .await;
         if matches!(&created, Err(CreateThreadError::AgentNotReported)) && !discovered {
             discovered = true;
-            if matches!(
-                ctx.app
-                    .engine
-                    .learn_descriptor(new.agent, new.provider, Some(new.environment))
-                    .await
-                    .map_err(ApiError::engine)?,
-                Learning::Known
-            ) {
-                continue;
+            match ctx
+                .app
+                .engine
+                .learn_descriptor(new.agent, new.provider, Some(new.environment))
+                .await
+                .map_err(ApiError::engine)?
+            {
+                Learning::Known => continue,
+                Learning::Unknown(orch_engine::provider_setup::Unlearned::Policy(key)) => {
+                    return Err(super::harness_start_failed(Some(&key)));
+                }
+                Learning::Unknown(orch_engine::provider_setup::Unlearned::Failed(_)) => {
+                    return Err(super::harness_start_failed(None));
+                }
+                Learning::Unknown(_) => {}
             }
         }
         break created;

@@ -112,7 +112,7 @@ async fn every_general_preset_at_creation_gives_a_viewer_role_member_exactly_its
                     arrangement: None,
                 }),
                 model: Some(MODEL.into()),
-                environment: Some(EnvironmentChoice::Use(s.on.environment)),
+                environment: Some(EnvironmentChoice::existing(s.on.environment)),
                 access: Some(ThreadAccess::Change(preset(&catalogue, topic, level))),
                 ..CreateThread::default()
             })

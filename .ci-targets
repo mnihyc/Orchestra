@@ -1,0 +1,6 @@
+fmt
+test -p orch-api-core --lib
+test -p orch-engine --lib -- resource_choice::
+test -p orch-api-core --test thread_creator_operation_scopes
+test -p orch-api-core --test threads_make -- a_new_thread_uses_its_environment_pool_once_even_when_the_request_is_replayed
+test -p orch-api-core --test threads_make -- a_thread_keeps_the_model_pool_member_and_fixed_agent_on_creation_replay
