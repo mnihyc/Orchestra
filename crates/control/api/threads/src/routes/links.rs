@@ -29,8 +29,6 @@ use orch_access_contract::permissions::Permission;
 
 use orch_api_contract::common::ErrorCode;
 
-use orch_api_contract::common::MAX_LIMIT;
-
 use orch_api_contract::links::DocumentGraphGet;
 
 use orch_api_contract::links::DocumentLinks;
@@ -190,7 +188,7 @@ impl Limits {
     /// The size of a page: what was asked for, within the API's limits, or the place's page size.
     fn page(&self, asked: Option<u32>) -> usize {
         asked.map_or(self.page_size, |asked| {
-            usize::try_from(asked.clamp(1, MAX_LIMIT)).unwrap_or(self.page_size)
+            usize::try_from(asked.max(1)).unwrap_or(self.page_size)
         })
     }
 }
@@ -310,6 +308,12 @@ async fn tabs_set(ctx: Ctx, (): (), body: DocumentLinksSetBody) -> ApiResult<Doc
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "list", rename_all = "snake_case")]
 enum Position {
+    /// The exact search belongs to the same sealed reader/document/source audience.
+    Filtered {
+        query: String,
+        position: Box<Position>,
+    },
+
     /// Sources: everything with a smaller identity.
     Sources { below: Id },
     /// The mentions of one source: those after this part.
