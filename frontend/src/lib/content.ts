@@ -14,6 +14,11 @@ export function isForwarded<Part extends object>(part: Part): part is Extract<Pa
   return 'type' in part && part.type === 'forwarded';
 }
 
+/** The visible words and attachment names a reader gets when copying a message. */
+export function copyableParts(parts: readonly ContentPart[]): string {
+  return parts.map((part) => part.type === 'forwarded' || part.type === 'text' ? part.text : part.name).join('\n');
+}
+
 /** The words of a message, its text parts joined by line. */
 export function wordsOf(parts: readonly ContentPart[]): string {
   return parts.flatMap((part) => (!isForwarded(part) && part.type === 'text' ? [part.text] : [])).join('\n');

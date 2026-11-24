@@ -354,6 +354,7 @@ pub struct DocumentTreeOperationBody {
     /// One explicit new basename/title.
     pub name: Option<String>,
     /// Actor-scoped request identity.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// Earlier version only for RestoreVersion.
     pub version: Option<i32>,
@@ -370,6 +371,7 @@ pub struct DocumentContainerCreateBody {
     /// New single component.
     pub name: String,
     /// Replay identity.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 

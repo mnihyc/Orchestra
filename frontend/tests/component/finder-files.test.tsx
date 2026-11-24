@@ -27,7 +27,7 @@ const hit: SearchHit = { kind: 'document', matches: [[0, 5]], snippet: 'photo.pn
     version: 1, open_discussions: 0, updated_at: at, updated_by: person, discussion_level: 'involved', seen_seq: null, archived: false, deleted: false },
   file: { id: 'file', name: 'photo.png', media_type: 'image/png', size: 128, is_text: false, added_by: null, added_at: at },
 };
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => () => undefined }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => () => undefined }));
 vi.mock('@/features/finder/sources', async (original) => ({ ...await original<typeof Sources>(),
   useEnv: (showCard: Sources.AnswerInput['env']['showCard']): Sources.AnswerInput['env'] => ({ t: i18n.t, go: calls.go, orgSlug: 'team', exists: () => true, showCard }),
   useAnswers: () => ({ answers: calls.answers, full: new Set(), partial: false, pending: false, failure: null }),
