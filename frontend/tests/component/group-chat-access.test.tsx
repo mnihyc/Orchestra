@@ -1,5 +1,5 @@
 /** Group Share uses actual manager facts and never borrows the generic permission page. */
-import { queryOptions } from '@tanstack/react-query';
+import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +17,7 @@ import { ADA, DORA, GRACE, chat } from '../doubles/chat-rows';
 import { show } from './support';
 
 const requests = vi.hoisted(() => ({ get: vi.fn<() => Promise<Chat>>(), update: vi.fn<typeof Chats.updateGroup>(), manager: vi.fn<typeof Chats.setGroupManager>(), add: vi.fn<typeof Chats.addMember>(), remove: vi.fn<typeof Chats.removeMember>(), refresh: vi.fn<typeof ChatStore.refreshChat>() }));
-vi.mock('@/api/chats', async (load) => ({ ...await load<typeof Chats>(), chatQuery: (id: string) => queryOptions({ queryKey: ['chat', id], queryFn: requests.get }), updateGroup: requests.update, setGroupManager: requests.manager, addMember: requests.add, removeMember: requests.remove }));
+vi.mock('@/api/chats', async (load) => ({ ...await load<typeof Chats>(), chatQuery: (id: string) => queryOptions({ queryKey: ['chat', id], queryFn: requests.get }), chatMembersPageQuery: (id: string,q:string)=>infiniteQueryOptions({queryKey:['chat-members',id,q],initialPageParam:null as string|null,queryFn:async({pageParam})=>{const current=await requests.get();const rows=(current.members??[]).filter(person=>[person.display_name,person.username].join(' ').includes(q));const start=Number(pageParam??0);return {items:rows.slice(start,start+50),next_cursor:start+50<rows.length?String(start+50):null,disclosed:current.members!==null};},getNextPageParam:(last)=>last.next_cursor}), updateGroup: requests.update, setGroupManager: requests.manager, addMember: requests.add, removeMember: requests.remove }));
 vi.mock('@/realtime/stores/chat', async (load) => ({ ...await load<typeof ChatStore>(), refreshChat: requests.refresh }));
 vi.mock('@/features/chat/NewChat', () => ({ PeoplePicker: ({ chosen, onToggle }: { chosen: UserRef[]; onToggle: (user: UserRef) => void }) => <button aria-pressed={chosen.some((person) => person.id === DORA.id)} onClick={() => onToggle(DORA)}>{DORA.display_name}</button> }));
 vi.mock('@/features/settings/PlacePicker', () => ({ PlacePicker: ({ onChange, rootOrgId, includeThreads, disabled }: PlacePickerProps) => <button disabled={disabled} onClick={() => onChange({ id: 'review-thread', kind: 'thread', color: null, folder: false, path: 'Example / Review' })}>{`Choose thread:${rootOrgId}:${includeThreads === true}`}</button> }));
@@ -124,4 +124,15 @@ it('keeps the native redacted home protected', () => {
   show(<GroupAccessSummary chat={group({ home: { id: 'private-home', kind: 'topic', name: 'Do not disclose this name', redacted: true } })} me={ADA.id} />);
   expect(screen.getByText(i18n.t('people.privateReference'))).toBeVisible();
   expect(screen.queryByText('Do not disclose this name')).toBeNull();
+});
+
+it('finds a group member beyond a thousand through the native roster search', async () => {
+  const row = group({ members: [ADA, ...Array.from({ length: 1000 }, (_, index) => ({ ...DORA, id: `member-${index}`, display_name: `Person ${index}`, username: `person_${index}` }))] });
+  open(row);
+  await screen.findByRole('table', { name: i18n.t('chat.group.people') });
+  expect(screen.queryByText('Person 999')).toBeNull();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('searchbox'));
+  await user.paste('Person 999');
+  expect(await screen.findByText('Person 999')).toBeVisible();
 });

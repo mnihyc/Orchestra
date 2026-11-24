@@ -40,6 +40,22 @@ beforeEach(() => {
 afterEach(async () => { cleanup(); client.session.setState(previous, true); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`says the effective automatic state in the document switch and follows the unsaved choice (${locale})`, async () => {
+    await setLocale(locale);
+    source.read.mockResolvedValue(view('document-a', { options: { automatic: true } }));
+    show(<DocumentSummaryOptionsDialog documentId="document-a" onOpenChange={vi.fn()} />);
+    const on = locale === 'en' ? 'Automatic on' : '自动刷新已开启';
+    const off = locale === 'en' ? 'Automatic off' : '自动刷新已关闭';
+    expect(await screen.findByText(on, { exact: true })).toBeVisible();
+    expect(screen.getByRole('switch', { name: i18n.t('summaryOptions.fields.automatic') })).toBeChecked();
+    expect(screen.getByText(i18n.t('summaryOptions.document.inherited'))).toBeVisible();
+    expect(source.write).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('switch', { name: i18n.t('summaryOptions.fields.automatic') }));
+    expect(screen.getByText(off, { exact: true })).toBeVisible();
+    expect(screen.getByRole('switch', { name: i18n.t('summaryOptions.fields.automatic') })).not.toBeChecked();
+    expect(source.write).not.toHaveBeenCalled();
+  });
+
   it(`edits the actual document entry, receives a receipt and refetches independently (${locale})`, async () => {
     await setLocale(locale);
     const close = vi.fn();
