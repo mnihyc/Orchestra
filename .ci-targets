@@ -1,0 +1,1 @@
+web-e2e tests/e2e/craft.spec.ts tests/e2e/area-chrome.spec.ts tests/accessibility/resources-expected.spec.ts tests/accessibility/resources.spec.ts tests/e2e/program-versions.spec.ts tests/e2e/resources-expected.spec.ts tests/e2e/screen-review2.spec.ts tests/e2e/workbench-scrolling.spec.ts --retries=0 --reporter=line

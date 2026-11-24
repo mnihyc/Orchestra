@@ -15,7 +15,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::{ErrorCode, MAX_JSON_BYTES};
 use orch_api_contract::nodes::NodeGet;
 use orch_api_contract::personal::{MeProjectViewDelete, MeStateGet, MeStateSet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_db::queries::{identity, transaction_guard};
 use orch_types::{Id, Json, new_id};
@@ -50,7 +50,7 @@ async fn key(world: &World, user: Id, target: Id, operations: &[(&str, &str)]) -
     assert!(scope.validate().is_empty());
     let scope = serde_json::to_value(scope).unwrap();
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let mut conn = world.conn().await;
     identity::create_api_token_scoped(
@@ -452,4 +452,123 @@ async fn state_get_rechecks_rules_before_its_actual_read() {
 #[tokio::test]
 async fn existing_state_writer_rechecks_rules_at_its_action_guard() {
     freshness_case("MeStateSet", "PUT", "write", true).await;
+}
+
+#[tokio::test]
+async fn picker_recents_require_this_accounts_own_read_or_write_scope() {
+    use orch_api_contract::personal::{
+        MePickerRecentChoice, MePickerRecentCreate, MePickerRecentsGet,
+    };
+    let world = World::new().await;
+    let owner = places::person(&world, "owner").await;
+    let other = places::person(&world, "other").await;
+    let read = key(
+        &world,
+        owner.id(),
+        owner.id(),
+        &[("MePickerRecentsGet", "read")],
+    )
+    .await;
+    let write = key(
+        &world,
+        owner.id(),
+        owner.id(),
+        &[("MePickerRecentCreate", "write")],
+    )
+    .await;
+    let wrong = key(
+        &world,
+        owner.id(),
+        other.id(),
+        &[
+            ("MePickerRecentsGet", "read"),
+            ("MePickerRecentCreate", "write"),
+        ],
+    )
+    .await;
+    let choice = MePickerRecentChoice {
+        kind: "machine".to_owned(),
+        key: "selected-machine".to_owned(),
+    };
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&owner.token)
+        .body(&MePickerRecentChoice {
+            kind: "model".to_owned(),
+            key: "private-provider/private-model".to_owned(),
+        })
+        .send()
+        .await
+        .ok();
+    let receipt = world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&write.secret)
+        .body(&choice)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(receipt).unwrap(),
+        json!({"count":5,"remembered":true}),
+        "a write-only key gets an acknowledgement, never another kind's private history"
+    );
+    assert_eq!(
+        world
+            .app
+            .call(MePickerRecentsGet, &[])
+            .token(&read.secret)
+            .send()
+            .await
+            .ok()
+            .choices["machine"],
+        ["selected-machine"]
+    );
+    assert_eq!(
+        world
+            .app
+            .call(MePickerRecentsGet, &[])
+            .token(&write.secret)
+            .send()
+            .await
+            .problem()
+            .status,
+        403
+    );
+    assert_eq!(
+        world
+            .app
+            .call(MePickerRecentCreate, &[])
+            .token(&read.secret)
+            .body(&choice)
+            .send()
+            .await
+            .problem()
+            .status,
+        403
+    );
+    assert_eq!(
+        world
+            .app
+            .call(MePickerRecentsGet, &[])
+            .token(&wrong.secret)
+            .send()
+            .await
+            .problem()
+            .status,
+        403
+    );
+    assert_eq!(
+        world
+            .app
+            .call(MePickerRecentCreate, &[])
+            .token(&wrong.secret)
+            .body(&choice)
+            .send()
+            .await
+            .problem()
+            .status,
+        403
+    );
 }

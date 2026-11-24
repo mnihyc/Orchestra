@@ -1,4 +1,5 @@
 /** Exact-object repair for older live events, plus an exact inventory projection if its policy fields are omitted. */
+import { READ_NOW } from '@/api/freshness';
 import type { QueryClient } from '@tanstack/react-query';
 import { api, ApiError, client, ok } from '@/api/client';
 import { applyRow, missingInventoryProjection, record } from '@/api/cache';
@@ -40,10 +41,15 @@ export async function repairResource(cache: QueryClient, { kind, id, source }: R
     const filter = key[3];
     return key[2] === 'resources' && record(filter) && Array.isArray(filter.kinds) && filter.kinds.includes(kind);
   });
-  if (!shown) return;
+  if (!shown) {
+    // A known change retires the exact answer without waking a hidden reader. Its ordinary
+    // returning observer can keep the old paint and ask for the current projection behind it.
+    await cache.invalidateQueries({ queryKey: [detail, id], exact: true, refetchType: 'none' });
+    return;
+  }
   const previous = cache.getQueryData([detail, id]);
   try {
-    const row = await cache.query({ queryKey: [detail, id], queryFn: ({ signal }) => read(kind, id, signal), staleTime: 0, retry: false });
+    const row = await cache.query({ queryKey: [detail, id], queryFn: ({ signal }) => read(kind, id, signal), ...READ_NOW, retry: false });
     if (client.session.getState().readerVersion !== reader) return;
     if (record(row) && row.id === id) {
       const change={kind,id,value:row,insert:true};const projection=missingInventoryProjection(cache,change,{row:previous});
