@@ -1,11 +1,11 @@
 ---
 title: 把文档写成文件
 screens: /doc/$documentId, /documents/$nodeId, /document-folder/$folderId
-keywords: markdown, orch markdown, html, word, docx, 文本, 粘贴, 导入, 导出, 压缩包, zip, 相对链接, 图片, 折叠, 分栏, 标注, 颜色, 下划线, 分页, 代理, edit_document, download_shared, 检出, 提交, 文档, 文件
+keywords: markdown, orch markdown, html, word, docx, 文本, 粘贴, 导入, 导出, 压缩包, zip, 相对链接, 图片, 折叠, 分栏, 标注, 颜色, 下划线, 分页, 代理, edit_document, download_shared, 检出, 提交, 文档, 文件, 智能体
 heading_id.粘贴: paste
 heading_id.导入文件: import-files
 heading_id.word-文件: word-files
-heading_id.代理怎么做: what-agents-do
+heading_id.智能体怎么做: what-agents-do
 heading_id.文件保留不了什么: what-a-file-cannot-keep
 heading_keywords.orch-markdown: 标注, 折叠, 分栏, 颜色, 下划线, 视频, 音频, 分页, 公式, 标签
 heading_keywords.paste: 剪贴板, 富文本, 页面, 图片, 提示
@@ -13,12 +13,12 @@ heading_keywords.import-files: 文件夹, zip, 链接, 引用, 图片, notion, l
 heading_keywords.word-files: docx, 标题, 表格, 图片, 样式
 heading_keywords.what-agents-do: 文件, 格式, seq, 块, 地址, 批量, 导入, 检出, 提交, 评论
 heading_keywords.what-a-file-cannot-keep: 丢失, 颜色, 对齐, 合并, 列宽, 空白
-summary: 通过 Orch Markdown、粘贴和文件导入，与人员和代理交换文档。
+summary: 通过 Orch Markdown、粘贴和文件导入，与人员和智能体交换文档。
 ---
 
 # 把文档写成文件
 
-Orch 读取 Markdown、HTML、Word 和纯文本，写出 Markdown 和 HTML。粘贴、导入和代理共用同一个读取器，
+Orch 读取 Markdown、HTML、Word 和纯文本，写出 Markdown 和 HTML。粘贴、导入和智能体共用同一个读取器，
 所以同一段文字在哪里读都得到同样的块。
 
 ## Orch Markdown
@@ -82,14 +82,14 @@ purple、pink 和 grey。栏的 `ratio` 是权重；省略则各栏等宽。其�
 `.docx` 文件会先转成 HTML，再像普通页面一样读取。标题、列表、表格、粗体、斜体、下划线、链接和图片都会带过来。
 Orch 不认识的样式按普通文本读取，结果会提示。
 
-## 代理怎么做
+## 智能体怎么做
 
-代理可以列出以“可查看”共享的空文档文件夹。添加或导入文档需要“可编辑”。
+智能体可以列出以“可查看”共享的空文档文件夹。添加或导入文档需要“可编辑”。
 
-代理先把想写的文档写成文件，再导入：`edit_document` 用 `file` 和 `format`（markdown、html、docx 或 text）
+智能体先把想写的文档写成文件，再导入：`edit_document` 用 `file` 和 `format`（markdown、html、docx 或 text）
 代替 `markdown`。文件旁边的图片会一起带入。
 
-要修改文档时，代理先用 `download_shared` 复制它：文件开头写着文档和它的 `seq`。
+要修改文档时，智能体先用 `download_shared` 复制它：文件开头写着文档和它的 `seq`。
 用自己的工具改好文件后，用 `rewrite` 加 `file` 提交。只有改动的部分会变：原样写出的块保持不动，
 文字有改动的块仍是同一个块，所以它上面的评论和指向它的链接都不会失效。
 `replace` 对一段文字也是这样；`block_replace`、`block_insert_after`、`block_delete` 和 `block_move_after`
@@ -97,7 +97,7 @@ Orch 不认识的样式按普通文本读取，结果会提示。
 `import` 把一个目录或 zip 中的文件导入文档文件夹。
 导入目录或 zip 后，用相同的 `path` 和 `file` 再次调用 `import` 可查看扫描和导入进度。
 加上 `cancel: true` 可停止导入，已导入的文档会保留；加上 `resume: true` 可继续，权限会重新检查。
-同一服务进程最多同时扫描或转换两项代理导入。达到限制时，等待一项完成后重试，或先取消已有任务。
+同一服务进程最多同时扫描或转换两项智能体导入。达到限制时，等待一项完成后重试，或先取消已有任务。
 
 ## 文件保留不了什么
 

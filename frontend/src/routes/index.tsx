@@ -4,11 +4,13 @@
  * it can still be read; else to the org they last had in view, the one team org they belong to when
  * there is exactly one, or their own org. Without a readable home, Shared is the normal entrance.
  */
+import { supersededRead } from '@/api/reads';
+import { landingFor, offerLandingThread, rememberedThread } from '@/api/landingOpening';
+import { READ_NOW } from '@/api/freshness';
 import { createFileRoute, redirect } from '@tanstack/react-router';
 
 import { nodeQuery } from '@/api/nodes';
 import { ApiError, client } from '@/api/client';
-import { CancelledError } from '@tanstack/react-query';
 import { resolveLandingPlaces } from '@/api/orgOverview';
 import { queryClient } from '@/api/query';
 import { ensureShellBootstrap } from '@/shell/bootstrap';
@@ -21,6 +23,8 @@ import { SharedScreen } from '@/features/shared/Shared';
 export const Route = createFileRoute('/')({
   staticData: { screen: 'page' },
   validateSearch: () => ({}),
+  // The root usually redirects. Once the landing answers, its pending screen can give way at once.
+  pendingMinMs: 0,
   loader: async ({ abortController, preload }) => {
     const href = await landingAddress((node) => {
       if (!preload && !abortController.signal.aborted) selectOrg(client.session.getState().userId, node.org_id);
@@ -37,10 +41,20 @@ export async function landingAddress(prepare?: (node: Node) => void): Promise<st
   const reader = client.session.getState().readerVersion;
   const { orgs, state, person } = await ensureShellBootstrap(queryClient, userId);
   const place = devicePlace() ?? savedPlace(state);
+  if (client.session.getState().userId !== userId || client.session.getState().readerVersion !== reader) throw supersededRead();
+  const part = landingFor(userId, reader, rememberedThread(place));
+  if (part?.status === 'ready' && place !== null && part.data.sync.thread.id === place.node_id) {
+    offerLandingThread(userId, reader, part.data);
+    prepare?.(part.data.sync.thread);
+    return place.route;
+  }
+  if (part?.status === 'failed' && ![403, 404, 410].includes(part.problem.status)) {
+    throw new ApiError(part.problem, part.retry_after === null ? null : new Date(Date.now() + part.retry_after * 1000));
+  }
   const last = savedOrg(state) ?? rememberedOrg(userId);
   let org = landingOrg(orgs, person.personal_org_id, last);
   const known = new Map<string, Node>(orgs.filter((node) => node.access.permissions.includes('org.view')).map((node) => [node.id, node]));
-  const wanted = [...new Set([place?.node_id, last].filter((id): id is string => id !== undefined && id !== null && !known.has(id)))];
+  const wanted = [...new Set([part?.status === 'failed' ? undefined : place?.node_id, last].filter((id): id is string => id !== undefined && id !== null && !known.has(id)))];
   const context = org ?? orgs.find((node) => node.access.permissions.includes('org.view'));
   let nodes: Node[];
   if (context !== undefined) nodes = await resolveLandingPlaces(queryClient, context.id, wanted);
@@ -48,14 +62,14 @@ export async function landingAddress(prepare?: (node: Node) => void): Promise<st
     // Without any readable org context, retain the native node reads. There
     // is no hidden org overview/navigation to preload merely for this check.
     nodes = (await Promise.all(wanted.map(async (id) => {
-      try { return await queryClient.query({ ...nodeQuery(id), staleTime: 0 }); }
+      try { return await queryClient.query({ ...nodeQuery(id), ...READ_NOW }); }
       catch (error) {
         if (!(error instanceof ApiError) || ![403, 404, 410].includes(error.status)) throw error;
         return null;
       }
     }))).filter((node): node is Node => node !== null);
   }
-  if (client.session.getState().userId !== userId || client.session.getState().readerVersion !== reader) throw new CancelledError({ silent: true });
+  if (client.session.getState().userId !== userId || client.session.getState().readerVersion !== reader) throw supersededRead();
   for (const node of nodes) known.set(node.id, node);
   const finish = (node: Node, route: string) => { prepare?.(node); return route; };
   if (place !== null) {

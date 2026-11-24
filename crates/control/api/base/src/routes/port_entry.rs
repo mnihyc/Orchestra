@@ -37,5 +37,5 @@ orch_api_base::api_family_callback! {
     slot __ApiCallback7dd1829dd2, __API_CALLBACK_7DD1829DD2, __api_set_7dd1829dd2;
     base orch_api_base::routes::port_entry;
 
-    fn assertion_keys<'__api>(arg0: &'__api orch_api_base::state::App) -> orch_api_contract::ports::PortAssertionKeys;
+    fn assertion_keys<'__api>(arg0: &'__api str) -> orch_api_contract::ports::PortAssertionKeys;
 }
