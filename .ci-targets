@@ -1,0 +1,7 @@
+fmt
+test -p orch-summarizer-model --lib
+test -p orch-engine --lib -- ask::policy::tests::
+test -p orch-engine --lib -- summaries::resource::tests::a_configured_model_pool_supplies_the_first_paid_title_without_a_recovery_rule
+test -p orch-api-core --test ask --test ask_tools_native_origin
+test -p orch-api-core --test thread_creator_operation_scopes
+test -p orch-api-core --test threads_make -- a_thread_keeps_the_model_pool_member_and_fixed_agent_on_creation_replay

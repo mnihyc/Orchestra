@@ -12,7 +12,7 @@ use orch_api_contract::nodes::{
     CreateThread, CreateThreadBinding, FirstInput, ThreadCreate, TopicCreate, TopicCreateBody,
 };
 use orch_api_contract::threads::ContentPart;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 use orch_types::{Id, Json, new_id};
 use rig::{MODEL, Scene};
@@ -25,12 +25,13 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> String {
     let scope: orch_access_contract::key_scope::KeyScope =
         serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let scope = serde_json::to_value(scope).unwrap();
     create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Creator control",
             token_hash: &token_hash(&secret),
@@ -48,13 +49,13 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> String {
 fn body(s: &Scene) -> CreateThread {
     CreateThread {
         name: Some("Scoped creator".into()),
-        binding: Some(CreateThreadBinding {
-            agent_id: s.on.agent,
-            provider_id: s.on.provider,
-            arrangement: None,
-        }),
+        binding: Some(CreateThreadBinding::provider(
+            s.on.agent,
+            s.on.provider,
+            None,
+        )),
         model: Some(MODEL.into()),
-        environment: Some(EnvironmentChoice::Use(s.on.environment)),
+        environment: Some(EnvironmentChoice::existing(s.on.environment)),
         prepare_source: Some(false),
         agent_access: Some(orch_api_contract::nodes::AgentAccessChoice {
             where_: orch_api_contract::nodes::AgentAccessWhere::Nothing,
@@ -405,4 +406,99 @@ async fn an_explicit_source_contribution_uses_its_same_operation_manage_without_
         .unwrap();
     assert_eq!(inputs, 0, "a pure initial contribution adds no input");
     assert!(s.rig.turn_starts(thread_id).is_empty());
+}
+
+#[tokio::test]
+async fn a_scoped_thread_creator_must_cover_its_pool_and_selected_environment() {
+    pool_and_member_scope("environment").await;
+}
+
+#[tokio::test]
+async fn a_scoped_thread_creator_must_cover_its_model_pool_and_selected_provider() {
+    pool_and_member_scope("model").await;
+}
+
+async fn pool_and_member_scope(kind: &str) {
+    use orch_api_contract::pools::PoolCreate;
+    use orch_provider_contract::pools::{Kind, Target};
+
+    let s = Scene::new().await;
+    let topic = s.tree.topic.base.id;
+    let (pool_kind, member_kind, member, leaf) = match kind {
+        "environment" => (
+            Kind::Environment,
+            "environment",
+            s.on.environment,
+            json!({"kind":"environment","id":s.on.environment}),
+        ),
+        "model" => (
+            Kind::Model,
+            "provider",
+            s.on.provider,
+            json!({"kind":"model","backend":{"route":"generation.model","config":{},"offering":{"provider":s.on.provider,"offering":MODEL}}}),
+        ),
+        _ => unreachable!(),
+    };
+    let pool = s.rig.world.app.call(PoolCreate, &[]).token(&s.ada.token)
+        .raw_body(&json!({
+            "name":"Scoped thread placement","description":"","home_id":s.ada.person.personal_org,"access":"only_me",
+            "definition":{"kind":kind,"enabled":true,"policy":{"type":"round_robin"},"lend_members":false,
+                "config":{},"members":[{"id":new_id(),"enabled":true,"rule":{"type":"single","resource":leaf}}]}
+        })).send().await.ok();
+    let target = Target::Pool {
+        id: pool.id,
+        kind: pool_kind,
+    };
+    let mut create = body(&s);
+    if pool_kind == Kind::Environment {
+        create.environment = Some(EnvironmentChoice::Use(target.clone()));
+    } else {
+        create.binding.as_mut().unwrap().target = target.clone();
+        create.model = None;
+    }
+    let parent = rule(
+        "ThreadCreate",
+        "topic",
+        topic,
+        "self",
+        &["thread"],
+        &["write"],
+    );
+    let use_pool = rule(
+        "ThreadCreate",
+        "pool",
+        pool.id,
+        "self",
+        &["pool"],
+        &["write"],
+    );
+    let use_member = rule(
+        "ThreadCreate",
+        member_kind,
+        member,
+        "self",
+        &[member_kind],
+        &["write"],
+    );
+    let before = count(&s, "thread").await;
+    for missing in [
+        vec![parent.clone(), use_pool.clone()],
+        vec![parent.clone(), use_member.clone()],
+    ] {
+        let token = key(&s, s.ada.id(), missing).await;
+        let (status, reply) = thread(&s, &token, topic, &create).await;
+        assert_eq!(status, 403, "{reply}");
+        assert_eq!(count(&s, "thread").await, before);
+        let choices: i64 = sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE target=$1")
+            .bind(json!(&target))
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(choices, 0);
+    }
+    let token = key(&s, s.ada.id(), vec![parent, use_pool, use_member]).await;
+    let (status, reply) = thread(&s, &token, topic, &create).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["projection"], "receipt");
+    assert_eq!(count(&s, "thread").await, before + 1);
 }

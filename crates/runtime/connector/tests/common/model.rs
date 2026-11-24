@@ -274,6 +274,10 @@ impl AgentAdapter for CallingFake {
         self.inner.start_turn(turn).await
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        self.inner.interrupt_handle()
+    }
+
     async fn interrupt(
         &mut self,
         thread: ThreadId,
@@ -572,7 +576,7 @@ impl ProviderRig {
         let id = new_id();
         let body = json!({
             "provider_id": self.rig.provider,
-            "protocols": upstreams.iter().map(|(protocol, _, _)| *protocol).collect::<Vec<_>>(),
+            "upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols": upstreams.iter().map(|(protocol, _, _)| *protocol).collect::<Vec<_>>(),
             "upstreams": upstreams.iter().map(|(protocol, url, options)| json!({
                 "protocol": protocol, "base_url": url, "options": options })).collect::<Vec<_>>(),
             "credential": key.map(|key| self.sealed_key_for(id, key)),

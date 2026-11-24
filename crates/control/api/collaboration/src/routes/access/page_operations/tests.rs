@@ -234,7 +234,7 @@ pub fn __api_run_genuine_noop_never_calls_boundary_and_multirow_private_change_c
 
 #[cfg(any(test, feature = "test-support"))]
 async fn an_empty_owners_object_cannot_relabel_a_whole_page_change_as_an_ownership_operation() {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_token, token_hash};
     use orch_access_contract::key_scope::KeyScope;
     use orch_api_contract::access::PermissionPageUpdate;
     use orch_api_contract::common::ErrorCode;
@@ -268,11 +268,12 @@ async fn an_empty_owners_object_cannot_relabel_a_whole_page_change_as_an_ownersh
     let before = snapshot(&world, target).await;
     let scope: KeyScope = serde_json::from_value(json!({"rules":[{"target":{"kind":"project","id":target,"reach":"self"},"allow":[{"operation":"PermissionPageUpdate.owners","actions":["manage"]}]}]})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let secret = new_api_token(issued_key_id);
     orch_db::queries::identity::create_api_token_scoped(
         &mut *world.conn().await,
         &orch_db::queries::identity::NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: owner.id(),
             name: "Actual page intent",
             token_hash: &token_hash(&secret),

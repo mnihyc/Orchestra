@@ -87,7 +87,7 @@ pub async fn gone_environments(conn: &mut Conn, ids: &[Id]) -> Result<Vec<Id>, D
 /// Where the inboxes of some people stand.
 pub async fn inbox_seqs(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, Seq)>, DbError> {
     Ok(
-        sqlx::query_as("SELECT id, inbox_seq FROM users WHERE id = ANY($1)")
+        sqlx::query_as("SELECT user_id, inbox_seq FROM user_inboxes WHERE user_id = ANY($1)")
             .bind(ids)
             .fetch_all(conn)
             .await?,
@@ -330,7 +330,7 @@ mod tests {
         let mut conn = test.pool.acquire().await.unwrap();
         let t = tree(&mut conn).await;
         for number in 1..=5i64 {
-            sqlx::query("UPDATE users SET inbox_seq = $2 WHERE id = $1")
+            sqlx::query("UPDATE user_inboxes SET inbox_seq = $2 WHERE user_id = $1")
                 .bind(t.user)
                 .bind(number)
                 .execute(&mut *conn)

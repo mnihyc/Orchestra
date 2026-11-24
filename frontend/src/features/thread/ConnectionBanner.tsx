@@ -8,25 +8,36 @@
 import { useTranslation } from 'react-i18next';
 
 import { reloadThread } from '@/realtime/live';
+import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { Banner } from '@/ui/Banner';
 import { Button } from '@/ui/Button';
+import { FactDisclosure } from '@/ui/FactDisclosure';
+import { useErrorText } from '@/ui/errorText';
+import { isReadCancelled } from '@/api/reads';
+import { useReadAttempt, useReadAttemptGroups } from '@/ui/ReadAttemptDetails';
 
 export function ConnectionBanner({ threadId }: { threadId: string }) {
   const { t } = useTranslation();
-  const failed = useThreadPart(threadId, (view) => view.loaded !== 'none' && view.error !== null);
-  if (!failed) return null;
+  const read = useThreadReadRef(threadId);
+  const error = useThreadPart(read, (view) => view.closed === null && view.loaded !== 'none' ? view.error : null);
+  const explain = useErrorText();
+  const attempt = useReadAttempt(error), attemptGroups = useReadAttemptGroups(attempt);
+  if (error === null || isReadCancelled(error)) return null;
+  const reason = explain(error).message;
+  const capacity = typeof error === 'object' && 'code' in error && error.code === 'too_many_subscriptions';
   return (
     <Banner
       tone="warning"
       className="rounded-md border"
       action={
-        <Button size="sm" onClick={() => reloadThread(threadId)}>
+        <Button size="sm" onClick={() => reloadThread(read, true)}>
           {t('thread.connection.retry')}
         </Button>
       }
     >
-      {t('thread.connection.stale')}
+      <FactDisclosure fragment={capacity ? reason : t('thread.connection.stale')}
+        groups={[{ key: 'failure', facts: [{ key: 'reason', label: t('common.reason'), value: reason }] }, ...attemptGroups]} />
     </Banner>
   );
 }

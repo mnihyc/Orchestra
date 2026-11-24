@@ -11,7 +11,7 @@ import { providerDefaultKey } from '@/api/defaultsOpening';
 import type * as Client from '@/api/client';
 import { ApiError, client } from '@/api/client';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
-import type { EverythingRow, EverythingRowPage, Provider } from '@/generated/api-types';
+import type { EverythingRow, EverythingRowPage, Provider, Pool } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { Dialog } from '@/ui/Dialog';
 import { TooltipProvider } from '@/ui/Tooltip';
@@ -21,13 +21,13 @@ import { planProvider } from '../unit/provider-plan-fixtures';
 
 interface Options { params?: { path?: { id?: string }; query?: Record<string, unknown> }; signal?: AbortSignal }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options?: Options) => Promise<unknown>>(),
-  changed: vi.fn(), edited: vi.fn(), submit: vi.fn(), create: vi.fn() }));
+  changed: vi.fn(), edited: vi.fn(), inherited: vi.fn(), submit: vi.fn(), create: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
   return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => resourceCardRead(path, options) ?? ({ data: await calls.read(path, options), response: new Response() }) } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map([['hidden home', [{ id: home.id, name: 'Private cached home', above: [] }]]]) }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ onCreated }: { onCreated?: (id: string) => void }) => {
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map([['hidden home', [{ id: home.id, name: 'Private cached home', above: [] }]]]) }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: ({ onCreated }: { onCreated?: (id: string) => void }) => {
   const [open, setOpen] = useState(false);
   return <><button type="button" onClick={() => setOpen(true)}>{i18n.t('resourceCreation.providers')}</button>
     {open && <Dialog open title="Existing provider creation" onOpenChange={setOpen}>
@@ -52,11 +52,13 @@ function deferred<T>() {
   const promise = new Promise<T>((accept) => { resolve = accept; });
   return { promise, resolve };
 }
-function Harness({ value = current.id, disabled = false }: { value?: string | null; disabled?: boolean }) {
+function Harness({ value = current.id, disabled = false, inheritance = false }: { value?: string | null; disabled?: boolean; inheritance?: boolean }) {
   const [selected, setSelected] = useState(value);
+  const [following, setFollowing] = useState(inheritance);
   return <form onSubmit={(event) => { event.preventDefault(); calls.submit(); }}>
     <ProviderDefaultChoice shape={{ type: 'text', maxLength: null, pattern: null }} label={label} value={selected} placeholder="Default: none" disabled={disabled}
-      onEdited={calls.edited} onChange={(next) => { calls.changed(next); setSelected(typeof next === 'string' ? next : null); }} />
+      inheritance={inheritance ? { selected: following, label: 'As Acme decides', value: current.name, onSelect: () => { calls.inherited(); setFollowing(true); } } : undefined}
+      onEdited={calls.edited} onChange={(next) => { calls.changed(next); setFollowing(false); setSelected(typeof next === 'string' ? next : null); }} />
     <select aria-label="Unrelated finite control"><option>One</option><option>Two</option></select>
     <button type="submit">Save fixture</button>
   </form>;
@@ -85,6 +87,35 @@ beforeEach(async () => {
   calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page(first, 'after-first')));
 });
 afterEach(() => { cleanup(); for (const query of clients) query.clear(); clients.length = 0; client.session.setState(session); });
+
+it('can choose the inherited provider explicitly here and return through the row clear', async () => {
+  calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page([current])));
+  const user = userEvent.setup();
+  draw(<Harness inheritance />);
+  expect(field()).toHaveValue('As Acme decides');
+  await user.click(field());
+  expect(choices().getAllByRole('option')[0]).toHaveTextContent('As Acme decides');
+  await user.click(await screen.findByRole('option', { name: current.name }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(current.id);
+  expect(field()).toHaveValue(current.name);
+  await user.click(field());
+  await user.click(choices().getAllByRole('option')[0]!);
+  expect(calls.inherited).toHaveBeenCalledExactlyOnceWith();
+  expect(calls.changed).toHaveBeenCalledTimes(1);
+});
+
+it('can follow inheritance while the unrelated provider inventory is still loading', async () => {
+  const pending = deferred<EverythingRowPage>();
+  calls.read.mockImplementation((path) => path === '/providers/{id}' ? Promise.resolve(current) : pending.promise);
+  const user = userEvent.setup();
+  draw(<Harness inheritance />);
+  await user.click(field());
+  try {
+    await user.click(choices().getAllByRole('option')[0]!);
+    expect(calls.inherited).toHaveBeenCalledExactlyOnceWith();
+    expect(calls.changed).not.toHaveBeenCalled();
+  } finally { await act(async () => { pending.resolve(page([])); await pending.promise; }); }
+});
 
 it.each(['en', 'zh-CN'] as const)('shows a provider label for an inner recovery or embeddings field (%s)', async (locale) => {
   await setLocale(locale);
@@ -117,13 +148,17 @@ it('browses thirteen usable rows, follows an empty native page, deduplicates and
   expect(choices().getByRole('option', { name: current.name })).toHaveAttribute('aria-disabled', 'true');
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: home.name }) })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('link', { name: home.name })).toHaveFocus();
-  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toHaveFocus();
+  // A picker's group header holds no act of the lists (Make pool, Sharing policy): the next stop is the list's More.
+  expect(screen.queryByRole('button', { name: i18n.t('pools.makeFrom', { name: home.name }) })).toBeNull();
+  expect(screen.queryByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toBeNull();
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toHaveFocus();
   await user.keyboard('{Enter}'); await waitFor(() => expect(reads()).toHaveLength(2));
   await waitFor(() => expect(field()).toHaveFocus()); expect(choices().getAllByRole('option')).toHaveLength(14);
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: home.name }) })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('link', { name: home.name })).toHaveFocus();
-  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toHaveFocus();
+  // A picker's group header holds no act of the lists (Make pool, Sharing policy): the next stop is the list's More.
+  expect(screen.queryByRole('button', { name: i18n.t('pools.makeFrom', { name: home.name }) })).toBeNull();
+  expect(screen.queryByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toBeNull();
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toHaveFocus();
   await user.keyboard('{Enter}'); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(15));
   expect(screen.queryByRole('button', { name: i18n.t('ui.pagination.more') })).not.toBeInTheDocument();
@@ -296,4 +331,41 @@ it('never fills a redacted provider home from the cached place names used for di
   const user = userEvent.setup(); draw(<Harness />); await user.click(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(2));
   expect(choices().getByRole('option', { name: /Provider home/u })).toBeVisible();
   expect(screen.queryByText(/Private cached home/u)).not.toBeInTheDocument(); expect(screen.queryByText(home.id)).not.toBeInTheDocument(); untouched();
+});
+
+it('offers a provider pool in the same native paged field as a single provider',async()=>{
+  const pool:Pool={id:id(98,1),name:'Build providers',description:'',address:'',kind:'provider',enabled:true,policy:{type:'ordered'},lend_members:false,revision:1,owner,home:null,settings:[],target:{type:'pool',kind:'provider',id:id(98,1)},grouping:{home:null,home_path:[],origin_machine:null,availability:[]},access:{permissions:['pool.view','pool.use'],administers:false,through:[]}};
+  const chosen=vi.fn();
+  const row=inventoryRow({id:pool.id,name:pool.name,kind:'pool',parent_id:'resources',my_access:'take_part',resource:{kind:'pool',value:pool}});
+  calls.read.mockImplementation((path)=>Promise.resolve(path==='/providers/{id}'?current:path==='/pools/{id}'?pool:{items:[entry(current),row],next_cursor:null}));
+  draw(<ProviderDefaultChoice shape={{type:'id'}} value="" label={label} showLabel onChange={calls.changed} pools={{id:null,onSelect:chosen}} />);
+  await userEvent.click(field());
+  expect(await screen.findByRole('option',{name:current.name})).toBeVisible();
+  await userEvent.click(await screen.findByRole('option',{name:pool.name}));
+  expect(chosen).toHaveBeenCalledExactlyOnceWith(pool.id);
+  expect(calls.changed).not.toHaveBeenCalled();
+  expect(reads()[0]?.[1]?.params?.query?.kinds).toBe('pool,provider');
+});
+
+it('selects a model pool from the same compact summary search as its usable providers', async () => {
+  const poolId = id(98, 2);
+  const pool: Pool = {
+    id: poolId, name: 'Title models', description: '', address: '', kind: 'model',
+    enabled: true, policy: { type: 'ordered' }, lend_members: false, revision: 1, owner, home: null, settings: [],
+    target: { type: 'pool', kind: 'model', id: poolId },
+    grouping: { home: null, home_path: [], origin_machine: null, availability: [] },
+    access: { permissions: ['pool.view', 'pool.use'], administers: false, through: [] },
+  };
+  const chosen = vi.fn();
+  const row = inventoryRow({ id: poolId, kind: 'pool', name: pool.name, my_access: 'take_part', resource_row: { kind: 'pool', value: pool } });
+  calls.read.mockResolvedValue({ items: [entry(current), row], next_cursor: null });
+  draw(<ProviderDefaultChoice shape={{ type: 'id' }} value="" label={label} summaryWindow="summarizer"
+    onChange={calls.changed} pools={{ kind: 'model', id: null, onSelect: chosen }} />);
+  await userEvent.click(field());
+  expect(await screen.findByRole('option', { name: current.name })).toBeVisible();
+  await userEvent.click(await screen.findByRole('option', { name: pool.name }));
+  expect(chosen).toHaveBeenCalledExactlyOnceWith(poolId, pool.name);
+  expect(reads()).toHaveLength(1);
+  expect(reads()[0]?.[1]?.params?.query).toMatchObject({ kinds: 'pool,provider', resource_rows: true });
+  expect(calls.changed).not.toHaveBeenCalled();
 });

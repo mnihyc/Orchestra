@@ -6,7 +6,13 @@
 
 mod budget;
 mod completion;
+pub(crate) use completion::effort_is_offered;
+mod headroom;
+mod pool;
+pub(crate) use completion::program::Source as ProgramSource;
+pub(crate) use completion::program::scope_checks as with_program_source_checks;
 mod estimate;
+pub(crate) mod facts;
 pub(crate) mod goal_check;
 mod handoff;
 pub mod options;
@@ -14,20 +20,20 @@ pub mod resource;
 pub mod sources;
 
 pub(crate) use budget::InputBudget;
-pub(crate) use budget::UNKNOWN_WINDOW_TOKENS;
 pub(crate) use estimate::handoff_estimate;
 pub use handoff::{
     Carried, IndexedTranscript, handoff, indexed_transcript, notice as handoff_notice,
 };
 pub(crate) use handoff::{
-    FRAME_BYTES as HANDOFF_FRAME_BYTES, HEADINGS_BYTES as HANDOFF_HEADINGS_BYTES, brief_bytes,
-    capture_handoff_choice, handoff_budget, handoff_captured, indexed_transcript_file,
+    FRAME_BYTES as HANDOFF_FRAME_BYTES, HEADINGS_BYTES as HANDOFF_HEADINGS_BYTES, HandoffCapture,
+    brief_bytes, capture_handoff_choice, handoff_budget, handoff_captured, indexed_transcript_file,
 };
 
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::unit::Unit;
 use chrono::{DateTime, Utc};
+use orch_api_contract::summary_facts::{SummaryAttemptOutcome, SummaryDiscardReason};
 use orch_db::queries::{hierarchy, settings as stored, threads};
 use orch_db::{Conn, DbError};
 use orch_plugin_contract::refs::{NodeKind, NodeRef};
@@ -63,6 +69,12 @@ struct History {
     revision: i64,
 }
 
+struct FieldObservation {
+    field: SummaryField,
+    outcome: SummaryAttemptOutcome,
+    facts: facts::ProducedFacts,
+}
+
 impl From<&threads::ThreadRow> for History {
     fn from(row: &threads::ThreadRow) -> Self {
         Self {
@@ -91,6 +103,9 @@ pub async fn due(
     event: &str,
     now: DateTime<Utc>,
 ) -> Result<(), EngineError> {
+    if event != "refresh" && orch_db::queries::capability_work::execution_only(conn, node).await? {
+        return Ok(());
+    }
     resource::node_event(conn, node, event, now).await?;
     let triggers: Option<Json> = setting(conn, Place::Node(node), keys::AUTO_TRIGGERS)
         .await
@@ -137,6 +152,19 @@ struct Choice {
     kind: String,
     config: Json,
     writer: Option<Id>,
+}
+
+struct PreparedAutomation {
+    before: hierarchy::NodeDetail,
+    configured: Choice,
+    chosen: Choice,
+    pool_fields: Vec<pool::Admitted>,
+    history: Option<History>,
+    cursor: i64,
+    upto: i64,
+    context_tokens: u32,
+    requests: Vec<SummaryRequest>,
+    definitions: Vec<hierarchy::TagRow>,
 }
 
 async fn choice(conn: &mut Conn, node: Id) -> Result<Option<Choice>, EngineError> {
@@ -191,23 +219,26 @@ impl Engine {
             .and_then(|row| row.context["next_call"].as_str())
             .and_then(|value| value.parse::<Id>().ok())
             .unwrap_or(root);
-        if !self
+        let api_answer = self
             .inner
             .commands
             .status(reference)
             .await?
             .and_then(|status| status.outcome)
-            .is_some_and(|outcome| matches!(outcome, crate::commands::Outcome::Succeeded(_)))
-        {
+            .is_some_and(|outcome| matches!(outcome, crate::commands::Outcome::Succeeded(_)));
+        let native_answer = {
+            let mut conn = self.db().acquire().await?;
+            sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM summary_calls WHERE id=$1 AND delegated_result ? 'result')")
+                .bind(reference).fetch_one(&mut *conn).await.map_err(DbError::from)?
+        };
+        if !api_answer && !native_answer {
             return Ok(ModelFailure::Unobserved);
         }
-        let configured = chosen.config["provider_id"]
-            .as_str()
-            .and_then(|value| value.parse::<Id>().ok())
-            .ok_or_else(|| EngineError::unreadable("the model configuration has no provider"))?;
-        let model = chosen.config["model_name"]
-            .as_str()
-            .ok_or_else(|| EngineError::unreadable("the model configuration has no model"))?;
+        let config = orch_summarizer_model::descriptor::Config::read(&chosen.config)
+            .map_err(EngineError::unreadable)?;
+        let offering = config.offering().map_err(EngineError::unreadable)?;
+        let configured = offering.provider;
+        let model = offering.offering.as_str();
         let mut context = previous.map_or_else(|| json!({}), |row| row.context);
         context["author_id"] = json!(chosen.writer);
         context["provider_id"] = context
@@ -252,12 +283,31 @@ impl Engine {
             .map(|producer| producer.describe().config_schema)
     }
 
+    /// The registered producers and their configuration forms, including the built-in model producer.
+    pub fn summarizer_descriptors(
+        &self,
+    ) -> Vec<orch_summarizer_contract::descriptor::SummarizerDescriptor> {
+        let mut descriptors = vec![orch_summarizer_model::descriptor::descriptor()];
+        descriptors.extend(
+            self.inner
+                .summarizers
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|(name, _)| name.as_str() != "model")
+                .map(|(_, producer)| producer.describe()),
+        );
+        descriptors.sort_by(|one, other| one.name.cmp(&other.name));
+        descriptors
+    }
+
     fn producer(
         &self,
         chosen: &Choice,
         call: Id,
         workflow: Id,
         field: SummaryField,
+        model_pool: Option<Id>,
     ) -> Option<Arc<dyn Summarizer>> {
         if chosen.kind == "model" {
             return Some(Arc::new(Model::new(Arc::new(completion::Host {
@@ -267,6 +317,8 @@ impl Engine {
                 workflow,
                 task: field_name(field),
                 resource: None,
+                model_pool,
+                goal_capture: None,
             }))));
         }
         self.inner
@@ -283,7 +335,7 @@ impl Engine {
             return Ok(false);
         };
         Ok(self
-            .producer(&chosen, new_id(), new_id(), SummaryField::Handoff)
+            .producer(&chosen, new_id(), new_id(), SummaryField::Handoff, None)
             .is_some_and(|producer| producer.describe().writes(SummaryField::Handoff)))
     }
 
@@ -297,7 +349,7 @@ impl Engine {
         let mut conn = self.db().acquire().await?;
         completion::recover(self, &mut conn, SUMMARY_BATCH).await?;
         // Interval candidates rotate by last attempt; a large tree is not scanned by id forever.
-        let running: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id LEFT JOIN node_summary_state s ON s.node_id=t.node_id WHERE t.state IN ('running','waiting_approval') AND n.deleted_at IS NULL AND n.archived_at IS NULL ORDER BY s.last_at NULLS FIRST,t.node_id LIMIT $1")
+        let running: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id LEFT JOIN node_summary_state s ON s.node_id=t.node_id WHERE t.state IN ('running','waiting_approval') AND NOT delegated_execution_only(t.node_id) AND n.deleted_at IS NULL AND n.archived_at IS NULL ORDER BY s.last_at NULLS FIRST,t.node_id LIMIT $1")
             .bind(self.config().sweep_batch).fetch_all(&mut *conn).await.map_err(DbError::from)?;
         for thread in running {
             let triggers: Option<Json> =
@@ -362,6 +414,21 @@ impl Engine {
             .await
             .map_err(stored_error)?;
         let min = seconds(triggers.as_ref(), "min_interval_secs", MIN_INTERVAL_SECS);
+        let def = orch_settings_contract::registry::get(keys::SUMMARY_RETRY_CEILING_SECS)
+            .ok_or_else(|| EngineError::unreadable("the summary retry default is unavailable"))?;
+        let settings = orch_settings::Snapshot::load(
+            &mut conn,
+            Place::Node(node),
+            orch_settings::Wanted::Keys(&[def]),
+        )
+        .await?;
+        let resolved = settings.resolve(def);
+        let retry_ceiling: u64 =
+            serde_json::from_value(resolved.value.unwrap_or_else(|| json!(3600)))?;
+        let retry_policy =
+            json!({"ceiling":retry_ceiling,"min_interval_secs":min,"source":resolved.source});
+        sqlx::query("UPDATE node_summary_state SET reason_code=NULL,retry_policy=$3 WHERE node_id=$1 AND claimed_by=$2")
+            .bind(node).bind(claimant).bind(retry_policy).execute(&mut *conn).await.map_err(DbError::from)?;
         let history = threads::thread(&mut conn, node)
             .await?
             .as_ref()
@@ -373,6 +440,14 @@ impl Engine {
                 metrics::counter!("orch_summary_attempts_total", "result" => "completed")
                     .increment(1);
                 (None, false, Some(seq))
+            }
+            Err(SummarizeError::Waiting(wait)) => {
+                let mut conn = self.db().acquire().await?;
+                sqlx::query("UPDATE node_summary_state SET due_at=$3,next_at=$3,reason=$4,claimed_by=NULL,claimed_until=NULL
+                    WHERE node_id=$1 AND claimed_by=$2 AND run_id=$5")
+                    .bind(node).bind(claimant).bind(wait.next.get()).bind(format!("summaryBox.wait.{}",wait.reason.code())).bind(run)
+                    .execute(&mut *conn).await.map_err(DbError::from)?;
+                return Ok(true);
             }
             Err(error) => {
                 let failure = error.is_failure();
@@ -388,18 +463,26 @@ impl Engine {
             next_interval(
                 Duration::from_secs(u64::try_from(min).unwrap_or(u64::MAX)),
                 u32::try_from(failures + 1).unwrap_or(u32::MAX),
+                Duration::from_secs(retry_ceiling),
             )
         } else {
             Duration::from_secs(u64::try_from(min).unwrap_or(u64::MAX))
         };
-        let next =
-            self.inner.clock.now() + chrono::Duration::from_std(backoff).map_err(stored_error)?;
+        let next = self
+            .inner
+            .clock
+            .now()
+            .checked_add_signed(
+                chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::MAX),
+            )
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
         let mut conn = self.db().acquire().await?;
         sqlx::query("WITH current_history AS (SELECT ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM threads
             WHERE node_id=$1 AND active_continuation_id=$8 AND execution_revision=$9)) AS same)
           UPDATE node_summary_state SET last_at=$3,next_at=CASE WHEN h.same THEN $4 ELSE next_at END,
             failures=CASE WHEN NOT h.same THEN failures WHEN $5 THEN failures+1 ELSE 0 END,
             reason=CASE WHEN h.same THEN $6 ELSE reason END,
+            reason_code=CASE WHEN h.same AND $5 THEN COALESCE(reason_code,'failed') ELSE reason_code END,
             last_seq=CASE WHEN h.same THEN COALESCE($7,last_seq) ELSE last_seq END,
             run_id=NULL,claimed_by=NULL,claimed_until=NULL,
             due_at=CASE WHEN h.same AND $10 THEN NULL WHEN h.same AND $5 THEN COALESCE(due_at,$4) ELSE due_at END
@@ -416,7 +499,8 @@ impl Engine {
         .await?
             && matches!(recovery.state.as_str(), "scheduled" | "stopped" | "waiting")
         {
-            sqlx::query("UPDATE node_summary_state SET next_at=COALESCE($2,next_at),due_at=$2,run_id=CASE WHEN $2::timestamptz IS NOT NULL THEN $3 ELSE NULL END,reason=$4 WHERE node_id=$1")
+            sqlx::query("UPDATE node_summary_state SET next_at=COALESCE($2,next_at),due_at=$2,run_id=CASE WHEN $2::timestamptz IS NOT NULL THEN $3 ELSE NULL END,reason=$4,
+                reason_code=CASE WHEN $2::timestamptz IS NULL THEN 'call_rule_paused' ELSE reason_code END WHERE node_id=$1")
                 .bind(node).bind(recovery.due_at).bind(run)
                 .bind(if recovery.state=="scheduled" {"calls.serviceScheduled"} else {crate::calls::administrative_pause_reason(&recovery).unwrap_or("calls.servicePaused")})
                 .execute(&mut *conn).await.map_err(DbError::from)?;
@@ -435,146 +519,20 @@ impl Engine {
         let expected_epoch = orch_authz::epoch::current(&mut conn)
             .await
             .map_err(internal)?;
-        let before = hierarchy::details(&mut conn, &[node], self.inner.clock.now())
-            .await
-            .map_err(internal)?
-            .into_iter()
-            .next()
-            .filter(|row| row.deleted_at.is_none() && row.archived_at.is_none())
-            .ok_or_else(|| SummarizeError::Skipped("the node is unavailable".to_owned()))?;
-        if hierarchy::with_ancestors(&mut conn, &[node])
-            .await
-            .map_err(internal)?
-            .iter()
-            .any(|place| place.archived_at.is_some() || place.deleted_at.is_some())
-        {
-            return Err(SummarizeError::Skipped(
-                "the place is archived or unavailable".to_owned(),
-            ));
-        }
-        let thread = threads::thread(&mut conn, node).await.map_err(internal)?;
-        if thread.as_ref().map(History::from) != history {
-            return Err(SummarizeError::Skipped(
-                "the selected conversation changed".to_owned(),
-            ));
-        }
-        // Read separately: no connection is held by overlapping futures.
-        let title: Option<String> = setting(&mut conn, Place::Node(node), keys::AUTO_TITLE)
-            .await
-            .map_err(internal)?;
-        let tags: Option<String> = setting(&mut conn, Place::Node(node), keys::AUTO_TAGS)
-            .await
-            .map_err(internal)?;
-        let mut fields = Vec::new();
-        if before.kind == "thread"
-            && before.title_source == "auto"
-            && title.as_deref() == Some("summarizer")
-        {
-            fields.push(SummaryField::Title);
-        }
-        if before.tags_source.as_deref() == Some("auto") && tags.as_deref() == Some("summarizer") {
-            fields.push(SummaryField::Tags);
-        }
-        if fields.is_empty() {
-            return Ok(cursor);
-        }
-        let mut chosen = choice(&mut conn, node)
-            .await
-            .map_err(internal)?
-            .ok_or_else(|| SummarizeError::Skipped("no summarizer is configured".to_owned()))?;
-        // Publication compares the stored choice, before execution fills in defaults and budgets.
-        let configured = chosen.clone();
-        let context_tokens = if chosen.kind == "model" {
-            let mut config = orch_summarizer_model::descriptor::Config::read(&chosen.config)?;
-            config.context_tokens = budget::context_tokens(&mut conn, &config)
-                .await
-                .map_err(internal)?;
-            let tokens = config.context_tokens;
-            chosen.config = serde_json::to_value(config).map_err(internal)?;
-            tokens
-        } else {
-            CONTEXT_TOKENS
-        };
-        let (activity, upto) = if let Some(history) = history {
-            activity(
-                &mut conn,
-                node,
-                history.continuation,
-                cursor,
-                context_tokens,
-            )
+        let Some(mut plan) = self
+            .prepare_automation(&mut conn, node, cursor, history, None, Some(run))
             .await?
-        } else {
-            (
-                topic_activity(
-                    &mut conn,
-                    node,
-                    context_tokens,
-                    self.inner.clock.now(),
-                    chosen.writer,
-                )
-                .await?,
-                cursor,
-            )
+        else {
+            return Ok(cursor);
         };
-        let definitions = hierarchy::tags_of(&mut conn, &before.path)
-            .await
-            .map_err(internal)?;
-        let allowed_tags: Vec<String> = definitions.iter().map(|tag| tag.name.clone()).collect();
-        let old_tags = hierarchy::node_tags(&mut conn, &[node])
-            .await
-            .map_err(internal)?;
-        let tag_limit: Option<u32> =
-            setting(&mut conn, Place::Node(node), keys::TAGS_MAX_PER_PLACE)
-                .await
-                .map_err(internal)?;
-        let (topic, environment) = thread.as_ref().map_or((node, None), |thread| {
-            (thread.topic_id, thread.environment_id)
-        });
-        let current = crate::raw_events::mask_summary(&mut conn, node, topic, environment, json!({"name":before.name,"description":before.description,"tags":allowed_tags,"previous_tags":old_tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>().join(", ")})).await.map_err(internal)?
-            .ok_or_else(|| SummarizeError::Skipped("redaction is unavailable".to_owned()))?;
-        let title_now = current["name"].as_str().unwrap_or_default().to_owned();
-        let description_now = current["description"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        let allowed_tags: Vec<String> = current["tags"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Json::as_str)
-            .map(str::to_owned)
-            .collect();
         drop(conn);
+        let chosen = &plan.chosen;
         let mut made = Vec::new();
+        let mut observations = Vec::new();
+        let mut aborted = false;
         let mut failure = None;
-        for field in fields {
-            let limits = SummaryLimits::for_field(field, tag_limit.unwrap_or_default());
-            let request = SummaryRequest {
-                field,
-                node: NodeRef {
-                    id: node,
-                    kind: if before.kind == "thread" {
-                        NodeKind::Thread
-                    } else {
-                        NodeKind::Topic
-                    },
-                    name: Some(title_now.clone()),
-                    redacted: false,
-                },
-                previous: match field {
-                    SummaryField::Title => title_now.clone(),
-                    SummaryField::Tags => current["previous_tags"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    _ => description_now.clone(),
-                },
-                activity: activity.clone(),
-                tag_choices: allowed_tags.clone(),
-                limits,
-                config: chosen.config.clone(),
-            };
+        for request in &plan.requests {
+            let field = request.field;
             // Changed material or configuration makes another real request in a recovered run.
             // Earlier answered requests are reconciled by their captured attribution.
             let body = serde_json::to_vec(&json!({"request":request,"writer":chosen.writer}))
@@ -584,32 +542,92 @@ impl Engine {
                 "summary.field",
                 &[run.as_bytes().as_slice(), digest.as_bytes().as_slice()],
             );
-            let producer = self.producer(&chosen, call, run, field).ok_or_else(|| {
-                SummarizeError::Skipped("the chosen producer is not installed".to_owned())
-            })?;
-            if !producer.describe().writes(field) {
+            let model_pool = if chosen.kind == "model" {
+                orch_summarizer_model::descriptor::Config::pool_id(&chosen.config)?
+            } else {
+                None
+            };
+            let mut request = request.clone();
+            let selected;
+            let chosen = if let Some(pool) = model_pool {
+                let config = pool::automatic(self, chosen, &request, pool, run, call).await?;
+                request.config = serde_json::to_value(&config).map_err(internal)?;
+                plan.pool_fields.push(pool::Admitted {
+                    field: pool::Field {
+                        node,
+                        workflow: run,
+                        task: field_name(field).into(),
+                        call,
+                        pool,
+                    },
+                    config,
+                });
+                selected = Choice {
+                    config: request.config.clone(),
+                    ..chosen.clone()
+                };
+                &selected
+            } else {
+                chosen
+            };
+            let producer = self
+                .producer(chosen, call, run, field, model_pool)
+                .ok_or_else(|| {
+                    SummarizeError::Skipped("the chosen producer is not installed".to_owned())
+                })?;
+            let descriptor = producer.describe();
+            if !descriptor.writes(field) {
                 measure(field, "unsupported");
                 failure = Some(SummarizeError::Unsupported(field));
                 continue;
             }
-            let result = match producer.summarize(request).await {
-                Ok(result) => result.conform(field, &limits, &allowed_tags),
+            let result = match producer.summarize(request.clone()).await {
+                Ok(result) => result.conform(field, &request.limits, &request.tag_choices),
+                Err(wait @ SummarizeError::Waiting(_)) => return Err(wait),
                 Err(error) => {
+                    {
+                        let mut conn = self.db().acquire().await.map_err(internal)?;
+                        if let Some(captured) = facts::produced(
+                            &mut conn,
+                            chosen,
+                            &descriptor,
+                            call,
+                            node,
+                            None,
+                            Time::new(self.inner.clock.now()),
+                        )
+                        .await
+                        .map_err(internal)?
+                        {
+                            observations.push(FieldObservation {
+                                field,
+                                outcome: SummaryAttemptOutcome::Failed,
+                                facts: captured,
+                            });
+                        }
+                    }
                     if matches!(&error,SummarizeError::Skipped(reason) if completion::stable_pause(reason))
                     {
-                        return Err(error);
+                        aborted = true;
+                        failure = Some(error);
+                        break;
                     }
                     if chosen.kind == "model" {
                         match self
-                            .model_output_failed(&chosen, node, call, run, field_name(field))
+                            .model_output_failed(chosen, node, call, run, field_name(field))
                             .await
                             .map_err(internal)?
                         {
-                            ModelFailure::Handled => return Err(error),
+                            ModelFailure::Handled => {
+                                aborted = true;
+                                failure = Some(error);
+                                break;
+                            }
                             ModelFailure::Unmatched => {
-                                return Err(SummarizeError::Skipped(
-                                    completion::NO_RULE.to_owned(),
-                                ));
+                                aborted = true;
+                                failure =
+                                    Some(SummarizeError::Skipped(completion::NO_RULE.to_owned()));
+                                break;
                             }
                             ModelFailure::Unobserved => {}
                         }
@@ -626,21 +644,50 @@ impl Engine {
                     continue;
                 }
             };
+            {
+                let mut conn = self.db().acquire().await.map_err(internal)?;
+                if let Some(captured) = facts::produced(
+                    &mut conn,
+                    chosen,
+                    &descriptor,
+                    call,
+                    node,
+                    Some(&result),
+                    Time::new(self.inner.clock.now()),
+                )
+                .await
+                .map_err(internal)?
+                {
+                    observations.push(FieldObservation {
+                        field,
+                        outcome: if result.discarded {
+                            SummaryAttemptOutcome::Unusable
+                        } else {
+                            SummaryAttemptOutcome::Published
+                        },
+                        facts: captured,
+                    });
+                }
+            }
             if result.discarded {
                 if chosen.kind == "model" {
                     match self
-                        .model_output_failed(&chosen, node, call, run, field_name(field))
+                        .model_output_failed(chosen, node, call, run, field_name(field))
                         .await
                         .map_err(internal)?
                     {
                         ModelFailure::Handled => {
-                            return Err(SummarizeError::Failed {
+                            aborted = true;
+                            failure = Some(SummarizeError::Failed {
                                 message: "The model returned no usable summary".to_owned(),
                                 retryable: true,
                             });
+                            break;
                         }
                         ModelFailure::Unmatched => {
-                            return Err(SummarizeError::Skipped(completion::NO_RULE.to_owned()));
+                            aborted = true;
+                            failure = Some(SummarizeError::Skipped(completion::NO_RULE.to_owned()));
+                            break;
                         }
                         ModelFailure::Unobserved => {}
                     }
@@ -665,49 +712,328 @@ impl Engine {
             }
             made.push((field, result.result));
         }
-        self.commit_summaries(
-            &before,
-            &configured,
-            expected_epoch,
-            history,
-            &made,
-            &definitions,
-        )
-        .await
-        .map_err(internal)?;
-        for (field, _) in &made {
-            measure(*field, "ok");
+        if let Err(error) = self
+            .commit_summaries(&plan, expected_epoch, &made, &observations, !aborted)
+            .await
+        {
+            // A refused publication does not erase the actual model observation or repeat model IO.
+            let _ = self
+                .commit_summaries(&plan, expected_epoch, &[], &observations, false)
+                .await;
+            return Err(internal(error));
+        }
+        if !aborted {
+            for (field, _) in &made {
+                measure(*field, "ok");
+            }
         }
         if let Some(error) = failure {
             return Err(error);
         }
-        Ok(upto)
+        Ok(plan.upto)
+    }
+
+    async fn prepare_automation(
+        &self,
+        conn: &mut Conn,
+        node: Id,
+        cursor: i64,
+        history: Option<History>,
+        frozen_budget: Option<u32>,
+        run: Option<Id>,
+    ) -> Result<Option<PreparedAutomation>, SummarizeError> {
+        let before = hierarchy::details(conn, &[node], self.inner.clock.now())
+            .await
+            .map_err(internal)?
+            .into_iter()
+            .next()
+            .filter(|row| row.deleted_at.is_none() && row.archived_at.is_none())
+            .ok_or_else(|| SummarizeError::Skipped("the node is unavailable".to_owned()))?;
+        if hierarchy::with_ancestors(conn, &[node])
+            .await
+            .map_err(internal)?
+            .iter()
+            .any(|place| place.archived_at.is_some() || place.deleted_at.is_some())
+        {
+            return Err(SummarizeError::Skipped(
+                "the place is archived or unavailable".to_owned(),
+            ));
+        }
+        let thread = threads::thread(conn, node).await.map_err(internal)?;
+        if thread.as_ref().map(History::from) != history {
+            return Err(SummarizeError::Skipped(
+                "the selected conversation changed".to_owned(),
+            ));
+        }
+        // Read separately: no connection is held by overlapping futures.
+        let title: Option<String> = setting(conn, Place::Node(node), keys::AUTO_TITLE)
+            .await
+            .map_err(internal)?;
+        let tags: Option<String> = setting(conn, Place::Node(node), keys::AUTO_TAGS)
+            .await
+            .map_err(internal)?;
+        let mut fields = Vec::new();
+        if before.kind == "thread"
+            && before.title_source == "auto"
+            && title.as_deref() == Some("summarizer")
+        {
+            fields.push(SummaryField::Title);
+        }
+        if before.tags_source.as_deref() == Some("auto") && tags.as_deref() == Some("summarizer") {
+            fields.push(SummaryField::Tags);
+        }
+        if let Some(run) = run {
+            for (field, selected) in [
+                ("title", fields.contains(&SummaryField::Title)),
+                ("tags", fields.contains(&SummaryField::Tags)),
+            ] {
+                sqlx::query("UPDATE node_summary_state SET automatic_fields=jsonb_set(COALESCE(automatic_fields,'{}'::jsonb),ARRAY[$3::text],
+                COALESCE(automatic_fields->$3,'{}'::jsonb)||jsonb_build_object('selected',$4::boolean)||
+                CASE WHEN $4 THEN jsonb_build_object('retry_policy',retry_policy,'last_attempt_at',$5::timestamptz) ELSE '{}'::jsonb END,true) WHERE node_id=$1 AND run_id=$2")
+                .bind(node).bind(run).bind(field).bind(selected).bind(self.inner.clock.now()).execute(&mut *conn).await.map_err(DbError::from).map_err(internal)?;
+            }
+        }
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        let Some(mut chosen) = choice(conn, node).await.map_err(internal)? else {
+            if let Some(run) = run {
+                facts::skip(
+                    conn,
+                    node,
+                    run,
+                    orch_api_contract::summary_facts::AutomaticSkipReason::NoProducer,
+                )
+                .await
+                .map_err(internal)?;
+            }
+            return Err(SummarizeError::Skipped(
+                "no summarizer is configured".into(),
+            ));
+        };
+        // Publication compares the stored choice, before execution fills in defaults and budgets.
+        let configured = chosen.clone();
+        let context_tokens = if chosen.kind == "model"
+            && orch_summarizer_model::descriptor::Config::pool_id(&chosen.config)?.is_some()
+        {
+            match (frozen_budget, chosen.config.get("context_tokens")) {
+                (Some(tokens), _) => tokens,
+                (None, None) => CONTEXT_TOKENS,
+                (None, Some(value)) => serde_json::from_value::<u32>(value.clone())
+                    .ok()
+                    .filter(|tokens| *tokens > 0)
+                    .ok_or_else(|| {
+                        SummarizeError::Config("The input budget must be positive.".into())
+                    })?,
+            }
+        } else if chosen.kind == "model" {
+            let mut config = orch_summarizer_model::descriptor::Config::read(&chosen.config)?;
+            config.context_tokens = match frozen_budget {
+                Some(tokens) => tokens,
+                None => {
+                    budget::context_tokens(conn, &config, budget::activity_field(&config, &fields))
+                        .await
+                        .map_err(internal)?
+                }
+            };
+            let tokens = config.context_tokens;
+            chosen.config = serde_json::to_value(config).map_err(internal)?;
+            tokens
+        } else {
+            CONTEXT_TOKENS
+        };
+        let (activity, upto) = if let Some(history) = history {
+            activity(conn, node, history.continuation, cursor, context_tokens).await?
+        } else {
+            (
+                topic_activity(
+                    conn,
+                    node,
+                    context_tokens,
+                    self.inner.clock.now(),
+                    chosen.writer,
+                )
+                .await?,
+                cursor,
+            )
+        };
+        let definitions = hierarchy::tags_of(conn, &before.path)
+            .await
+            .map_err(internal)?;
+        let allowed_tags: Vec<String> = definitions.iter().map(|tag| tag.name.clone()).collect();
+        let old_tags = hierarchy::node_tags(conn, &[node])
+            .await
+            .map_err(internal)?;
+        let tag_limit: Option<u32> = setting(conn, Place::Node(node), keys::TAGS_MAX_PER_PLACE)
+            .await
+            .map_err(internal)?;
+        let (topic, environment) = thread.as_ref().map_or((node, None), |thread| {
+            (thread.topic_id, thread.environment_id)
+        });
+        let current = crate::raw_events::mask_summary(conn, node, topic, environment, json!({"name":before.name,"description":before.description,"tags":allowed_tags,"previous_tags":old_tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>().join(", ")})).await.map_err(internal)?
+            .ok_or_else(|| SummarizeError::Skipped("redaction is unavailable".to_owned()))?;
+        let title_now = current["name"].as_str().unwrap_or_default().to_owned();
+        let description_now = current["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let allowed_tags: Vec<String> = current["tags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+            .map(str::to_owned)
+            .collect();
+        let requests = fields
+            .into_iter()
+            .map(|field| {
+                let limits = SummaryLimits::for_field(field, tag_limit.unwrap_or_default());
+                SummaryRequest {
+                    field,
+                    node: NodeRef {
+                        id: node,
+                        kind: if before.kind == "thread" {
+                            NodeKind::Thread
+                        } else {
+                            NodeKind::Topic
+                        },
+                        name: Some(title_now.clone()),
+                        redacted: false,
+                    },
+                    previous: match field {
+                        SummaryField::Title => title_now.clone(),
+                        SummaryField::Tags => current["previous_tags"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        _ => description_now.clone(),
+                    },
+                    activity: activity.clone(),
+                    tag_choices: allowed_tags.clone(),
+                    limits,
+                    config: chosen.config.clone(),
+                }
+            })
+            .collect();
+        Ok(Some(PreparedAutomation {
+            before,
+            configured,
+            chosen,
+            pool_fields: Vec::new(),
+            history,
+            cursor,
+            upto,
+            context_tokens,
+            requests,
+            definitions,
+        }))
+    }
+
+    /// A private helper may change the permission epoch. Compare the complete readable plan before publishing its answer.
+    async fn current_program_plan(
+        &self,
+        conn: &mut Conn,
+        plan: &PreparedAutomation,
+    ) -> Result<bool, EngineError> {
+        let before = &plan.before;
+        let chosen = &plan.configured;
+        let history = plan.history;
+        let definitions = &plan.definitions;
+        if chosen.kind != "model"
+            || plan.pool_fields.is_empty()
+                && chosen
+                    .config
+                    .pointer("/backend/route")
+                    .and_then(Json::as_str)
+                    != Some("summary.delegation")
+        {
+            return Ok(false);
+        }
+        let Some(writer) = chosen.writer else {
+            return Ok(false);
+        };
+        let principal = orch_authz::Principal::load(
+            conn,
+            orch_authz::Caller::session(writer).with_admin_mode(false),
+            self.inner.clock.time(),
+        )
+        .await?;
+        for field in &plan.pool_fields {
+            if !field.publishable(conn, &principal).await? {
+                return Ok(false);
+            }
+        }
+        let target = if history.is_some() {
+            orch_api_contract::summaries::SummaryTarget::Thread { id: before.id }
+        } else {
+            orch_api_contract::summaries::SummaryTarget::Topic { id: before.id }
+        };
+        if !sources::readable(conn, &principal, target)
+            .await
+            .map_err(EngineError::unreadable)?
+        {
+            return Ok(false);
+        }
+        let fresh = match self
+            .prepare_automation(
+                conn,
+                before.id,
+                plan.cursor,
+                history,
+                Some(plan.context_tokens),
+                None,
+            )
+            .await
+        {
+            Ok(Some(fresh)) => fresh,
+            Ok(None) | Err(SummarizeError::Skipped(_)) => return Ok(false),
+            Err(error) => return Err(EngineError::unreadable(error)),
+        };
+        if fresh.chosen != plan.chosen
+            || fresh.upto != plan.upto
+            || fresh.requests != plan.requests
+            || fresh
+                .definitions
+                .iter()
+                .map(|tag| (&tag.id, &tag.name))
+                .ne(definitions.iter().map(|tag| (&tag.id, &tag.name)))
+            || fresh.before.path != before.path
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     async fn commit_summaries(
         &self,
-        before: &hierarchy::NodeDetail,
-        chosen: &Choice,
+        plan: &PreparedAutomation,
         expected_epoch: i64,
-        history: Option<History>,
         made: &[(SummaryField, SummaryResult)],
-        definitions: &[hierarchy::TagRow],
+        observations: &[FieldObservation],
+        publish: bool,
     ) -> Result<(), EngineError> {
+        let (before, chosen, history, definitions) = (
+            &plan.before,
+            &plan.configured,
+            plan.history,
+            &plan.definitions,
+        );
         let now = self.inner.clock.now();
         let mut tx = self.db().begin().await?;
-        // What was decided under `expected_epoch` is written only if no change of authority commits first:
-        // the commit checks it, without holding the epoch's row while this runs.
-        orch_db::queries::transaction_guard::expect_cache_epoch(&mut tx, expected_epoch).await?;
-        if orch_authz::epoch::current(&mut tx).await? != expected_epoch {
+        let read_epoch = orch_authz::epoch::current(&mut tx).await?;
+        let readable = plan.pool_fields.is_empty() && read_epoch == expected_epoch
+            || self.current_program_plan(&mut tx, plan).await?;
+        if !hierarchy::lock(&mut tx, before.id).await? {
             return Ok(());
         }
-        hierarchy::lock(&mut tx, before.id).await?;
-        if before.kind == "thread" {
-            let current = threads::lock(&mut tx, before.id).await?;
-            if current.as_ref().map(History::from) != history {
-                return Ok(());
-            }
-        }
+        let selected_history = if before.kind == "thread" {
+            threads::lock(&mut tx, before.id)
+                .await?
+                .as_ref()
+                .map(History::from)
+        } else {
+            None
+        };
         let Some(current) = hierarchy::details(&mut tx, &[before.id], now)
             .await?
             .into_iter()
@@ -715,33 +1041,59 @@ impl Engine {
         else {
             return Ok(());
         };
-        // A manual edit followed by Resume is still an edit in flight: its revision wins too.
-        if current.revision != before.revision
-            || current.deleted_at.is_some()
-            || current.archived_at.is_some()
-        {
-            return Ok(());
+        let current_epoch = orch_authz::epoch::current(&mut tx).await?;
+        let epoch_matches = readable && current_epoch == read_epoch;
+        let global = if !epoch_matches {
+            Some(SummaryDiscardReason::AccessChanged)
+        } else if selected_history != history {
+            Some(SummaryDiscardReason::HistoryChanged)
+        } else if current.archived_at.is_some() {
+            Some(SummaryDiscardReason::Archived)
+        } else if current.revision != before.revision || current.deleted_at.is_some() {
+            Some(SummaryDiscardReason::SourceChanged)
+        } else if choice(&mut tx, before.id).await?.as_ref() != Some(chosen) {
+            Some(SummaryDiscardReason::ProducerChanged)
+        } else {
+            None
+        };
+        if publish && global.is_none() {
+            orch_db::queries::transaction_guard::expect_cache_epoch(&mut tx, current_epoch).await?;
         }
-        if choice(&mut tx, before.id).await?.as_ref() != Some(chosen) {
-            return Ok(());
+        let mut outcomes = Vec::new();
+        for observed in observations {
+            let (key, person_owns) = match observed.field {
+                SummaryField::Title => (keys::AUTO_TITLE, current.title_source != "auto"),
+                SummaryField::Tags => (
+                    keys::AUTO_TAGS,
+                    current.tags_source.as_deref() != Some("auto"),
+                ),
+                _ => continue,
+            };
+            let mode: Option<String> = setting(&mut tx, Place::Node(before.id), key).await?;
+            let reason = if person_owns {
+                Some(SummaryDiscardReason::ChangedByPerson)
+            } else {
+                global.or_else(|| {
+                    (mode.as_deref() != Some("summarizer"))
+                        .then_some(SummaryDiscardReason::ProducerChanged)
+                })
+            };
+            let outcome = if reason.is_some()
+                || !publish && observed.outcome == SummaryAttemptOutcome::Published
+            {
+                SummaryAttemptOutcome::Discarded
+            } else {
+                observed.outcome
+            };
+            outcomes.push((observed.field, outcome, reason));
         }
         let mut unit = Unit::new(&mut tx, now);
         let mut changed = false;
+        let mut written = Vec::new();
         for (field, result) in made {
-            let (key, wanted) = match field {
-                SummaryField::Title => (keys::AUTO_TITLE, "summarizer"),
-                SummaryField::Tags => (keys::AUTO_TAGS, "summarizer"),
-                SummaryField::Summary
-                | SummaryField::Description
-                | SummaryField::Rollup
-                | SummaryField::Handoff => {
-                    continue;
-                }
-            };
-            let mode: Option<String> = setting(&mut *unit.conn, Place::Node(before.id), key)
-                .await
-                .map_err(stored_error)?;
-            if mode.as_deref() != Some(wanted) {
+            if !outcomes.iter().any(|(seen, outcome, _)| {
+                seen == field && *outcome == SummaryAttemptOutcome::Published
+            }) {
                 continue;
             }
             match field {
@@ -751,9 +1103,13 @@ impl Engine {
                         .as_deref()
                         .filter(|title| *title != current.name.as_str())
                     {
-                        changed |=
+                        let renamed =
                             threads::rename_if_automatic(&mut *unit.conn, before.id, title, now)
                                 .await?;
+                        changed |= renamed;
+                        if renamed {
+                            written.push(*field);
+                        }
                         if before.kind == "thread" {
                             if let Some(row) = threads::thread(&mut *unit.conn, before.id).await?
                                 && let Some(segment) = row.current_segment_id
@@ -800,19 +1156,38 @@ impl Engine {
                         sqlx::query("UPDATE nodes SET auto_updated_at=$2,updated_at=$2,revision=revision+1 WHERE id=$1")
                             .bind(before.id).bind(now).execute(&mut *unit.conn).await.map_err(DbError::from)?;
                         changed = true;
+                        written.push(*field);
                     }
                 }
                 _ => {}
             }
         }
-        if changed {
+        for observed in observations {
+            if let Some((_, outcome, reason)) = outcomes
+                .iter()
+                .find(|(field, _, _)| *field == observed.field)
+            {
+                facts::record_field(
+                    &mut *unit.conn,
+                    before.id,
+                    observed.field,
+                    &observed.facts.attempt(*outcome, *reason),
+                    observed.facts.owner,
+                    written.contains(&observed.field).then_some(Time::new(now)),
+                )
+                .await?;
+            }
+        }
+        if changed || !observations.is_empty() {
             if before.kind == "thread" {
                 let seq = unit.stamp(before.id).await?;
                 threads::set_seq_state(&mut *unit.conn, before.id, seq).await?;
             }
             hierarchy::stamp(&mut *unit.conn, before.id).await?;
         }
-        if before.kind == "thread"
+        if publish
+            && global.is_none()
+            && before.kind == "thread"
             && !made.is_empty()
             && let Some(thread) = threads::thread(&mut *unit.conn, before.id).await?
         {
@@ -847,9 +1222,14 @@ fn internal(error: impl std::fmt::Display) -> SummarizeError {
 fn safe_reason(error: &SummarizeError) -> String {
     match error {
         SummarizeError::Skipped(reason) => reason.clone(),
+        SummarizeError::Waiting(wait) => format!("summaryBox.wait.{}", wait.reason.code()),
         SummarizeError::Config(_) => "The summarizer configuration is not usable.".to_owned(),
         SummarizeError::Unsupported(_) => {
             "The chosen summarizer does not write this field.".to_owned()
+        }
+        SummarizeError::Failed { message, .. } if message == orch_summarizer_contract::summarizer::OUTPUT_CUT => {
+            "The summarizer's model used its output allowance before finishing. Raise the summarizer's output allowance or choose another model."
+                .to_owned()
         }
         SummarizeError::Failed { .. } => {
             "The summarizer returned no usable answer; it will try again after the backoff."
@@ -971,7 +1351,7 @@ async fn topic_activity(
     now: DateTime<Utc>,
     writer: Option<Id>,
 ) -> Result<Vec<ActivityItem>, SummarizeError> {
-    let ids: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE $1=ANY(n.path) AND t.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL)) ORDER BY n.updated_at DESC LIMIT $2")
+    let ids: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE $1=ANY(n.path) AND t.side_of IS NULL AND NOT delegated_execution_only(t.node_id) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL)) ORDER BY n.updated_at DESC LIMIT $2")
         .bind(topic).bind(i64::from(count)).fetch_all(&mut *conn).await.map_err(DbError::from).map_err(internal)?;
     let mut out = Vec::new();
     let Some(writer) = writer else {

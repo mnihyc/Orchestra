@@ -27,7 +27,7 @@ it('lists what is removed and kept and refuses to start from an outdated plan', 
   const button = await screen.findByRole('button', { name: 'Undo import' });
   await waitFor(() => expect(button).toBeEnabled());
   expect(screen.getByText('Nothing to remove')).toBeVisible();
-  expect(screen.getByText('Replaced, skipped and unchanged objects stay')).toBeVisible();
+  expect(screen.getByText('Replaced, skipped and unchanged items stay')).toBeVisible();
   await user.click(button);
   expect(await screen.findByText('The plan changed; review it again')).toBeVisible();
   expect(screen.getByText('Will remove: 2 places')).toBeVisible();
@@ -62,7 +62,7 @@ it.each([
 it('does not offer confirmation when the server reports a blocker', async () => {
   calls.plan.mockResolvedValue({ ...plan, blockers: [{ code: 'import.forbidden', message: 'Server words' }] });
   show(<ImportUndo id="import" onClose={vi.fn()} onStarted={vi.fn()} />);
-  expect(await screen.findByText('You may not make this here')).toBeVisible();
+  expect(await screen.findByText('You do not have permission to create this here. Ask someone who manages this place.')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Undo import' })).toBeDisabled();
 });
 
