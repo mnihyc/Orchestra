@@ -59,11 +59,11 @@ describe('Export… in a menu', () => {
   it('stays on the thing’s own screen, switched off with one line that says for whom it is, with Request access under it', () => {
     const list = entries(false, 'screen');
     expect(idsOf(list)).toEqual(['export', 'export-request']);
-    expect(list[0] && 'disabled' in list[0] && list[0].disabled).toBe('Taking this away as a file is for people Ada Lovelace names');
+    expect(list[0] && 'disabled' in list[0] && list[0].disabled).toBe('Only people Ada Lovelace names can export this as a file');
   });
 
   it('gives no way to ask where nobody could give the right', () => {
-    const list = entries(false, 'screen', 'Only the people in this chat can take it away as a file');
+    const list = entries(false, 'screen', 'Only the people in this chat can export it as a file');
     expect(idsOf(list)).toEqual(['export']);
   });
 });

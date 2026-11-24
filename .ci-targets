@@ -1,0 +1,1 @@
+web-e2e tests/e2e/admin-messages.spec.ts tests/e2e/human-check-admin.spec.ts tests/accessibility/admin.spec.ts tests/e2e/admin.spec.ts tests/e2e/installation-reach.spec.ts --retries=0 --reporter=line

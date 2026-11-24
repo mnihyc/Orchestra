@@ -24,6 +24,40 @@ pub async fn vectors_ready(conn: &mut Conn) -> Result<Result<(), String>, DbErro
     Ok(if state == "ready" { Ok(()) } else { Err(state) })
 }
 
+/// A captured model label uses the exact reported model row; no provider configuration is returned.
+pub async fn serving_model_display(
+    conn: &mut Conn,
+    provider: Id,
+    model: &str,
+) -> Result<String, DbError> {
+    let label: Option<String> = sqlx::query_scalar("SELECT display_name FROM provider_models WHERE provider_id=$1 AND model_name=$2 AND display_name<>''")
+        .bind(provider).bind(model).fetch_optional(conn).await?;
+    Ok(label.unwrap_or_else(|| model.to_owned()))
+}
+
+/// Maps an already authorized native content projection to these captured roots in one indexed read.
+pub async fn source_roots(
+    conn: &mut Conn,
+    roots: &[Id],
+    nodes: &[Id],
+    objects: &[Id],
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT root FROM (
+        SELECT n.org_id AS root FROM nodes n WHERE n.id=ANY($2) AND n.deleted_at IS NULL
+        UNION SELECT n.org_id FROM documents d JOIN nodes n ON n.id=d.node_id
+          WHERE d.id=ANY($3) AND d.deleted_at IS NULL AND n.deleted_at IS NULL
+        UNION SELECT c.org_id FROM chats c LEFT JOIN nodes n ON n.id=c.node_id
+          WHERE c.id=ANY($3) AND (c.node_id IS NULL OR (n.id IS NOT NULL AND n.deleted_at IS NULL))
+      ) visible WHERE root=ANY($1)",
+    )
+    .bind(roots)
+    .bind(nodes)
+    .bind(objects)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The live root orgs, by name: where an index can be.
 pub async fn root_orgs(conn: &mut Conn) -> Result<Vec<(Id, String)>, DbError> {
     Ok(sqlx::query_as(
@@ -175,16 +209,37 @@ pub struct IndexRow {
     pub rate: Option<f64>,
     /// When it last changed.
     pub updated_at: DateTime<Utc>,
+    /// Captured batch/retry facts for the latest recorded attempt.
+    pub retry: Option<sqlx::types::Json<orch_api_contract::admin::SemanticIndexRetry>>,
 }
 
 /// The state of an org's indexing, if it ever had any.
 pub async fn index(conn: &mut Conn, org: Id) -> Result<Option<IndexRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT org_id, state, reason, detail, rate, updated_at FROM search_indexes WHERE org_id = $1",
+        "SELECT org_id, state, reason, detail, rate, updated_at, retry FROM search_indexes WHERE org_id = $1",
     )
     .bind(org)
     .fetch_optional(conn)
     .await?)
+}
+
+/// A claimant records only its own actual decision, so a retired worker cannot overwrite newer work.
+pub async fn record_index_retry(
+    conn: &mut Conn,
+    org: Id,
+    claimant: Id,
+    retry: &orch_api_contract::admin::SemanticIndexRetry,
+) -> Result<bool, DbError> {
+    Ok(
+        sqlx::query("UPDATE search_indexes SET retry=$3 WHERE org_id=$1 AND claimed_by=$2")
+            .bind(org)
+            .bind(claimant)
+            .bind(sqlx::types::Json(retry))
+            .execute(conn)
+            .await?
+            .rows_affected()
+            == 1,
+    )
 }
 
 /// Takes the org's indexing for `until`, unless another process holds it; `true` when it is this one's.
