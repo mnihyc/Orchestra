@@ -403,13 +403,9 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
         .token(&seeds.token)
         .body(&CreateThread {
             name: Some("In a container".to_owned()),
-            binding: Some(CreateThreadBinding {
-                agent_id: seeds.agent,
-                provider_id: provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(seeds.agent, provider, None)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(made.base.id)),
+            environment: Some(EnvironmentChoice::existing(made.base.id)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

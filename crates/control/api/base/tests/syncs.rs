@@ -344,13 +344,13 @@ async fn private_thread(s: &Scene, by: &Who, name: &str) -> Id {
         .body(&CreateThread {
             name: Some(name.to_owned()),
             access: Some(ThreadAccess::Preset(AccessPreset::Private)),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: s.on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                s.on.agent,
+                s.on.provider,
+                None,
+            )),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()
@@ -536,4 +536,388 @@ async fn what_is_not_a_topic_has_no_topic_state() {
         sync_topic(&s, &s.ada, Some(-5)).await.problem().code,
         ErrorCode::RequestInvalid
     );
+}
+
+#[tokio::test]
+async fn a_page_reads_each_threads_queue_approvals_read_position_and_stop_from_one_native_snapshot()
+{
+    use orch_db::queries::{approvals, threads};
+    use support::Statements;
+    Statements::now();
+    let s = Scene::without_supervisor().await;
+    let mut ids = Vec::new();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    for number in 0..10_i64 {
+        let id = s
+            .thread_by(&s.ada, &format!("Independent activity {number}"))
+            .await
+            .base
+            .id;
+        ids.push(id);
+        let segment = new_id();
+        sqlx::query("INSERT INTO segments(id,thread_id,ordinal,agent_id,provider_id,environment_id,env_generation,arrangement,credential_path,seq_updated,continuation_id) SELECT $1,t.node_id,COALESCE((SELECT max(ordinal) FROM segments WHERE thread_id=t.node_id),0)+1,t.agent_id,t.provider_id,t.environment_id,1,t.arrangement,'forwarded',0,t.active_continuation_id FROM threads t WHERE t.node_id=$2")
+            .bind(segment).bind(id).execute(&mut *conn).await.unwrap();
+        for (seq, stream, state) in [
+            (1_i64, "main", "completed"),
+            (2, "main", "in_progress"),
+            (3, "child", "completed"),
+        ] {
+            sqlx::query("INSERT INTO items(id,thread_id,segment_id,stream,kind,status,payload,seq_created,seq_updated,continuation_id) SELECT $1,node_id,$3,$4,'agent_message',$5,$6,$7,$7,active_continuation_id FROM threads WHERE node_id=$2")
+                .bind(new_id()).bind(id).bind(segment).bind(stream).bind(state).bind(json!({"text":format!("Answer {number}/{seq}")})).bind(seq)
+                .execute(&mut *conn).await.unwrap();
+        }
+        sqlx::query("UPDATE threads SET next_seq=100,seq_state=99 WHERE node_id=$1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let stopped_input = new_id();
+        for (position, state, held) in [
+            (1_i64, "pending", true),
+            (2, "pending", false),
+            (3, "cancelled", true),
+            (4, "delivering", true),
+        ] {
+            sqlx::query("INSERT INTO thread_inputs(id,thread_id,author_id,source,content,delivery,state,queue_held,position,seq_updated,continuation_id) SELECT $1,node_id,$3,'user','[]','queue',$4,$5,$6,0,active_continuation_id FROM threads WHERE node_id=$2")
+                .bind(if position == 1 { stopped_input } else { new_id() }).bind(id).bind(s.ada.id()).bind(state).bind(held).bind(position)
+                .execute(&mut *conn).await.unwrap();
+        }
+        for (kind, state) in [
+            ("harness", "pending"),
+            ("harness", "approved"),
+            ("capability", "pending"),
+        ] {
+            sqlx::query("INSERT INTO approvals(id,kind,state,thread_id,title,request,required_permission) VALUES($1,$2,$3,$4,'Review','{}','')")
+                .bind(new_id()).bind(kind).bind(state).bind(id).execute(&mut *conn).await.unwrap();
+        }
+        sqlx::query("INSERT INTO thread_reads(user_id,thread_id,last_read_seq,continuation_id) SELECT $1,node_id,$3,active_continuation_id FROM threads WHERE node_id=$2")
+            .bind(s.cai.id()).bind(id).bind(number+1).execute(&mut *conn).await.unwrap();
+        let continuation = threads::thread(&mut conn, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active_continuation_id;
+        let stop = threads::record_stop(
+            &mut conn,
+            &threads::NewStop {
+                id: new_id(),
+                thread_id: id,
+                turn_id: None,
+                input_id: stopped_input,
+                continuation_id: continuation,
+                requested_by: s.ada.id(),
+                requested_at: s.rig.world.now() - chrono::Duration::seconds(number),
+            },
+        )
+        .await
+        .unwrap();
+        if number % 2 == 1 {
+            let at = s.rig.world.now();
+            threads::mark_stop_applied(&mut conn, stop.id, false, at)
+                .await
+                .unwrap();
+            threads::finish_stop_work(&mut conn, &[stop.id], at)
+                .await
+                .unwrap();
+            threads::announce_stop(&mut conn, id, None).await.unwrap();
+        }
+    }
+    let absent = new_id();
+    let mut requested = ids.clone();
+    requested.extend([ids[0], absent]);
+    let (batch, many_cost) = Statements::measure(threads::activity_many(
+        &mut conn,
+        &requested,
+        Some(s.cai.id()),
+    ))
+    .await;
+    let batch = batch.unwrap();
+    assert_eq!(batch.len(), ids.len());
+    assert!(!batch.contains_key(&absent));
+    let (one, one_cost) = Statements::measure(threads::activity_many(
+        &mut conn,
+        &ids[..1],
+        Some(s.cai.id()),
+    ))
+    .await;
+    assert_eq!(one.unwrap()[&ids[0]], batch[&ids[0]]);
+    assert_eq!(
+        many_cost, one_cost,
+        "a page does not issue one activity query per conversation"
+    );
+    assert_eq!(many_cost, 1);
+    assert!(
+        batch
+            .values()
+            .any(|value| value.stopping.as_ref().is_some_and(|stop| stop.pending))
+    );
+    assert!(
+        batch
+            .values()
+            .any(|value| value.stopping.as_ref().is_some_and(|stop| !stop.pending))
+    );
+    let (answers, answer_cost) = Statements::measure(
+        orch_db::queries::source::last_agent_messages(&mut conn, &requested),
+    )
+    .await;
+    let answers = answers.unwrap();
+    assert_eq!(answer_cost, 1);
+    for (number, id) in ids.iter().enumerate() {
+        assert_eq!(
+            answers[id],
+            orch_db::queries::source::last_agent_message(&mut conn, *id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            answers[id],
+            Some(json!({"text":format!("Answer {number}/1")})),
+            "running and child messages cannot replace the latest completed main message"
+        );
+    }
+    let url = "https://example.org/team/project/pull/7";
+    let candidates = [
+        (json!({"text":url,"data":{"text":"ignored"}}), Some(url)),
+        (json!({"text":false,"data":{"text":url}}), Some(url)),
+        (json!({"text":"","data":{"text":url}}), None),
+        (json!({"data":{"text":[url]}}), None),
+        (json!({"text":"Plain answer","other":url}), None),
+    ];
+    for (id, (payload, _)) in ids.iter().zip(&candidates) {
+        sqlx::query("UPDATE items SET payload=$2 WHERE thread_id=$1 AND seq_created=1")
+            .bind(id)
+            .bind(payload)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let activity = threads::activity_many(&mut conn, &ids, None).await.unwrap();
+    for (id, (_, expected)) in ids.iter().zip(candidates) {
+        assert_eq!(activity[id].answer_link_text.as_deref(), expected);
+    }
+    for id in &ids {
+        let actual = &batch[id];
+        assert_eq!(
+            actual.pending_inputs,
+            threads::count_pending_inputs(&mut conn, *id).await.unwrap()
+        );
+        assert_eq!(
+            actual.held_inputs,
+            threads::count_queue_held(&mut conn, *id).await.unwrap()
+        );
+        assert_eq!(
+            actual.pending_approvals,
+            approvals::count_pending_of_thread(&mut conn, *id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            actual.last_read_seq,
+            threads::last_read(&mut conn, s.cai.id(), *id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            actual.stopping,
+            threads::stopping_status(&mut conn, *id).await.unwrap()
+        );
+    }
+    let other = threads::activity_many(&mut conn, &ids, Some(s.bea.id()))
+        .await
+        .unwrap();
+    let nobody = threads::activity_many(&mut conn, &ids, None).await.unwrap();
+    assert!(other.values().all(|value| value.last_read_seq == Some(0)));
+    for id in &ids {
+        let current = threads::thread(&mut conn, *id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active_continuation_id;
+        assert_eq!(
+            other[id].last_read_seq,
+            orch_db::queries::thread_continuations::reading::last_read(
+                &mut conn,
+                s.bea.id(),
+                *id,
+                current,
+            )
+            .await
+            .unwrap(),
+            "an unread current continuation uses the same native zero in every projection"
+        );
+    }
+    assert!(nobody.values().all(|value| value.last_read_seq.is_none()));
+    let now = orch_types::Time::new(s.rig.world.now());
+    // Compare the opening's activity with the ordinary batch, including both Stop states,
+    // links, and held deliveries that still affect display but have already left the queue.
+    let reader = s.cai.id();
+    let another = s.bea.id();
+    let mut opening = s.rig.db.begin_opening_snapshot().await.unwrap();
+    let selected = [ids[0], ids[1]];
+    let expected = threads::activity_many(&mut conn, &selected, Some(reader))
+        .await
+        .unwrap();
+    orch_authz::read_facts::scope(&mut opening, move |conn| {
+        Box::pin(async move {
+            for id in selected {
+                threads::thread(conn, id).await.unwrap().unwrap();
+                let (status, queries) = Statements::measure(
+                    orch_db::queries::source::thread_display_facts(conn, &[id], Some(reader), now),
+                )
+                .await;
+                assert!(status.unwrap()[0].held_inputs > expected[&id].held_inputs);
+                assert_eq!(queries, 1);
+                let (actual, queries) =
+                    Statements::measure(threads::activity_many(conn, &[id], Some(reader))).await;
+                assert_eq!(actual.unwrap()[&id], expected[&id]);
+                assert_eq!(
+                    queries, 0,
+                    "the first screen already read this thread's activity"
+                );
+                let (other, queries) =
+                    Statements::measure(threads::activity_many(conn, &[id], Some(another))).await;
+                assert_eq!(other.unwrap()[&id].last_read_seq, Some(0));
+                assert_eq!(
+                    queries, 1,
+                    "each reader gets their own continuation position"
+                );
+            }
+        })
+    })
+    .await;
+    opening.rollback().await.unwrap();
+    let parts = orch_engine::views::thread_parts_many(&mut conn, &ids, Some(s.cai.id()), now)
+        .await
+        .unwrap();
+    for id in &ids {
+        let single = orch_engine::views::thread_parts(&mut conn, *id, Some(s.cai.id()), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parts[id], single,
+            "full thread facts retain nonempty native activity for {id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_topic_page_keeps_each_threads_complete_native_projection_and_current_reader_boundaries()
+{
+    use orch_api_contract::threads::{ThreadSyncGet, ThreadSyncGetQuery};
+    let s = Scene::without_supervisor().await;
+    let mut ids = Vec::new();
+    for number in 0..10 {
+        let id = s
+            .thread_by(&s.ada, &format!("Parallel conversation {number}"))
+            .await
+            .base
+            .id;
+        s.rig
+            .world
+            .set_at(
+                orch_settings::Target::Node(id),
+                "agent.memory",
+                json!(if number % 2 == 0 { "on" } else { "off" }),
+            )
+            .await;
+        s.rig
+            .world
+            .set_at(
+                orch_settings::Target::Node(id),
+                "agent.effort",
+                json!(if number % 2 == 0 { "low" } else { "high" }),
+            )
+            .await;
+        ids.push(id);
+    }
+    let private = private_thread(&s, &s.eve, "A private conversation outside this reader").await;
+    // Capture an actual native report before independent HTTP snapshots compare its full projection.
+    orch_db::queries::resources::thread_engine::set_harness_status(
+        &mut s.rig.db.acquire().await.unwrap(),
+        s.on.provider,
+        s.on.agent,
+        s.rig.machine_id,
+        &orch_db::queries::resources::thread_engine::HarnessReport {
+            home: None,
+            status: "online",
+            detail: None,
+            version: Some("1.0.0"),
+            sessions_open: 0,
+        },
+        s.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    let mut tx = s.rig.db.pool().begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let now = orch_types::Time::new(s.rig.world.now());
+    let batch = orch_engine::views::thread_parts_many(&mut tx, &ids, Some(s.cai.id()), now)
+        .await
+        .unwrap();
+    for id in &ids {
+        let single = orch_engine::views::thread_parts(&mut tx, *id, Some(s.cai.id()), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch[id], single, "every native field is retained for {id}");
+    }
+    tx.commit().await.unwrap();
+    for reader in [&s.ada, &s.cai] {
+        let page = sync_topic(&s, reader, None).await.ok();
+        let private_read = s
+            .rig
+            .world
+            .app
+            .call(ThreadSyncGet, &[&private])
+            .token(&reader.token)
+            .query(&ThreadSyncGetQuery::default())
+            .send()
+            .await;
+        let may_private = private_read.status.is_success();
+        if reader.id() == s.cai.id() {
+            assert!(
+                !may_private,
+                "the ordinary viewer cannot read the private thread"
+            );
+        }
+        assert_eq!(
+            page.threads.iter().any(|thread| thread.base.id == private),
+            may_private
+        );
+        assert_eq!(page.threads.len(), ids.len() + usize::from(may_private));
+        for shown in page.threads {
+            assert_eq!(
+                shown
+                    .binding
+                    .as_ref()
+                    .unwrap()
+                    .program
+                    .as_ref()
+                    .unwrap()
+                    .version,
+                "1.0.0",
+                "a page retains the captured native program instead of omitting the field"
+            );
+            let direct = s
+                .rig
+                .world
+                .app
+                .call(ThreadSyncGet, &[&shown.base.id])
+                .token(&reader.token)
+                .query(&ThreadSyncGetQuery::default())
+                .send()
+                .await
+                .ok()
+                .thread;
+            assert_eq!(
+                serde_json::to_value(shown).unwrap(),
+                serde_json::to_value(direct).unwrap(),
+                "the topic uses full thread fields under this reader"
+            );
+        }
+    }
 }

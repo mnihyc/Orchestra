@@ -57,13 +57,13 @@ async fn owning_a_provider_does_not_bypass_the_destinations_address_policy_at_cr
         .token(&s.ada.token)
         .body(&CreateThread {
             name: Some("Forbidden destination".to_owned()),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: s.on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                s.on.agent,
+                s.on.provider,
+                None,
+            )),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()

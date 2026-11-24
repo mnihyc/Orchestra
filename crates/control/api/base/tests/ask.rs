@@ -4,12 +4,20 @@
     clippy::expect_used,
     reason = "a deciding case fails by panicking"
 )]
+#[path = "ask/admin_mode.rs"]
+mod admin_mode;
 #[path = "ask/backend_reserve.rs"]
 mod backend_reserve;
 #[path = "ask/context.rs"]
 mod context;
 mod places;
+#[path = "ask/refusals.rs"]
+mod refusals;
 mod rig;
+#[path = "ask/sources.rs"]
+mod sources;
+#[path = "ask/subscription.rs"]
+mod subscription;
 mod support;
 
 use orch_api_contract::{
@@ -36,6 +44,7 @@ async fn setting(s: &Scene, key: &str, value: Json) {
         .call(NodeSettingSet, &[&s.tree.org.base.id, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -142,12 +151,63 @@ async fn configured_provider(s: &Scene) -> Id {
     .await
     .unwrap()
     .unwrap_or_default();
-    models.push(AskModelIdentity {
-        provider_id: id,
-        model: MODEL.into(),
-    });
+    models.push(AskModelIdentity::api(id, MODEL.into()));
     setting(s, "ask.models", json!(models)).await;
     id
+}
+
+#[tokio::test]
+async fn an_embedding_entry_never_becomes_the_default_ask_model_because_its_provider_also_serves_chat()
+ {
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    let selection = AskModelIdentity::api(provider, MODEL.into());
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{offered}', '{\"purposes\":[\"embedding\"]}') WHERE provider_id=$1")
+        .bind(provider).execute(s.rig.db.pool()).await.unwrap();
+    let blocked = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let entry = blocked
+        .models
+        .iter()
+        .find(|entry| entry.selection == selection)
+        .unwrap();
+    assert!(!entry.allowed);
+    assert_eq!(
+        entry.unavailable_reason.as_deref(),
+        Some("generation_unsupported")
+    );
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{purposes}', '[\"generation\"]') WHERE provider_id=$1")
+        .bind(provider).execute(s.rig.db.pool()).await.unwrap();
+    let available = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        available
+            .models
+            .iter()
+            .find(|entry| entry.selection == selection)
+            .unwrap()
+            .allowed
+    );
 }
 
 async fn kept_native_source(s: &Scene) -> (Id, Id) {
@@ -201,6 +261,36 @@ async fn kept_native_source(s: &Scene) -> (Id, Id) {
     sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,import_neutral}','true') WHERE id=$1")
         .bind(s.on.agent).execute(s.rig.db.pool()).await.unwrap();
     (kept.thread_id, provider)
+}
+
+#[tokio::test]
+async fn a_native_ask_default_use_is_recent_for_its_person_without_opening_a_model_picker() {
+    use orch_api_contract::personal::MeModelRecentList;
+    let s = Scene::new().await;
+    let (_, provider) = kept_native_source(&s).await;
+    let recent = s
+        .rig
+        .world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(recent.recent[0].provider_id, provider);
+    assert_eq!(recent.recent[0].model_name, MODEL);
+    assert!(
+        s.rig
+            .world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&s.cai.token)
+            .send()
+            .await
+            .ok()
+            .recent
+            .is_empty()
+    );
 }
 
 async fn native_program_plan(
@@ -574,17 +664,18 @@ async fn switching_a_running_builtin_interrupts_its_actual_turn_without_a_native
 
 async fn scoped_key(s: &Scene, scope: Json) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let scope: KeyScope = serde_json::from_value(scope).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let encoded = json!(scope);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.ada.id(),
             name: "Ask operation fixture",
             token_hash: &hash,
@@ -605,9 +696,10 @@ async fn permission_key(s: &Scene, permissions: &[&str]) -> String {
 }
 
 async fn permission_key_for(s: &Scene, person: Id, permissions: &[&str]) -> String {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let scopes: Vec<String> = permissions
         .iter()
@@ -616,7 +708,7 @@ async fn permission_key_for(s: &Scene, person: Id, permissions: &[&str]) -> Stri
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: person,
             name: "Ask permission ceiling fixture",
             token_hash: &hash,
@@ -650,6 +742,63 @@ fn simple_answer() -> CommandResult {
         timing: Default::default(),
         request_ref: None,
     })
+}
+
+#[tokio::test]
+async fn an_ask_only_use_entry_runs_the_ordinary_model_and_a_question_larger_than_one_link_frame() {
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query("UPDATE permission_entries SET options=$3 WHERE object_kind='provider' AND object_id=$1 AND permission='provider.use' AND holder_kind='user' AND holder_id=$2 AND removed_at IS NULL")
+        .bind(provider).bind(s.cai.id()).bind(json!({"models":[MODEL],"purposes":["ask"]})).execute(s.rig.db.pool()).await.unwrap();
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&s.cai.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(choices.models.iter().any(|choice| choice.selection
+        == AskModelIdentity::api(provider, MODEL.into())
+        && choice.allowed));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, move |command| {
+            let Command::ProviderGenerate(request) = command else {
+                panic!("a real generation command");
+            };
+            seen.lock().unwrap().push(request.model_name.clone());
+            Ok(simple_answer())
+        });
+    let made = create_unseeded(&s, &s.cai).await;
+    s.rig
+        .world
+        .app
+        .call(AskMessageCreate, &[&made.conversation_id])
+        .token(&s.cai.token)
+        .body(&AskMessageBody {
+            client_id: "large-question".into(),
+            content: vec![ContentPart::Text {
+                text: "上下文".repeat(30_000),
+            }],
+            context: None,
+            model: None,
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the allowed question reaches its model", || async {
+        !calls.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(calls.lock().unwrap().as_slice(), [MODEL]);
 }
 
 #[tokio::test]
@@ -1451,12 +1600,12 @@ async fn root_model_choices_do_not_require_thread_creation_authority() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,enabled,source,created_by) VALUES ($1,$2,'switched-off','Off',false,'manual',$3)")
         .bind(new_id()).bind(provider).bind(s.ada.id()).execute(s.rig.db.pool()).await.unwrap();
-    setting(&s,"ask.models",json!([{ "provider_id":provider,"model":MODEL },{ "provider_id":provider,"model":"switched-off" }])).await;
+    setting(&s,"ask.models",json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":"switched-off"}}}])).await;
     let reply = s
         .rig
         .world
@@ -1472,14 +1621,19 @@ async fn root_model_choices_do_not_require_thread_creation_authority() {
     let allowed = reply
         .models
         .iter()
-        .find(|choice| choice.selection.provider_id == provider && choice.selection.model == MODEL)
+        .find(|choice| {
+            choice.selection.backend.offering.as_ref().unwrap().provider == provider
+                && choice.selection.backend.offering.as_ref().unwrap().offering == MODEL
+        })
         .unwrap();
     assert!(allowed.allowed);
     assert!(allowed.is_default);
     let disabled = reply
         .models
         .iter()
-        .find(|choice| choice.selection.model == "switched-off")
+        .find(|choice| {
+            choice.selection.backend.offering.as_ref().unwrap().offering == "switched-off"
+        })
         .unwrap();
     assert!(!disabled.allowed);
     assert!(disabled.unavailable_reason.is_some());
@@ -1501,7 +1655,7 @@ async fn model_choices_keep_the_original_keys_root_read_admission() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     for operation in ["AskGet", "AskModelsGet"] {
@@ -1526,15 +1680,12 @@ async fn model_choices_keep_the_original_keys_root_read_admission() {
             .await;
         if operation == "AskModelsGet" {
             let reply = reply.ok();
-            assert!(
-                reply
-                    .models
-                    .iter()
-                    .any(|choice| choice.selection.provider_id == provider
-                        && choice.selection.model == MODEL
-                        && choice.allowed
-                        && choice.is_default)
-            );
+            assert!(reply.models.iter().any(|choice| {
+                choice.selection.backend.offering.as_ref().unwrap().provider == provider
+                    && choice.selection.backend.offering.as_ref().unwrap().offering == MODEL
+                    && choice.allowed
+                    && choice.is_default
+            }));
         } else {
             assert_eq!(reply.status.as_u16(), 403);
         }
@@ -1606,14 +1757,17 @@ async fn ask_model_options_include_native_constraints_without_provider_read_oper
     let option = reply
         .models
         .iter()
-        .find(|option| option.selection.provider_id == provider)
+        .find(|option| option.selection.backend.offering.as_ref().unwrap().provider == provider)
         .unwrap();
     assert!(option.allowed, "{:?}", option.unavailable_reason);
     let schema = option.request_option_schema.as_ref().unwrap();
-    assert_eq!(
-        schema,
-        &option.model.as_ref().unwrap().option_constraints["openai-responses"]
-    );
+    // Ask declares its own read tools, so hosted web search is the one option it does not offer.
+    let mut offered = option.model.as_ref().unwrap().option_constraints["openai-responses"].clone();
+    offered["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("web_search");
+    assert_eq!(schema, &offered);
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.3})).is_ok());
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.8})).is_err());
     assert_eq!(schema["properties"]["temperature"]["maximum"], 0.5);
@@ -1656,12 +1810,41 @@ async fn ask_model_discovery_batches_queries_without_changing_order_or_exclusion
         .await;
         let reply = reply.ok();
         assert_eq!(reply.models.len(), total);
-        assert_eq!(reply.models[0].selection.provider_id, disabled);
+        assert_eq!(
+            reply.models[0]
+                .selection
+                .backend
+                .offering
+                .as_ref()
+                .unwrap()
+                .provider,
+            disabled
+        );
         assert!(!reply.models[0].allowed);
         assert!(reply.models[0].unavailable_reason.is_some());
-        assert_eq!(reply.models[1].selection.provider_id, default);
+        assert_eq!(
+            reply.models[1]
+                .selection
+                .backend
+                .offering
+                .as_ref()
+                .unwrap()
+                .provider,
+            default
+        );
         assert!(reply.models[1].allowed && reply.models[1].is_default);
-        assert_eq!(reply.default_model.as_ref().unwrap().provider_id, default);
+        assert_eq!(
+            reply
+                .default_model
+                .as_ref()
+                .unwrap()
+                .backend
+                .offering
+                .as_ref()
+                .unwrap()
+                .provider,
+            default
+        );
         assert!(reply.blocked_reason.is_none());
         let first = reply.models[..2].to_vec();
         match &stable {
@@ -1736,8 +1919,7 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
             context: None,
             retention_days: None,
             model: Some(AskModel {
-                provider_id: outside,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(outside, MODEL.into()).backend,
                 params: None,
             }),
         })
@@ -1771,8 +1953,7 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
         .body(&question(
             "outside",
             Some(Some(AskModel {
-                provider_id: outside,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(outside, MODEL.into()).backend,
                 params: None,
             })),
         ))
@@ -1832,7 +2013,7 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
     setting(
         &s,
         "ask.models",
-        json!([{ "provider_id":listed,"model":MODEL }]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":listed,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
@@ -1858,6 +2039,174 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
     );
     assert!(unusable.default_model.is_none());
     assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn another_organizations_provider_can_be_shared_for_ask_without_letting_threads_use_it() {
+    use orch_access_contract::permissions::UsagePurpose;
+    use orch_api_contract::access::{PageChange, PermissionPageGet, PermissionPageUpdate};
+    use orch_engine::access::ResourceAccess;
+    let s = Scene::new().await;
+    let receiver = places::person(&s.rig.world, "askguest").await;
+    places::join(
+        &s.rig.world,
+        s.tree.org.base.id,
+        s.tree.org.base.id,
+        &receiver,
+        "viewer",
+        &s.ada,
+    )
+    .await;
+    let provider = configured_provider(&s).await;
+    let foreign = places::make_org(&s.rig.world, &s.ada, "Model owners", "model-owners").await;
+    sqlx::query("UPDATE providers SET org_id=$2,home_id=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(foreign.base.id)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(PermissionPageGet, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let grant: PageChange = serde_json::from_value(json!({"expected_revision":page.revision,"name":[{
+        "choice":"full_interact","holders":[{"kind":"user","id":receiver.id()}],"options":{"purposes":["ask"]}
+    }]})).unwrap();
+    s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .body(&grant)
+        .send()
+        .await
+        .ok();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(PermissionPageGet, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let entry = page.rows.iter().find(|row| row.permission == "provider.use").unwrap().entries.iter()
+        .find(|entry| matches!(&entry.holder, orch_api_contract::access::Holder::User {user} if user.id == receiver.id())).unwrap();
+    assert_eq!(entry.options["purposes"], json!(["ask"]));
+    let entry_id = entry.id;
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&receiver.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(choices.models[0].allowed);
+    let access = orch_api_core::thread_access::AuthzAccess::new(s.rig.world.app.app.clock.clone());
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let turn = access
+        .provider_use(
+            &mut conn,
+            &orch_engine::access::ProviderUse {
+                pool: None,
+                person: receiver.id(),
+                node: s.tree.topic.base.id,
+                provider,
+                model: None,
+                effort: None,
+                runs_in: None,
+                purpose: UsagePurpose::Turn,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !turn.is_allowed(),
+        "Ask access cannot choose the provider for a thread"
+    );
+    drop(conn);
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, |_| Ok(simple_answer()));
+    let made = create(&s, &receiver, None).await;
+    s.rig
+        .world
+        .app
+        .call(AskMessageCreate, &[&made.conversation_id])
+        .token(&receiver.token)
+        .body(&AskMessageBody {
+            client_id: "ask-only-share".into(),
+            content: vec![ContentPart::Text {
+                text: "Use the shared Ask model".into(),
+            }],
+            context: None,
+            model: None,
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the Ask-only provider answers the person", || async {
+        read(&s, &receiver, made.conversation_id)
+            .await
+            .messages
+            .iter()
+            .any(|message| {
+                message.role == AskRole::Assistant
+                    && message.complete
+                    && message.content.iter().any(|part| {
+                        matches!(part, ContentPart::Text {text} if text == "A retained answer")
+                    })
+            })
+    })
+    .await;
+    let page = s
+        .rig
+        .world
+        .app
+        .call(PermissionPageGet, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let update: PageChange = serde_json::from_value(json!({"expected_revision":page.revision,"rows":[{
+        "permission":"provider.use","update":[{"entry_id":entry_id,"options":{"purposes":["work"]}}]
+    }]})).unwrap();
+    s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .body(&update)
+        .send()
+        .await
+        .ok();
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&receiver.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        !choices.models[0].allowed,
+        "thread Use cannot also appear as Ask Use"
+    );
 }
 
 #[tokio::test]
@@ -1904,7 +2253,7 @@ async fn ask_models_unset_blocks_then_the_first_usable_entry_answers_without_a_p
     setting(
         &s,
         "ask.models",
-        json!([{ "provider_id":first,"model":MODEL },{ "provider_id":second,"model":MODEL }]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":second,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
@@ -1927,7 +2276,18 @@ async fn ask_models_unset_blocks_then_the_first_usable_entry_answers_without_a_p
     assert_eq!(choices.models.len(), 2);
     assert!(!choices.models[0].allowed);
     assert!(choices.models[1].allowed);
-    assert_eq!(choices.default_model.as_ref().unwrap().provider_id, second);
+    assert_eq!(
+        choices
+            .default_model
+            .as_ref()
+            .unwrap()
+            .backend
+            .offering
+            .as_ref()
+            .unwrap()
+            .provider,
+        second
+    );
     assert!(choices.blocked_reason.is_none());
     assert!(choices.writable);
     s.rig
@@ -1956,7 +2316,7 @@ async fn a_saved_excluded_model_uses_todays_allowed_default_with_a_notice() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = s
@@ -1977,7 +2337,7 @@ async fn a_saved_excluded_model_uses_todays_allowed_default_with_a_notice() {
     // A formerly saved entry is removed from the current configuration.
     sqlx::query("UPDATE threads SET ask_model=$2 WHERE node_id=$1")
         .bind(made.conversation_id)
-        .bind(json!({"provider_id":provider,"model":"removed-model"}))
+        .bind(json!({"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":"removed-model"}}}))
         .execute(s.rig.db.pool())
         .await
         .unwrap();
@@ -2055,8 +2415,7 @@ async fn a_saved_excluded_model_uses_todays_allowed_default_with_a_notice() {
                 }],
                 context: None,
                 model: Some(Some(AskModel {
-                    provider_id: provider,
-                    model: "removed-model".into(),
+                    backend: AskModelIdentity::api(provider, "removed-model".into()).backend,
                     params: None
                 }))
             })
@@ -2081,7 +2440,7 @@ async fn default_model_preference_follows_current_settings_and_can_replace_an_ex
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":first,"model":MODEL},{"provider_id":other,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}}]),
     )
     .await;
     let providers = Arc::new(Mutex::new(Vec::new()));
@@ -2102,14 +2461,13 @@ async fn default_model_preference_follows_current_settings_and_can_replace_an_ex
             setting(
                 &s,
                 "ask.models",
-                json!([{"provider_id":other,"model":MODEL},{"provider_id":first,"model":MODEL}]),
+                json!([{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}}]),
             )
             .await;
         }
         let selection = match index {
             2 => Some(Some(AskModel {
-                provider_id: first,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(first, MODEL.into()).backend,
                 params: None,
             })),
             4 => Some(None),
@@ -2144,7 +2502,10 @@ async fn default_model_preference_follows_current_settings_and_can_replace_an_ex
             .conversation
             .model;
         if matches!(index, 2 | 3) {
-            assert_eq!(preference.unwrap().provider_id, first);
+            assert_eq!(
+                preference.unwrap().backend.offering.unwrap().provider,
+                first
+            );
         } else {
             assert!(
                 preference.is_none(),
@@ -2195,7 +2556,7 @@ async fn changing_the_model_origin_keeps_text_without_replaying_another_interfac
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":first,"model":MODEL},{"provider_id":other,"model":MODEL},{"provider_id":other,"model":"other-model"}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":"other-model"}}}]),
     )
     .await;
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2246,12 +2607,15 @@ async fn changing_the_model_origin_keeps_text_without_replaying_another_interfac
                 context: None,
                 model: (index >= 3)
                     .then(|| AskModel {
-                        provider_id: other,
-                        model: if index == 4 {
-                            "other-model".into()
-                        } else {
-                            MODEL.into()
-                        },
+                        backend: AskModelIdentity::api(
+                            other,
+                            if index == 4 {
+                                "other-model".into()
+                            } else {
+                                MODEL.into()
+                            },
+                        )
+                        .backend,
                         params: None,
                     })
                     .map(Some),
@@ -2307,7 +2671,7 @@ async fn sourced_opaque_state_stays_inside_its_current_tool_round_trip() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2405,7 +2769,7 @@ async fn repeated_provider_tool_ids_keep_distinct_journal_witnesses_through_keep
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2575,7 +2939,7 @@ async fn another_builtin_sender_gets_visible_history_without_the_previous_person
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2691,7 +3055,7 @@ async fn conversation_files_are_private_without_an_environment() {
         .app
         .app
         .blobs
-        .register(&mut conn, meta, now)
+        .register(&mut conn, &meta, now)
         .await
         .unwrap();
     orch_db::queries::uploads::remember(&mut conn, s.cai.id(), &meta.hash, now)
@@ -2764,7 +3128,7 @@ async fn named_read_tools_use_the_catalogue_and_refuse_a_different_actual_varian
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let tools = [
@@ -3039,7 +3403,7 @@ async fn resuming_replaces_a_revoked_preview_before_the_model_sees_it() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -3161,7 +3525,8 @@ async fn personal_storage_does_not_mix_another_ask_knowledge_root_into_a_turn() 
         .call(NodeSettingSet, &[&personal, &"ask.models"])
         .token(&s.cai.token)
         .body(&NodeSettingSetBody {
-            value: json!([{ "provider_id":provider,"model":MODEL }]),
+            model_choice: None,
+            value: json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
             locked: None,
             expected_revision: None,
         })
@@ -3179,8 +3544,7 @@ async fn personal_storage_does_not_mix_another_ask_knowledge_root_into_a_turn() 
             context: None,
             retention_days: None,
             model: Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(provider, MODEL.into()).backend,
                 params: None,
             }),
         })
@@ -3249,7 +3613,7 @@ async fn provider_use_revoked_during_startup_prevents_a_paid_ask_request() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let entry: Id = sqlx::query_scalar("SELECT id FROM permission_entries WHERE object_kind='provider' AND object_id=$1 AND page='live' AND permission='provider.use' AND holder_kind='user' AND holder_id=$2 AND removed_at IS NULL")
@@ -3331,7 +3695,7 @@ async fn losing_the_keys_history_read_during_startup_prevents_paid_generation() 
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = create(&s, &s.ada, None).await;
@@ -3415,7 +3779,7 @@ async fn owning_an_ask_does_not_bypass_a_permission_keys_native_ceiling() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = create(&s, &s.ada, None).await;
@@ -3549,14 +3913,14 @@ async fn builtin_input_needs_the_original_keys_read_of_retained_history() {
     // 两者均应在调用模型前拒绝，写入权限不会授予历史对话的读取权限。
     use orch_access_contract::key_scope::KeyScope;
     use orch_api_contract::threads::{Delivery, ThreadInputCreate, ThreadInputCreateBody};
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let s = Scene::new().await;
     let provider = configured_provider(&s).await;
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = create(&s, &s.ada, None).await;
@@ -3594,13 +3958,14 @@ async fn builtin_input_needs_the_original_keys_read_of_retained_history() {
         }]}))
         .unwrap();
         assert!(scope.validate().is_empty());
-        let secret = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let secret = new_api_token(issued_key_id);
         let hash = token_hash(&secret);
         let encoded = json!(scope);
         identity::create_api_token_scoped(
             &mut *s.rig.world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: issued_key_id,
                 user_id: s.ada.id(),
                 name: "Built-in input scope fixture",
                 token_hash: &hash,
@@ -3824,7 +4189,7 @@ async fn a_no_environment_program_refuses_workspace_choices_before_runtime_or_bi
                 id: BuiltinThreadProgramId::Orch,
                 model: None,
             }),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..Default::default()
         })
         .send()
@@ -3854,7 +4219,7 @@ async fn native_builtin_birth_commits_its_first_question_before_generation_and_r
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -3995,7 +4360,7 @@ async fn ask_message_pages_skip_nonmessages_without_losing_the_boundary_message(
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     s.rig
@@ -4130,7 +4495,7 @@ async fn ask_snapshot_model_and_export_use_the_native_selected_history() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -4312,7 +4677,7 @@ async fn permanent_builtin_forks_use_native_source_and_destination_rights_and_th
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -4518,7 +4883,7 @@ async fn builtin_fork_from_here_copies_only_visible_selected_history_and_its_fil
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -4720,7 +5085,7 @@ async fn a_kept_thread_exposes_and_applies_its_own_program_model_choice() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":first,"model":MODEL},{"provider_id":other,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -4764,8 +5129,7 @@ async fn a_kept_thread_exposes_and_applies_its_own_program_model_choice() {
                 }],
                 context: None,
                 model: Some((index == 0).then(|| AskModel {
-                    provider_id: other,
-                    model: MODEL.into(),
+                    backend: AskModelIdentity::api(other, MODEL.into()).backend,
                     params: None,
                 })),
             })
@@ -4795,7 +5159,18 @@ async fn a_kept_thread_exposes_and_applies_its_own_program_model_choice() {
         );
         assert_eq!(thread.base.owner.id, s.ada.id());
         if index == 0 {
-            assert_eq!(thread.program_model.as_ref().unwrap().provider_id, other);
+            assert_eq!(
+                thread
+                    .program_model
+                    .as_ref()
+                    .unwrap()
+                    .backend
+                    .offering
+                    .as_ref()
+                    .unwrap()
+                    .provider,
+                other
+            );
         } else {
             assert!(thread.program_model.is_none());
         }
@@ -4836,8 +5211,7 @@ async fn kept_segment_program_survives_the_end_of_its_current_binding() {
             context: None,
             retention_days: None,
             model: Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(provider, MODEL.into()).backend,
                 params: None,
             }),
         })
@@ -4959,7 +5333,7 @@ async fn a_native_attachment_reaches_ask_and_its_kept_history_without_an_environ
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("UPDATE provider_models SET parameters=$2 WHERE provider_id=$1")
@@ -5114,7 +5488,7 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -5285,41 +5659,27 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
             .await
             .unwrap();
     assert_eq!(followed, "all");
-    // EN browser: stop the displayed current turn; a stale turn selection
-    // must leave it running, and a successful Stop names the actual person.
-    // 中文浏览器：停止当前显示的回合；过期选择不能停止别的回合，成功停止应记录实际操作者。
+    // The page can still show an earlier turn when a person presses Stop.
     let turn = sent.input.turn_id.unwrap();
     let now = s.rig.world.app.app.clock.now();
     sqlx::query("UPDATE turns SET state='running',completed_at=NULL,completed_seq=0,end_work=NULL WHERE id=$1")
         .bind(turn).execute(s.rig.db.pool()).await.unwrap();
     sqlx::query("UPDATE threads SET state='running',ask_state='running',current_turn_id=$2,ask_runner_id=$3,ask_heartbeat_at=$4 WHERE node_id=$1")
         .bind(kept.thread_id).bind(turn).bind(new_id()).bind(now).execute(s.rig.db.pool()).await.unwrap();
-    let stale = s
-        .rig
-        .world
-        .app
-        .call(ThreadInterrupt, &[&kept.thread_id])
-        .token(&s.cai.token)
-        .body(&ThreadInterruptBody { turn_id: new_id() })
-        .send()
-        .await;
-    assert!(stale.status.is_client_error());
-    let state: String = sqlx::query_scalar("SELECT ask_state FROM threads WHERE node_id=$1")
-        .bind(kept.thread_id)
-        .fetch_one(s.rig.db.pool())
-        .await
-        .unwrap();
-    assert_eq!(state, "running");
     let stopped = s
         .rig
         .world
         .app
         .call(ThreadInterrupt, &[&kept.thread_id])
         .token(&s.cai.token)
-        .body(&ThreadInterruptBody { turn_id: turn })
+        .body(&ThreadInterruptBody {
+            turn_id: Some(new_id()),
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .turn
+        .expect("the answer is the turn it names");
     assert_eq!(stopped.id, turn);
     assert_eq!(
         stopped.state,
@@ -5362,7 +5722,7 @@ async fn ordinary_retry_rechecks_and_runs_a_builtin_question_as_the_actual_sende
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -5539,7 +5899,7 @@ async fn an_expired_controller_lease_recovers_without_borrowing_a_new_principal(
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     s.rig
@@ -5663,7 +6023,7 @@ async fn a_late_provider_reply_is_counted_only_from_its_original_recipient_and_o
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let response = ProviderGenerateResult {
@@ -5766,7 +6126,7 @@ async fn ask_purpose_and_offering_filters_share_the_owned_model_cap_port() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     for purpose in ["turn", "summary"] {
@@ -5887,7 +6247,7 @@ async fn ask_concurrency_keeps_the_current_turns_reservation_and_its_actual_purp
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -5907,8 +6267,7 @@ async fn ask_concurrency_keeps_the_current_turns_reservation_and_its_actual_purp
         }],
         context: None,
         model: Some(Some(AskModel {
-            provider_id: provider,
-            model: MODEL.into(),
+            backend: AskModelIdentity::api(provider, MODEL.into()).backend,
             params: Some(json!({"service_tier":"priority"})),
         })),
     };
@@ -6038,7 +6397,7 @@ async fn lowering_an_ask_stop_cap_ends_only_its_persons_actual_builtin_turn() {
         setting(
             &s,
             "ask.models",
-            json!([{"provider_id":provider,"model":MODEL}]),
+            json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
         )
         .await;
         let calls = Arc::new(Mutex::new(0));
@@ -6186,7 +6545,7 @@ async fn a_personal_ask_cap_allows_finish_turn_and_blocks_the_next_question() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,at_limit,uncounted,created_by) VALUES ($1,$2,'user',$3,'shared','tokens','day',100,'finish_turn','allow',$4)")
@@ -6296,7 +6655,7 @@ async fn a_stop_cap_prevents_the_next_tool_batch_and_model_step() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,at_limit,uncounted,created_by) VALUES ($1,$2,'user',$3,'shared','tokens','day',100,'stop','allow',$4)")
@@ -6378,7 +6737,7 @@ async fn ask_runs_a_tool_loop_and_attributes_every_step_to_the_person() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));

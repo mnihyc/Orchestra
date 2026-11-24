@@ -259,6 +259,7 @@ pub(crate) fn complete_staged<'a>(
             "ThreadAdopt",
             prepared.new_thread(),
             None,
+            None,
         )
         .await
         {

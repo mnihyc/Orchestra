@@ -60,7 +60,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       expect(starts).toHaveLength(entry === 'quick' ? 1 : 2);
       expect(starts.at(-1)?.body).toMatchObject({
         let_into_environment: viewers,
-        environment: { use: RUNS_ON.workspace },
+        environment: { use: { type: 'single', resource: { kind: 'environment', id: RUNS_ON.workspace } } },
         first_input: { content: [{ type: 'text', text: message }], client_id: expect.any(String) },
       });
       expect(permissionReads).toEqual([]);

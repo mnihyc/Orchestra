@@ -6,13 +6,16 @@ import type * as Client from '@/api/client';
 import { client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { NO_PICKS, resolve } from '@/features/start/choices';
-import { rememberSetup, useLastSetup } from '@/features/start/lastSetup';
+import { useLastSetup } from '@/features/start/lastSetup';
 import { useStart, type StartPlan } from '@/features/start/start';
 import type { Thread, ThreadCreateResponse } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { options } from '../unit/start-fixtures';
-import { show } from './support';
+import { show as renderWithProviders } from './support';
+import { modelMemoryClient } from './model-memory';
+import type { ReactNode } from 'react';
+function show(ui: ReactNode) { return renderWithProviders(ui, queryClient); }
 
 const io = vi.hoisted(() => ({
   send: vi.fn<(request: Request) => Promise<Response>>(),
@@ -38,7 +41,7 @@ function Starter({ selected }: { selected: StartPlan }) {
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear(); queryClient.clear();
   client.session.setState({ status: 'signed_in', userId: 'receipt-starter' });
-  rememberSetup('receipt-starter', { place: 'previous-topic', picks: NO_PICKS });
+  modelMemoryClient({ place: 'previous-topic', picks: NO_PICKS }, queryClient);
 });
 afterEach(async () => {
   act(() => client.session.setState({ status: 'signed_out', userId: null }));
@@ -86,7 +89,7 @@ it('acknowledges a committed start without full-thread followups or automatic re
   const request = sent[0];
   if (request === undefined) throw new Error('Expected the single accepted start');
   const body: unknown = await request.json();
-  expect(body).toMatchObject({ environment: { use: 'e1' }, let_into_environment: true,
+  expect(body).toMatchObject({ environment: { use: { type: 'single', resource: { kind: 'environment', id: 'e1' } } }, let_into_environment: true,
     first_input: { content: [{ type: 'text', text: selected.message }] } });
   expect(request.headers.get('Idempotency-Key')).toEqual(expect.any(String));
   expect(request.headers.get('Idempotency-Key')).not.toBe('');

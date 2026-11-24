@@ -1,16 +1,16 @@
+import { providerTarget, singleProviderId } from '@/lib/resourceTargets';
+import { environmentPoolId, environmentTarget, environmentValue } from '@/features/resources/pools/environmentTarget';
 import { BindingPickerScope } from '@/features/resources/PickerContext';
-import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Four ordinary choices; optional setup stays under Options. The native answer still decides every permission and value. */
+import { SetupChoiceFacts } from './SetupChoiceFacts';
 import { useQuery } from '@tanstack/react-query';
-import { PlugZap } from 'lucide-react';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
-import { choiceOption, offeredChoice } from '@/i18n/choices';
 
 import { machinesQuery, providersQuery } from '@/api/resources';
-import { ResourceHint, resourcePreview, resourceChoice } from '@/features/resource-facts/ResourceFacts';
-import { useHarnessTitle } from '@/features/resources/harnesses';
 import { ResourceCreationActions } from '@/features/resources/ResourceCreation';
 import { providerPickerLabels } from '@/features/resources/providers/labels';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
@@ -26,13 +26,13 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { PromptScope, usePrompt } from '@/ui/PromptScope';
-import { Select } from '@/ui/Select';
 import { Textarea } from '@/ui/Textarea';
 
 import { ArrangementSection } from './Arrangement';
 import { ChoiceOriginMark } from './ChoiceOrigin';
 import { useViewerDefault } from './viewerDefault';
-import { type Mode, modelName, NEW_ENVIRONMENT, NO_PICKS, type Picks } from './choices';
+import { type Mode, NEW_ENVIRONMENT, NO_PICKS, type Picks } from './choices';
+import { StartAgentChoice, StartModelChoice } from './ModelChoice';
 import { useStartOptions } from './options';
 import { useStart } from './start';
 import { DirectorySign } from './DirectorySign';
@@ -40,10 +40,10 @@ import { Where, WhereOptions } from './Where';
 import { CreationAgentAccess } from './AgentAccess';
 import { useOfferedAgentAccess } from './agentAccessOffer';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
-import type { AgentAccessChoice, BindingEnvironment, CreateThread, CreateThreadProgram } from '@/generated/api-types';
-import { agentWhy, bindingReason, providerWhy, reasonWords } from './words';
-import { agentProgramPreview } from './ProgramReport';
+import type { AgentAccessChoice, BindingEnvironment, CreateThread, CreateThreadProgram,WorkspaceFileEdit } from '@/generated/api-types';
+import { bindingReason } from './words';
 import { ProgramThread } from './ProgramThread';
+import { WorkspaceInstructions,StagedWorkspaceInstructions } from './WorkspaceInstructions';
 
 /** What the person typed and chose in the inline starter, which the dialog opens with. */
 export interface StartDraft {
@@ -55,6 +55,9 @@ export interface StartDraft {
   letIntoEnvironment?: boolean;
   name?: string;
   program?: CreateThreadProgram;
+  directory?: string;
+  prepareSource?: boolean;
+  workspaceEdits?: readonly (readonly [string,WorkspaceFileEdit])[];
 }
 
 /** A dialog suggests the first of each choice where the place has no default: the person is there to choose. */
@@ -93,36 +96,51 @@ function ThreadSetup(props: NewThreadDialogProps) {
 function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }: NewThreadDialogProps & { onProgram: (draft: StartDraft) => void }) {
   const { t } = useTranslation();
   const optionsId = useId();
-  const harnessTitle = useHarnessTitle(open);
-  const [picks, setPicks] = useState<Picks>(draft?.picks ?? { ...NO_PICKS, provider: prepare?.initial?.binding?.provider_id ?? null, agent: prepare?.initial?.binding?.agent_id ?? null, model: prepare?.initial?.model ?? null, effort: prepare?.initial?.effort ?? null, arrangement: prepare?.initial?.binding?.arrangement ?? null, environment: prepare?.initial?.environment !== undefined && prepare.initial.environment !== null && 'use' in prepare.initial.environment ? prepare.initial.environment.use : null });
+  const initialEnvironment = prepare?.initial?.environment;
+  const initialNew = initialEnvironment !== undefined && initialEnvironment !== null && 'new' in initialEnvironment ? initialEnvironment.new : undefined;
+  const [picks, setPicks] = useState<Picks>(draft?.picks ?? {
+    ...NO_PICKS, provider: singleProviderId(prepare?.initial?.binding?.target), agent: prepare?.initial?.binding?.agent_id ?? null,
+    model: prepare?.initial?.model ?? null, effort: prepare?.initial?.effort ?? null, arrangement: prepare?.initial?.binding?.arrangement ?? null,
+    environment: initialNew === undefined ? initialEnvironment !== undefined && initialEnvironment !== null && 'use' in initialEnvironment ? environmentValue(initialEnvironment.use) : null : NEW_ENVIRONMENT,
+    ...(initialNew === undefined ? {} : { newEnvironment: {
+      host_id: initialNew.host_id, template_id: initialNew.template_id, access: initialNew.access, files: initialNew.files,
+    } }),
+  });
   const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
   const [access, setAccess] = useState<NewPagePreset>(draft?.generalAccess ?? 'defaults');
   const [name, setName] = useState(draft?.name ?? prepare?.initial?.name ?? '');
-  const [directory, setDirectory] = useState(prepare?.initial?.directory ?? '');
-  const [prepareSource, setPrepareSource] = useState(true);
+  const [directory, setDirectory] = useState(draft?.directory ?? prepare?.initial?.directory ?? '');
+  const [prepareSource, setPrepareSource] = useState(draft?.prepareSource ?? true);
   const [temporary, setTemporary] = useState(false);
   const [message, setMessage] = useState(draft?.message ?? '');
   const [advanced, setAdvanced] = useState(false);
+  const reader=useStore(client.session,(state)=>JSON.stringify([state.userId,state.readerVersion]));
+  const firstReader=useRef(reader);
+  const initialFileEdit=prepare?.initial?.workspace_edits?.find((edit)=>edit.path==='AGENTS.md')??null;
+  const initialFileAdopted=useRef(false);
+  const [fileEdits,setFileEdits]=useState<ReadonlyMap<string,WorkspaceFileEdit>>(()=>new Map(draft?.workspaceEdits));
+  // The line that says where a choice of model changed the agent.
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
   const making = parent.kind !== 'topic';
   const simpleAudience = access === 'defaults' || access === 'private';
   const catalogue = useQuery({ ...permissionsQuery, enabled: open && !simpleAudience });
   const audienceReady = simpleAudience || catalogue.data !== undefined;
   const threadAccess = access === 'defaults' ? undefined : access === 'private' ? 'private' as const
     : catalogue.data === undefined ? undefined : generalAccessChange(indexCatalogue(catalogue.data), 'thread', parent.kind === 'topic' ? parent.id : null, access);
-  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(parent.id, picks, SUGGEST, open && audienceReady,
+  const { setupObservation, options, resolved: checked, preview, loading, failed, refreshing, retry } = useStartOptions(parent.id, picks, SUGGEST, open && audienceReady,
     threadAccess === undefined ? undefined : { threadAccess });
+  const resolved = checked ?? (picks.environment === NEW_ENVIRONMENT || environmentPoolId(picks.environment) !== undefined ? preview : null);
   const viewers = useViewerDefault(parent.id, options, draft?.letIntoEnvironment ?? prepare?.initial?.let_into_environment ?? undefined);
   const agentAccess = useOfferedAgentAccess({ at: parent.id, enabled: open, initial: draft?.agentAccess,
     initialPreset:draft?.agentAccessPreset,
     offer: options?.agent_access, pending: loading || refreshing || !audienceReady,
-    error: options === null || resolved === null ? null : failed, retry });
+    error: options === null || checked === null ? null : failed, retry });
   const extraOpen = advanced || resolved?.missing.some((row) => row.kind === 'arrangement') === true;
   // Drawn beside a choice and never the choice: what a provider is, where it runs and how much of it is used.
   const providers = useQuery({ ...providersQuery('all'), enabled: open });
   const places = useKnownPlaces({ trees: false });
   const machines = useQuery({ ...machinesQuery, enabled: open && extraOpen });
   const place = useQuery({ ...nodeQuery(parent.id), enabled: open });
-  const known = new Map((providers.data ?? []).map((provider) => [provider.id, provider]));
   const providerNames=providerPickerLabels(resolved?.providers.map((row)=>row.entry.provider) ?? [],providers.data ?? [],places);
 
   const make = useStart(() => onClose());
@@ -140,7 +158,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
       ? loading
         ? t('start.why.loading')
         : t('start.why.failed')
-      : !viewers.ready ? t('startImplicit.checkingViewerDefault') : !agentAccess.ready ? t('agentAccess.checking')
+      : failed !== null ? t('start.why.failed') : !viewers.ready ? t('startImplicit.checkingViewerDefault') : !agentAccess.ready ? t('agentAccess.checking')
       : requesting !== null
         ? t('start.why.environment')
       : refreshing || resolved.settling
@@ -150,18 +168,19 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
           : t(`start.why.${resolved.missing[0].kind === 'agent' && resolved.missing[0].unreported ? 'agentUnreported' : resolved.missing[0].kind}`);
 
   const create = () => {
-    if (options === null || resolved === null || requesting !== null || !agentAccess.ready || !audienceReady || viewers.value === undefined) return;
+    if (options === null || resolved === null || checked === null || why !== null || requesting !== null || !agentAccess.ready || !audienceReady || viewers.value === undefined) return;
     if (prepare !== undefined) {
       if (resolved.agent === null || resolved.provider === null || resolved.model === null || resolved.arrangement === null) return;
-      const { first_input: _input, program: _program, ...kept } = prepare.initial ?? {};
+      const { first_input: _input, program: _program,workspace_edits:_edits, ...kept } = prepare.initial ?? {};
       const config: CreateThread = {
         ...kept,
         ...(name.trim() === '' ? {} : { name: name.trim() }),
-        binding: { agent_id: resolved.agent.id, provider_id: resolved.provider.id, arrangement: resolved.arrangement },
+        binding: { agent_id: resolved.agent.id, target: providerTarget(resolved.provider.id), arrangement: resolved.arrangement },
         model: resolved.model.model_name, ...(resolved.effort === null ? {} : { effort: resolved.effort }),
         environment: resolved.fresh ? { new: { ...resolved.newEnvironment, ...(temporary ? { config: { 'env.lifetime': 'thread' } } : {}) } }
-          : resolved.environment === null ? null : { use: resolved.environment.environment.id },
+          : resolved.environment === null ? null : { use: environmentTarget(resolved.environment.environment.id) },
         ...(directory.trim() === '' ? {} : { directory: directory.trim() }), prepare_source: prepareSource,
+        ...(fileEdit===null?{}:{workspace_edits:[fileEdit]}),
         ...(threadAccess === undefined ? {} : { access: threadAccess }), agent_access: agentAccess.value,
         let_into_environment: viewers.value,
       };
@@ -174,6 +193,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
       name: name.trim(),
       directory: directory.trim(),
       prepareSource,
+      ...(fileEdit===null?{}:{workspaceEdits:[fileEdit]}),
       temporary,
       privately: access === 'private',
       generalAccess: access,
@@ -185,12 +205,18 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
 
   const whereValue = resolved === null ? null : resolved.fresh ? NEW_ENVIRONMENT : (resolved.environment?.environment.id ?? picks.environment);
   const defaultDirectory = resolved?.environment?.directory ?? null;
+  const fileSourceKey=JSON.stringify([reader,parent.id,directory.trim(),resolved?.newEnvironment?.files,resolved?.newEnvironment?.template_id,options?.source]);
+  const fileEdit=resolved?.fresh===true?fileEdits.get(fileSourceKey)??null:null;
+  useEffect(()=>{
+    if(initialFileAdopted.current||initialFileEdit===null||resolved===null||reader!==firstReader.current)return;
+    initialFileAdopted.current=true;
+    setFileEdits((before)=>before.has(fileSourceKey)?before:new Map(before).set(fileSourceKey,initialFileEdit));
+  },[fileSourceKey,initialFileEdit,reader,resolved]);
   const optionsSummary = [
-    (resolved?.effort === null || resolved?.effort === undefined) ? null : t('startImplicit.effort', { value: offeredChoice(t, 'effort', resolved.effort)?.name ?? t('changeCompact.otherEffort') }),
     (resolved?.arrangement === null || resolved?.arrangement === undefined) ? null : t(`choiceCatalog.arrangement.${resolved.arrangement}.name`),
     directory.trim() === '' ? defaultDirectory === '' ? null : defaultDirectory : directory.trim(),
-    name.trim() === '' ? null : t('startImplicit.name', { value: name.trim() }),
     message.trim() === '' ? null : t('startImplicit.message', { value: message.trim() }),
+    fileEdit===null?null:`AGENTS.md · ${t('start.instructions.edited')}`,
   ].filter((value): value is string => value !== null).join(t('startFlow.separator'));
   const footerReason = make.pending && make.step !== null ? t(`start.making.${make.step}`) : !loading && (options === null || resolved === null) ? null : why;
   return <BindingPickerScope options={options} screen="new-thread" currentHomes={[parent.id,...(parent.parentId===null?[]:[parent.parentId])]}>{(
@@ -203,7 +229,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
       footer={
         <>
           {footerReason !== null && <span className="basis-full text-sm text-text-muted">{footerReason}</span>}
-          <div role="group" aria-label={t('changeCompact.startActions')} className="flex basis-full flex-wrap justify-end gap-2" data-start-actions>
+          <div role="group" aria-label={t('changeCompact.startActions')} className="flex basis-full flex-wrap justify-end gap-2" data-start-actions><span className="mr-auto inline-flex items-center"><SetupChoiceFacts options={options} resolved={resolved} observation={setupObservation} /></span>
             <Button disabled={make.pending} onClick={onClose}>
               {t('common.cancel')}
             </Button>
@@ -215,8 +241,9 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
       }
     >
       <div className="flex flex-col gap-4 py-2 outline-none" data-new-thread data-autofocus tabIndex={-1}>
+        <Input label={t('start.options.name')} optional placeholder={t('start.options.nameDefault')} value={name} disabled={make.pending} onChange={(event) => setName(event.target.value)} autoComplete="off" />
         {parent.kind === 'topic' && <Button size="sm" variant="ghost" className="self-start" disabled={make.pending}
-          onClick={() => onProgram({ ...draft, picks, message, name, generalAccess: access })}>{t('ask.startProgram')}</Button>}
+          onClick={() => onProgram({ ...draft, picks, message, name, generalAccess: access, directory, prepareSource, workspaceEdits:[...fileEdits] })}>{t('ask.startProgram')}</Button>}
         {options === null || resolved === null ? (
           loading ? null : (
             <><ErrorState compact error={failed} onRetry={retry} />
@@ -225,91 +252,36 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
           )
         ) : (
           <>
-            <Step title={t('start.provider.title')} mark={<ChoiceOriginMark origin={resolved.origins.provider} />}>
-              {resolved.providers.length === 0 ? (
-                <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>
-              ) : (
-                <ResourcePicker pickerKey="start.BindingDialog.start.provider.title"
-                  label={t('start.provider.title')}
-                  hideLabel
-                  value={resolved.provider?.id ?? ''}
-                  disabled={options.defaults.locked}
-                  onValueChange={(next) => pick({ provider: next, agent: null, model: null, effort: null, arrangement: null })}
-                  options={resolved.providers
-                    .map((row) => {
-                      const full = known.get(row.id);
-                      const ref = row.entry.provider;
-                      return {
-                        value: row.id,
-                        preview: resourcePreview({ kind: 'provider', provider: full ?? ref }),
-                        disabled: !row.choosable,
-                        label: (
-                          <span className="flex flex-wrap items-center gap-2">
-                            <PlugZap aria-hidden />
-                            {providerNames.get(ref.id) ?? ref.name}
-                          </span>
-                        ),
-                        description: (
-                          <span className="flex flex-wrap gap-x-3 gap-y-1">
-                            <ResourceHint subject={{ kind: 'provider', provider: full ?? ref }} />
-                            {!row.choosable && <span>{providerWhy(row, full?.owner.display_name ?? null, t)}</span>}
-                          </span>
-                        ),
-                      };
-                    })}
-                />
-              )}
-              {options.defaults.locked && <p className="text-sm text-text-muted">{t('start.provider.locked')}</p>}
+            {resolved.providers.length === 0 && <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>}
+            {options.defaults.locks.provider && <p className="text-sm text-text-muted">{t('start.provider.locked')}</p>}
+
+            {(resolved.providers.every((row) => !row.choosable) || resolved.agents.every((row) => !row.startable)) && <ResourceCreationActions onReadChoices={retry} />}
+            <Step title={t('start.model.model')} mark={<ChoiceOriginMark origin={resolved.origins.model} />}>
+              {resolved.provider !== null && resolved.models.length === 0 && <InlineAlert tone="warning">{t('start.model.none')}</InlineAlert>}
+              <div className="flex flex-wrap items-center gap-2">
+                <StartModelChoice allowPools={prepare === undefined} options={options} resolved={resolved} names={providerNames} disabled={make.pending} onPick={(patch, notice) => { setAgentNotice(notice); pick(patch); }} />
+                <ChoiceOriginMark origin={resolved.origins.effort} />
+              </div>
             </Step>
 
             <Step title={t('start.agent.title')} mark={<ChoiceOriginMark origin={resolved.origins.agent} />}>
               {resolved.agents.length === 0 ? (
                 <EmptyState compact title={t('start.agent.none')} />
               ) : (
-                <ResourcePicker pickerKey="start.BindingDialog.start.agent.title"
-                  label={t('start.agent.title')}
-                  hideLabel
-                  value={resolved.agent?.id ?? ''}
-                  onValueChange={(next) => pick({ agent: next, arrangement: null })}
-                  options={resolved.agents.map((row) => ({
-                    value: row.id,
-                    label: row.entry.agent.name,
-                    preview: row.entry.program_report?.status === 'error' ? agentProgramPreview(row.entry, resolved.provider?.entry.provider ?? null)
-                      : resourcePreview({ kind: 'agent', agent: row.entry.agent, provider: known.get(resolved.provider?.id ?? ''), models: resolved.models }),
-                    description: row.startable ? harnessTitle(row.entry.agent.harness_kind) : agentWhy(row, t),
-                    disabled: !row.startable,
-                  }))}
-                />
-              )}
-            </Step>
-
-            {(resolved.providers.every((row) => !row.choosable) || resolved.agents.every((row) => !row.startable)) && <ResourceCreationActions onReadChoices={retry} />}
-            <Step title={t('start.model.model')} mark={<ChoiceOriginMark origin={resolved.origins.model} />}>
-              {resolved.provider === null ? (
-                <p className="text-sm text-text-muted">{t('start.model.pickProvider')}</p>
-              ) : resolved.models.length === 0 ? (
-                <InlineAlert tone="warning">{t('start.model.none')}</InlineAlert>
-              ) : (
-                <div className="flex flex-wrap items-start gap-3">
-                  <Select
-                    label={t('start.model.model')}
-                    hideLabel
-                    value={resolved.model?.model_name ?? ''}
-                    onValueChange={(next) => pick({ model: next, effort: null })}
-                    options={[
-                      ...resolved.models.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '', usage: known.get(resolved.provider?.id ?? '')?.choice_usage }) })),
-                      // What the provider lists and the person may not use is shown, off, with why.
-                      ...resolved.closedModels.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '', usage: known.get(resolved.provider?.id ?? '')?.choice_usage }), description: model.reason === null ? t('start.model.closed') : reasonWords(model.reason), disabled: true })),
-                    ]}
-                    fieldClassName="min-w-(--field-wide) flex-1"
-                  />
+                <div className="flex flex-col gap-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StartAgentChoice options={options} resolved={resolved} names={providerNames} onPick={(agent) => { setAgentNotice(null); pick({ agent, arrangement: null }); }} />
+                  </div>
+                  {agentNotice !== null && <p role="status" className="text-sm text-text-muted" data-agent-notice>{agentNotice}</p>}
                 </div>
               )}
             </Step>
 
             <Step title={t('start.where.title')} mark={<ChoiceOriginMark origin={resolved.origins.environment} />}>
-              <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
-                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })} />
+              <Where compact assessed environmentPools={prepare === undefined} place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
+                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ environment: NEW_ENVIRONMENT, newEnvironment })}
+                note={resolved.environmentNote} agentHere={resolved.agentHere} />
+              {failed !== null && <ErrorAlert error={failed} action={<Button size="sm" onClick={retry}>{t('common.tryAgain')}</Button>} />}
               {requesting === null && resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
             </Step>
           </>
@@ -329,8 +301,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
         </div>
         {extraOpen && <div id={optionsId} role="region" aria-label={t('start.options.title')} className="flex flex-col gap-3">
           {resolved !== null && options !== null && <>
-              {resolved.efforts.length > 0 && <Select label={t('start.model.effort')} aside={<ChoiceOriginMark origin={resolved.origins.effort} />} value={resolved.effort ?? ''} onValueChange={(next) => pick({ effort: next })} options={resolved.efforts.map((value) => ({ value, ...(offeredChoice(t, 'effort', value) ?? choiceOption(t, 'dynamic.value', { name: value, context: t('start.model.effort') })) }))} />}
-              <WhereOptions place={parent} options={options} value={whereValue} onChange={(next) => { setRequesting(null); pick({ environment: next, arrangement: null }); }} machines={machines.data ?? []} machinesLoading={machines.isPending} homeId={place.data?.org_id ?? ''} />
+              <WhereOptions place={parent} options={options} value={whereValue} onChange={(next) => { setRequesting(null); pick({ environment: next }); }} machines={machines.data ?? []} machinesLoading={machines.isPending} homeId={place.data?.org_id ?? ''} />
               <div className="flex min-w-0 flex-col gap-1"><Input
                 label={t('start.where.directory')}
                 optional
@@ -341,11 +312,12 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
               />
                 <DirectorySign environmentId={requesting !== null || resolved.fresh ? null : (resolved.environment?.environment.id ?? null)} directory={directory.trim()} />
               </div>
+              {requesting === null && !resolved.fresh && resolved.environment !== null && <WorkspaceInstructions environmentId={resolved.environment.environment.id} directory={directory.trim() === '' ? defaultDirectory ?? '' : directory.trim()} />}
+              {requesting===null&&resolved.fresh&&<StagedWorkspaceInstructions key={fileSourceKey} sourceKey={fileSourceKey} directory={directory.trim()} files={resolved.newEnvironment?.files} value={fileEdit} onChange={(edit)=>setFileEdits((before)=>new Map(before).set(fileSourceKey,edit))}/>}
               <RepositoryChoice source={options.source} checked={prepareSource} onChange={setPrepareSource} />
               {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(type) => pick({ arrangement: type })} />}
 
           </>}
-          <Input label={t('start.options.name')} optional hint={t('start.options.nameHint')} value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
           {prepare === undefined && <Textarea label={t('start.message.title')} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} />}
         </div>}
 
