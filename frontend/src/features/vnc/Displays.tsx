@@ -6,15 +6,19 @@
  * Ctrl+Alt+Del, Fit to this panel and Close…. The same view stands beside a thread and as the VNC tab of
  * the environment's page, following the environment's feed of displays.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Ellipsis, Hand, MonitorPlay, ScreenShare } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
+import { client as apiClient } from '@/api/client';
 
 import { closeDisplay, displayKeys, displaysQuery, lookAgainForDisplays, openDisplay } from '@/api/displays';
 import { useBrowserRequests } from '@/features/browser/store';
 import type { Display, Environment, EnvironmentDisplays } from '@/generated/api-types';
 import { socket } from '@/realtime/live';
+import { hostQuery, machinePolicyQuery, updateMachinePolicy } from '@/api/resources';
+import { StateLine } from '@/ui/StateLine';
 import { AvatarStack } from '@/ui/AvatarStack';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -28,6 +32,9 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { Select } from '@/ui/Select';
+import { useViewChoice } from '@/lib/viewChoices';
+import { InteractiveFacts } from '@/features/browser/InteractiveFacts';
 import { StatusDot } from '@/ui/StatusDot';
 import { Textarea } from '@/ui/Textarea';
 
@@ -57,27 +64,61 @@ export interface DisplaysPanelProps {
   load?: () => Promise<RfbConstructor>;
 }
 
-export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProps) {
+export function DisplaysPanel(props: DisplaysPanelProps) {
+  const scope = useStore(apiClient.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <DisplayContents key={`${scope}:${props.environment.id}`} {...props} scope={scope} />;
+}
+function DisplayContents({ environment, threadId, load, scope }: DisplaysPanelProps & { scope: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const query = useQuery(displaysQuery(environment.id));
+  const [keptState, setKeptState] = useViewChoice<string>('display-list', 'state', 'open', environment.id);
+  const closed = keptState === 'closed';
+  const [search, setSearch] = useState('');
+  const canonical = useQuery({ ...displaysQuery(environment.id), enabled: false });
+  const specification = displaysQuery(environment.id, { closed, query: search });
+  const pageKey = [...specification.queryKey, 'pages', scope, closed, search];
+  const query = useInfiniteQuery({ queryKey: pageKey, initialPageParam: null as string | null,
+    queryFn: async (context): Promise<EnvironmentDisplays> => {
+      if (!closed && search === '' && context.pageParam === null) return client.query(displaysQuery(environment.id));
+      const page = displaysQuery(environment.id, { closed, query: search, ...(context.pageParam === null ? {} : { cursor: context.pageParam }) });
+      const read = page.queryFn;
+      if (typeof read !== 'function') throw new Error('The display reader is unavailable');
+      return read({ ...context, queryKey: page.queryKey });
+    }, getNextPageParam: (page) => page.next_cursor ?? undefined, placeholderData: (previous) => previous });
   useDisplaysFeed(environment.id);
   const [front, setFront] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
+  const [opening, setOpening] = useState<'virtual' | 'server' | null>(null);
   const [closing, setClosing] = useState<Display | null>(null);
   const requests = useBrowserRequests();
-  const look = useMutation({ mutationFn: () => lookAgainForDisplays(environment.id), onSuccess: (list) => client.setQueryData(displayKeys.list(environment.id), list) });
+  // A deliberate Open from a tool can name a later page. Follow only that intent, never preload a list.
+  const wanted = requests.display;
+  const wantedPresent = query.data?.pages.some((page) => page.displays.some((row) => row.id === wanted)) === true;
+  const { isPending: reading, isFetchingNextPage: readingMore, isPlaceholderData: placeholder, hasNextPage: more, fetchNextPage: readNext } = query;
+  useEffect(() => {
+    if (wanted === null) return;
+    if (closed) { setKeptState('open'); return; }
+    if (!wantedPresent && !reading && !readingMore && !placeholder && more) void readNext();
+  }, [wanted, closed, setKeptState, wantedPresent, reading, readingMore, placeholder, more, readNext]);
+  const look = useMutation({ mutationFn: () => lookAgainForDisplays(environment.id), onSuccess: (list) => { client.setQueryData(displayKeys.list(environment.id), list); client.setQueryData(pageKey, { pages: [list], pageParams: [null] }); } });
+  const share = useMutation({
+    mutationFn: () => openDisplay(environment.id, {desktop:true}, threadId),
+    onSuccess: (display) => { setFront(display.id); void client.invalidateQueries({queryKey:displayKeys.list(environment.id)}); },
+  });
   const mayWork = environment.access.permissions.includes('vnc.manage');
 
   if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
-  const data = query.data;
-  const displays = data.displays.filter((display) => display.state !== 'closed');
+  const first = !closed && search === '' ? canonical.data ?? query.data.pages[0] : query.data.pages[0];
+  if (first === undefined) return null;
+  const held = [first, ...query.data.pages.slice(1)].flatMap((page) => page.displays);
+  const data = { ...first, displays: [...new Map(held.map((row) => [row.id, row])).values()] };
+  const displays = (data.off === null || closed ? data.displays : []).filter((display) => (display.state === 'closed') === closed && `${display.name} ${display.note ?? ''} ${display.x_display ?? ''}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const asked = requests.display !== null && displays.some((display) => display.id === requests.display) ? requests.display : null;
-  const shown = displays.find((display) => display.id === (asked ?? front)) ?? displays[0] ?? null;
+  const shown = closed ? null : displays.find((display) => display.id === (asked ?? front)) ?? displays[0] ?? null;
   const found = data.support.servers.length > 0;
   const choose = (id: string) => {
     requests.takeDisplay();
+    setKeptState('open');
     setFront(id);
   };
 
@@ -85,11 +126,18 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
     <div className="flex h-full min-h-0 flex-col gap-2 p-3" data-displays-view={environment.id}>
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="min-w-0 flex-1 truncate text-sm font-medium">{t('vnc.list.title', { environment: environment.name })}</h2>
+        {mayWork && data.off === null && data.support.desktop === true && <Button size="sm" pending={share.isPending} onClick={() => share.mutate()}>{t('vnc.attach.desktop')}</Button>}
+        {mayWork && data.off === null && <Button size="sm" onClick={() => setOpening('server')}>{t('vnc.attach.title')}</Button>}
         {mayWork && data.off === null && found && (
-          <Button size="sm" icon={<ScreenShare aria-hidden />} onClick={() => setOpening(true)}>
+          <Button size="sm" icon={<ScreenShare aria-hidden />} onClick={() => setOpening('virtual')}>
             {t('vnc.list.open')}
           </Button>
         )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Select size="sm" label={t('interactiveHistory.state')} value={closed ? 'closed' : 'open'} onValueChange={(value) => { requests.takeDisplay(); setKeptState(value); }}
+          options={[{ value: 'open', label: t('vnc.state.open') }, { value: 'closed', label: t('vnc.state.closed') }]} />
+        {(data.displays.length > 10 || query.hasNextPage || search !== '') && <Input type="search" label={t('interactiveHistory.search')} value={search} onChange={(event) => { requests.takeDisplay(); setSearch(event.target.value); }} />}
       </div>
       {data.off !== null && <OffNotice off={data.off} environment={environment} />}
       {data.off === null && !found && (
@@ -107,13 +155,14 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
           </span>
         </InlineAlert>
       )}
+      {share.error !== null && <ErrorAlert error={share.error} />}
       {look.error !== null && <ErrorAlert error={look.error} />}
       {displays.length > 0 && (
         <ul className="flex max-h-40 shrink-0 flex-col overflow-auto rounded-lg border border-border" aria-label={t('vnc.list.label')}>
           {displays.map((display) => (
             <li key={display.id} className={cx('flex items-start gap-2 border-b border-border px-2 py-1 last:border-0', display.id === shown?.id && 'bg-bg-subtle')} data-display-row={display.id}>
               <StatusDot className="h-(--control-sm)" tone={display.state === 'open' ? 'success' : 'info'} label={t(`vnc.state.${display.state}`)} />
-              <button type="button" className="min-w-0 flex-1 text-left" aria-pressed={display.id === shown?.id} onClick={() => choose(display.id)}>
+              <button type="button" className="min-w-0 flex-1 text-left" aria-pressed={display.id === shown?.id} disabled={display.state === 'closed'} onClick={() => choose(display.id)}>
                 <span className="block truncate text-sm font-medium leading-(--control-sm)">
                   {display.name}
                   {display.x_display !== null && <span className="ml-2 font-mono text-xs text-text-muted">{display.x_display}</span>}
@@ -125,7 +174,8 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
                   {display.note !== null && <span className="wrap-anywhere">{display.note}</span>}
                 </span>
               </button>
-              {mayWork && (
+              <InteractiveFacts subject={display} />
+              {!closed && mayWork && (
                 <Menu
                   label={t('vnc.menu.label')}
                   align="end"
@@ -137,9 +187,12 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
           ))}
         </ul>
       )}
-      {displays.length === 0 && data.off === null && found && <EmptyState compact icon={<MonitorPlay aria-hidden />} title={t('vnc.list.empty')} description={mayWork ? t('vnc.list.emptyHint') : undefined} />}
+      {query.hasNextPage && <Button size="sm" pending={query.isFetchingNextPage} disabled={query.isPlaceholderData} onClick={() => void query.fetchNextPage()}>{t('interactiveHistory.more')}</Button>}
+      {closed && !query.isPlaceholderData && displays.length === 0 && <EmptyState compact title={t('interactiveHistory.empty')} />}
+      {!closed && displays.length === 0 && data.off === null && found && <EmptyState compact icon={<MonitorPlay aria-hidden />} title={t('vnc.list.empty')} description={mayWork ? t('vnc.list.emptyHint') : undefined} />}
       {shown !== null && <Front key={shown.id} display={shown} environment={environment} mayWork={mayWork} onClose={() => setClosing(shown)} {...(load === undefined ? {} : { load })} />}
-      {opening && <OpenDisplay environment={environment} threadId={threadId} onClose={() => setOpening(false)} onOpened={(display) => { setOpening(false); choose(display.id); }} />}
+      {opening === 'server' && <AttachDisplay environmentId={environment.id} threadId={threadId} onClose={() => setOpening(null)} onOpened={(display) => { setOpening(null); choose(display.id); }} />}
+      {opening === 'virtual' && <OpenDisplay environment={environment} threadId={threadId} onClose={() => setOpening(null)} onOpened={(display) => { setOpening(null); choose(display.id); }} />}
       {closing !== null && <CloseDisplay display={closing} onClose={() => setClosing(null)} />}
     </div>
   );
@@ -147,17 +200,61 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
 
 function OffNotice({ off, environment }: { off: NonNullable<EnvironmentDisplays['off']>; environment: Environment }) {
   const { t } = useTranslation();
+  if (off === 'machine_policy') return <PolicyOff environment={environment} />;
   const words = {
     disabled_by_policy: t('vnc.off.policy', { environment: environment.name }),
     environment_switch_off: t('vnc.off.switch', { environment: environment.name, owner: environment.owner.display_name }),
-    machine_policy: t('vnc.off.machine', { machine: environment.machine?.name ?? environment.name }),
+    environment_stopping: t('terminal.refused.environment_stopping'),
     environment_offline: t('vnc.off.offline', { environment: environment.name }),
   }[off];
   return (
-    <InlineAlert tone={off === 'environment_offline' ? 'info' : 'warning'}>
+    <InlineAlert tone={off === 'environment_offline' || off === 'environment_stopping' ? 'info' : 'warning'}>
       <span data-displays-off={off}>{words}</span>
     </InlineAlert>
   );
+}
+
+function PolicyOff({environment}:{environment: Environment}) {
+  const { t } = useTranslation();
+  const client = useQueryClient();
+  const hostId = environment.host?.id;
+  const host = useQuery({...hostQuery(hostId ?? ''), enabled: hostId !== undefined, retry:false});
+  const machine = (environment.placement === 'managed' ? host.data?.machine : environment.machine) ?? null;
+  const query = machinePolicyQuery(machine?.id ?? '');
+  const policy = useQuery({...query, enabled: machine !== null, retry:false});
+  const key = policy.data?.keys.find((row) => row.key === 'environment.vnc');
+  const enable = useMutation({
+    mutationFn: () => {
+      if (machine === null || key?.writable !== true) throw new Error(t('vnc.off.machine', {machine: environment.name}));
+      return updateMachinePolicy(machine.id, {'environment.vnc': true});
+    },
+    onSuccess: (ack) => {
+      client.setQueryData(query.queryKey, ack);
+      void client.invalidateQueries({queryKey: displayKeys.list(environment.id)});
+    },
+  });
+  return <><StateLine compact message={<span data-displays-off="machine_policy">{t('vnc.off.machine', {machine: machine?.name ?? environment.name})}</span>}
+    action={key?.writable === true && key.value !== true ? <Button size="sm" pending={enable.isPending} onClick={() => enable.mutate()}>{t('vnc.attach.enable')}</Button> : undefined} />
+    {enable.isError && <ErrorAlert error={enable.error} />}</>;
+}
+
+function AttachDisplay({ environmentId, threadId, onClose, onOpened }: {environmentId:string; threadId:string | null; onClose:()=>void; onOpened:(row:Display)=>void}) {
+  const { t } = useTranslation();
+  const [port, setPort] = useState(''), [password, setPassword] = useState('');
+  const number = Number(port);
+  const valid = /^\d+$/.test(port) && Number.isInteger(number) && number > 0 && number <= 65535;
+  const attach = useMutation({
+    mutationFn: () => openDisplay(environmentId, {attach:{port:number, ...(password === '' ? {} : {password})}}, threadId),
+    onSuccess: onOpened,
+  });
+  return <Dialog open size="sm" title={t('vnc.attach.title')} onOpenChange={(next) => { if (!next) onClose(); }}
+    footer={<><Button onClick={onClose}>{t('common.cancel')}</Button><Button variant="primary" pending={attach.isPending} disabled={!valid} onClick={() => attach.mutate()}>{t('vnc.attach.apply')}</Button></>}>
+    <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (valid && !attach.isPending) attach.mutate(); }}>
+      <Input label={t('vnc.attach.port')} inputMode="numeric" placeholder="5900" value={port} onChange={(event) => setPort(event.target.value)} />
+      <Input label={t('vnc.attach.password')} optional type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} />
+      {attach.isError && <ErrorAlert error={attach.error} />}
+    </form>
+  </Dialog>;
 }
 
 function Front({ display, environment, mayWork, onClose, load }: { display: Display; environment: Environment; mayWork: boolean; onClose: () => void; load?: () => Promise<RfbConstructor> }) {

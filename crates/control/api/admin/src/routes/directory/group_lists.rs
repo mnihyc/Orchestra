@@ -47,6 +47,7 @@ struct PreparedList {
     response: OperationPlan,
     rows: Vec<access::GroupFull>,
     names: NameBounds,
+    next_cursor: Option<String>,
 }
 
 /// Read identities only. Ordinary node visibility and the original nearest-keeper
@@ -96,6 +97,7 @@ pub(super) fn org<'a>(
         Selection::Org {
             under: query.under.unwrap_or(false),
         },
+        query.collection(),
     ))
 }
 
@@ -103,10 +105,10 @@ pub(super) fn node<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    (): (),
+    query: orch_api_contract::common::CollectionQuery,
     (): (),
 ) -> OperationFuture<'a> {
-    Box::pin(prepare(ctx, conn, caller, Selection::Nearest))
+    Box::pin(prepare(ctx, conn, caller, Selection::Nearest, query))
 }
 
 async fn prepare(
@@ -114,6 +116,7 @@ async fn prepare(
     conn: &mut Conn,
     caller: &Caller,
     selection: Selection,
+    query: orch_api_contract::common::CollectionQuery,
 ) -> ApiResult<OperationPlan> {
     let id = ctx.id("id")?;
     let (keeper, rows) = candidates(conn, id, selection).await?;
@@ -176,6 +179,21 @@ async fn prepare(
         // discloses no groups, even when the key scope names those identities.
         selected.clear();
     }
+    let source = format!(
+        "{}:{id}:{keeper:?}:{}",
+        ctx.route.name,
+        matches!(selection, Selection::Org { under: true })
+    );
+    let page = orch_api_base::collection::snapshot(
+        &query,
+        &source,
+        selected,
+        |row| (row.name.clone(), row.id),
+        |row| row.name.clone(),
+        false,
+    )?;
+    let selected = page.items;
+    let next_cursor = page.next_cursor;
     let mut sources = NameSources::default();
     sources.groups.extend(selected.iter().map(|row| row.id));
     // This shared producer binds the primary Group role once and only the
@@ -186,18 +204,27 @@ async fn prepare(
         response,
         rows: selected,
         names,
+        next_cursor,
     }))
 }
 
-pub(super) async fn org_list(ctx: Ctx, _query: OrgGroupListQuery, (): ()) -> ApiResult<Vec<Group>> {
+pub(super) async fn org_list(
+    ctx: Ctx,
+    _query: OrgGroupListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<Group>> {
     crate::key_operations::snapshot_read::run(ctx, snapshot).await
 }
 
-pub(super) async fn node_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Group>> {
+pub(super) async fn node_list(
+    ctx: Ctx,
+    _query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<Group>> {
     crate::key_operations::snapshot_read::run(ctx, snapshot).await
 }
 
-async fn snapshot(ctx: Ctx) -> ApiResult<Vec<Group>> {
+async fn snapshot(ctx: Ctx) -> ApiResult<orch_api_contract::common::Page<Group>> {
     let mut tx = ctx.app.db.begin_snapshot().await?;
     // Re-run this exact producer under the accepted/current credential ceiling,
     // replacing any earlier richer row or name footprint on the actual snapshot.
@@ -208,8 +235,17 @@ async fn snapshot(ctx: Ctx) -> ApiResult<Vec<Group>> {
         .clone()
         .read_response(&ctx, &mut tx, principal.caller(), move |conn, reader| {
             Box::pin(async move {
-                groups_named_bounded(conn, reader, prepared.rows.clone(), Some(&prepared.names))
-                    .await
+                let items = groups_named_bounded(
+                    conn,
+                    reader,
+                    prepared.rows.clone(),
+                    Some(&prepared.names),
+                )
+                .await?;
+                Ok(orch_api_contract::common::Page {
+                    items,
+                    next_cursor: prepared.next_cursor.clone(),
+                })
             })
         })
         .await?

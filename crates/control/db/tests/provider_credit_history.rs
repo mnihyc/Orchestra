@@ -55,6 +55,7 @@ impl World {
                     name: "Vendor observations",
                     owner_id: owner,
                     home_id: org,
+                    home_overridden: false,
                     upstreams: &json!([{"protocol":"openai-responses","base_url":"https://example.invalid/v1","options":{}}]),
                     protocols: &["openai-responses".into()],
                     machine_id: None,
