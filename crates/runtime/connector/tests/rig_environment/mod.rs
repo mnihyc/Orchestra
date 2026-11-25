@@ -91,6 +91,7 @@ impl EnvRig {
         let hub = Hub::new(Arc::clone(&clock), pki.certificate());
         let signer = TicketSigner::generate();
         hub.set_ticket_verifier(signer.verifier());
+        hub.admit_test_tool_sessions();
         let machine_id = new_id();
         let controller =
             ScriptedController::attach(&hub, Arc::clone(&clock), machine_id, roles.clone());
@@ -284,9 +285,10 @@ impl EnvRig {
         }
     }
 
-    /// `env.attach` for a directory, which the machine's owner offers; returns the facts.
-    pub async fn attach(&self, directory: &Path) -> Json {
-        let body = EnvAttach {
+    /// The attachment command for a directory offered by the machine's owner.
+    pub fn attach_body(&self, directory: &Path) -> EnvAttach {
+        EnvAttach {
+            workspace: Default::default(),
             resources: None,
             data_generation: None,
             storage: None,
@@ -298,8 +300,12 @@ impl EnvRig {
             mounts: Some(Vec::new()),
             variables: std::collections::BTreeMap::new(),
             secrets: std::collections::BTreeMap::new(),
-        };
-        self.succeed(&body).await
+        }
+    }
+
+    /// Attaches an offered directory and returns its facts.
+    pub async fn attach(&self, directory: &Path) -> Json {
+        self.succeed(&self.attach_body(directory)).await
     }
 
     /// Puts content in the system's store as if it had been uploaded, and returns its hash.
@@ -362,8 +368,11 @@ impl EnvRig {
                 .and_then(|role| role.host().environment(self.environment).ok())
                 .map(|environment| environment.generation())
                 .unwrap_or(0);
-            self.signer
-                .issue_for_tool(&request, self.environment, generation)
+            orch_testkit::doubles::link::session_ticket(
+                &self.signer,
+                &request,
+                Some((self.environment, generation)),
+            )
         } else {
             self.signer.issue(&request)
         }

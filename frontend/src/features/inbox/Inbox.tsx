@@ -5,13 +5,14 @@
  * Mentions) and "Mark all read". The rows are the person's live feed: a notification that arrives
  * appears at the top and the counters move with it. Older ones come a page at a time.
  */
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCheck, Inbox as InboxIcon } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { fetchNotifications } from '@/api/notifications';
 import { NotificationRow } from '@/features/inbox/NotificationRow';
+import { InboxRetention } from './Retention';
 import { Hint } from '@/features/help/Hint';
 import { useNotificationLabels } from '@/features/inbox/presentation';
 import { PlaceInbox } from './away/Grouped';
@@ -27,6 +28,9 @@ import { reloadUserFeed, useUserFeed } from '@/realtime/live';
 import { useHeldRows, userWriter, useUserStore } from '@/realtime/stores/user';
 import { Page, PageHeader, PlaceMark } from '@/shell/Page';
 import { useScreenHeading } from '@/shell/screen';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
@@ -58,6 +62,16 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
   useUserFeed();
   useAwayLive();
   const grouping = useInboxGrouping();
+  const search=useCollectionSearch('inbox');
+  const cache=useQueryClient();
+  const searching=search.q!=='';
+  const searchKey=['inbox-search',search.scope,filter,search.q] as const;
+  const matching=useInfiniteQuery({queryKey:searchKey,initialPageParam:null as string|null,
+    queryFn:({pageParam,signal})=>fetchNotifications({q:search.q,cursor:pageParam,...(filter==='unread'?{unread:true}:{}),...(filter==='mentions'?{kind:'mention,doc.mention,person.notify'}:{})},signal),
+    getNextPageParam:(page)=>page.next_cursor,enabled:searching && grouping.value!=='place'});
+  const sequence=useUserStore((state)=>state.lastSeq);
+  const priorSequence=useRef(sequence);
+  useEffect(()=>{if(priorSequence.current!==sequence){priorSequence.current=sequence;void cache.resetQueries({queryKey:['inbox-search',search.scope]});}},[sequence,cache,search.scope]);
   useScreenHeading({ title: t('screens.inbox.title'), icon: InboxIcon });
 
   const held = useHeldRows();
@@ -68,7 +82,7 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
   const nextCursor = useUserStore((state) => state.nextCursor);
   const unread = useUserStore((state) => state.counters.unread);
 
-  const rows = useMemo(() => filterRows(held, filter, { edge, reachedEnd }), [held, filter, edge, reachedEnd]);
+  const rows = useMemo(() => searching ? matching.data?.pages.flatMap((page)=>page.items) ?? [] : filterRows(held, filter, { edge, reachedEnd }), [searching,matching.data,held, filter, edge, reachedEnd]);
   const labels = useNotificationLabels(rows);
   const groups = useMemo(() => grouping.value === 'kind' ? groupByKind(rows) : groupByDay(rows, timeZone), [rows, timeZone, grouping.value]);
   const today = dayKey(now, timeZone);
@@ -93,17 +107,17 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
     queryFn: ({ pageParam, signal }) => fetchNotifications({ unread: true, cursor: pageParam }, signal),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor,
-    enabled: grouping.value !== 'place' && filter === 'unread' && loaded && !reachedEnd,
+    enabled: grouping.value !== 'place' && filter === 'unread' && !searching && loaded && !reachedEnd,
   });
   useEffect(() => {
     for (const page of unreadPages.data?.pages ?? []) userWriter.found(page.items);
   }, [unreadPages.data]);
 
   const onUnread = filter === 'unread';
-  const hasMore = onUnread ? !reachedEnd && unreadPages.hasNextPage : !reachedEnd;
-  const loadingMore = onUnread ? unreadPages.isFetchingNextPage : older.loading;
-  const moreError = onUnread ? (unreadPages.isFetchNextPageError ? unreadPages.error : null) : older.error;
-  const more = () => (onUnread ? void unreadPages.fetchNextPage() : loadOlder());
+  const hasMore = searching ? matching.hasNextPage : onUnread ? !reachedEnd && unreadPages.hasNextPage : !reachedEnd;
+  const loadingMore = searching ? matching.isFetchingNextPage : onUnread ? unreadPages.isFetchingNextPage : older.loading;
+  const moreError = searching ? matching.error : onUnread ? (unreadPages.isFetchNextPageError ? unreadPages.error : null) : older.error;
+  const more = () => (searching ? void matching.fetchNextPage() : onUnread ? void unreadPages.fetchNextPage() : loadOlder());
 
   const dayLabel = (key: string) => (key === today ? t('inbox.today') : key === yesterday ? t('inbox.yesterday') : writeDay(key, today, locale));
   const groupLabel = (key: string) => {
@@ -115,7 +129,9 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
     value,
     name: value === 'unread' && unread > 0 ? t('inbox.filter.unreadWithCount', { count: unread }) : t(`inbox.filter.${value}`),
   }));
-  const empty = loaded && rows.length === 0 && !hasMore && !(onUnread && unreadPages.isFetching);
+  const ready=searching ? matching.data!==undefined : loaded;
+  const listError=searching ? matching.error : error;
+  const empty = ready && rows.length === 0 && !hasMore && !(onUnread && !searching && unreadPages.isFetching);
 
   return (
     <Page>
@@ -143,17 +159,19 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
           </>
         }
       />
+      <CollectionSearch name={t('screens.inbox.title')} {...search}/>
       {/* A change of the count is read to somebody who cannot see it. */}
       <p role="status" className="sr-only">
         {loaded && unread > 0 ? t('inbox.unreadCount', { count: unread }) : ''}
       </p>
 
-      {grouping.loading ? <Loading /> : grouping.value === 'place' ? <PlaceInbox filter={filter} /> : !loaded && error === null ? (
+      <ScrollRegion kind="table" label={t('screens.inbox.title')} className="max-h-[70dvh] overflow-y-auto">
+      {grouping.loading ? <Loading /> : grouping.value === 'place' ? <PlaceInbox filter={filter} q={search.q} /> : !ready && listError === null ? (
         <Loading />
-      ) : !loaded ? (
-        <ErrorState error={error} onRetry={reloadUserFeed} />
+      ) : !ready ? (
+        <ErrorState error={listError} onRetry={searching?()=>void matching.refetch():reloadUserFeed} />
       ) : empty ? (
-        <EmptyState icon={<InboxIcon aria-hidden />} title={t(`inbox.empty.${filter}.title`)} description={t(`inbox.empty.${filter}.description`)} />
+        <EmptyState icon={<InboxIcon aria-hidden />} title={t(searching?'ui.collection.none':`inbox.empty.${filter}.title`)} description={searching?undefined:t(`inbox.empty.${filter}.description`)} />
       ) : (
         <div className="flex flex-col gap-4">
           {groups.map((group) => (
@@ -172,6 +190,8 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
           <Pagination hasMore={hasMore} loading={loadingMore} error={moreError} onMore={more} />
         </div>
       )}
+      </ScrollRegion>
+      {loaded && <div className="flex min-w-0 justify-end"><InboxRetention/></div>}
       {loaded && error !== null && <ErrorState compact error={error} onRetry={reloadUserFeed} />}
     </Page>
   );

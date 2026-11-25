@@ -7,7 +7,7 @@ summary: Let an agent wake its thread on a schedule you can see, pause and end.
 
 # Let the agent schedule future work
 
-An agent can arrange a later input on its own thread, such as checking a CI run in ten minutes or repeating a short review. Orch keeps these schedules visible and cancellable. They use the same input queue as people's schedules.
+An agent can arrange a later input on its own thread, such as checking a CI run in ten minutes or repeating a short review. Orch keeps these schedules visible and cancellable. They use the ordinary input queue and retain their source turn’s Plan mode. A planned future turn still waits for a person to proceed.
 
 ## Enable agent schedules
 
@@ -25,4 +25,4 @@ For example, ask the enabled agent to check the CI run in ten minutes. Its pendi
 
 Anyone with current thread control can cancel future occurrences with one click. Cancellation leaves an input that has already entered the ordinary queue there; use the queue's own controls for it. Turning the scheduling tool off prevents new calls and does not stand in for cancelling an existing schedule.
 
-Each run checks the starter's current permissions and the provider's allowance again. A schedule reserves neither rights nor credits. No notification is sent by default. The managed schedule belongs to Orch; the agent program's private timers remain unavailable. See [running thread views](running-thread-views.md) for the queue, current work and background tasks.
+Each run checks the starter's current permissions and the provider's allowance again. A schedule reserves neither permissions nor credits. No notification is sent by default. The managed schedule belongs to Orch; the agent program's private timers remain unavailable. See [running thread views](running-thread-views.md) for the queue, current work and background tasks.

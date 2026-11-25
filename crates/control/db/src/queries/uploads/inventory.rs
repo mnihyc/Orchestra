@@ -64,25 +64,39 @@ SELECT 'machine-upload:'||encode(u.hash,'hex'),'machine',NULL::uuid,NULL::uuid,u
  FROM blob_uploads u";
 
 /// Native source order shared by the personal cursor and system inventory.
+/// Native source order shared by the system inventory and custody readers.
 pub async fn list(
     conn: &mut Conn,
     owner: Option<Id>,
     after: Option<(DateTime<Utc>, String)>,
     take: Option<i64>,
 ) -> Result<Vec<Row>, DbError> {
+    list_named(conn, owner, after, take, "").await
+}
+
+pub async fn list_named(
+    conn: &mut Conn,
+    owner: Option<Id>,
+    after: Option<(DateTime<Utc>, String)>,
+    take: Option<i64>,
+    q: &str,
+) -> Result<Vec<Row>, DbError> {
     let (at, key) = after
         .map(|(at, key)| (Some(at), Some(key)))
         .unwrap_or_default();
+    let matching = super::super::search::matching_sql("name", "$5");
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "WITH inventory AS ({ROWS}) SELECT * FROM inventory
          WHERE ($1::uuid IS NULL OR user_id=$1)
            AND ($2::timestamptz IS NULL OR (created_at,key)<($2,$3::text))
+           AND {matching}
          ORDER BY created_at DESC,key DESC LIMIT $4"
     )))
     .bind(owner)
     .bind(at)
     .bind(key)
     .bind(take)
+    .bind(super::super::search::Query::parse(q).like_patterns())
     .fetch_all(conn)
     .await?)
 }
