@@ -1,0 +1,10 @@
+test -p orch-connector --bin orch-connector -- composition::tests::the_forwarder_speaks_each_format_and_reads_the_address_each_harness_is_given
+test -p orch-connector-core --test provider_role -- gemini::a_google_key_lists_its_models_and_completes_a_stateless_function_turn
+test -p orch-connector --test program -- the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_stops_when_told
+test -p orch-protocol-google-interactions --lib
+test -p orch-adapter-acp --lib --test turns --test generic_suite
+test -p orch-agent-programs --lib
+test -p orch-connector-core --lib -- gemini_search_keeps_its_host_tools
+test -p orch-provider-contract --lib
+test -p orch-image-backends --lib
+test -p orch-api-core --test provider_setup --test usage_rates

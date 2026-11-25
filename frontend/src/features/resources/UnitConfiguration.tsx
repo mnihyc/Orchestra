@@ -1,4 +1,5 @@
 /** Both unit pools show applicable values, provenance, apply timing and guarded editors, including commands after start. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -12,8 +13,7 @@ import { DetailSections, ResourceDetails } from '@/features/resources/DetailSect
 import { CommandList, CommandListEditor, TemplatePrograms, commandMap, record, templateCommands, validCommands } from '@/features/resources/UnitCommands';
 import { SettingsEditor } from '@/features/settings/Editor';
 import type { RowPlace } from '@/features/settings/SettingRow';
-import { runtimeEffect } from '@/features/settings/runtimeEffects';
-import type { ResolvedSetting, RuntimeChanges } from '@/generated/api-types';
+import type { ResolvedSetting } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -23,7 +23,7 @@ import { useErrorText } from '@/ui/errorText';
 
 export interface UnitConfigurationProps {
   pool: 'environment' | 'provider'; id: string; placement: 'managed' | 'connected'; place: RowPlace;
-  owns?: boolean; templateId?: string | null; jobId?: string | null; failureDetail?: string | null; runtime?: RuntimeChanges | null;
+  owns?: boolean; templateId?: string | null; jobId?: string | null; failureDetail?: string | null;
   lifecycle?: 'unit' | 'attach' | null;
   commands?: { supported: boolean; reason: string | null } | null;
   afterUp?: boolean | null;
@@ -65,9 +65,10 @@ function AfterStart({ target, setting, spec, editable, templateReadable, templat
   }, onError: (error) => {
     if (error instanceof ApiError && error.is('conflict.stale_revision')) void client.invalidateQueries({ queryKey: targetSettingsKey(target) });
   } });
+  const commandTiming = t(templateApplies ? 'unitConfiguration.commandTiming' : 'unitConfiguration.commandAttachTiming');
   return <section id="unit-after-up" className="flex flex-col gap-4" aria-label={t('unitConfiguration.commands')}>
     {!compact && <h2 className="text-base font-semibold">{t('unitConfiguration.commands')}</h2>}
-    <p className="text-sm text-text-muted">{t(templateApplies ? 'unitConfiguration.commandTiming' : 'unitConfiguration.commandAttachTiming')}</p>
+    <p className="text-sm text-text-muted">{commandTiming}</p>
     {target.kind === 'provider' && <InlineAlert tone="warning">{t('unitConfiguration.credentialWarning')}</InlineAlert>}
     {templateApplies && (templateReadable ? <CommandList label={t('unitConfiguration.templateCommands')} commands={templateCommands(spec)} /> : <p className="text-sm text-text-muted">{t('unitConfiguration.templateUnread')}</p>)}
     <CommandList label={t('unitConfiguration.inheritedCommands')} commands={inherited.filter((command) => !removed.includes(command.name))} />
@@ -101,7 +102,7 @@ export function UnitCommandFailure({ jobId, detail, href = '#unit-after-up', onO
   const diagnostic=typeof error.message==='string'?error.message:typeof error.detail==='string'?error.detail:commandAt<0?'':status.slice(commandAt);
   const lines=diagnostic.split('\n');
   return <><InlineAlert tone="warning" action={
-    <a href={href} className="underline" onClick={(event) => { if (onOpen !== undefined && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); onOpen(); } }}>{t('unitConfiguration.changeCommands')}</a>
+    <PathLink href={href} className="underline" onClick={(event) => { if (onOpen !== undefined && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); onOpen(); } }}>{t('unitConfiguration.changeCommands')}</PathLink>
   }>{failureText({ code: COMMAND_FAILURE_CODE }).message}</InlineAlert>
     {diagnostic!=='' && <ResourceDetails label={t('unitConfiguration.commandOutput')}><Preview more={lines.length>COMMAND_FAILURE_PREVIEW_LINES}>{(expanded)=><pre className="text-sm wrap-anywhere whitespace-pre-wrap">{(expanded?lines:lines.slice(0,COMMAND_FAILURE_PREVIEW_LINES)).join('\n')}</pre>}</Preview></ResourceDetails>}
   </>;
@@ -132,12 +133,12 @@ export function ResourceSupport({support}:{support:unknown}) {
   </section>;
 }
 
-export function UnitConfiguration({ pool, id, place, owns = false, templateId, jobId, failureDetail, runtime, lifecycle, commands, afterUp,resourceSupport, compact = false, wantedKey }: UnitConfigurationProps) {
+export function UnitConfiguration({ pool, id, place, placement, owns = false, templateId, jobId, failureDetail, lifecycle, commands, afterUp,resourceSupport, compact = false, wantedKey }: UnitConfigurationProps) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const target: SettingsTarget = pool === 'environment' ? { kind: 'environment', id } : { kind: 'provider', id };
   const list = useQuery(targetSettingsQuery(target));
-  const managed = lifecycle === 'unit' || ((lifecycle === null || lifecycle === undefined) && Boolean(templateId));
+  const managed = lifecycle === 'unit' || ((lifecycle === null || lifecycle === undefined) && (Boolean(templateId) || pool === 'environment' && placement === 'managed'));
   const resolvedTemplate = list.data?.find((row) => row.key === (pool === 'provider' ? 'runtime.template_id' : 'env.template_id'))?.value;
   const selectedTemplate = templateId ?? (typeof resolvedTemplate === 'string' ? resolvedTemplate : undefined);
   const [section, setSection] = useState(wantedKey === (pool === 'provider' ? 'runtime.after_up' : 'env.after_up') ? 'commands' : 'values');
@@ -150,19 +151,6 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
   // Dedicated command/home editors are their one entrance, including their stricter authority.
   const rows = (list.data ?? []).filter((row) => keys.includes(row.key)&&row.key!==storageKey && row.key!==commandKey && (pool !== 'provider' || row.key !== 'runtime.home'));
   const editorKeys = rows.map((row) => row.key);
-  const when = (key: string) => {
-    if (!managed && key === 'env.mounts') return t('unitConfiguration.effects.attach');
-    if (!managed && (key==='env.resources'||key==='runtime.resources')) return t('unitConfiguration.effects.attach');
-    if (key === 'env.variables' || key === 'env.secret_names') return t('unitConfiguration.effects.attach');
-    if (key === commandKey) return t(managed ? 'unitConfiguration.effects.start' : 'unitConfiguration.effects.attach');
-    if (!managed && (key === 'runtime.variables' || key === 'runtime.secret_names')) return t('unitConfiguration.effects.attach');
-    if (key === 'runtime.home') return t(managed ? 'unitConfiguration.effects.update' : 'unitConfiguration.effects.attach');
-    if (['runtime.template_id', 'runtime.host_id', 'runtime.variables', 'runtime.secret_names', 'runtime.storage', 'runtime.needs', 'env.template_id', 'env.runtime', 'env.storage', 'env.needs', 'env.host_id', 'network.allowed_hosts'].includes(key)) return t('unitConfiguration.effects.update');
-    const effect = runtimeEffect(key, runtime);
-    if (effect !== null) return <span>{t(`runtimeChanges.${effect}`)}{effect === 'pendingResources' && <span className="block text-warning-text">{runtime?.pending_reason}</span>}</span>;
-    if (/^(exec|mcp)\./.test(key)) return t('unitConfiguration.effects.turn');
-    return t('unitConfiguration.effects.policy');
-  };
   if (compact) {
     if (list.isPending) return <SkeletonRows read={list} rows={4} />;
     if (list.isError) return <ErrorState compact error={list.error} onRetry={() => void list.refetch()} />;
@@ -187,10 +175,10 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
     <UnitCommandFailure jobId={jobId} detail={failureDetail} />
     <ResourceSupport support={resourceSupport} />
     {storage!==undefined&&<section id="unit-storage" aria-label={t('machineStorage.title')} className="flex flex-col gap-3">
-      <SettingsTable settings={[storage]} label={t('machineStorage.title')} target={target} place={place} runtime={runtime} effectFor={when} />
+      <SettingsTable settings={[storage]} label={t('machineStorage.title')} target={target} place={place} />
     </section>}
     {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : <>
-      <SettingsTable settings={rows} label={t('unitConfiguration.values')} target={target} place={place} runtime={runtime} effectFor={when} />
+      <SettingsTable settings={rows} label={t('unitConfiguration.values')} target={target} place={place} />
       {managed && template.isError && <ErrorState compact error={template.error} onRetry={() => void template.refetch()} />}
       {pool === 'provider' && commands?.supported === false && <InlineAlert tone="info">{commands.reason ?? t('unitConfiguration.commandsUnsupported')}</InlineAlert>}
       {afterUp === false && <InlineAlert tone="info">{t('unitConfiguration.commandsPolicyOff')}</InlineAlert>}

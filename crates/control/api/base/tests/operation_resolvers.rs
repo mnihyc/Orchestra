@@ -13,7 +13,7 @@ use http::{Request, StatusCode};
 use orch_access_contract::key_scope::{KeyObjectRef, KeyResolvedTarget, KeyScope, KeyTargetKind};
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::nodes::{DeletedInspectionQuery, NodeGet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::middleware::requests::ApiError;
 use orch_api_core::middleware::{authorization, transaction_guard};
 use orch_api_core::registry::{Ctx, OperationFuture, OperationPlan, Registry};
@@ -94,9 +94,9 @@ async fn scoped_key(world: &World, user: Id, policy: serde_json::Value) -> (Id, 
     let scope: KeyScope = serde_json::from_value(policy).unwrap();
     assert!(scope.validate().is_empty());
     let value = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
-    let hash = token_hash(&secret);
     let id = new_id();
+    let secret = new_api_token(id);
+    let hash = token_hash(&secret);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -228,9 +228,9 @@ async fn a_legacy_node_read_records_its_real_canonical_selection_and_safe_facet(
     let owner = places::person(&world, "reader").await;
     let org = places::make_org(&world, &owner, "Workspace", "workspace").await;
     let project = places::make_project(&world, &owner, org.base.id, "Visible").await;
-    let secret = new_token(API_TOKEN_PREFIX);
-    let hash = token_hash(&secret);
     let token = new_id();
+    let secret = new_api_token(token);
+    let hash = token_hash(&secret);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -346,11 +346,12 @@ async fn a_static_read_rebinds_actual_placement_and_keeps_current_and_accepted_s
             sqlx::query("UPDATE api_tokens SET operation_scope=NULL, scopes=ARRAY['topic.view']::text[] WHERE id=$1")
                 .bind(key_id).execute(&world.db.pool).await.unwrap();
         }
-        let legacy = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let legacy = new_api_token(issued_key_id);
         identity::create_api_token(
             &mut *world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: issued_key_id,
                 user_id: owner.id(),
                 name: "Ordinary legacy read control",
                 token_hash: &token_hash(&legacy),

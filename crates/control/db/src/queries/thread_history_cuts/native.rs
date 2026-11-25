@@ -7,6 +7,7 @@ pub struct Witness {
     pub cut_id: Id,
     pub source_identity: Vec<u8>,
     pub lineage: Vec<u8>,
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub boundary: Json,
     pub prefix_digest: Vec<u8>,
     pub prefix_entries: i64,
@@ -20,7 +21,7 @@ pub async fn witness(conn: &mut Conn, cut: Id) -> Result<Option<Witness>, DbErro
 /// First publication wins. Another native source or comparison cannot replace it.
 pub async fn keep(conn: &mut Conn, proof: &Witness) -> Result<bool, DbError> {
     sqlx::query("INSERT INTO thread_history_native_witnesses(cut_id,source_identity,lineage,boundary,prefix_digest,prefix_entries) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(cut_id) DO NOTHING")
-        .bind(proof.cut_id).bind(&proof.source_identity).bind(&proof.lineage).bind(&proof.boundary).bind(&proof.prefix_digest).bind(proof.prefix_entries)
+        .bind(proof.cut_id).bind(&proof.source_identity).bind(&proof.lineage).bind(orch_types::storable::encode_exact(&proof.boundary)).bind(&proof.prefix_digest).bind(proof.prefix_entries)
         .execute(&mut *conn).await?;
     Ok(witness(conn, proof.cut_id).await?.as_ref() == Some(proof))
 }
