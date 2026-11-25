@@ -2,9 +2,7 @@
 
 use super::definitions::{Code, Refusal};
 use super::{Answer, CallContext};
-use crate::displays::{
-    CLOSED_LIST_KEPT, DisplayFailure, Displays, NOTE_MAX, OpenDisplay, Requester,
-};
+use crate::displays::{DisplayFailure, Displays, NOTE_MAX, OpenDisplay, Requester};
 use crate::{engine::Engine, error::EngineError};
 use orch_db::queries::{displays as rows, threads::ThreadRow};
 use orch_types::{Id, Json};
@@ -121,12 +119,7 @@ impl Engine {
                 }
                 let mut conn = self.inner.db.acquire().await?;
                 let found = if off.is_none() {
-                    rows::list(
-                        &mut conn,
-                        environment,
-                        self.inner.clock.now() - CLOSED_LIST_KEPT,
-                    )
-                    .await?
+                    rows::list(&mut conn, environment).await?
                 } else {
                     Vec::new()
                 };
@@ -157,13 +150,17 @@ impl Engine {
             }
             "announce" => {
                 displays
-                    .adopt(
+                    .adopt(crate::displays::AdoptDisplay {
                         environment,
-                        thread.node_id,
-                        args.endpoint.unwrap_or_default(),
-                        args.password,
-                        args.note,
-                    )
+                        requester: Requester::Agent(thread.node_id),
+                        thread: Some(thread.node_id),
+                        target: orch_link_contract::display::DisplayTarget::Endpoint(
+                            args.endpoint.unwrap_or_default(),
+                        ),
+                        password: args.password,
+                        note: args.note,
+                        origin: Default::default(),
+                    })
                     .await
             }
             "close" => {

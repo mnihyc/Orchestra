@@ -36,8 +36,14 @@ async fn summary_read_and_refresh_require_native_document_read_before_any_work()
     let body = SummaryRefreshBody {
         client_id: new_id(),
         model: Some(SummaryModelChoice {
-            provider_id: scene.on.provider,
-            model: rig::MODEL.into(),
+            backend: orch_provider_contract::capabilities::BackendRef {
+                route: "summarizer-model.complete".into(),
+                offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider: scene.on.provider,
+                    offering: rig::MODEL.into(),
+                }),
+                ..Default::default()
+            },
             params: None,
         }),
         range: None,

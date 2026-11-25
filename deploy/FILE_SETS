@@ -1,0 +1,15 @@
+# What the files of this directory are, for update.sh (which reads it from the release's orch-deploy bundle).
+#
+# generation: the generation of the files in this release. It is raised when any file of the main set differs from the
+#   latest published release's; a release's gate refuses a candidate that changes the set and leaves the number.
+# minimum: the oldest generation of the main set the programs of this release work with. It is raised by hand, only when a
+#   release needs a change in these files, and the release notes give the reason: an update whose kept or old set is older
+#   stops before it stops anything.
+# set main: the files that must agree with each other; replaced whole when every member equals a published file.
+# file: what a published release shipped (tag, generation, SHA-256, path below deploy/). Packaging adds a release's own
+#   rows to the copy in its bundle; once a release is published, `python3 .github/scripts/release_contract.py
+#   record-published --tag vX.Y.Z --revision <tag>` adds them here. Nothing under config/ is listed: it is never touched.
+format 1
+generation 1
+minimum 1
+set main compose.yml compose.frontend-https.yml nginx.conf frontend.sh frontend-csp.sh postgres/Dockerfile hosts/runtimes/common.sh hosts/runtimes/gvisor.sh hosts/runtimes/kata.sh
