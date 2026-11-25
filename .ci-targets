@@ -1,0 +1,12 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- restoring_the_team_members_session_with_the_shell_tree_and_a_resource_list_stays_within_the_servers_share restoring_the_team_members_session_with_the_machine_list_stays_within_the_servers_share restoring_the_team_members_session_with_home_s_first_reads_stays_within_the_servers_share a_resources_list_is_one_prepared_statement_whose_plan_its_connection_keeps resource_lists:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_resources -- --skip figures_scopes::resource_impact_publication_rechecks_the_original_model_qualified_binding_after_activity_wait
+test -p orch-api-core --test permission_reader_scopes
+test -p orch-authz --test pages
+test -p orch-api-core --test access
+test -p orch-api-core --lib -- --skip completed_projection_actual_http_session_expiry_withholds_full_but_acknowledges_write --skip native_get_context_uses_actual_session_mode_and_the_same_principal_time_after_opening
+test -p orch-api-core --test everything_scale -- read_facts:: --test-threads=1
+test -p orch-api-core --test resource_facts
+test -p orch-db --test participation_summaries
+test -p orch-api-core --test thread_opening_scopes

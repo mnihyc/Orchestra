@@ -1,4 +1,5 @@
 /** Your imports keeps the person's jobs and reports, with the same history layout as exports. */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ellipsis, FileUp } from 'lucide-react';
 import { useState } from 'react';
@@ -14,6 +15,9 @@ import { watchImport } from '@/features/people/importJobs';
 import { importActionSummary } from '@/features/people/importResults';
 import { ImportUndo } from '@/features/people/ImportUndo';
 import { PersonalFrame } from '@/features/settings/PersonalFrame';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import type { ImportLine as ImportRow } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
@@ -52,12 +56,15 @@ function SourceNames({ row }: { row: ImportRow }) {
 /** The names, a page at a time from the server: a folder of many files is never sent whole with the list. */
 function SourceNamePages({ id }: { id: string }) {
   const cache = useQueryClient();
-  const options = importFileNamesQuery(id, SOURCE_NAMES_PAGE);
+  const { t } = useTranslation();
+  const search = useCollectionSearch('import-source-names:' + id);
+  const options = importFileNamesQuery(id, SOURCE_NAMES_PAGE, search.q);
   const names = useInfiniteQuery({ ...options, maxPages: 1 });
   const page = names.data?.pages[0];
-  if (page === undefined) return names.isError ? <ErrorState compact error={names.error} retrying={names.isRefetching} onRetry={() => void names.refetch()} /> : <SkeletonRows read={names} rows={3} />;
   return <>
-    <ul className="flex min-w-0 flex-col gap-1">{page.items.map((name, index) => <li key={`${name}:${index}`} className="break-all text-sm">{name}</li>)}</ul>
+    <CollectionSearch name={t('importWizard.mine.files')} {...search} />
+    {page === undefined ? names.isError ? <ErrorState compact error={names.error} retrying={names.isRefetching} onRetry={() => void names.refetch()} /> : <SkeletonRows read={names} rows={3} />
+      : <ScrollRegion kind="table" label={t('importWizard.mine.files')} className="max-h-64 overflow-y-auto"><ul className="flex min-w-0 flex-col gap-1">{page.items.map((name, index) => <li key={`${name}:${index}`} className="break-all text-sm">{name}</li>)}</ul></ScrollRegion>}
     <ImportPagination first={names.data?.pageParams[0] !== null && names.data?.pageParams[0] !== undefined} more={names.hasNextPage} loading={names.isFetching}
       error={names.isFetchNextPageError ? names.error : null} onMore={() => void names.fetchNextPage()} onFirst={() => void cache.resetQueries({ queryKey: options.queryKey, exact: true })} />
   </>;
@@ -82,7 +89,8 @@ export function YourImports() {
   const reader = useStore(client.session, (session) => `${session.userId ?? ''}:${session.readerVersion ?? 0}`);
   const user = useStore(client.session, (session) => session.userId);
   const [undo, setUndo] = useState<{ row: ImportRow; reader: string } | null>(null);
-  const listOptions = myImportsQuery();
+  const search = useCollectionSearch('my-imports');
+  const listOptions = myImportsQuery(search.q);
   const list = useInfiniteQuery({ ...listOptions, maxPages: 1, enabled: user !== null });
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const name = (row: ImportRow) => row.node === null ? t('importWizard.mine.gone') : row.node.redacted || row.node.name === null ? t('importWizard.mine.hidden') : row.node.name;
@@ -115,19 +123,20 @@ export function YourImports() {
   return <PersonalFrame page="imports" lead={t('importWizard.mine.lead')}>
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button size="sm" variant="ghost" asChild><a href="/settings/exports">{t('importWizard.mine.exports')}</a></Button>
+        <Button size="sm" variant="ghost" asChild><PathLink href="/settings/exports">{t('importWizard.mine.exports')}</PathLink></Button>
         {rows.length > 0 && make}
       </div>
+      <CollectionSearch name={t('importWizard.mine.title')} {...search} />
       {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         : rows.length === 0 ? <EmptyState icon={<FileUp aria-hidden />} title={t('importWizard.mine.empty')} action={make} />
-        : <Table label={t('importWizard.mine.title')} columns={columns} rows={rows} rowKey={(row) => row.id} boundedIdentity rowMenu={{ label: (row) => t('importWizard.mine.menuFor', { name: name(row) }), entries }} />}
+        : <Table key={search.q} virtual label={t('importWizard.mine.title')} columns={columns} rows={rows} rowKey={(row) => row.id} boundedIdentity rowMenu={{ label: (row) => t('importWizard.mine.menuFor', { name: name(row) }), entries }} />}
       <ImportPagination first={(list.data?.pageParams[0] !== null && list.data?.pageParams[0] !== undefined)} more={list.hasNextPage} loading={list.isFetching}
         error={list.isFetchNextPageError ? list.error : null} onMore={() => void list.fetchNextPage()} onFirst={() => void cache.resetQueries({ queryKey: listOptions.queryKey, exact: true })} />
     </div>
     {undo !== null && undo.reader === reader && user !== null && <ImportUndo key={reader} id={undo.row.id} onClose={() => setUndo(null)} onStarted={(job) => {
       watchImport(job, undo.row.node?.id ?? null, false, true, undo.row.id);
       void cache.invalidateQueries({ queryKey: importKeys.one(undo.row.id), exact: true });
-      void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });
+      void cache.invalidateQueries({ queryKey: importKeys.mine() });
     }} />}
   </PersonalFrame>;
 }

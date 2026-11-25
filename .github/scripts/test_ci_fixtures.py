@@ -15,6 +15,56 @@ import ci_fixtures
 
 
 class NativeFixtures(unittest.TestCase):
+    def test_the_display_peer_requests_its_compiler_even_without_a_node_fixture(self):
+        for package, arguments, expected in (
+            ("orch-api-core", ["--test", "kvnc_core", "--", "a_manager_"], True),
+            ("orch-api-core", ["--lib"], False),
+            ("orch-api-core", ["--test", "ports_core", "--", "--test", "kvnc_core"], False),
+            ("orch-testkit", ["--test", "kvnc_core"], False),
+        ):
+            with self.subTest(package=package, arguments=arguments):
+                plan = ci_fixtures.describe_fixtures([["cargo", "test", "-p", package, *arguments]])
+                self.assertEqual(plan["browser_peer"], expected)
+                self.assertEqual(plan["musl_tools"], expected)
+
+    def test_the_display_api_program_runs_with_its_real_shipped_image_peer(self):
+        cases = [["cargo", "test", "-p", "orch-api-core", "--test", "kvnc_core"]]
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(ci_fixtures, "static_program", return_value="/built/browser_peer") as build, \
+                patch.object(ci_fixtures.subprocess, "run") as run:
+            env = ci_fixtures.prepare_fixtures(cases)
+        self.assertEqual(env["ORCH_BROWSER_PEER_PROGRAM"], "/built/browser_peer")
+        self.assertTrue(any("images/orch-env-base" in invocation.args[0] for invocation in run.call_args_list))
+        self.assertIn("crates/control/api/base/tests/displays_support/Dockerfile", run.call_args.args[0])
+        build.assert_called_once_with("orch-envhost", "browser_peer", kind="example")
+
+    def test_api_and_engine_tests_receive_the_deployment_search_extensions(self):
+        for package in ("orch-api-core", "orch-api-collaboration", "orch-engine"):
+            for arguments in (("--lib",), ("--test", "semantic_index")):
+                with self.subTest(package=package, arguments=arguments):
+                    planned = [["cargo", "test", "--locked", "-p", package, *arguments]]
+                    self.assertTrue(ci_fixtures.needs_search_extensions(planned))
+                    self.assertTrue(ci_fixtures.describe_fixtures(planned)["search_extensions"])
+        for command in (["cargo", "test", "-p", "orch-api-contract", "--lib"],
+                        ["cargo", "test", "-p", "orch-node", "--lib", "--", "-p", "orch-engine"],
+                        ["cargo", "clippy", "-p", "orch-engine", "--all-targets"]):
+            with self.subTest(command=command):
+                self.assertFalse(ci_fixtures.needs_search_extensions([command]))
+
+    def test_targeted_semantic_proof_installs_extensions_before_running_native_checks(self):
+        workflow = (Path(__file__).resolve().parents[1] / "workflows/ci-targeted.yml").read_text()
+        plan = workflow.index("name: Plan the assigned native fixtures")
+        install = workflow.index("name: Install the deployment database search extensions")
+        run = workflow.index("name: Run the Rust checks .ci-targets names")
+        self.assertLess(plan, install)
+        self.assertLess(install, run)
+        step = workflow[install:run]
+        self.assertIn("fromJSON(steps.native-fixtures.outputs.plan).search_extensions", step)
+        self.assertIn("job.services.postgres.id", step)
+        self.assertIn("./deploy/postgres", step)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS vector", step)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS pg_bigm", step)
+
     def test_node_conformance_and_default_package_tests_need_a_static_runner_and_the_harness(self):
         for arguments in (("--test", "conformance"), (), ("--tests",), ("--all-targets",)):
             with self.subTest(arguments=arguments):
@@ -29,7 +79,7 @@ class NativeFixtures(unittest.TestCase):
                 planned = [["cargo", "test", "-p", "orch-node", "--test", target]]
                 self.assertEqual(ci_fixtures.describe_fixtures(planned), {
                     "images": [(ci_fixtures.BUSYBOX_IMAGE, "busybox:latest")], "harness": False,
-                    "node_runner": False, "node_connector": True,
+                    "node_runner": False, "node_connector": True, "browser_peer": False, "musl_tools": True, "search_extensions": False,
                 })
 
     def test_node_fixture_selection_covers_every_actual_lab_consumer(self):
@@ -57,7 +107,7 @@ class NativeFixtures(unittest.TestCase):
                     patch.object(ci_fixtures.subprocess, "Popen", side_effect=AssertionError("unexpected build")), \
                     contextlib.redirect_stdout(output):
                 self.assertEqual(ci_fixtures.main(), 0)
-            self.assertEqual(json.loads(output.getvalue()), {"images": [], "harness": True, "node_runner": True, "node_connector": False})
+            self.assertEqual(json.loads(output.getvalue()), {"images": [], "harness": True, "node_runner": True, "node_connector": False, "browser_peer": False, "musl_tools": True, "search_extensions": False})
 
     def cargo_process(self, messages, returncode=0):
         process = MagicMock()
