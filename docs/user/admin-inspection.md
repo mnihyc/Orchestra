@@ -7,7 +7,7 @@ summary: Inspect stored work, sessions and tokens through audited administrative
 
 # Inspect stored data, sessions and tokens
 
-With admin mode on, system admins can inspect administered stored objects through their native views. Owner, age, size, attachment and activity facts make orphaned data visible. An administrative opening or revocation is marked and audited; secret credential values are not displayed by an inventory.
+With admin mode on, system admins can inspect administered stored objects through their own views. Owner, age, size, attachment and activity facts make orphaned data visible. An administrative opening or revocation is marked and audited; secret credential values are not displayed by an inventory.
 
 ## Where
 

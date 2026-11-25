@@ -172,7 +172,7 @@ mod tests {
             limits:SummaryLimits {max_chars:1200,max_tags:0}, config:serde_json::json!({}),
         };
         let config = Config::read(
-            &serde_json::json!({"provider_id":orch_types::new_id(),"model_name":"small"}),
+            &serde_json::json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}}}),
         )
         .unwrap();
         let (system, input) = render(&request, &config);
@@ -207,7 +207,7 @@ mod tests {
             tag_choices:vec![],limits:SummaryLimits {max_chars:321,max_tags:0},config:serde_json::json!({}),
         };
         let mut config = Config::read(
-            &serde_json::json!({"provider_id":orch_types::new_id(),"model_name":"small"}),
+            &serde_json::json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}}}),
         )
         .unwrap();
         let (system, input) = render(&request, &config);

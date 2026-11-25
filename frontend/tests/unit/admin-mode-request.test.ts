@@ -14,8 +14,8 @@ const calls = vi.hoisted(() => ({
   put: vi.fn<(path: string, options: { body: { as_admin: boolean } }) => Promise<{ data: AdminMode }>>(),
   reset: vi.fn<(changes: readonly Change[]) => Promise<void>>(),
 }));
-vi.mock('@/api/client', () => ({ api: { GET: calls.get, PUT: calls.put }, ok: async (reply: Promise<{ data: AdminMode }>) => (await reply).data }));
-vi.mock('@/api/acts', () => ({ applyChanges: calls.reset }));
+vi.mock('@/api/client', async (loadOriginal) => ({ ...await loadOriginal<object>(), api: { GET: calls.get, PUT: calls.put }, ok: async (reply: Promise<{ data: AdminMode }>) => (await reply).data }));
+vi.mock('@/api/acts', async (loadOriginal) => ({ ...await loadOriginal<object>(), applyChanges: calls.reset }));
 beforeEach(() => {
   vi.clearAllMocks();
   calls.reset.mockResolvedValue(undefined);
