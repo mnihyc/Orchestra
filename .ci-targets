@@ -1,0 +1,12 @@
+fmt
+contracts
+test -p orch-api-core --test thread_opening_scopes --test node_chat_opening_scopes --test personal --test sign_in
+test -p orch-api-core --test bound --test screen_openings --test resource_summaries --test summaries
+test -p orch-api-core --test everything_scale -- restoring_the_team_members_session an_org_chat_opening resource_lists --nocapture --test-threads=1
+test -p orch-engine --test resource_summaries
+clippy
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/openings.spec.ts tests/e2e/first-wave-edge.spec.ts tests/e2e/last-place.spec.ts --grep-invert "^(?=.*(?:Home|Providers) opens within a second at 200 ms with nothing)" --retries=0 --reporter=line

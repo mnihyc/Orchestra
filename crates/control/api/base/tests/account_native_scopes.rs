@@ -28,8 +28,8 @@ mod usage_world;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::directory::{OrgServiceAccountCreate, OrgServiceAccountCreateBody};
-use orch_api_contract::users::{USER_SEARCH_MAX_RESULTS, UserSearch, UserSearchQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_contract::users::{USER_SEARCH_DEFAULT_RESULTS, UserSearch, UserSearchQuery};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
@@ -43,11 +43,12 @@ fn rule(kind: &str, id: Id, reach: &str) -> Json {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Native account search fixture",
             token_hash: &token_hash(&secret),
@@ -99,7 +100,7 @@ async fn account_search_filters_before_its_native_limit_and_keeps_exact_first_ke
         .id;
     let mut people = Vec::new();
     // One more than the native limit proves this cannot be a post-limit DTO filter.
-    for index in 0..=USER_SEARCH_MAX_RESULTS {
+    for index in 0..=USER_SEARCH_DEFAULT_RESULTS {
         let person = places::person(&world, &format!("search-{index:02}")).await;
         places::join(&world, org, org, &person, "viewer", &owner).await;
         sqlx::query("UPDATE users SET display_name=$2 WHERE id=$1")
@@ -115,6 +116,7 @@ async fn account_search_filters_before_its_native_limit_and_keeps_exact_first_ke
     let query = UserSearchQuery {
         q: "search-00".into(),
         org_id: Some(org),
+        ..Default::default()
     };
     let response = checked(
         world
@@ -126,8 +128,8 @@ async fn account_search_filters_before_its_native_limit_and_keeps_exact_first_ke
             .await,
         StatusCode::OK,
     );
-    assert_eq!(response.as_array().unwrap().len(), 1);
-    assert_eq!(response[0]["id"], json!(last));
+    assert_eq!(response["items"].as_array().unwrap().len(), 1);
+    assert_eq!(response["items"][0]["id"], json!(last));
     let mut conn = world.conn().await;
     let first = identity::search_user_rows(&mut conn, owner.id(), "search-00", Some(org), 1, None)
         .await
@@ -170,6 +172,7 @@ async fn account_search_keeps_native_org_view_and_public_exact_match_prerequisit
         .query(&UserSearchQuery {
             q: "member".into(),
             org_id: Some(org),
+            ..Default::default()
         })
         .send_bytes()
         .await;
@@ -183,12 +186,13 @@ async fn account_search_keeps_native_org_view_and_public_exact_match_prerequisit
             .query(&UserSearchQuery {
                 q: "member".into(),
                 org_id: None,
+                ..Default::default()
             })
             .send_bytes()
             .await,
         StatusCode::OK,
     );
-    assert_eq!(public[0]["id"], json!(member.id()));
+    assert_eq!(public["items"][0]["id"], json!(member.id()));
 }
 
 #[tokio::test]
@@ -221,12 +225,13 @@ async fn account_search_uses_service_ownership_without_making_human_members_desc
             .query(&UserSearchQuery {
                 q: "search-service".into(),
                 org_id: None,
+                ..Default::default()
             })
             .send_bytes()
             .await,
         StatusCode::OK,
     );
-    assert_eq!(service_result[0]["id"], json!(service.user.id));
+    assert_eq!(service_result["items"][0]["id"], json!(service.user.id));
     let human = checked(
         world
             .app
@@ -235,12 +240,13 @@ async fn account_search_uses_service_ownership_without_making_human_members_desc
             .query(&UserSearchQuery {
                 q: "owner".into(),
                 org_id: Some(org),
+                ..Default::default()
             })
             .send_bytes()
             .await,
         StatusCode::OK,
     );
-    assert_eq!(human, json!([]));
+    assert_eq!(human, json!({"items":[],"next_cursor":null}));
 }
 
 #[tokio::test]
@@ -274,6 +280,7 @@ async fn account_search_publication_cannot_borrow_a_new_native_selection_for_its
     let query = UserSearchQuery {
         q: "match".into(),
         org_id: Some(org),
+        ..Default::default()
     };
     let control = checked(
         world
@@ -285,7 +292,7 @@ async fn account_search_publication_cannot_borrow_a_new_native_selection_for_its
             .await,
         StatusCode::OK,
     );
-    assert_eq!(control[0]["id"], json!(first.id()));
+    assert_eq!(control["items"][0]["id"], json!(first.id()));
     let mut blocker = world.db.pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE api_token_activity IN SHARE MODE")
         .execute(&mut *blocker)
@@ -343,11 +350,69 @@ async fn account_search_publication_cannot_borrow_a_new_native_selection_for_its
         owner.id(),
         "match",
         Some(org),
-        i64::from(USER_SEARCH_MAX_RESULTS),
+        i64::from(USER_SEARCH_DEFAULT_RESULTS),
         None,
     )
     .await
     .unwrap();
     assert_eq!(native.len(), 1);
     assert_eq!(native[0].user.id, second.id());
+}
+
+#[tokio::test]
+async fn a_people_continuation_does_not_expose_unselected_private_recent_accounts() {
+    use orch_api_contract::personal::{MePickerRecentChoice, MePickerRecentCreate};
+    let world = World::new().await;
+    let owner = places::person(&world, "picker-owner").await;
+    let org = places::make_org(&world, &owner, "Picker directory", "picker-directory")
+        .await
+        .base
+        .id;
+    let first = places::person(&world, "choice-first").await;
+    let second = places::person(&world, "choice-second").await;
+    let private = places::person(&world, "private-choice").await;
+    for person in [&first, &second, &private] {
+        places::join(&world, org, org, person, "viewer", &owner).await;
+    }
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&owner.token)
+        .body(&MePickerRecentChoice {
+            kind: "user".into(),
+            key: private.id().to_string(),
+        })
+        .send()
+        .await
+        .ok();
+    let secret = key(
+        &world,
+        owner.id(),
+        vec![
+            rule("account", first.id(), "self"),
+            rule("account", second.id(), "self"),
+        ],
+    )
+    .await;
+    let page = world
+        .app
+        .call(UserSearch, &[])
+        .token(&secret)
+        .query(&UserSearchQuery {
+            q: String::new(),
+            org_id: Some(org),
+            picker: Some(true),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.items.len(), 1);
+    assert_ne!(page.items[0].id, private.id());
+    let cursor = page.next_cursor.unwrap();
+    assert!(
+        !cursor.contains(&private.id().to_string()),
+        "a continuation binds personal order without returning other private choices"
+    );
 }

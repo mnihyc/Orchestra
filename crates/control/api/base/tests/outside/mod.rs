@@ -462,6 +462,7 @@ impl Outside {
             .send()
             .await
             .ok()
+            .items
     }
 
     /// The row of a table that a test reads by one identifier.

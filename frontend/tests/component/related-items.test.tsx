@@ -9,12 +9,12 @@ import { NetworkError } from '@/lib/requests';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({
-  related: vi.fn<(id: string, seq: number, cursor?: string) => Promise<RelatedItems>>(),
+  related: vi.fn<(id: string, seq: number, cursor?: string, q?: string) => Promise<RelatedItems>>(),
   preview: vi.fn<(signal: AbortSignal) => Promise<ReferencePreview>>(),
   go: vi.fn(),
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<Record<string, unknown>>(), useRouter: () => ({ history: { push: calls.go } }) }));
-vi.mock('@/api/search', async (original) => ({ ...await original<Record<string, unknown>>(), relatedQuery: (id: string, seq: number) => ({ queryKey: ['related-test', id, seq], initialPageParam: null as string | null, queryFn: ({ pageParam }: { pageParam: string | null }) => pageParam === null ? calls.related(id, seq) : calls.related(id, seq, pageParam), getNextPageParam: (page: RelatedItems) => page.next_cursor ?? undefined, staleTime: Infinity, retry: false }) }));
+vi.mock('@/api/search', async (original) => ({ ...await original<Record<string, unknown>>(), relatedQuery: (id: string, seq: number, q = '') => ({ queryKey: ['related-test', id, seq, q], initialPageParam: null as string | null, queryFn: ({ pageParam }: { pageParam: string | null }) => q === '' ? pageParam === null ? calls.related(id, seq) : calls.related(id, seq, pageParam) : calls.related(id, seq, pageParam ?? undefined, q), getNextPageParam: (page: RelatedItems) => page.next_cursor ?? undefined, staleTime: Infinity, retry: false }) }));
 vi.mock('@/api/references', () => ({ referencePreviewQuery: (reference: unknown) => ({ queryKey: ['related-preview-test', reference], queryFn: ({ signal }: { signal: AbortSignal }) => calls.preview(signal), staleTime: Infinity }) }));
 
 const entries: RelatedItem[] = [
@@ -80,7 +80,7 @@ it('keeps the in-flight preview when a focused card is pinned before its answer 
   const user = userEvent.setup();
   show(<RelatedPanel documentId="source" seq={1} />);
   await screen.findByRole('link', { name: entries[0]!.name });
-  await user.tab();
+  await user.tab(); expect(screen.getByRole('searchbox')).toHaveFocus(); await user.tab();
   await waitFor(() => expect(calls.preview).toHaveBeenCalledTimes(1));
   await user.keyboard('{Enter}');
   await waitFor(() => expect(document.querySelector('[data-reference-card]')).not.toBeNull());
@@ -110,7 +110,7 @@ it.each(entries.flatMap((entry) => ['keyboard', 'tap'].map((mode) => ({ entry, m
   show(<RelatedPanel documentId="source" seq={1} />);
   const chip = await screen.findByRole('link', { name: entry.name });
   expect(calls.preview).not.toHaveBeenCalled();
-  if (mode === 'keyboard') { await user.tab(); expect(chip).toHaveFocus(); await user.keyboard('{Enter}'); }
+  if (mode === 'keyboard') { await user.tab(); expect(screen.getByRole('searchbox')).toHaveFocus(); await user.tab(); expect(chip).toHaveFocus(); await user.keyboard('{Enter}'); }
   else await user.click(chip);
   await waitFor(() => expect(document.querySelector('[data-reference-card]')).toHaveTextContent(preview.description));
   expect(calls.preview).toHaveBeenCalledTimes(1);
@@ -141,10 +141,21 @@ it('reads only the opened page and asks for the next cursor on demand', async ()
   await screen.findByRole('link', { name: entries[0]!.name });
   expect(calls.related).toHaveBeenCalledTimes(1);
   expect(calls.preview).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: i18n.t('related.more') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
   expect(await screen.findByRole('link', { name: entries[1]!.name })).toBeVisible();
   expect(calls.related).toHaveBeenLastCalledWith('source', 1, 'next-window');
   expect(calls.related).toHaveBeenCalledTimes(2);
-  expect(screen.queryByRole('button', { name: i18n.t('related.more') })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: i18n.t('ui.pagination.more') })).not.toBeInTheDocument();
   expect(calls.preview).not.toHaveBeenCalled();
+});
+
+it('finds a native related name outside the opening page and retains its original reason', async () => {
+  const user = userEvent.setup();
+  calls.related.mockImplementation((_id, _seq, _cursor, q) => Promise.resolve({ ...reply, items: q === 'rollback' ? [entries[2]!] : [entries[0]!] }));
+  show(<RelatedPanel documentId="source" seq={1} />); await screen.findByRole('link', { name: entries[0]!.name });
+  await user.type(screen.getByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('related.title') }) }), 'rollback');
+  await waitFor(() => expect(calls.related).toHaveBeenCalledWith('source', 1, undefined, 'rollback'));
+  expect(await screen.findByRole('link', { name: entries[2]!.name })).toBeVisible();
+  expect(screen.queryByRole('link', { name: entries[0]!.name })).toBeNull();
+  expect(screen.getByText(i18n.t('related.references.incoming'))).toBeVisible();
 });

@@ -47,11 +47,17 @@ test('the actual org rail distinguishes a team from a personal space with the sa
     if (own === undefined || team === undefined) throw new Error('The scenario needs a personal space and a team');
     return [{ ...own, name: 'Ben Barker', color: 4 }, { ...team, name: 'Beta', color: 4 }];
   };
-  // The shell receives its orgs in the joined bootstrap rather than a second org-list request.
+  // The shell receives its orgs in the joined bootstrap rather than a second org-list request; signing in at the
+  // entrance takes the same shell inside its landing read.
   await page.route(/\/api\/v1\/me\/bootstrap(?:\?|$)/, async (route) => {
     const response = await route.fetch();
     const body = await response.json() as MeBootstrapReply;
     await route.fulfill({ response, json: { ...body, orgs: names(body.orgs) } });
+  });
+  await page.route(/\/api\/v1\/me\/landing(?:\?|$)/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as { shell: MeBootstrapReply };
+    await route.fulfill({ response, json: { ...body, shell: { ...body.shell, orgs: names(body.shell.orgs) } } });
   });
   await page.route(/\/api\/v1\/orgs(?:\?|$)/, async (route) => {
     const response = await route.fetch();
