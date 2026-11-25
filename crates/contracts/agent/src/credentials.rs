@@ -24,11 +24,6 @@ use crate::descriptor::{ArrangementType, ProviderKind};
 /// The name of the form every protocol has: the API key, as it is.
 pub const API_KEY_FORM: &str = "api_key";
 
-/// How soon after the last copy a new one may be issued, in milliseconds: an adapter that asks more often
-/// fails the turn. Thirty seconds is longer than any renewal needs and shorter than the shortest copy that
-/// is worth issuing.
-pub const MIN_ISSUE_INTERVAL_MILLIS: i64 = 30_000;
-
 /// Who owns a credential while it is away from its provider's runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -42,13 +37,16 @@ pub enum Custody {
 /// One kind of credential that can be issued and run on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CredentialForm {
+    /// The issuer reports an expiry with each copy, even when its duration is not fixed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expires: bool,
     /// Its name; the issuing and the accepting side must both know it.
     pub form: String,
     /// Whether it is a copy or the credential itself.
     pub custody: Custody,
     /// How long a copy is good for before it lapses by itself. `null`: it lasts until its owner rotates or
-    /// revokes it (a key as it is, a long-lived token), and always for a transferred form, which is the
-    /// login with its renewal.
+    /// revokes it unless expires is true and each copy carries its own expiry; a transferred form
+    /// always has no duration, because it is the login with its renewal.
     pub lifetime_secs: Option<i64>,
 }
 
@@ -57,6 +55,7 @@ impl CredentialForm {
     #[must_use]
     pub fn api_key() -> Self {
         Self {
+            expires: false,
             form: API_KEY_FORM.to_owned(),
             custody: Custody::Shared,
             lifetime_secs: None,
@@ -66,7 +65,7 @@ impl CredentialForm {
     /// Whether a copy of it lapses by itself.
     #[must_use]
     pub const fn lapses(&self) -> bool {
-        matches!(self.custody, Custody::Shared) && self.lifetime_secs.is_some()
+        matches!(self.custody, Custody::Shared) && (self.expires || self.lifetime_secs.is_some())
     }
 
     /// What is wrong with the declaration, if anything: a transferred form has no lifetime, because it is
@@ -75,7 +74,7 @@ impl CredentialForm {
         if self.form.is_empty() {
             return Err(FormFault::NoName);
         }
-        if self.custody == Custody::Transferred && self.lifetime_secs.is_some() {
+        if self.custody == Custody::Transferred && (self.expires || self.lifetime_secs.is_some()) {
             return Err(FormFault::TransferredWithLifetime(self.form.clone()));
         }
         if self.lifetime_secs.is_some_and(|secs| secs <= 0) {
@@ -237,13 +236,21 @@ impl CredentialPath {
     }
 }
 
-/// Whether a new copy may be issued now: not while one is in flight for the session, and not within
-/// [`MIN_ISSUE_INTERVAL_MILLIS`] of the last one.
+/// Whether a copy may be issued now under the caller's interval. One in flight always waits; a
+/// nonpositive interval imposes no wait after the previous issue.
 #[must_use]
-pub fn may_issue(in_flight: bool, last_issue: Option<Time>, now: Time) -> bool {
+pub fn may_issue(
+    in_flight: bool,
+    last_issue: Option<Time>,
+    now: Time,
+    minimum_interval_secs: i64,
+) -> bool {
     !in_flight
-        && last_issue
-            .is_none_or(|last| now.unix_millis() - last.unix_millis() >= MIN_ISSUE_INTERVAL_MILLIS)
+        && (minimum_interval_secs <= 0
+            || last_issue.is_none_or(|last| {
+                now.unix_millis() - last.unix_millis()
+                    >= minimum_interval_secs.saturating_mul(1_000)
+            }))
 }
 
 /// Whether a copy that lapses at `expires_at` is to be replaced at `now`: it has less than `margin_secs`
@@ -265,10 +272,23 @@ mod tests {
 
     fn form(name: &str, custody: Custody, lifetime_secs: Option<i64>) -> CredentialForm {
         CredentialForm {
+            expires: false,
             form: name.to_owned(),
             custody,
             lifetime_secs,
         }
+    }
+
+    #[test]
+    fn a_vendor_expiring_copy_needs_no_invented_fixed_lifetime() {
+        let copy: CredentialForm = serde_json::from_value(
+            json!({"form":"account_access","custody":"shared","lifetime_secs":null,"expires":true}),
+        )
+        .unwrap();
+        assert!(copy.lapses());
+        assert_eq!(copy.check(), Ok(()));
+        let moved:CredentialForm=serde_json::from_value(json!({"form":"account_login","custody":"transferred","lifetime_secs":null,"expires":true})).unwrap();
+        assert!(moved.check().is_err());
     }
 
     #[test]
@@ -367,20 +387,27 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_is_not_issued_while_one_is_in_flight_nor_within_thirty_seconds_of_the_last() {
+    fn a_copy_can_be_renewed_without_a_fixed_interval_and_issues_do_not_overlap() {
         let last = time("2026-10-11T10:00:00.000Z");
-        assert!(may_issue(false, None, last));
-        assert!(!may_issue(true, None, last));
+        assert!(may_issue(false, None, last, 30));
+        assert!(!may_issue(true, None, last, 0));
+        assert!(
+            may_issue(false, Some(last), last, 0),
+            "a caller that needs a new copy can allow it immediately"
+        );
         assert!(!may_issue(
             false,
             Some(last),
-            time("2026-10-11T10:00:29.999Z")
+            time("2026-10-11T10:00:29.999Z"),
+            30
         ));
         assert!(may_issue(
             false,
             Some(last),
-            time("2026-10-11T10:00:30.000Z")
+            time("2026-10-11T10:00:30.000Z"),
+            30
         ));
+        assert!(!may_issue(false, Some(last), last, 3_600));
     }
 
     #[test]

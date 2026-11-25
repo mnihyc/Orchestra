@@ -136,6 +136,7 @@ fn ask_of(index: usize, item: &api::AccessRequestItem, caller: Id) -> ApiResult<
         },
         permissions,
         options: item.options.as_ref().map(|options| AskedOptions {
+            purposes: options.purposes.clone(),
             models: options.models.clone(),
             services: options.services.clone(),
             efforts: options.efforts.clone(),
@@ -215,8 +216,9 @@ pub(super) fn read_body(body: &api::AccessRequestCreateBody, asker: Id) -> ApiRe
 pub async fn create(
     ctx: Ctx,
     (): (),
-    body: api::AccessRequestCreateBody,
+    mut body: api::AccessRequestCreateBody,
 ) -> ApiResult<api::AccessRequestWriteResponse> {
+    body.expires_at = body.expires_at.map(Time::to_minute);
     let asks = read_body(&body, ctx.user()?.id())?;
     let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
     orch_db::queries::approvals::access::lock_requester(&mut tx, initial.user().id()).await?;
@@ -428,6 +430,7 @@ pub async fn views_of(
                         .map(|permission| permission.as_str().to_owned())
                         .collect(),
                     options: asked.options.as_ref().map(|options| api::AccessOptions {
+                        purposes: options.purposes.clone(),
                         models: options.models.clone(),
                         services: options.services.clone(),
                         efforts: options.efforts.clone(),

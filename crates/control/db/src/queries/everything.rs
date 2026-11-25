@@ -44,8 +44,26 @@ pub struct AccessSeed {
 /// Read places and exceptional thread pages, plus the much smaller resource and document inventories.
 /// Ordinary ownership entries are resolved by the same live Owners rows in the final statement.
 pub async fn access_seeds(conn: &mut Conn, parent: Option<Id>) -> Result<Vec<AccessSeed>, DbError> {
+    seeds(conn, parent, None).await
+}
+
+/// The seeds of a list that shows only resources of `kinds`: those resources and the places of their tags. Their homes
+/// and the places above them come with the resources themselves, so no other place, document or chat is read.
+pub async fn resource_access_seeds(
+    conn: &mut Conn,
+    kinds: &[String],
+) -> Result<Vec<AccessSeed>, DbError> {
+    seeds(conn, None, Some(kinds)).await
+}
+
+async fn seeds(
+    conn: &mut Conn,
+    parent: Option<Id>,
+    kinds: Option<&[String]>,
+) -> Result<Vec<AccessSeed>, DbError> {
     Ok(sqlx::query_as(include_str!("everything_seeds.sql"))
         .bind(parent)
+        .bind(kinds)
         .fetch_all(conn)
         .await?)
 }
@@ -191,7 +209,7 @@ pub struct ResourceFilter<'a> {
     pub state: Option<&'a str>,
     /// An agent's harness.
     pub harness: Option<&'a str>,
-    /// Template kind or environment origin.
+    /// Template kind, environment origin, or system for an agent without a home.
     pub kind: Option<&'a str>,
     /// Apply the existing provider-scope policy projected into the grant.
     pub provider_scope: bool,

@@ -161,7 +161,7 @@ test('QS-013 the host detail uses its served kept_data and makes no speculative 
 test('Remove describes a positive window, zero-day deletion and a connected registration truthfully', async ({ page }) => {
   await signIn(page); await page.goto(`/resources/environments/${RUNS_ON.sandbox}`); await page.getByRole('button', { name: 'Actions for Sandbox', exact: true }).click(); await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click(); await expect(page.getByText(/Its files are kept until/)).toBeVisible(); await expect(page.getByText('Workspace, home, state and private views are included. Mounts are kept separately.')).toBeVisible(); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await retention({ keep_days: 0 }); await page.reload(); await page.getByRole('button', { name: 'Actions for Sandbox', exact: true }).click(); await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click();
-  await expect(page.getByText('Deletes the unit and its owned volumes without a recovery window.')).toBeVisible();
+  await expect(page.getByText('Deletes the container and its owned volumes without a recovery window.')).toBeVisible();
   await expect(page.getByText(/Its files are kept until/)).toHaveCount(0);
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.goto(`/resources/environments/${RUNS_ON.workspace}`); await page.getByRole('button', { name: 'Actions for Workspace', exact: true }).click(); await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click(); await expect(page.getByText('Only its registration is removed; its files stay on this machine.')).toBeVisible();

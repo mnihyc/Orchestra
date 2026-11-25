@@ -70,20 +70,42 @@ async fn sql_wait(s: &Scene, pid: i32, pattern: &str, request: &tokio::task::Joi
         }
     }).await.expect("the actual native recycle SQL wait");
 }
+#[derive(sqlx::FromRow)]
+struct NativeCommand {
+    id: Id,
+    receiver: Id,
+    kind: String,
+    body: Json,
+    target: Option<Json>,
+}
+
 /// The same native protocol peer role as resources::answer, with typed process/stop results.
 fn peer(s: &Scene, expected: usize) -> tokio::task::JoinHandle<Vec<(String, Json)>> {
     let pool = s.world.db.pool.clone();
+    let units = s.native_units.clone();
     tokio::spawn(async move {
         tokio::time::timeout(WAIT,async {
             let mut answered=Vec::new();
             while answered.len()<expected {
-                let rows:Vec<(Id,String,Json)>=sqlx::query_as("SELECT id,kind,body FROM commands WHERE kind IN ('proc.list','node.runtime.stop') AND state IN ('queued','sent','accepted') ORDER BY created_at,id")
+                let rows:Vec<NativeCommand>=sqlx::query_as("SELECT id,machine_id AS receiver,kind,body,tool_session->'native_target' AS target FROM commands WHERE kind IN ('proc.list','node.runtime.stop') AND state IN ('queued','sent','accepted') ORDER BY created_at,id")
                     .fetch_all(&pool).await.unwrap();
-                for (id,kind,body) in rows {
-                    let result=if kind=="proc.list" {json!({"processes":[]})} else {json!({})};
+                for command in rows {
+                    let result=if command.kind=="proc.list" {json!({"processes":[]})} else {
+                        use orch_link_contract::native_target::{LifecycleSubject,NativeTarget};
+                        let runtime:Id=serde_json::from_value(command.body["runtime_id"].clone()).unwrap();
+                        let mut units=units.lock().unwrap();
+                        let unit=units.get_mut(&runtime).expect("the actual fixture native unit exists");
+                        assert_eq!(command.receiver,unit.receiver,"Stop keeps its original actual native receiver");
+                        let target:NativeTarget=serde_json::from_value(command.target.clone().expect("Stop retains its original target")).unwrap();
+                        let NativeTarget::Lifecycle(target)=target else {panic!("Stop needs its original lifecycle target");};
+                        assert_eq!(target.subject,LifecycleSubject::Runtime {runtime_id:runtime});
+                        assert!(target.matches_source(unit.source.incarnation),"Stop cannot adopt a source from its expected header");
+                        unit.running=false;
+                        json!(orch_link_contract::commands::NodeRuntimeStopResult::Stopped {source:unit.source})
+                    };
                     let done=sqlx::query("UPDATE commands SET state='succeeded',result=$2 WHERE id=$1 AND state IN ('queued','sent','accepted')")
-                        .bind(id).bind(result).execute(&pool).await.unwrap().rows_affected();
-                    if done>0 {answered.push((kind,body));}
+                        .bind(command.id).bind(result).execute(&pool).await.unwrap().rows_affected();
+                    if done>0 {answered.push((command.kind,command.body));}
                 }
                 tokio::task::yield_now().await;
             }
