@@ -64,3 +64,12 @@ it('keeps cached identity readable while a new presentation has not arrived yet'
   const cached = { ...row, thread: { ...row.thread, display: undefined } } as unknown as TreeNode;
   expect(containedThreadStates(new Map([[cached.id, cached]])).size).toBe(0);
 });
+
+it('keeps contained work from a closed native fold without retaining any thread rows',()=>{
+  const parent=acmeTree().find((row)=>row.id===ACME.web)!;
+  const root=acmeTree().find((row)=>row.id===parent.parent_id)!;
+  const closed={...parent,folded:{has_children:true,waiting:0,unread:false,mentions:0,urgency:'running' as const}};
+  const rows=new Map([[root.id,root],[closed.id,closed]]);
+  expect(containedThreadStates(rows).get(parent.id)).toBe('running');expect(containedThreadStates(rows).get(root.id)).toBe('running');
+  expect(containedThreadStates(new Map([[root.id,root],[closed.id,{...closed,folded:{...closed.folded,urgency:null}}]])).get(parent.id)).toBeUndefined();
+});

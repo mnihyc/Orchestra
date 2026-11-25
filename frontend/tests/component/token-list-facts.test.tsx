@@ -20,7 +20,7 @@ const rows: ApiTokenInfo[] = [
 ];
 const calls = vi.hoisted(() => ({ preview: vi.fn<() => Promise<ReferencePreview>>() }));
 const preview: ReferencePreview = { id: 'web', kind: 'node', node_kind: 'project', title: 'Web', place: null, description: '', updated_at: null, updated_by: null, part: null };
-vi.mock('@/api/users', async (load) => ({ ...await load<typeof UsersApi>(), tokensQuery: { queryKey: ['token-list-facts'], queryFn: () => Promise.resolve(rows) } }));
+vi.mock('@/api/users', async (load) => ({ ...await load<typeof UsersApi>(), tokensQuery: { queryKey: ['token-list-facts'], queryFn: () => Promise.resolve(rows) }, tokensPageQuery: (q: string) => ({ queryKey: ['token-list-pages', q], initialPageParam: null, queryFn: () => Promise.resolve({ items: rows.filter((row) => row.name.includes(q)), next_cursor: null }), getNextPageParam: () => null }) }));
 vi.mock('@/api/references', async (load) => {
   const actual = await load<typeof ReferencesApi>();
   return { ...actual, referencePreviewQuery: (reference: Parameters<typeof actual.referencePreviewQuery>[0]) => ({ ...actual.referencePreviewQuery(reference), queryFn: calls.preview }) };
@@ -69,4 +69,12 @@ for (const opening of ['hover', 'focus', 'tap'] as const) it(`opens the token pl
     await user.keyboard('{Escape}');
     await waitFor(() => expect(document.querySelector('[data-reference-card]')).toBeNull());
   }
+});
+
+it('copies the public ID of the chosen key from its list row', async () => {
+  const user = userEvent.setup();
+  show(<Tokens />);
+  const row = await screen.findByRole('row', { name: /Read release/ });
+  await user.click(within(row).getByRole('button', { name: i18n.t('common.copyId') }));
+  expect(await navigator.clipboard.readText()).toBe('some');
 });

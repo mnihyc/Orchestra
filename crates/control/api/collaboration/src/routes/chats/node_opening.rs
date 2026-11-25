@@ -208,14 +208,22 @@ async fn prepare_inner(
                 .map(|node| node.id)
         })
         .collect();
-    let visible =
-        view::viewable_ways(conn, &work.principal, &candidates, Policy::default()).await?;
+    let ancestors: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|id| *id != root)
+        .collect();
+    let visible = if ancestors.is_empty() {
+        Default::default()
+    } else {
+        view::viewable_ways(conn, &work.principal, &ancestors, Policy::default()).await?
+    };
     let mut scopes = Vec::new();
     let mut loaded = Vec::new();
     let mut chat_targets = Vec::new();
     // Retain the existing nearest-kind order rather than HashMap/database order.
     for id in candidates {
-        if !visible.contains_key(&id) {
+        if id != root && !visible.contains_key(&id) {
             continue;
         }
         let Some(node) = path.iter().find(|node| node.id == id) else {
