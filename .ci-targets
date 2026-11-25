@@ -1,0 +1,15 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- a_resources_list_is_one_prepared_statement an_org_chat_opening resource_lists:: --nocapture --test-threads=1
+test -p orch-api-core --test admin_messages
+test -p orch-api-core --test resource_summaries
+test -p orch-api-core --test node_chat_opening_scopes
+test -p orch-api-core --test thread_continuation_summaries
+test -p orch-api-core --test document_file_reader_scopes
+test -p orch-api-core --test exports -- archive_body_delivery_rechecks_the_actual_key_after_headers
+test -p orch-api-core --test summaries
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/openings.spec.ts -g "reads each part of the navigation tree" --repeat-each=20 --retries=0 --reporter=line

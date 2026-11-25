@@ -25,9 +25,9 @@ as Ask. A locked or disallowed mode blocks the plan with a reason.
 
 ## Choose history
 
-**Carry** takes the conversation by the most native route the destination
-supports: the same session, a native fork, a transplant or an import. Where
-native import is unavailable, recent turns go into the handoff word for word.
+**Carry** takes the conversation by the route closest to the program's own that the destination
+supports: the same session, a fork by the program, a transplant or an import. Where
+the program's own import is unavailable, recent turns go into the handoff word for word.
 Choose all turns, through one turn, or a range in the History control.
 
 The place's carry share keeps room in the new model's window for work; it

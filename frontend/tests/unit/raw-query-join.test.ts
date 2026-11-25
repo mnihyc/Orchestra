@@ -1,5 +1,5 @@
 /** Actual observers + the one socket, with synthetic HTTP barriers; no native execution is claimed. */
-import { CancelledError, InfiniteQueryObserver } from '@tanstack/react-query';
+import { CancelledError, InfiniteQueryObserver, QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { client, ApiError } from '@/api/client';
 import { queryClient } from '@/api/query';
@@ -8,7 +8,7 @@ import { captureThreadRead, isCurrentThreadRead, selectThreadContinuation } from
 import { fetchThreadSync, threadKeys } from '@/api/threads';
 import type { Draft, RawEvent, ThreadContinuationProjection, ThreadOpening, ThreadParameters, ThreadRawListReply } from '@/generated/api-types';
 import { installQueryFeeds, queryFeed } from '@/realtime/queryFeeds';
-import { RawSourceError } from '@/realtime/rawQuery';
+import { type RawFilter, RawSourceError } from '@/realtime/rawQuery';
 import { createRealtimeSocket, type ClientFrame } from '@/realtime/socket';
 import { contentThreadRead, defaultThreadRead, resultThreadRead, sameThreadRead, threadReadRegistryKey, threadReceipt, type ThreadReadRef } from '@/realtime/threadScope';
 import { holdThreadRead, setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer, threadViewOf, threadWriter, useThreadStore } from '@/realtime/stores/thread';
@@ -60,11 +60,12 @@ function transport() {
   return { socket, wires, wire: first, last, stop };
 }
 interface PublicationBarrier {
+  filter?: RawFilter;
   afterPage?: (page: ThreadRawListReply) => Promise<ThreadRawListReply>;
   beforeCommit?: () => void;
 }
 function observationOptions(ref: ThreadReadRef, segment: string, barrier?: PublicationBarrier): ReturnType<typeof viewedRawFramesQuery> {
-  const options = viewedRawFramesQuery(ref, segment);
+  const options = viewedRawFramesQuery(ref, segment, barrier?.filter);
   if (barrier === undefined) return options;
   const read = options.queryFn, sharing = options.structuralSharing;
   if (typeof read !== 'function' || typeof sharing !== 'function') throw new Error('Expected the actual scoped raw query and publication guard');
@@ -76,9 +77,9 @@ function observationOptions(ref: ThreadReadRef, segment: string, barrier?: Publi
     structuralSharing: (previous, next) => { barrier.beforeCommit?.(); return sharing(previous, next); },
   };
 }
-function observe(ref: ThreadReadRef, segment = 'segment-one', follow = false, barrier?: PublicationBarrier) {
+function observe(ref: ThreadReadRef, segment = 'segment-one', follow = false, barrier?: PublicationBarrier, cache: QueryClient = queryClient) {
   let options = observationOptions(ref, segment, barrier);
-  const observer = new InfiniteQueryObserver(queryClient, options);
+  const observer = new InfiniteQueryObserver(cache, options);
   const off = observer.subscribe(() => undefined);
   let key = JSON.stringify(options.queryKey);
   // The real UI's inherited-scope hook rebuilds pure options after a verified owner transition.
@@ -152,6 +153,16 @@ it('coalesces equal-source observers and does not let an unmount cancel the rema
   reply(read, left, [event(1)]); await settled(two); expect(numbers(two)).toEqual([1]);
   two.close(); await vi.advanceTimersByTimeAsync(0);
   expect(wire.sent.filter((frame) => frame.op === 'unsub')).toHaveLength(1);
+});
+
+it('uses the installed raw transport through a kept view of the same query cache', async () => {
+  const server = rawServer(); await open(left, B); const { wire } = transport();
+  const scoped = new QueryClient({ queryCache: queryClient.getQueryCache() });
+  const view = observe(left, 'segment-one', false, undefined, scoped);
+  const sub = await wire.subscriptions.next(); ack(wire, sub, scopeOf(left));
+  const reading = await server.issued.next();
+  reply(reading, left, [event(1)]); await settled(view);
+  expect(numbers(view)).toEqual([1]); expect(server.reads).toHaveLength(1);
 });
 
 it('coalesces native sources across owners while keeping their cancellation and query windows independent', async () => {
@@ -775,4 +786,22 @@ it('hiding and remounting the same raw query preserves admitted tails while fenc
   expect(remounted.observer.getCurrentResult().data?.pages[1]).toBe(admitted?.pages[1]);
   expect(remounted.observer.getCurrentResult().data?.pageParams).toEqual([null, 5]);
   expect(threadViewOf(left)).toBe(owner);
+});
+
+it('keeps native filtered raw pages ACK-gated, follows empty progress and admits only matching live frames', async () => {
+  const server = rawServer(); await open(left, B);
+  const { wire } = transport();
+  const view = observe(left, 'segment-one', false, { filter:{q:'"older result"',direction:'from_harness'} });
+  const sub = await wire.subscriptions.next(); expect(server.reads).toHaveLength(0);
+  ack(wire, sub, scopeOf(left), 100);
+  const first = await server.issued.next();
+  expect(new URL(first.request.url).searchParams.get('q')).toBe('"older result"');
+  first.resolve(Response.json({events:[],has_older:true,next_before:50,projection:scopeOf(left)}));
+  const second = await server.issued.next();
+  expect(new URL(second.request.url).searchParams.get('before')).toBe('50');
+  live(wire, sub, scopeOf(left), event(101, 'older unrelated result'));
+  live(wire, sub, scopeOf(left), event(102, 'older result'));
+  reply(second, left, [event(1,'older result')]); await settled(view);
+  expect(numbers(view)).toEqual([102,1]);
+  expect(view.observer.getCurrentResult().hasNextPage).toBe(false);
 });

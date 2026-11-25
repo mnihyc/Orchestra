@@ -8,24 +8,11 @@ import { Select } from '@/ui/Select';
 import { ValueControl, type ValueControlProps } from '@/features/settings/ValueControl';
 import { AgentAdvancedRows } from './AgentAdvancedRows';
 import { AREA_WORDS, stepOption } from './agentShareWords';
-import { ADVANCED, ADVANCED_WORDS, hasAgentParts, mayGiveParts, AREAS, LEVELS, creationAreas, creationChoice, levelOfParts, partsOfLevel, sharePartsValue, stepOf, stepsOf, withStep } from './agentShares';
+import { ADVANCED, ADVANCED_WORDS, hasAgentParts, mayGiveParts, REACHES, LEVELS, creationAreas, creationChoice, levelOfParts, partsOfLevel, agentAccessValue, stepOf, stepsOf, withStep } from './agentShares';
+
+export { agentAccessValue } from './agentShares';
 
 export const AGENT_ACCESS_SETTING = 'threads.agent_access';
-const REACHES: readonly AgentAccessWhere[] = ['nothing', 'thread', 'topic', 'project'];
-const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-
-/** An invalid or newer value remains visible in the ordinary value control instead of being replaced with a grant. */
-export function agentAccessValue(value: unknown): AgentAccessChoice | null {
-  if (!record(value) || Object.keys(value).some((key) => key !== 'where' && key !== 'parts') || !record(value.parts)) return null;
-  const givenParts = value.parts;
-  const where = REACHES.find((entry) => entry === value.where);
-  if (where === undefined || where === 'nothing' && Object.keys(value.parts).length > 0 || where === 'thread' && (Object.hasOwn(value.parts, 'timeline') || ADVANCED.some((row) => Object.hasOwn(givenParts, row)))) return null;
-  const parts = sharePartsValue(value.parts);
-  if (parts === null) return null;
-  if (AREAS.some((area) => !creationAreas(where).includes(area) && stepOf(area, parts) > 0)) return null;
-  return { where, parts };
-}
-
 export function AgentAccessSummary({ value }: { value: AgentAccessChoice }) {
   const { t } = useTranslation();
   const shared = creationAreas(value.where).filter((area) => stepOf(area, value.parts) > 0);

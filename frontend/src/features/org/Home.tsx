@@ -24,7 +24,8 @@ import { orgOverviewQuery } from '@/api/orgOverview';
 import { childrenQuery, orgBySlugQuery } from '@/api/nodes';
 import { PlaceReadme } from '@/features/documents/Readme';
 import { ActivityFeed, OrgActivity } from '@/features/org/Activity';
-import { UsageSection, useUsageBoardParams } from '@/features/usage/Board';
+import { UsageSection } from '@/features/usage/Board';
+import { useUsageBoardParams } from '@/features/usage/useBoardParams';
 import { Members } from '@/features/settings/org/Members';
 import { DepartmentCard, ProjectCard } from '@/features/org/ProjectCards';
 import { OrgWork } from '@/features/org/Work';
@@ -41,6 +42,7 @@ import type { Org, Project } from '@/generated/api-types';
 import { denial, holds } from '@/lib/permissions';
 import { useOrgTreeFeed } from '@/realtime/live';
 import { useOrgTree } from '@/realtime/stores/tree';
+import { useNavigationReadsReady } from '@/shell/useThreadOpeningPaint';
 import { selectOrg } from '@/shell/org';
 import { boxClasses, Page, PageHeader, PageSectionContext, Section } from '@/shell/Page';
 import { useScreenHeading } from '@/shell/screen';
@@ -93,7 +95,7 @@ function Overview({ org, onTab }: { org: Org; onTab: (tab: OrgTab) => void }) {
     <OrgWork key={org.id} org={org} />
     <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} />
     <OverviewRows org={org} onTab={onTab} participating={participating} />
-    {org.readme !== null && <PlaceReadme readme={org.readme} />}
+    {org.readme !== null && <PlaceReadme readme={org.readme} nodeId={org.id} />}
   </div>;
 }
 
@@ -201,7 +203,8 @@ export function OrgHome({ slug, tab, onTab }: OrgHomeProps) {
   useEffect(() => {
     if (focusedContent && org !== undefined) selectOrg(userId, org.org_id);
   }, [org, userId, focusedContent]);
-  useOrgTreeFeed(org?.org_id ?? null);
+  const navigationReady = useNavigationReadsReady();
+  useOrgTreeFeed(navigationReady ? org?.org_id ?? null : null);
   useScreenHeading({ title: org === undefined ? t('screens.org.title') : orgPageTitle(org, t), icon: LayoutGrid, nodeId: org?.id, views: { ready: org !== undefined, chat: org?.org_kind !== 'personal' } });
 
   const failure = query.isError ? <NodeFailure className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : null;
