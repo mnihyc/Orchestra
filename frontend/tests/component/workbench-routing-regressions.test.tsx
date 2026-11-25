@@ -21,6 +21,7 @@ import { treeWriter } from '@/realtime/stores/tree';
 import { clearViewOpenings } from '@/features/workbench/viewOpening';
 import { registerView } from '@/features/workbench/views';
 import { workspaceEntries } from '@/features/workbench/workspaceActions';
+import * as tabChoices from '@/features/workbench/Tabs';
 import { i18n } from '@/i18n';
 import { Route as ThreadRoute } from '@/routes/thread/$threadId/index';
 import { Route as OrgRoute } from '@/routes/org/$slug/index';
@@ -203,6 +204,23 @@ function runPalette(id: string): void {
   command.run('here');
 }
 
+it('builds move destinations only for the tab whose menu the reader opens', async () => {
+  const tabs = Array.from({ length: 10 }, (_, i) => page(address(`thread-${i}`)));
+  const selected = tabs[0]!;
+  seed(tabs, selected.id);
+  const choices = vi.spyOn(tabChoices, 'tabEntries');
+  try {
+    const frame = draw(requiredHref(selected));
+    await settled(frame, requiredHref(selected));
+    const tab = document.getElementById(`tab-${selected.id}`)!;
+    expect(tab).toBeVisible();
+    expect(choices.mock.calls.length).toBe(0);
+    fireEvent.keyDown(tab, { key: 'F10', shiftKey: true });
+    expect(await screen.findByRole('menuitem', { name: i18n.t('workbench.tab.pin') })).toBeVisible();
+    expect(new Set(choices.mock.calls.map(([, id]) => id))).toEqual(new Set([selected.id]));
+  } finally { choices.mockRestore(); }
+});
+
 it('adds the org to a browser title when another known department has the same name', async () => {
   // Frame identity comes from its authorized native read, not the synthetic feature body.
   queryClient.setQueryData(['org', ORG_ADDRESS], department);
@@ -324,6 +342,24 @@ describe('duplicate instances and owned URL changes', () => {
     expect(state().activeContent).toBe(b.id); expect(ids()).toEqual([a.id, b.id]);
   });
 
+  it('an address change that a page asks to push is a step the browser’s Back undoes, and any other replaces the entry that stands', async () => {
+    const a = page(address('a'));
+    seed([a], a.id);
+    const drawn = draw(requiredHref(a));
+    await screen.findByTestId(`body-${a.id}`); await settled(drawn, requiredHref(a));
+    await act(async () => { await capturedNavigate(a.id, { search: { agent: 'step' }, push: true }); });
+    await settled(drawn, `${address('a')}?agent=step`);
+    expect(drawn.history.length).toBe(2); expect(hrefOf(a.id)).toBe(`${address('a')}?agent=step`);
+    act(() => { drawn.history.back(); }); await settled(drawn, address('a'));
+    expect(ids()).toEqual([a.id]); expect(hrefOf(a.id)).toBe(address('a'));
+    act(() => { drawn.history.forward(); }); await settled(drawn, `${address('a')}?agent=step`);
+    expect(ids()).toEqual([a.id]); expect(hrefOf(a.id)).toBe(`${address('a')}?agent=step`);
+    // An ordinary change of the page's own address takes the place of the entry that stands.
+    await act(async () => { await capturedNavigate(a.id, { search: { agent: 'other' } }); });
+    await settled(drawn, `${address('a')}?agent=other`);
+    expect(drawn.history.length).toBe(2); expect(ids()).toEqual([a.id]);
+  });
+
   it('Close all uses the neutral route, survives reload empty and reopens the exact last closed locator', async () => {
     const a = page(address('a', 'version-x')), b = page(address('b', 'version-y'));
     seed([a, b], b.id, true);
@@ -384,7 +420,7 @@ describe('main origin is independent from bottom keyboard focus', () => {
     const empty = spatialMainGroups(state().layout.main)[5];
     if (empty === undefined) throw new Error('The explicit grid cell is missing.');
     state().setFocusedGroup(empty.id); state().focus(inspector.id); state().flush();
-    expect(loadWorkspace(USER, 'thread').kept?.focusedMainGroup).toBe(empty.id);
+    expect(loadWorkspace(USER).kept?.focusedMainGroup).toBe(empty.id);
     state().leave();
     const drawn = draw(requiredHref(a));
     await settled(drawn, requiredHref(a)); await focusBottom();
@@ -491,7 +527,7 @@ describe('sidebar movement carries presentation focus without changing content c
     await focusOutline(outline);
     expect(state().focusedMainTab).toBe(chat.id);
     act(() => { state().flush(); });
-    const saved = loadWorkspace(USER, 'thread').kept;
+    const saved = loadWorkspace(USER).kept;
     expect(saved?.focusedTab).toBe(outline.id); expect(saved?.focusedMainTab).toBe(chat.id); expect(saved?.activeContent).toBe(a.id);
     act(() => { state().reset(); });
     await settled(drawn, requiredHref(a));

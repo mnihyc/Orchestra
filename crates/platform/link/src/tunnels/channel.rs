@@ -21,7 +21,6 @@
 //! frames themselves go through a [`Wire`], which is a session for a machine
 //! and the backplane for the system's end of a terminal.
 
-use crate::framing::SessionOver;
 use crate::ports::{Datagram, UdpBudget};
 use crate::session::SessionSender;
 use crate::tunnels::flow::{Gauge, credit_due};
@@ -707,6 +706,70 @@ pub struct Tunnel {
     closed: Option<oneshot::Receiver<()>>,
 }
 
+/// The tunnel's single writer, with a non-writing check of its existing replay capacity.
+/// No other writer can consume that room while this owner checks authorization.
+pub struct TunnelWriter {
+    inner: tokio::io::WriteHalf<Tunnel>,
+    channel: Weak<Mutex<Channel>>,
+}
+impl std::fmt::Debug for TunnelWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelWriter").finish_non_exhaustive()
+    }
+}
+impl TunnelWriter {
+    /// Wait for actual buffer room without writing a byte. Readiness is for this
+    /// exclusive writer; closing the original channel can still make its write fail.
+    pub fn poll_write_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(channel) = self.channel.upgrade() else {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the tunnel ended",
+            )));
+        };
+        let mut channel = lock(&channel);
+        if let Some(ended) = &channel.ended {
+            return Poll::Ready(Err(ended_error(ended)));
+        }
+        if channel.udp.is_some() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP is sent as whole datagrams",
+            )));
+        }
+        if channel.send.eof_wanted {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the tunnel was shut down for writing",
+            )));
+        }
+        let room = channel
+            .options
+            .replay_bytes
+            .saturating_sub(channel.send.buffer.len());
+        if room == 0 || channel.phase == Phase::Opening {
+            channel.write_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+impl AsyncWrite for TunnelWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, data)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 /// A retirement handle that holds no socket owner alive.
 #[derive(Clone)]
 pub struct TunnelCloser {
@@ -744,6 +807,12 @@ impl std::fmt::Debug for Tunnel {
 }
 
 impl Tunnel {
+    /// Split this original socket once, retaining its single native buffer writer.
+    pub fn into_halves(self) -> (tokio::io::ReadHalf<Self>, TunnelWriter) {
+        let channel = Arc::downgrade(&self.channel);
+        let (reader, inner) = tokio::io::split(self);
+        (reader, TunnelWriter { inner, channel })
+    }
     /// A weak retirement handle for current-authority and lifecycle reconciliation.
     #[must_use]
     pub fn closer(&self) -> TunnelCloser {
@@ -2207,7 +2276,7 @@ impl HubShared {
                 cid,
                 inside,
             }))
-            .map_err(|SessionOver| OpenError::Interrupted)?;
+            .map_err(|_| OpenError::Interrupted)?;
         Ok(Tunnel::new(channel, events_rx))
     }
 
@@ -2341,4 +2410,85 @@ where
     B: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::io::copy_bidirectional(a, b).await
+}
+
+#[cfg(test)]
+mod write_ready_tests {
+    #![allow(clippy::unwrap_used, reason = "test assertions fail by panicking")]
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[derive(Default)]
+    struct Sent(Mutex<Vec<Bytes>>);
+    impl Wire for Sent {
+        fn control(&self, _: u32, _: ChannelFrame) -> bool {
+            true
+        }
+        fn data(&self, _: u32, _: u64, payload: Bytes) -> bool {
+            lock(&self.0).push(payload);
+            true
+        }
+        fn data_frame_bytes(&self) -> usize {
+            MAX_WRITE_BYTES
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_writer_waits_for_actual_replay_room_without_writing_or_trusting_a_spurious_wake()
+     {
+        let (channel, events) = Channel::make(
+            TunnelKind::Rfb,
+            "rfb".into(),
+            true,
+            ChannelOptions {
+                window_bytes: 1,
+                replay_bytes: 1,
+                resumable: true,
+            },
+            None,
+        );
+        let sent = Arc::new(Sent::default());
+        lock(&channel).attach(sent.clone(), 1, new_id());
+        let tunnel = Tunnel::new(channel.clone(), events);
+        let (_reader, mut writer) = tunnel.into_halves();
+        assert!(matches!(
+            std::future::poll_fn(|cx| Poll::Ready(writer.poll_write_ready(cx))).await,
+            Poll::Ready(Ok(()))
+        ));
+        assert!(
+            lock(&sent.0).is_empty(),
+            "checking readiness emits no native bytes"
+        );
+        writer.write_all(b"A").await.unwrap();
+        assert_eq!(lock(&sent.0).as_slice(), &[Bytes::from_static(b"A")]);
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(writer.poll_write_ready(cx)))
+                .await
+                .is_pending()
+        );
+        lock(&channel).write_waker.take().unwrap().wake();
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(writer.poll_write_ready(cx)))
+                .await
+                .is_pending(),
+            "a wake cannot stand in for actual existing replay capacity"
+        );
+        assert_eq!(lock(&channel).send.buffer.len(), 1);
+        lock(&channel).on_ack(1);
+        assert!(matches!(
+            std::future::poll_fn(|cx| Poll::Ready(writer.poll_write_ready(cx))).await,
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(
+            lock(&sent.0).len(),
+            1,
+            "room still publishes nothing until the owner writes"
+        );
+        lock(&channel).on_credit(1);
+        writer.write_all(b"B").await.unwrap();
+        assert_eq!(
+            lock(&sent.0).as_slice(),
+            &[Bytes::from_static(b"A"), Bytes::from_static(b"B")]
+        );
+    }
 }

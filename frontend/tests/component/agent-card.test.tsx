@@ -41,7 +41,7 @@ describe('an agent’s identity', () => {
     await screen.findByRole('button', { name: 'Other agent' });
     await userEvent.tab();
     await userEvent.keyboard('{Enter}');
-    expect(await screen.findByText('The agent’s thread is private to you. Its runtime details are not shown.')).toBeVisible();
+    expect(await screen.findByText('You cannot view this agent’s thread, so its environment and model are not shown.')).toBeVisible();
     expect(lookup).not.toHaveBeenCalled();
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
