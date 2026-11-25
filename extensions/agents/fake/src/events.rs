@@ -475,6 +475,9 @@ impl Emitter {
     pub async fn lost(&self, reason: &str) {
         self.request_ended("session_lost", None, false).await;
         self.send(SessionEvent::SessionLost(SessionLost {
+            expected: false,
+            opening_id: self.live.spec.opening_id,
+            uncertain: false,
             reason: reason.to_owned(),
         }))
         .await;
@@ -915,8 +918,9 @@ pub fn turn_error(code: &str, message: &str, retryable: bool) -> TurnError {
 
 /// The event that tells the host the session opened.
 #[must_use]
-pub fn session_opened(native_session_ref: &str, resumed: bool) -> SessionEvent {
+pub fn session_opened(opening_id: Id, native_session_ref: &str, resumed: bool) -> SessionEvent {
     SessionEvent::SessionOpened(SessionOpenedEvent {
+        opening_id,
         native_session_ref: native_session_ref.to_owned(),
         resumed,
     })
@@ -926,6 +930,7 @@ pub fn session_opened(native_session_ref: &str, resumed: bool) -> SessionEvent {
 pub async fn announce(sink: &EventSink, thread: ThreadId, segment: Id, event: SessionEvent) {
     let _ = sink
         .emit(AdapterEvent::Session {
+            native_opening_id: None,
             thread_id: thread,
             segment_id: segment,
             event,

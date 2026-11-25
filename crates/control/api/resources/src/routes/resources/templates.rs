@@ -213,14 +213,25 @@ async fn check_spec(
     let found = drivers_of(&reported)
         .into_iter()
         .find(|found| found.name == driver);
+    // A driver that no host has loaded has no schema to check against: the person is told so, and how a
+    // host loads one, rather than that a machine is offline.
+    let found = found.ok_or_else(|| {
+        invalid(
+            "driver",
+            &format!(
+                "no host has loaded this driver; {}",
+                orch_engine::places::DRIVER_LOADING
+            ),
+        )
+    })?;
     let schema = found
-        .as_ref()
-        .and_then(|found| found.descriptor.get("spec_schemas"))
+        .descriptor
+        .get("spec_schemas")
         .and_then(|schemas| schemas.get(kind))
         .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::SourceOffline,
-                "this driver's schema for this pool has not been reported",
+            invalid(
+                "kind",
+                "the hosts that loaded this driver cannot make this kind of template",
             )
         })?;
     let mut errors = match orch_plugin::schema::validate(schema, spec) {

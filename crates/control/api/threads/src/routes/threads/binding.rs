@@ -88,6 +88,8 @@ use orch_api_contract::binding::BindingAgent;
 
 use orch_api_contract::binding::BindingCanCreate;
 
+use orch_api_contract::binding::BindingDefaultEnvironment;
+
 use orch_api_contract::binding::BindingDefaults;
 
 use orch_api_contract::binding::BindingEnvironment;
@@ -98,7 +100,7 @@ use orch_api_contract::binding::BindingOptions;
 
 use orch_api_contract::binding::BindingProgramReport;
 
-use orch_api_contract::binding::BindingProvider;
+use orch_api_contract::binding::{BindingProvider, BindingProviderSetup};
 
 use orch_api_contract::binding::CredentialHolder;
 
@@ -153,8 +155,6 @@ use orch_api_contract::resources::ProviderRef;
 use orch_api_contract::settings::ModelOption;
 
 use orch_api_contract::settings::ModelOptionReason;
-
-use orch_api_contract::settings::ModelParameters;
 
 use orch_api_contract::threads::Thread;
 
@@ -214,7 +214,7 @@ use orch_engine::binding::RebindError;
 
 use orch_engine::binding::Replace;
 
-use orch_engine::harnesses::descriptor_of;
+use orch_engine::harnesses::current_descriptor;
 
 use orch_engine::models::allowed_by;
 
@@ -230,7 +230,7 @@ use orch_settings::get as setting;
 
 use orch_settings_contract::registry::keys;
 
-use orch_types::Id;
+use orch_types::{Id, Json};
 
 use serde::Serialize;
 
@@ -354,17 +354,13 @@ async fn rebind_failed(conn: &mut Conn, thread: Id, error: RebindError) -> ApiEr
             "the thread is in no environment yet, and a binding is worked out in one",
         )
         .with("reason", "no_environment"),
+        RebindError::AgentStartFailed(policy) => super::harness_start_failed(policy.as_deref()),
         RebindError::AgentNotReported => ApiError::new(
             ErrorCode::BindingIncompatible,
             "the agent profile has not reported what its harness is",
         )
         .with("reason", HARNESS_UNREPORTED),
-        RebindError::ModelNotAllowed(model) => ApiError::new(
-            ErrorCode::ModelNotAllowed,
-            format!("the model {model} is not available here"),
-        )
-        .with("reason", "model")
-        .with("model", model),
+        RebindError::ModelNotAllowed(model, why) => super::model_refusal(&model, why),
         RebindError::EffortNotListed(effort) => ApiError::new(
             ErrorCode::ModelNotAllowed,
             format!("the model does not take the effort {effort}"),
@@ -451,7 +447,20 @@ async fn defaults_of(
         agent_id: id(keys::AGENT_DEFAULT_AGENT_ID),
         model_name: value(keys::AGENT_MODEL),
         effort: value(keys::AGENT_EFFORT),
-        locked: found.iter().any(|setting| setting.locked_by.is_some()),
+        locks: orch_api_contract::binding::BindingDefaultLocks {
+            provider: found.iter().any(|setting| {
+                setting.key == keys::AGENT_DEFAULT_PROVIDER_ID && setting.locked_by.is_some()
+            }),
+            agent: found.iter().any(|setting| {
+                setting.key == keys::AGENT_DEFAULT_AGENT_ID && setting.locked_by.is_some()
+            }),
+            model: found
+                .iter()
+                .any(|setting| setting.key == keys::AGENT_MODEL && setting.locked_by.is_some()),
+            effort: found
+                .iter()
+                .any(|setting| setting.key == keys::AGENT_EFFORT && setting.locked_by.is_some()),
+        },
     })
 }
 
@@ -535,6 +544,7 @@ fn arrangement_view(
         tool_set: isolation.tool_set.clone(),
         executor_ref: executor_ref.clone(),
         isolation: Isolation {
+            translation: isolation.translation,
             kind,
             harness_runs_in: if isolation.harness_with_provider {
                 HarnessPlace::Provider
@@ -586,6 +596,26 @@ fn model_options(
     settings: &Resolved,
     entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
 ) -> ApiResult<Vec<ModelOption>> {
+    let mut options = model_options_for(
+        rows,
+        settings,
+        entries,
+        orch_access_contract::permissions::ProviderUsePurpose::Work,
+    )?;
+    options.retain(|model| {
+        model.purpose.as_ref().is_none_or(|purpose| {
+            purpose.supports_purpose(orch_provider_contract::models::ModelPurpose::Generation)
+        })
+    });
+    Ok(options)
+}
+
+fn model_options_for(
+    rows: Vec<orch_db::queries::resources::ProviderModelRow>,
+    settings: &Resolved,
+    entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
+    purpose: orch_access_contract::permissions::ProviderUsePurpose,
+) -> ApiResult<Vec<ModelOption>> {
     rows.into_iter()
         .map(|row| {
             let reason = if !row.enabled {
@@ -597,16 +627,46 @@ fn model_options(
             {
                 Some(ModelOptionReason::ExcludedByPolicy)
             } else if entries.is_some_and(|entries| {
+                !entries.is_empty()
+                    && !entries.iter().any(|entry| entry.allows_purpose(purpose))
+                    && entries.iter().any(|entry| {
+                        entry.allows_purpose(match purpose {
+                            orch_access_contract::permissions::ProviderUsePurpose::Ask => {
+                                orch_access_contract::permissions::ProviderUsePurpose::Work
+                            }
+                            orch_access_contract::permissions::ProviderUsePurpose::Work => {
+                                orch_access_contract::permissions::ProviderUsePurpose::Ask
+                            }
+                        })
+                    })
+            }) {
+                Some(match purpose {
+                    orch_access_contract::permissions::ProviderUsePurpose::Work => {
+                        ModelOptionReason::SharedForAskOnly
+                    }
+                    orch_access_contract::permissions::ProviderUsePurpose::Ask => {
+                        ModelOptionReason::SharedForOtherWorkOnly
+                    }
+                })
+            } else if entries.is_some_and(|entries| {
                 !entries.iter().any(|entry| {
-                    orch_authz::options::allows_model(entry, &row.model_name, &row.groups)
+                    orch_authz::options::entry_allows_for(
+                        entry,
+                        &orch_authz::options::Wanted {
+                            model: Some((&row.model_name, &row.groups)),
+                            ..Default::default()
+                        },
+                        purpose,
+                    )
                 })
             }) {
                 Some(ModelOptionReason::ExcludedByEntry)
             } else {
                 None
             };
-            let parameters: ModelParameters =
-                orch_provider_contract::models::composed_model_parameters(
+            let (parameters, purpose) =
+                orch_provider_contract::models::composed_model_with_purpose(
+                    &row.model_name,
                     &row.parameters,
                     &row.groups,
                     &row.option_layers,
@@ -614,6 +674,7 @@ fn model_options(
                 )
                 .map_err(ApiError::internal)?;
             Ok(ModelOption {
+                purpose: Some(purpose),
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups.clone(),
                 display_name: if row.display_name.is_empty() {
@@ -662,6 +723,7 @@ struct Ground<'a> {
     offers: Option<&'a EnvironmentOffers>,
     orch_tools: &'a OrchToolsOf,
     scope: Option<&'a NodeRef>,
+    translation_scope: Option<&'a NodeRef>,
 }
 
 /// The providers the caller can see, each with whether they may use it, its models, and the
@@ -683,6 +745,7 @@ struct ChoiceProjection {
 async fn provider_candidates(
     conn: &mut Conn,
     principal: &Principal,
+    work: &Principal,
     thread: Id,
     bounds: Option<&dyn choice_window::Bounds>,
 ) -> ApiResult<ProviderCandidates> {
@@ -714,7 +777,7 @@ async fn provider_candidates(
     let may_use = choice_window::select(
         conn,
         &choice_window::Usable {
-            principal,
+            principal: work,
             kind: ResourceKind::Provider,
             thread,
             policies: &policies,
@@ -726,7 +789,7 @@ async fn provider_candidates(
     let may_use_agent = choice_window::select(
         conn,
         &choice_window::Usable {
-            principal,
+            principal: work,
             kind: ResourceKind::Agent,
             thread,
             policies: &policies,
@@ -834,7 +897,9 @@ async fn provider_inputs(
             .await?
             .filter(|row| row.deleted_at.is_none())
         {
-            let descriptor = descriptor_of(&row).map_err(ApiError::internal)?;
+            let descriptor = current_descriptor(conn, &row)
+                .await
+                .map_err(ApiError::internal)?;
             agent_rows.push((row, descriptor));
         }
     }
@@ -879,7 +944,7 @@ async fn providers_of(
     app: &crate::state::AppState,
     ground: &Ground<'_>,
 ) -> ApiResult<Vec<BindingProvider>> {
-    let candidates = provider_candidates(conn, principal, ground.thread, None).await?;
+    let candidates = provider_candidates(conn, principal, principal, ground.thread, None).await?;
     providers_from(conn, principal, app, ground, &candidates, None, None).await
 }
 
@@ -1020,8 +1085,19 @@ async fn providers_from(
             })
             .unwrap_or_default();
         let reason = if let Some(granted) = granted {
-            let _ = granted;
-            allowing.is_empty().then_some(NOT_ALLOWED_WHERE)
+            allowing.is_empty().then(|| {
+                if granted.allows(&orch_authz::options::Wanted::default()) {
+                    NOT_ALLOWED_WHERE
+                } else if granted.each.iter().any(|entry| {
+                    entry
+                        .provider
+                        .allows_purpose(orch_access_contract::permissions::ProviderUsePurpose::Ask)
+                }) {
+                    "shared_for_ask_only"
+                } else {
+                    NO_USE
+                }
+            })
         } else if each.resource.disabled {
             Some(DISABLED)
         } else if each.resource.subscription.is_some()
@@ -1059,8 +1135,36 @@ async fn providers_from(
             } else {
                 allowing.clone()
             };
+        let model_rows = models_of_provider(conn, id).await?;
+        let holds = |permission| each.held.iter().any(|grant| grant.permission == permission);
+        let setup = if row.status == "needs_setup" && holds(Permission::ProviderView) {
+            let credential = row.facts.get("credential");
+            let yields = credential
+                .and_then(|fact| fact.get("yields"))
+                .and_then(Json::as_str);
+            let expired = credential
+                .and_then(|fact| fact.get("expires_at"))
+                .and_then(Json::as_str)
+                .and_then(|end| end.parse::<orch_types::Time>().ok())
+                .is_some_and(|end| end <= principal.now());
+            if row.kind == "subscription" && expired && matches!(yields, Some("key" | "token")) {
+                Some(BindingProviderSetup::SignInLapsed {
+                    can_sign_in: holds(Permission::ProviderManage),
+                })
+            } else if row.kind == "subscription"
+                && (expired || !matches!(yields, Some("login" | "token")))
+            {
+                Some(BindingProviderSetup::NeedsSignIn)
+            } else if model_rows.iter().all(|model| !model.enabled) {
+                Some(BindingProviderSetup::NeedsModel)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let models = model_options(
-            models_of_provider(conn, id).await?,
+            model_rows,
             ground.settings,
             granted.map(|_| for_models.as_slice()),
         )?;
@@ -1111,6 +1215,7 @@ async fn providers_from(
                             .to_owned(),
                     ),
                     program_report: report,
+                    approval_resolution: None,
                     arrangements: Vec::new(),
                 });
                 continue;
@@ -1149,7 +1254,17 @@ async fn providers_from(
                                 agent,
                                 descriptor,
                                 &orch_tools,
-                                ground.scope,
+                                if !ground.settings.translation_allowed
+                                    && option
+                                        .arrangement
+                                        .as_ref()
+                                        .and_then(|chosen| chosen.protocol.as_ref())
+                                        .is_some_and(|protocol| !row.protocols.contains(protocol))
+                                {
+                                    ground.translation_scope
+                                } else {
+                                    ground.scope
+                                },
                             )
                         })
                         .collect::<ApiResult<Vec<_>>>()?
@@ -1183,6 +1298,7 @@ async fn providers_from(
                 usable: reason.is_none(),
                 reason,
                 program_report: report,
+                approval_resolution: None,
                 arrangements,
             });
         }
@@ -1209,6 +1325,7 @@ async fn providers_from(
                 .and_then(|id| owners.get(&id).cloned()),
             grouping: metadata,
             provider: name,
+            setup,
             usable: reason.is_none() && policy_source.is_none(),
             reason: if policy_source.is_some() {
                 Some("provider_not_allowed".to_owned())
@@ -1240,6 +1357,7 @@ struct EnvironmentCandidates {
 async fn environment_candidates(
     conn: &mut Conn,
     principal: &Principal,
+    work: &Principal,
     thread: Id,
     required: Permission,
     bounds: Option<&dyn choice_window::Bounds>,
@@ -1251,7 +1369,7 @@ async fn environment_candidates(
     let managed = choice_window::select(
         conn,
         &choice_window::Usable {
-            principal,
+            principal: work,
             kind: ResourceKind::Environment,
             thread,
             policies: &policies,
@@ -1289,7 +1407,8 @@ async fn environments_of(
     thread: Id,
     required: Permission,
 ) -> ApiResult<Vec<BindingEnvironment>> {
-    let candidates = environment_candidates(conn, principal, thread, required, None).await?;
+    let candidates =
+        environment_candidates(conn, principal, principal, thread, required, None).await?;
     environments_from(conn, principal, app, topic, required, &candidates, None).await
 }
 
@@ -1317,6 +1436,51 @@ fn environment_reason(
     }
 }
 
+/// The environment the nearest setting of `env.default_id` names for the threads started at `topic`, and the node
+/// whose setting it is: the topic itself, else its project, else its org.
+async fn named_default(conn: &mut Conn, topic: Id) -> ApiResult<Option<(Id, Option<Id>)>> {
+    let resolved = orch_settings::resolve(conn, Place::Node(topic), keys::ENV_DEFAULT_ID)
+        .await
+        .map_err(ApiError::internal)?
+        .resolved;
+    let Some(value) = resolved.value else {
+        return Ok(None);
+    };
+    let environment = serde_json::from_value::<Id>(value).map_err(ApiError::internal)?;
+    Ok(Some((environment, resolved.source.node)))
+}
+
+/// Why a thread cannot be started in the environment that is named the default, when it cannot: the reason its row
+/// carries, or that the caller may not see it at all.
+const ENVIRONMENT_NOT_SEEN: &str = "environment_not_seen";
+
+/// The environment that is named the default at `topic`, where its setting is when that is above the topic, and why
+/// the caller cannot use it when they cannot, so that a default that is passed over is said and not dropped in silence.
+async fn default_environment_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    listed: &[BindingEnvironment],
+    names: &crate::routes::access::page::NameBounds,
+) -> ApiResult<Option<BindingDefaultEnvironment>> {
+    let Some((environment, source)) = named_default(conn, topic).await? else {
+        return Ok(None);
+    };
+    let from = match source.filter(|node| *node != topic) {
+        Some(node) => names.refs(conn, principal, &[node]).await?.remove(&node),
+        None => None,
+    };
+    let reason = match listed.iter().find(|row| row.environment.id == environment) {
+        Some(row) => row.reason.clone(),
+        None => Some(ENVIRONMENT_NOT_SEEN.to_owned()),
+    };
+    Ok(Some(BindingDefaultEnvironment {
+        environment,
+        from,
+        reason,
+    }))
+}
+
 async fn environments_from(
     conn: &mut Conn,
     principal: &Principal,
@@ -1336,10 +1500,8 @@ async fn environments_from(
     let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let uses = history::environment_uses(conn, &ids, topic).await?;
     let hosts = environment_choice::hosts_of(conn, &ids).await?;
-    let default = environment_queries::default_for(conn, &ids)
+    let default = named_default(conn, topic)
         .await?
-        .into_iter()
-        .find(|(_, of)| *of == topic)
         .map(|(environment, _)| environment);
     let topic_name = thread_rows::node_name(conn, topic)
         .await?
@@ -1367,6 +1529,16 @@ async fn environments_from(
         .filter_map(|row| row.machine_id)
         .collect();
     let machines = machine_refs(app, conn, &machine_ids).await?;
+    let readable_ids: Vec<_> = machine_ids
+        .into_iter()
+        .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+        .collect();
+    let capacity = orch_api_base::routes::environments::places::machine_capacities(
+        conn,
+        principal,
+        &readable_ids,
+    )
+    .await?;
     let mut topic_ids: Vec<Id> = uses.iter().flat_map(|each| each.topics.clone()).collect();
     topic_ids.sort_unstable();
     topic_ids.dedup();
@@ -1401,9 +1573,16 @@ async fn environments_from(
         } else {
             2
         };
+        let machine = row
+            .machine_id
+            .filter(|_| row.placement == "connected")
+            .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+            .and_then(|id| machines.get(&id).cloned());
         listed.push((
             group,
             BindingEnvironment {
+                room: None,
+                capacity: machine.as_ref().and_then(|m| capacity.get(&m.id)).cloned(),
                 owner: Some(environment.owner.clone()),
                 grouping: {
                     let mut metadata = grouped
@@ -1437,13 +1616,7 @@ async fn environments_from(
                         name: name.clone(),
                         address: host_addresses.get(host).cloned().unwrap_or_default(),
                     }),
-                machine: row
-                    .machine_id
-                    .filter(|_| row.placement == "connected")
-                    .filter(|machine| {
-                        projection.is_none_or(|projection| projection.machines.contains(machine))
-                    })
-                    .and_then(|machine| machines.get(&machine).cloned()),
+                machine,
                 threads: used_here.map_or(0, |used| used.threads),
                 usable: reason.is_none(),
                 reason: reason.map(str::to_owned),
@@ -1462,6 +1635,20 @@ async fn environments_from(
     }
     // Stable: within a group the environments stay in the order they were made.
     listed.sort_by_key(|(group, _)| *group);
+    let sources: Vec<_> = listed
+        .iter()
+        .map(|(_, row)| {
+            (
+                row.environment.id,
+                row.host.as_ref().map(|h| h.id),
+                row.machine.as_ref().filter(|m| m.online).map(|m| m.id),
+            )
+        })
+        .collect();
+    let rooms = orch_db::queries::placement_room::for_environments(conn, &sources).await?;
+    for (_, row) in &mut listed {
+        row.room = rooms.get(&row.environment.id).copied();
+    }
     Ok(listed.into_iter().map(|(_, each)| each).collect())
 }
 
@@ -1794,6 +1981,12 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
             .remove(&node),
         None => None,
     };
+    let translation_scope = match settings.translation_scope {
+        Some(node) => node_view::refs(&mut conn, &principal, &[node], Policy::default())
+            .await?
+            .remove(&node),
+        None => None,
+    };
     let defaults = defaults_of(&mut conn, &principal, topic).await?;
     timing.phase("settings_and_environment");
     let providers = providers_of(
@@ -1807,6 +2000,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
             offers: offers.as_ref(),
             orch_tools: &orch_tools,
             scope: scope.as_ref(),
+            translation_scope: translation_scope.as_ref(),
         },
     )
     .await?;
@@ -1844,6 +2038,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
         providers,
         environments,
         environment_default,
+        default_environment: None,
         source,
         access,
         agent_access: None,

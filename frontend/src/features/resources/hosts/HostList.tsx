@@ -17,7 +17,7 @@ import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
 import { useHostActs } from '@/features/resources/hosts/acts';
 import { UpdateMark } from '@/features/resources/ComponentUpdate';
 import { oneOf } from '@/features/resources/search';
-import type { Host } from '@/generated/api-types';
+import type { HostListRow as Host } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { Meter } from '@/ui/Meter';
@@ -29,10 +29,11 @@ import { UserChip } from '@/ui/UserChip';
 export { HOST_STATES, type HostState, type HostsSearch };
 
 export function HostLink({ host, label = host.name }: { host: Pick<Host, 'id' | 'name'> & Partial<Host>; label?: string }) {
+  const { t } = useTranslation();
   return (
     <span className="flex min-w-0 flex-col gap-0.5"><ResourceName subject={{ kind: 'host', host }} asChild><Link to="/resources/hosts/$id" params={{ id: host.id }} className="truncate font-medium text-text hover:underline">
       {label}
-    </Link></ResourceName><ResourceHint subject={{ kind: 'host', host }} wrap /></span>
+    </Link></ResourceName>{host.bundled_with_server && <span className="text-sm text-text-muted">{t('hosts.serverHost.label')}</span>}<ResourceHint subject={{ kind: 'host', host }} wrap /></span>
   );
 }
 

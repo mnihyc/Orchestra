@@ -1,0 +1,2 @@
+web-e2e tests/e2e/human-check-admin.spec.ts --grep "the card with hcaptcha chosen at 400px in zh-CN/light" --repeat-each=5 --retries=0 --reporter=line
+web-e2e tests/e2e/workbench-grid.spec.ts --grep "160 tabs keep a bounded grid strip" --repeat-each=4 --retries=0 --reporter=line
