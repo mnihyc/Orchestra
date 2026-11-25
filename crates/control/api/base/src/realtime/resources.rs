@@ -31,6 +31,12 @@ use orch_realtime_contract::feeds::ResourceKind;
 
 use orch_types::Id;
 fn object(feed: &Feed) -> Option<ObjectRef> {
+    if let Feed::ProviderRow(id) = feed {
+        return Some(ObjectRef {
+            kind: ObjectKind::Provider,
+            id: *id,
+        });
+    }
     let Feed::Resource { kind, id } = feed else {
         return None;
     };
@@ -91,11 +97,19 @@ pub(crate) async fn decide(inner: &Inner, user: Id, feed: &Feed) -> Result<Acces
         return Ok(Access::Forbidden);
     };
     match orch_authz::resources::effective(&mut conn, &principal, object, Policy::default()).await {
-        Ok(effective) => Ok(if effective.held.is_empty() {
-            Access::Forbidden
-        } else {
-            Access::Allowed
-        }),
+        Ok(effective) => Ok(
+            if effective.held.is_empty()
+                || matches!(feed, Feed::ProviderRow(_))
+                    && !effective
+                        .held
+                        .iter()
+                        .any(|held| held.permission == Permission::ProviderView)
+            {
+                Access::Forbidden
+            } else {
+                Access::Allowed
+            },
+        ),
         Err(orch_authz::Error::NotFound(_)) => Ok(Access::NotFound),
         Err(orch_authz::Error::Suspended { .. } | orch_authz::Error::Archived { .. }) => {
             Ok(Access::Forbidden)

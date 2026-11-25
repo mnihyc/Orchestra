@@ -1163,3 +1163,112 @@ async fn somebody_who_left_the_org_no_longer_reads_its_chats_and_the_other_perso
         .problem();
     assert_eq!(started.code, ErrorCode::ChatNotAllowed);
 }
+
+#[tokio::test]
+async fn saved_chat_choices_are_resolved_in_one_native_batch_without_borrowing_membership() {
+    let room = Room::new().await;
+    let mut made = Vec::new();
+    for index in 0..13 {
+        made.push(
+            room.group(
+                &room.ada,
+                &[&room.bea],
+                Some(&format!("Saved destination {index}")),
+            )
+            .await
+            .base
+            .id,
+        );
+    }
+    let hidden = room
+        .group(&room.cai, &[&room.dee], Some("Private destination"))
+        .await
+        .base
+        .id;
+    let ids = format!("{},{},{hidden}", made[0], made[12]);
+    let first = room
+        .world
+        .app
+        .call(OrgChatList, &[&room.root])
+        .token(&room.ada.token)
+        .raw_query(&format!("scope=mine&ids={ids}&limit=1"))
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.items.len(), 1);
+    assert!([made[0], made[12]].contains(&first.items[0].base.id));
+    let next = first.next_cursor.as_ref().unwrap();
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("scope", "mine")
+        .append_pair("ids", &ids)
+        .append_pair("limit", "1")
+        .append_pair("cursor", next);
+    let second = room
+        .world
+        .app
+        .call(OrgChatList, &[&room.root])
+        .token(&room.ada.token)
+        .raw_query(&query.finish())
+        .send()
+        .await
+        .ok();
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(first.items[0].base.id, second.items[0].base.id);
+    assert!(second.next_cursor.is_none());
+    assert!([made[0], made[12]].contains(&second.items[0].base.id));
+    let unavailable = room
+        .world
+        .app
+        .call(OrgChatList, &[&room.root])
+        .token(&room.ada.token)
+        .raw_query(&format!("scope=mine&ids={hidden}"))
+        .send()
+        .await
+        .ok();
+    assert!(unavailable.items.is_empty());
+}
+
+#[tokio::test]
+async fn a_forward_destination_search_keeps_writable_place_chats_before_their_first_message() {
+    let room = Room::new().await;
+    let place = places::make_project(&room.world, &room.ada, room.root, "Empty destination")
+        .await
+        .base
+        .id;
+    let ordinary = room
+        .world
+        .app
+        .call(OrgChatList, &[&room.root])
+        .token(&room.ada.token)
+        .raw_query("scope=nodes&q=Empty%20destination&limit=1")
+        .send()
+        .await
+        .ok();
+    assert!(
+        ordinary.items.is_empty(),
+        "the activity list remains an activity list"
+    );
+    let choices = room
+        .world
+        .app
+        .call(OrgChatList, &[&room.root])
+        .token(&room.ada.token)
+        .raw_query("scope=nodes&include_empty=true&q=E&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(choices.items.len(), 1);
+    let exact = room
+        .world
+        .app
+        .call(OrgChatList, &[&room.root])
+        .token(&room.ada.token)
+        .raw_query("scope=nodes&include_empty=true&q=Empty%20destination&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(exact.items.len(), 1);
+    assert_eq!(exact.items[0].base.node.as_ref().unwrap().id, place);
+    assert!(exact.items[0].can.send);
+}
