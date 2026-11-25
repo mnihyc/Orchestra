@@ -7,6 +7,7 @@
  * whose block is gone is listed under "On text that was removed". Comments are beside the document and no
  * part of it: they are in no version.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { Check, MessageSquare, MessageSquarePlus, Pencil, RotateCcw, SendHorizontal, Trash2 } from 'lucide-react';
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from 'zustand';
@@ -523,8 +524,8 @@ function CommentsBody({ doc }: { doc: Document }) {
   const [discussionCursor, setDiscussionCursor] = useState<string | null>(null);
   const pagedDiscussions = state.discussions.size >= 50 || discussionCursor !== null;
   const discussionPage = useQuery({ ...discussionPageQuery(doc.id, show, discussionCursor, state.lastSeq), enabled: pagedDiscussions, placeholderData: (previous) => previous });
-  const setShow = (next: Show) => { setDiscussionCursor(null); changeShow(next); };
-  const setOrder = (next: Order) => { changeOrder(next); };
+  const setShow = carryDeviceChoice((next: Show) => { setDiscussionCursor(null); changeShow(next); }, changeShow);
+  const setOrder = carryDeviceChoice((next: Order) => { changeOrder(next); }, changeOrder);
   const me = client.session.getState().userId;
   const canComment = holds(doc.access, 'doc.comment') && !doc.archived && (doc.inspection === null || doc.inspection === undefined);
 

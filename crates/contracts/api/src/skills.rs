@@ -480,6 +480,8 @@ pub enum ThreadSkillFrom {
 /// A skill a thread's agent may use now, at the version it is given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadSkill {
+    /// The effective contributor whose Use was checked for this decision.
+    pub contributor: Id,
     /// The skill.
     pub skill_id: Id,
     /// The version it is given.
@@ -501,6 +503,8 @@ pub struct ThreadSkill {
 /// A skill that a thread's settings name but its agent is not given, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkippedSkill {
+    /// The effective contributor checked at selection time.
+    pub contributor: Id,
     /// The skill.
     pub skill_id: Id,
     /// Its name, where it is known.
@@ -521,6 +525,98 @@ pub struct ThreadSkills {
     pub skipped: Vec<SkippedSkill>,
 }
 
+/// Small actual-session state carried by the ordinary thread binding; no skill files or archives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSkillsSummary {
+    /// Immutable accepted session opening, used to fence detail pages.
+    pub session_revision: Id,
+    /// The segment that owns this session.
+    pub segment_id: Id,
+    /// When the session opening was actually accepted.
+    pub applied_at: Time,
+    /// Whether that accepted agent program takes skills.
+    pub supported: bool,
+    /// Skills actually given to this session.
+    pub selected: i64,
+    /// Named candidates skipped at this selection decision.
+    pub skipped: i64,
+}
+
+/// A currently readable skill identity, without source contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSkillRef {
+    pub id: Id,
+    pub name: String,
+}
+
+/// The exact accepted version, only where the skill's identity is currently readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSkillVersion {
+    pub id: Id,
+    pub number: i64,
+}
+
+/// Current safe projection of where this captured choice came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionSkillSource {
+    Place {
+        setting: Option<crate::settings::SettingSource>,
+    },
+    Personal,
+}
+
+/// Selection and omission are distinct; an unreadable version is not an unknown outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionSkillDecision {
+    Selected {
+        version: Option<SessionSkillVersion>,
+    },
+    Skipped {
+        reason: SkillSkip,
+    },
+}
+
+/// One reference-only captured decision, masked under current nested authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSkillEntry {
+    pub skill: Option<SessionSkillRef>,
+    pub contributor: Option<UserRef>,
+    pub source: SessionSkillSource,
+    pub decision: SessionSkillDecision,
+}
+
+/// A page of one immutable accepted session's decisions, never a resource's current latest version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadSessionSkills {
+    pub projection: crate::threads::continuations::ThreadContinuationProjection,
+    pub summary: SessionSkillsSummary,
+    pub entries: Page<SessionSkillEntry>,
+    /// Current proposal comparison, absent for an inapplicable or unreported program declaration.
+    pub next_session_changed: Option<bool>,
+    pub observed_at: Time,
+}
+
+/// Read a captured session under the same explicit continuation scope as its thread reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadSessionSkillsQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_id: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspect_deleted: Option<bool>,
+    pub segment_id: Id,
+    pub session_revision: Id,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Positive requested page size; the ordinary list default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// A newly accepted skill identity, without its existing-content projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillCreateReceipt {
@@ -535,6 +631,12 @@ crate::common::full_or_receipt! {
 }
 
 crate::endpoints! {
+    /// Actual accepted session skills under current thread and nested resource/source authority.
+    ThreadSessionSkillsGet: GET "/threads/{id}/session-skills", Permission("thread.view"), query ThreadSessionSkillsQuery, none, json ThreadSessionSkills, 200,
+        operation Op::variants(&[
+            Variant { name:"read", selector:"inspect_deleted is not true", facets:&[crate::operations::FacetSpec::required(Read,&[Object(K::Thread)],Target::PermissionObject)] },
+            Variant { name:"inspect_deleted", selector:"inspect_deleted is true; apply the stored thread restoration rule", facets:&[crate::operations::FacetSpec::required(Manage,&[Object(K::Thread)],Target::PermissionObject)] },
+        ]);
     /// Lists the skills the caller may see, of whatever org.
     SkillList: GET "/skills", User, query SkillListQuery, none, json Vec<Listed<Skill>>, 200,
         operation Op::facets(&READS.facets::<6>(Target::ResolvedCollection("results")));
@@ -649,6 +751,7 @@ mod tests {
     #[test]
     fn a_skill_named_by_the_settings_and_left_out_says_why() {
         let skipped = SkippedSkill {
+            contributor: Id::nil(),
             skill_id: Id::nil(),
             name: Some("pdf".to_owned()),
             reason: SkillSkip::NotUsable,
@@ -658,6 +761,7 @@ mod tests {
             serde_json::to_value(&skipped).unwrap(),
             json!({
                 "skill_id": Id::nil(),
+                "contributor": Id::nil(),
                 "name": "pdf",
                 "reason": "not_usable",
                 "from": { "kind": "place", "node_id": Id::nil() }

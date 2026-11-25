@@ -232,6 +232,9 @@ impl RuntimeClass {
 /// A runtime's name and what it is, as a screen shows the pair "Runs on · Runtime".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeIsolation {
+    /// Captured provenance of the assumptions; absent on a result that did not record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumptions: Option<RuntimeAssumptions>,
     /// The driver the unit runs on.
     pub driver: String,
     /// What the driver is called.
@@ -491,4 +494,29 @@ mod tests {
         assert_eq!(vm.risk_of("docker_inside", "high"), "medium");
         assert_eq!(vm.risk_of("kvm", "high"), "high");
     }
+}
+
+/// Provenance of the values used to describe this runtime's isolation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeAssumptions {
+    /// Where the effective boundary came from.
+    pub boundary_source: RuntimeAssumptionSource,
+    /// Where stop persistence came from; unknown is not a claim that files disappear.
+    pub stop_persistence_source: RuntimeAssumptionSource,
+    /// Where the runtime's additional memory came from; unknown is not measured zero.
+    pub overhead_source: RuntimeAssumptionSource,
+}
+
+/// A declaration or an explicit absence of knowledge, captured at the deciding operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAssumptionSource {
+    /// The selected, reported runtime class supplied the value.
+    RuntimeDeclaration,
+    /// The driver's reported confinement supplied the value.
+    DriverDeclaration,
+    /// The runtime class could not be resolved, so the implementation used its fallback.
+    UnknownRuntimeFallback,
+    /// No declaration supplied this value.
+    NotReported,
 }
