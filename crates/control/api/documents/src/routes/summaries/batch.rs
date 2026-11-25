@@ -34,6 +34,7 @@ impl native::Selected for Reader {
     type Reply = SummaryBatchReply;
     const DECLARATION: &'static Declaration<Role> = &declarations::RESOURCE_BATCH;
     const WATCH_ORDINARY: bool = true;
+    const MOVES: native::Moves = native::Moves::Publish;
 
     fn select<'a>(
         ctx: &'a Ctx,
@@ -283,6 +284,34 @@ impl native::Selected for Reader {
                     .iter()
                     .map(|identity| identity.fact())
                     .eq(fresh.targets.iter().map(|identity| identity.fact())))
+        })
+    }
+    /// Every target that was read is still read from the same sources; one that has since become
+    /// readable, or whose paragraph has moved, changes nothing about what the person may read.
+    fn access_held<'a>(
+        _: &'a Ctx,
+        _: &'a mut Conn,
+        _: &'a Principal,
+        _: &'a Self::Query,
+        old: &'a View,
+        fresh: &'a View,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            Ok(old.complete.iter().all(|old| {
+                fresh
+                    .complete
+                    .iter()
+                    .find(|fresh| fresh.identity.target() == old.identity.target())
+                    .is_some_and(|fresh| super::same_sources(old, fresh))
+            }) && old
+                .targets
+                .iter()
+                .all(|old| fresh.targets.iter().any(|fresh| fresh.fact() == old.fact()))
+                && old.inputs.iter().all(|input| fresh.inputs.contains(input))
+                && old
+                    .providers
+                    .iter()
+                    .all(|provider| fresh.providers.contains(provider)))
         })
     }
     fn after_read<'a>(

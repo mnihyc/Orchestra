@@ -44,7 +44,8 @@ async function clearDraftScopes(): Promise<void> {
   // Unsaved words correctly survive unmount. End this fixture's reader through
   // the existing session boundary rather than weakening the product's guard.
   client.session.setState({ status: 'signed_in', userId: 'personal-chat-fixture' });
-  const logout = vi.spyOn(client.api, 'POST').mockResolvedValue({ data: undefined, response: new Response(null, { status: 204 }) });
+  const logoutApi: { POST(path: '/auth/logout'): Promise<{ response: Response }> } = client.api;
+  const logout = vi.spyOn(logoutApi, 'POST').mockResolvedValue({ response: new Response(null, { status: 204 }) });
   try { await client.signOut(); } finally { logout.mockRestore(); }
 }
 

@@ -49,11 +49,23 @@ pub async fn sent_page(
     before: Option<(DateTime<Utc>, Id)>,
     limit: i64,
 ) -> Result<Vec<SummaryRow>, DbError> {
+    sent_page_search(conn, org, before, limit, &[]).await
+}
+
+/// The immutable sent-row names and accepted issuer attribution are matched before paging.
+pub async fn sent_page_search(
+    conn: &mut Conn,
+    org: Option<Id>,
+    before: Option<(DateTime<Utc>, Id)>,
+    limit: i64,
+    patterns: &[String],
+) -> Result<Vec<SummaryRow>, DbError> {
     Ok(sqlx::query_as("SELECT id,org_id,org_name,title,sender_id,sender,created_at,recipient_count,delivery_job_id
         FROM admin_messages WHERE org_id IS NOT DISTINCT FROM $1
           AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3::uuid))
+          AND concat_ws(' ',title,org_name,sender->>'display_name',sender->>'username') ILIKE ALL($5::text[])
         ORDER BY created_at DESC,id DESC LIMIT $4")
-        .bind(org).bind(before.map(|(at,_)|at)).bind(before.map(|(_,id)|id)).bind(limit)
+        .bind(org).bind(before.map(|(at,_)|at)).bind(before.map(|(_,id)|id)).bind(limit).bind(patterns)
         .fetch_all(conn).await?)
 }
 

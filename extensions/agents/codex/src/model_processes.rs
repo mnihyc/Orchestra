@@ -88,6 +88,9 @@ impl CodexAdapter {
         &mut self,
         spec: &SessionSpec,
     ) -> Result<Option<Identity>, AdapterError> {
+        if let Some(unit) = self.unit_work.get(&spec.settings.thread_id) {
+            return Ok(Some(unit.identity));
+        }
         let identity = match model_catalogue::document(spec) {
             Some(document) => {
                 let ProviderAccess::Forwarded { provider_id, .. } = spec.provider else {
@@ -107,10 +110,14 @@ impl CodexAdapter {
                 {
                     Self::stop_running(running).await
                 }
+                let owned: std::collections::BTreeSet<_> =
+                    self.unit_work.values().map(|unit| unit.identity).collect();
                 let idle: Vec<_> = self
                     .model_processes
                     .iter()
-                    .filter(|(key, running)| **key != identity && running.shared.quiescent())
+                    .filter(|(key, running)| {
+                        **key != identity && !owned.contains(*key) && running.shared.quiescent()
+                    })
                     .map(|(key, _)| *key)
                     .collect();
                 for key in idle {
@@ -169,7 +176,9 @@ impl CodexAdapter {
             .unwrap_or(control.shared.outputs().directory())
             .join("model-catalogues");
         let catalogue = Catalogue::write(identity.provider, document, &directory)?;
-        let running = self.launch_model(start, events, Some(catalogue)).await?;
+        let running = self
+            .launch_model(start, events, Some(catalogue), None)
+            .await?;
         self.model_processes.insert(identity, running);
         Ok(())
     }

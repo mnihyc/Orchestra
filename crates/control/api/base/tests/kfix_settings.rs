@@ -34,6 +34,7 @@ async fn put(
         .call(NodeSettingSet, &[&node, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -207,6 +208,7 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         .call(NodeSettingSet, &[&project, &"chat.enabled"])
         .token(&rules)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
