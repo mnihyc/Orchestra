@@ -1,0 +1,1572 @@
+//! Opening contention and tuple locks taken during an idle installation minute.
+use super::{
+    hotspots::Capture,
+    page_budgets::fixture,
+    support::{Statements, World},
+};
+use crate::places::Who;
+use orch_api_contract::threads::ThreadOpeningGet;
+use orch_types::Id;
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
+
+/// The server's share of the owner's one-second bound for a person at a 200 ms round trip: the first screen
+/// takes two round trips and the page's own drawing, which leave about 250 ms for the server's answer. The
+/// installed stack's measurement at 200 ms after an install decides; this bound holds the hosted runner to that
+/// share (it measured 140 and 175 ms against an earlier 100 ms).
+const SERVER_SHARE: Duration = Duration::from_millis(250);
+// Capture the work behind a first screen that misses the 100 ms opening target.
+const TRACE_OPENING_AFTER: Duration = Duration::from_millis(100);
+
+#[tokio::test]
+async fn ten_simultaneous_openings_finish_within_half_again_the_time_of_one() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let open = || async {
+        let response = world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send()
+            .await;
+        let id = response.headers[orch_api_contract::common::REQUEST_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        (response.ok(), id)
+    };
+    let (expected, _) = open().await;
+    let mut solo = Vec::new();
+    for _ in 0..3 {
+        let start = Instant::now();
+        let (reply, _) = open().await;
+        solo.push(start.elapsed());
+        assert_eq!(reply.sync, expected.sync);
+    }
+    solo.sort_unstable();
+    let released = Instant::now();
+    let results = futures::future::join_all((0..10).map(|_| async {
+        let trace = orch_api_core::testing::Boundaries::new();
+        let reply = orch_api_core::testing::follow(trace.clone(), open()).await;
+        (released.elapsed(), reply, trace)
+    }))
+    .await;
+    let times: Vec<_> = results.iter().map(|(time, _, _)| *time).collect();
+    eprintln!("opening solo={solo:?} ten={times:?}");
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, _, trace)| trace.entered("ThreadOpeningGet", "selected.read"))
+            .count(),
+        1,
+        "each request authenticates, and only one builds the opening"
+    );
+    for (_, _, trace) in &results {
+        eprintln!("opening phases {:?}", trace.all(released));
+    }
+    let budget = solo[1] + solo[1] / 2;
+    if times.iter().any(|time| *time > budget) {
+        use crate::support::failure_trace::FailureTrace;
+        use tracing::instrument::WithSubscriber;
+
+        // Repeat only a failed batch so subscriber overhead does not affect the comparison.
+        // Its SQL and pool events distinguish a slow shared read from a slow fresh View check.
+        let trace = FailureTrace::with_tail("Slow concurrent team opening", budget, 1024);
+        futures::future::join_all((0..10).map(|_| open()))
+            .with_subscriber(trace.recorder())
+            .await;
+    }
+    let reference = serde_json::to_value(&results[0].1.0).unwrap();
+    for (time, (reply, id), _) in results {
+        let mut expected_wire = reference.clone();
+        for name in ["screen", "gateway", "pending_agent_schedules"] {
+            if expected_wire[name]["status"] == "failed" {
+                expected_wire[name]["problem"]["request_id"] = serde_json::json!(id);
+            }
+        }
+        assert_eq!(serde_json::to_value(&reply).unwrap(), expected_wire);
+
+        assert_eq!(reply.sync, expected.sync);
+        assert_eq!(reply.draft, expected.draft);
+        assert!(time <= budget, "solo={solo:?}, batch={times:?}");
+    }
+}
+
+fn locks(plan: &serde_json::Value) -> u64 {
+    let own = if plan["Node Type"] == "LockRows" {
+        plan["Actual Rows"].as_u64().unwrap() * plan["Actual Loops"].as_u64().unwrap()
+    } else {
+        0
+    };
+    own + plan["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(locks)
+        .sum::<u64>()
+}
+
+#[tokio::test]
+async fn an_ordinary_opening_reads_its_credential_without_pinning_any_rows() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send(),
+    )
+    .await;
+    reply.ok();
+    assert!(work.totals.statements > 0);
+    for sql in work.statements.keys() {
+        let words = sql
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            ![
+                "FOR UPDATE",
+                "FOR NO KEY UPDATE",
+                "FOR KEY SHARE",
+                "FOR SHARE"
+            ]
+            .iter()
+            .any(|clause| words.contains(clause)),
+            "opening locks rows: {sql}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_quiet_minute_lists_its_statements_and_takes_no_row_locks() {
+    let world = World::for_requests().await;
+    let app = &world.app.app;
+    let capture = Capture::default();
+    Capture::configure(&app.db, true).await;
+    capture.verify(&app.db).await;
+    let mut connections = Vec::new();
+    for _ in 0..app.db.pool().options().get_max_connections() {
+        connections.push(app.db.pool().acquire().await.unwrap());
+    }
+    for conn in &mut connections {
+        sqlx::query("SET auto_explain.log_min_duration=0")
+            .execute(&mut **conn)
+            .await
+            .unwrap();
+    }
+    drop(connections);
+    // All tasks of this isolated server run on this current-thread test runtime.
+    let _subscriber = tracing::subscriber::set_default(capture.clone());
+    app.link.start().await.unwrap();
+    app.engine.start();
+    app.realtime.start(app.engine.clone());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while app.engine.sweeps_run() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(capture.take());
+    // Prove the collector sees actual locked tuples before observing the idle minute.
+    capture
+        .run(
+            sqlx::query("SELECT slot FROM document_notice_slots ORDER BY slot LIMIT 1 FOR UPDATE")
+                .fetch_all(app.db.pool()),
+        )
+        .await
+        .unwrap();
+    assert!(capture.take().iter().any(|plan| {
+        plan.body["Query Text"]
+            .as_str()
+            .is_some_and(|sql| sql.starts_with("SELECT slot FROM document_notice_slots"))
+            && locks(&plan.body["Plan"]) == 1
+    }));
+    let start = Instant::now();
+    let before = app.engine.sweeps_run();
+    let mut statements = BTreeMap::<String, (usize, u64)>::new();
+    while start.elapsed() < Duration::from_secs(60) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        world.advance(chrono::Duration::seconds(1));
+        for plan in capture.take() {
+            let sql = plan.body["Query Text"].as_str().unwrap().to_owned();
+            let count = statements.entry(sql).or_default();
+            count.0 += 1;
+            count.1 += locks(&plan.body["Plan"]);
+        }
+    }
+    app.engine.stop();
+    app.link.shutdown();
+    app.realtime.stop().await;
+    assert!(app.engine.sweeps_run() > before);
+    assert!(
+        statements
+            .keys()
+            .any(|sql| sql.contains("document_notice_slots") || sql.contains("document_notices")),
+        "quiet runtime must inspect the notice queue"
+    );
+    for (sql, (calls, locked)) in &statements {
+        eprintln!("quiet calls={calls} locked={locked} sql={sql}");
+    }
+    assert!(
+        statements.values().all(|(_, locked)| *locked == 0),
+        "an idle sweep locked a row"
+    );
+}
+
+#[tokio::test]
+async fn showing_more_messages_in_a_team_opening_takes_the_same_number_of_history_reads() {
+    use orch_api_contract::threads::ThreadOpeningGetQuery;
+
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let mut samples = Vec::new();
+    for limit in [1, 40] {
+        let (reply, work) = Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .query(&ThreadOpeningGetQuery {
+                    limit: Some(limit),
+                    ..Default::default()
+                })
+                .send(),
+        )
+        .await;
+        let opened = reply.ok();
+        assert_eq!(opened.sync.items.len(), usize::try_from(limit).unwrap());
+        let history: usize = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| sql.contains("thread_continuation_spans"))
+            .map(|(_, count)| count.statements)
+            .sum();
+        assert!(history > 0);
+        samples.push(history);
+    }
+    assert_eq!(
+        samples[0], samples[1],
+        "reading the same history must not cost a round trip per displayed message"
+    );
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_each_visible_message_body_once_across_streams() {
+    use orch_api_contract::threads::ThreadOpeningGetQuery;
+
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    sqlx::query("UPDATE items SET stream='sub:opening' WHERE thread_id=$1 AND seq_created=200")
+        .bind(thread)
+        .execute(&mut *world.conn().await)
+        .await
+        .unwrap();
+    for (limit, first) in [(2, 198), (200, 1)] {
+        let (reply, work) = Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .query(&ThreadOpeningGetQuery {
+                    limit: Some(limit),
+                    ..Default::default()
+                })
+                .send(),
+        )
+        .await;
+        let sync = reply.ok().sync;
+        let positions: Vec<_> = sync.items.iter().map(|item| item.seq_created).collect();
+        assert_eq!(positions, (first..=200).collect::<Vec<_>>());
+        assert_eq!(sync.has_older, first > 1);
+        let traced: Vec<_> = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| sql.contains("AS has_older") && sql.contains("FROM items"))
+            .collect();
+        assert!(
+            traced
+                .iter()
+                .all(|(sql, _)| !sql.contains("thread_item_revisions")
+                    && !sql.contains("thread_continuation_spans")),
+            "a first screen with no inherited spans reads current messages directly"
+        );
+        let decoded: u64 = traced.iter().map(|(_, count)| count.rows).sum();
+        assert_eq!(
+            decoded,
+            sync.items.len() as u64,
+            "each visible body crosses the database boundary once"
+        );
+        assert_eq!(
+            traced
+                .iter()
+                .map(|(_, count)| count.statements)
+                .sum::<usize>(),
+            1,
+            "the overlapping windows and pagination marker share one read"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_team_members_first_screen_is_served_within_the_servers_share() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let mut times = Vec::new();
+    for visit in ["first", "returning"] {
+        let start = Instant::now();
+        let response = world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send_bytes()
+            .await;
+        let elapsed = start.elapsed();
+        assert!(
+            response.status.is_success(),
+            "opening returned {}",
+            response.status
+        );
+        let opening: orch_api_contract::threads::ThreadOpening =
+            serde_json::from_slice(&response.raw).unwrap();
+        assert!(!opening.sync.items.is_empty());
+        eprintln!(
+            "team opening visit={visit} elapsed={elapsed:?} bytes={}",
+            response.raw.len()
+        );
+        times.push(elapsed);
+    }
+    if times.iter().any(|time| *time >= TRACE_OPENING_AFTER) {
+        use crate::support::failure_trace::FailureTrace;
+        use tracing::instrument::WithSubscriber;
+        // Collect the two traces on a fresh team's first and returning visits. The original
+        // measurements above exclude subscriber overhead and both use the same real route.
+        drop(world);
+        let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+        for name in ["Slow first team opening", "Slow returning team opening"] {
+            let trace = FailureTrace::with_tail(name, TRACE_OPENING_AFTER, 1024);
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send()
+                .with_subscriber(trace.recorder())
+                .await
+                .ok();
+        }
+    }
+    assert!(
+        times.iter().all(|time| *time < SERVER_SHARE),
+        "first and returning server times: {times:?}"
+    );
+}
+
+#[tokio::test]
+async fn restoring_the_team_members_session_and_thread_stays_within_the_servers_share() {
+    use orch_api_contract::auth::{AuthSessionThreadOpen, AuthThreadOpening};
+    use orch_api_contract::common::CSRF_HEADER;
+    use orch_api_contract::nodes::OverviewPart;
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let signed = world.sign_in(&reader.person).await;
+    let cookie = signed.browser();
+    let mut times = Vec::new();
+    for visit in ["first", "returning"] {
+        let start = Instant::now();
+        let response = world
+            .app
+            .call(AuthSessionThreadOpen, &[&thread])
+            .header(CSRF_HEADER, "1")
+            .header("cookie", &cookie)
+            .send_bytes()
+            .await;
+        let elapsed = start.elapsed();
+        assert_eq!(response.status.as_u16(), 200);
+        let opening: AuthThreadOpening = serde_json::from_slice(&response.raw).unwrap();
+        assert_eq!(opening.session.user.user.id, reader.id());
+        assert!(
+            matches!(opening.opening, OverviewPart::Ready { data } if !data.sync.items.is_empty())
+        );
+        eprintln!(
+            "team session and thread visit={visit} elapsed={elapsed:?} bytes={}",
+            response.raw.len()
+        );
+        times.push(elapsed);
+    }
+    if times[0] >= TRACE_OPENING_AFTER {
+        use crate::support::failure_trace::FailureTrace;
+        use tracing::instrument::WithSubscriber;
+        // Measure first, then trace the cookie route on a fresh team so its caches
+        // and session renewal match the first visit. Never record the cookie.
+        drop(world);
+        let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+        let cookie = world.sign_in(&reader.person).await.browser();
+        let trace = FailureTrace::with_tail(
+            "Slow first session and thread opening",
+            TRACE_OPENING_AFTER,
+            1024,
+        );
+        let traced = world
+            .app
+            .call(AuthSessionThreadOpen, &[&thread])
+            .header(CSRF_HEADER, "1")
+            .header("cookie", &cookie)
+            .send_bytes()
+            .with_subscriber(trace.recorder())
+            .await;
+        assert_eq!(traced.status.as_u16(), 200);
+    }
+    assert!(
+        times.iter().all(|time| *time < SERVER_SHARE),
+        "first and returning server times: {times:?}"
+    );
+}
+
+/// One composed opening of `reads` with the browser's cookie, after checking that it restored `reader` and that every
+/// read is ready: how long it took.
+async fn opened(world: &World, cookie: &str, reader: Id, reads: &[String]) -> Duration {
+    use orch_api_contract::auth::AuthSessionOpen;
+    use orch_api_contract::common::CSRF_HEADER;
+    let query = form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(reads.iter().map(|read| ("read", read)))
+        .finish();
+    let start = Instant::now();
+    let response = world
+        .app
+        .call(AuthSessionOpen, &[])
+        .raw_query(&query)
+        .header(CSRF_HEADER, "1")
+        .header("cookie", cookie)
+        .send_bytes()
+        .await;
+    let elapsed = start.elapsed();
+    assert_eq!(response.status.as_u16(), 200);
+    let lines: Vec<serde_json::Value> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), reads.len() + 1);
+    assert_eq!(lines[0]["session"]["user"]["id"], serde_json::json!(reader));
+    for line in &lines[1..] {
+        assert_eq!(line["status"], "ready", "{line}");
+    }
+    elapsed
+}
+
+/// The opening of a page that first reads `reads`, as the page asks them, for the team member: the composed request
+/// first and returning, then the session alone and each read alone after it, so that the figures say which read the
+/// opening waits for. A read whose opening misses the opening target prints its statements and phases.
+async fn page_opening(world: &World, reader: &Who, page: &str, reads: &[String]) -> Vec<Duration> {
+    use crate::support::failure_trace::FailureTrace;
+    use tracing::instrument::WithSubscriber;
+    let cookie = world.sign_in(&reader.person).await.browser();
+    let mut times = Vec::new();
+    for visit in ["first", "returning"] {
+        let elapsed = opened(world, &cookie, reader.id(), reads).await;
+        eprintln!("team page opening page={page} visit={visit} elapsed={elapsed:?}");
+        times.push(elapsed);
+    }
+    let alone = opened(world, &cookie, reader.id(), &[]).await;
+    eprintln!("team page opening page={page} read=(the session alone) elapsed={alone:?}");
+    for read in reads {
+        eprintln!("team page opening page={page} read={read}");
+        let mut trace = FailureTrace::with_tail("Slow opening read", TRACE_OPENING_AFTER, 4096);
+        let elapsed = opened(world, &cookie, reader.id(), std::slice::from_ref(read))
+            .with_subscriber(trace.recorder())
+            .await;
+        if elapsed < TRACE_OPENING_AFTER {
+            trace.finish();
+        }
+        drop(trace);
+        eprintln!("team page opening page={page} read={read} elapsed={elapsed:?}");
+    }
+    times
+}
+
+const PROVIDERS_QUERY: &str = "scope=mine&parent=resources&kinds=provider&resource_rows=true&resource_view=usable&sort=name&direction=asc&limit=50";
+
+/// Exercise the statement on one connection with the usable providers of this reader's actual page.
+/// The route adds library_scope after projecting access. The bare projection alone excludes every row.
+async fn usable_providers(
+    world: &World,
+    reader: &Who,
+    conn: &mut orch_db::Conn,
+    kinds: &[String],
+) -> (orch_authz::everything::Projection, Vec<String>) {
+    use orch_api_contract::everything::EverythingList;
+    use orch_authz::{Caller, Principal};
+    let page = world
+        .app
+        .call(EverythingList, &[])
+        .token(&reader.token)
+        .raw_query(PROVIDERS_QUERY)
+        .send()
+        .await
+        .ok();
+    let ids: Vec<_> = page.items.into_iter().map(|row| row.id).collect();
+    assert!(
+        !ids.is_empty(),
+        "team members can use their shared providers"
+    );
+    let principal = Principal::load(
+        conn,
+        Caller::session(reader.id()),
+        orch_types::Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    let mut projection = orch_authz::everything::project_resources(conn, &principal, kinds)
+        .await
+        .unwrap();
+    for id in &ids {
+        projection.grants["objects"][id.as_str()]["library_scope"] = serde_json::json!(true);
+    }
+    (projection, ids)
+}
+
+/// The Providers page's list, as the page asks for it, for `reader`.
+fn providers_list<'a>(
+    reader: &Who,
+    projection: &'a orch_authz::everything::Projection,
+    kinds: &'a [String],
+    world: &World,
+) -> orch_db::queries::everything::Query<'a> {
+    use orch_db::queries::everything::{NavigationFilter, Query, ResourceFilter};
+    Query {
+        navigation: NavigationFilter::default(),
+        resource: ResourceFilter {
+            provider_scope: true,
+            details: true,
+            ..ResourceFilter::default()
+        },
+        admin_access: None,
+        participating: false,
+        user: reader.id(),
+        groups: &[],
+        member_roots: &projection.member_roots,
+        grants: &projection.grants,
+        parent: Some("resources"),
+        system: false,
+        text: "",
+        kinds,
+        owner: None,
+        created_from: None,
+        created_to: None,
+        active_from: None,
+        sort: "name",
+        descending: false,
+        after: None,
+        limit: 51,
+        at: world.now(),
+    }
+}
+
+#[tokio::test]
+async fn a_resources_list_is_one_prepared_statement_whose_plan_its_connection_keeps() {
+    use orch_db::queries::everything as rows;
+    let (world, reader, _) = fixture(1, true).await;
+    let mut conn = world.conn().await;
+    let kinds = vec!["provider".to_owned()];
+    let (projection, expected) = usable_providers(&world, &reader, &mut conn, &kinds).await;
+    let mut times = Vec::new();
+    for _ in 0..8 {
+        let start = Instant::now();
+        let listed = rows::level(
+            &mut conn,
+            &providers_list(&reader, &projection, &kinds, &world),
+        )
+        .await
+        .unwrap();
+        times.push(start.elapsed());
+        assert_eq!(
+            listed.into_iter().map(|row| row.id).collect::<Vec<_>>(),
+            expected
+        );
+    }
+    // Only this connection's own prepared statements: the Resources list is the one that keeps the reader's projection.
+    // This question is not prepared by name, so that it is never among them itself.
+    let plans: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT custom_plans, generic_plans FROM pg_prepared_statements
+          WHERE statement LIKE '%reader_projection AS MATERIALIZED%'
+            AND statement NOT LIKE '%pg_prepared_statements%'",
+    )
+    .persistent(false)
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    let [(custom, generic)] = plans.as_slice() else {
+        panic!("expected one prepared Resources statement, found {plans:?}");
+    };
+    assert!(custom + generic >= times.len() as i64);
+    eprintln!("resources list times={times:?} custom_plans={custom} generic_plans={generic}");
+    assert!(
+        *generic >= 1,
+        "after its first plans the connection keeps one plan for every Resources list ({custom} custom, {generic} generic)"
+    );
+}
+
+#[tokio::test]
+async fn restoring_the_team_members_session_with_the_shell_tree_and_a_resource_list_stays_within_the_servers_share()
+ {
+    let (world, reader, [org, ..]) = fixture(1, true).await;
+    // What the Providers page reads first, as the page itself asks for it.
+    let reads = [
+        "/me/bootstrap".to_owned(),
+        format!("/everything?{PROVIDERS_QUERY}"),
+        format!("/orgs/{org}/tree?sort=navigation&locale=en&parent_id={org}"),
+        "/harness-kinds".to_owned(),
+    ];
+    let times = page_opening(&world, &reader, "providers", &reads).await;
+    {
+        // Where the list's own statement spends its time, planning and execution, for the reader at this fixture.
+        use orch_db::queries::everything as rows;
+        let mut conn = world.conn().await;
+        let kinds = vec!["provider".to_owned()];
+        let (projection, _) = usable_providers(&world, &reader, &mut conn, &kinds).await;
+        for visit in ["first", "again"] {
+            let plan = rows::explain(
+                &mut conn,
+                &providers_list(&reader, &projection, &kinds, &world),
+            )
+            .await
+            .unwrap();
+            eprintln!(
+                "providers list statement visit={visit} planning_ms={} execution_ms={}",
+                plan[0]["Planning Time"], plan[0]["Execution Time"]
+            );
+        }
+    }
+    assert!(
+        times.iter().all(|time| *time < SERVER_SHARE),
+        "first and returning server times: {times:?}"
+    );
+}
+
+#[tokio::test]
+async fn restoring_the_team_members_session_with_the_machine_list_stays_within_the_servers_share() {
+    let (world, reader, [org, ..]) = fixture(1, true).await;
+    let reads = [
+        "/me/bootstrap".to_owned(),
+        format!("/orgs/{org}/tree?sort=navigation&locale=en&parent_id={org}"),
+        "/everything?scope=mine&parent=resources&kinds=machine&resource_rows=true&resource_view=usable&sort=name&direction=asc&limit=50".to_owned(),
+    ];
+    let times = page_opening(&world, &reader, "machines", &reads).await;
+    assert!(
+        times.iter().all(|time| *time < SERVER_SHARE),
+        "first and returning server times: {times:?}"
+    );
+}
+
+#[tokio::test]
+async fn restoring_the_team_members_session_with_home_s_first_reads_stays_within_the_servers_share()
+{
+    let (world, reader, [org, ..]) = fixture(1, true).await;
+    let today = world.now().date_naive();
+    let from = today - chrono::Days::new(5);
+    // What Home reads first for a member of a team, as the page itself asks for it.
+    let reads = [
+        "/me/bootstrap".to_owned(),
+        format!("/orgs/{org}/tree?sort=navigation&locale=en&parent_id={org}"),
+        format!("/orgs/{org}/overview?participating=false&from={from}&to={today}&usage_by=model"),
+        "/orgs/by-slug/scale-org-1".to_owned(),
+        format!("/nodes/{org}/chat-opening?scope=thread&limit=100"),
+    ];
+    let times = page_opening(&world, &reader, "home", &reads).await;
+    assert!(
+        times.iter().all(|time| *time < SERVER_SHARE),
+        "first and returning server times: {times:?}"
+    );
+}
+
+#[tokio::test]
+async fn restoring_the_team_members_session_with_the_settings_first_reads_stays_within_the_servers_share()
+ {
+    let (world, reader, [org, ..]) = fixture(1, true).await;
+    // What the person's own settings read first: the shell and the left bar's tree.
+    let reads = [
+        "/me/bootstrap".to_owned(),
+        format!("/orgs/{org}/tree?sort=navigation&locale=en&parent_id={org}"),
+    ];
+    let times = page_opening(&world, &reader, "settings", &reads).await;
+    assert!(
+        times.iter().all(|time| *time < SERVER_SHARE),
+        "first and returning server times: {times:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_team_opening_can_follow_sign_in_with_only_one_free_connection() {
+    use orch_api_contract::auth::AuthSessionThreadOpen;
+    use orch_api_contract::common::CSRF_HEADER;
+    use orch_api_contract::nodes::OverviewPart;
+
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let pool = world.app.app.db.pool();
+    let mut reserved = Vec::new();
+    for _ in 0..pool.options().get_max_connections() {
+        reserved.push(pool.acquire().await.unwrap());
+    }
+    reserved.pop().unwrap().return_to_pool().await;
+    let signed = world.sign_in(&reader.person).await;
+    assert_eq!(
+        pool.num_idle(),
+        1,
+        "the browser can reuse its sign-in connection"
+    );
+    let opened = world
+        .app
+        .call(AuthSessionThreadOpen, &[&thread])
+        .header(CSRF_HEADER, "1")
+        .header("cookie", &signed.browser())
+        .send()
+        .await
+        .ok()
+        .expect("the session cookie restores its reader");
+    assert_eq!(opened.session.user.user.id, reader.id());
+    assert!(matches!(opened.opening, OverviewPart::Ready { data } if !data.sync.items.is_empty()));
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_the_thread_status_and_participation_once_for_the_first_screen() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send(),
+    )
+    .await;
+    assert!(!reply.ok().sync.items.is_empty());
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("JOIN documents d ON d.id = n.readme_document_id")),
+        "an opening without a README need not look up a document"
+    );
+    let lock_reads: usize = work
+        .statements
+        .iter()
+        .filter(|(sql, _)| {
+            sql.contains("restore_recovery_required") || sql.contains("thread_native_guards")
+        })
+        .map(|(_, count)| count.statements)
+        .sum();
+    assert_eq!(
+        lock_reads, 1,
+        "open jobs and retained preparations share one lock lookup"
+    );
+    let account_reads: usize = work
+        .statements
+        .iter()
+        .filter(|(sql, _)| sql.contains("AS suspended_in") || sql.contains("d.path AS domain_path"))
+        .map(|(_, count)| count.statements)
+        .sum();
+    assert_eq!(
+        account_reads, 1,
+        "the reader's account and domains are read together"
+    );
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("array_agg(g.group_id) FROM group_members")),
+        "the reader's group set already comes from holder expansion"
+    );
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("SELECT t.node_id,i.payload FROM threads t")),
+        "opening a conversation must not fetch the full latest message again to suggest links"
+    );
+    let display = work
+        .statements
+        .keys()
+        .find(|sql| sql.contains(" recovery_has_lock"))
+        .expect("the first screen reads the native thread status");
+    assert!(
+        !display.contains("JOIN threads selected"),
+        "approval counts use the display's own selected continuation"
+    );
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("q.pending_inputs,q.held_inputs,a.pending_approvals")),
+        "the opening should have read active queue and approval counts with the thread status"
+    );
+    for detail in [
+        "FROM picked JOIN items i",
+        "FROM held JOIN items m ON m.id=held.item_id",
+    ] {
+        assert!(
+            !work.statements.keys().any(|sql| sql.contains(detail)),
+            "an opening without background work should not resolve its sources: {detail}"
+        );
+    }
+    let costs = work
+        .statements
+        .keys()
+        .find(|sql| sql.contains("usage_daily") && sql.contains("usage_turn_daily"))
+        .expect("the first screen reads its thread and turn costs");
+    assert!(
+        !costs.contains("jsonb_to_recordset"),
+        "a single thread can read its costs directly without building a page of thread IDs"
+    );
+    let participation = work
+        .statements
+        .keys()
+        .find(|sql| sql.contains("Ordinary assignment summaries and current role/follow facts"))
+        .expect("the opening shows participation for the addressed thread");
+    assert!(
+        !participation.contains("direct_requests") && !participation.contains("blockers AS"),
+        "a single node without scope restrictions needs only its descendant assignment count"
+    );
+    assert!(
+        !participation.contains("gone.deleted_at"),
+        "roles and follows use the live paths already maintained for participation"
+    );
+    assert!(
+        !participation.contains("orch_participation_node_count"),
+        "a single node's participation can stop at the first current assignment"
+    );
+    assert!(
+        !display.contains("FROM jobs j"),
+        "an idle thread need not plan the recovery job search for its status"
+    );
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("Direct participation for selected resource pages")),
+        "the thread shows the caller's environment permissions without reading resource-page participation"
+    );
+    for fragment in [
+        "Ordinary assignment summaries and current role/follow facts",
+        " recovery_has_lock",
+        "AS pending_notices",
+        "FROM thread_goals",
+    ] {
+        let calls: usize = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| sql.contains(fragment))
+            .map(|(_, count)| count.statements)
+            .sum();
+        assert_eq!(calls, 1, "opening reads {fragment}");
+    }
+}
+
+#[tokio::test]
+async fn a_team_opening_keeps_held_background_completions_after_the_task_ends() {
+    use orch_db::queries::{source::thread_display_facts, threads};
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let viewer = reader.id();
+    let at = orch_types::Time::new(world.now());
+    let mut conn = world.conn().await;
+    let marker = orch_types::new_id();
+    sqlx::query(r#"INSERT INTO items(id,thread_id,segment_id,continuation_id,kind,status,payload,seq_created,seq_updated)
+        SELECT $2,t.node_id,s.id,t.active_continuation_id,'marker','completed','{"data":{"causes":[{},{}]}}',201,201
+        FROM threads t JOIN segments s ON s.thread_id=t.node_id WHERE t.node_id=$1 ORDER BY s.ordinal DESC LIMIT 1"#)
+        .bind(thread).bind(marker).execute(&mut *conn).await.unwrap();
+    sqlx::query("INSERT INTO thread_inputs(id,thread_id,continuation_id,source,content,delivery,state,state_detail,position,client_id,seq_updated)
+        SELECT $2,t.node_id,t.active_continuation_id,'system','[]','queue','pending','background_stopped',1,$3,201 FROM threads t WHERE t.node_id=$1")
+        .bind(thread).bind(orch_types::new_id()).bind(format!("background:{marker}")).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let mut tx = world.app.app.db.begin_opening_snapshot().await.unwrap();
+    orch_authz::read_facts::scope(&mut tx, move |conn| {
+        Box::pin(async move {
+            let row = threads::thread(conn, thread).await.unwrap().unwrap();
+            thread_display_facts(conn, &[thread], Some(viewer), at)
+                .await
+                .unwrap();
+            let wake = orch_engine::background_wake::status(conn, &row, &[], false)
+                .await
+                .unwrap();
+            assert!(wake.tasks.is_empty());
+            assert_eq!(wake.held_completions, 2);
+        })
+    })
+    .await;
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_its_connected_directory_without_planning_a_unit_host() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send(),
+    )
+    .await;
+    assert!(!reply.ok().sync.items.is_empty());
+    for kind in ["environment", "machine"] {
+        assert!(
+            work.statements.keys().any(|sql| {
+                sql.trim_start()
+                    .starts_with(&format!("SELECT '{kind}'::text AS kind"))
+                    && !sql.contains("UNION ALL")
+            }),
+            "the opening should read its {kind} by kind"
+        );
+    }
+    assert!(
+        work.statements
+            .keys()
+            .any(|sql| sql.contains("m.facts -> 'environment_descriptor'"))
+    );
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("LEFT JOIN LATERAL (SELECT target.* FROM hosts target"))
+    );
+}
+
+#[tokio::test]
+async fn an_org_chat_opening_judges_its_summaries_model_once_and_publishes_without_judging_it_again()
+ {
+    use orch_api_contract::chats::{NodeChatOpeningGet, NodeChatOpeningGetQuery};
+    use orch_api_contract::nodes::NodeKind;
+    let (world, reader, [org, ..]) = fixture(1, true).await;
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(NodeChatOpeningGet, &[&org])
+            .token(&reader.token)
+            .query(&NodeChatOpeningGetQuery {
+                scope: Some(NodeKind::Thread),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .send(),
+    )
+    .await;
+    let opening = reply.ok();
+    assert!(opening.opening.is_some(), "the org's chat is shown");
+    assert!(
+        !opening.summaries.is_empty(),
+        "the chat's summaries come with its opening"
+    );
+    let count = |fragment: &str| -> usize {
+        work.statements
+            .iter()
+            .filter(|(sql, _)| sql.contains(fragment))
+            .map(|(_, count)| count.statements)
+            .sum()
+    };
+    let chats = count(" FROM chats WHERE node_id = $1");
+    // Only a model judgment reads the machine that keeps the provider's key.
+    let judgments = count(" FROM machines WHERE id = $1");
+    eprintln!(
+        "org chat opening statements={} chat lookups={chats} judgments={judgments}",
+        work.totals.statements
+    );
+    assert_eq!(
+        chats, 1,
+        "the opening is prepared once, in the snapshot it is shown from"
+    );
+    assert_eq!(
+        judgments, 1,
+        "the opening resolves its model once and checks its sources directly at publication"
+    );
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_the_selected_model_and_environment_defaults_once() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send(),
+    )
+    .await;
+    let sync = reply.ok().sync;
+    assert!(!sync.items.is_empty());
+    assert_eq!(sync.thread.model_display.as_deref(), Some("Scale model"));
+    for alternatives in [
+        &[
+            "provider_option_layers(",
+            "SELECT display_name FROM provider_models",
+        ][..],
+        &[
+            "th.node_id,e.id,e.placement,t.spec",
+            "e.id AS environment_id, e.placement, t.spec AS template_spec",
+        ],
+    ] {
+        let calls: usize = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| alternatives.iter().any(|fragment| sql.contains(*fragment)))
+            .map(|(_, count)| count.statements)
+            .sum();
+        assert_eq!(calls, 1, "reads per opening for {alternatives:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_team_opening_shows_an_inherited_limit_and_skips_billing_reads_when_it_has_none() {
+    let (world, reader, [_, project, _, thread, _]) = fixture(1, true).await;
+    let open = || async {
+        Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await
+    };
+    let (empty, queries) = open().await;
+    assert!(empty.ok().limits.unwrap().reached.is_empty());
+    assert!(
+        !queries
+            .statements
+            .keys()
+            .any(|sql| sql.contains("WITH live AS") && sql.contains("i.kind='tool_call'")),
+        "without an applicable cap the first screen need not resolve who pays for overlapping turns"
+    );
+    let reads: usize = queries
+        .statements
+        .iter()
+        .filter(|(sql, _)| sql.contains("AS pending_notices") || sql.contains("usage_caps c"))
+        .map(|(_, work)| work.statements)
+        .sum();
+    assert_eq!(
+        reads, 1,
+        "the selected thread includes the lookup for covering caps"
+    );
+    let cap = orch_types::new_id();
+    sqlx::query(
+        "INSERT INTO usage_caps(id,node_id,meter,amount,created_by) VALUES($1,$2,'running',0,$3)",
+    )
+    .bind(cap)
+    .bind(project)
+    .bind(reader.id())
+    .execute(world.app.app.db.pool())
+    .await
+    .unwrap();
+    let (bounded, _) = open().await;
+    assert!(bounded.ok().limits.unwrap().reached.iter().any(|limit| {
+        limit
+            .cap
+            .as_ref()
+            .is_some_and(|status| status.cap.id == cap)
+    }));
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_the_selected_environment_and_continuation_once() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let mut conn = world.app.app.db.acquire().await.unwrap();
+    let (view, revision): (orch_types::Id, i64) = sqlx::query_as(
+        "UPDATE thread_continuations c SET queue_revision = c.queue_revision + 7
+         FROM threads t WHERE t.node_id=$1 AND c.id=t.active_continuation_id
+         RETURNING c.id,c.queue_revision",
+    )
+    .bind(thread)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let marker = orch_db::queries::thread_continuations::mark_read(
+        &mut conn,
+        reader.id(),
+        thread,
+        view,
+        7,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(ThreadOpeningGet, &[&thread])
+            .token(&reader.token)
+            .send(),
+    )
+    .await;
+    let sync = reply.ok().sync;
+    assert!(!sync.items.is_empty());
+    assert_eq!(sync.inputs_queue_revision, Some(revision));
+    assert_eq!(sync.thread.my_last_read_seq, Some(marker));
+    for repeat in [
+        "SELECT * FROM thread_continuations WHERE thread_id=$1 AND id=$2",
+        "SELECT COALESCE(r.last_read_seq,0)::bigint FROM thread_continuations",
+        "SELECT e.environment_preparation,e.generation",
+    ] {
+        assert!(
+            !work.statements.keys().any(|sql| sql.contains(repeat)),
+            "unnecessary query for the idle thread: {repeat}",
+        );
+    }
+    for query in [
+        "c.id AS viewed_continuation_id",
+        "SELECT revision, id, name, owner_id, org_id, placement, home_node_id",
+        "e.id AS environment_id, e.placement, t.spec AS template_spec",
+        "CASE WHEN h.id IS NULL THEN 'machine' ELSE 'host' END,COALESCE(h.id,m.id)",
+    ] {
+        let calls: usize = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| sql.contains(query))
+            .map(|(_, count)| count.statements)
+            .sum();
+        assert_eq!(calls, 1, "reads per opening for {query}");
+    }
+
+    let viewer = reader.id();
+    let mut tx = world.app.app.db.begin_opening_snapshot().await.unwrap();
+    orch_authz::read_facts::scope(&mut tx, move |conn| {
+        Box::pin(async move {
+            use orch_db::queries::{
+                thread_continuations::reading::last_read, threads::activity_many,
+            };
+            activity_many(conn, &[thread], Some(viewer)).await.unwrap();
+            let missing = orch_types::new_id();
+            for (person, target, continuation, expected, queries) in [
+                (viewer, thread, view, Some(marker), 0),
+                (missing, thread, view, Some(0), 1),
+                (viewer, thread, missing, None, 1),
+                (viewer, missing, view, None, 1),
+            ] {
+                let (position, calls) =
+                    Statements::measure(last_read(conn, person, target, continuation)).await;
+                assert_eq!((position.unwrap(), calls), (expected, queries));
+            }
+        })
+    })
+    .await;
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_team_opening_serves_current_messages_without_reconstructing_historical_rows() {
+    use orch_db::queries::thread_continuations::{projection, reading};
+
+    let (world, _, [_, _, _, thread, _]) = fixture(1, true).await;
+    let db = &world.app.app.db;
+    Capture::configure(db, true).await;
+    let mut conn = db.acquire().await.unwrap();
+    let view = projection(&mut conn, thread, None).await.unwrap().unwrap();
+    sqlx::query("SET auto_explain.log_min_duration=0")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let capture = Capture::default();
+    let items = capture
+        .run(reading::items_bounded(
+            &mut conn,
+            thread,
+            view.viewed_continuation_id,
+            None,
+            false,
+            Some("main"),
+            40,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 40);
+
+    fn historical_decodes(plan: &serde_json::Value) -> u64 {
+        let own = if plan["Function Name"] == "jsonb_populate_record" {
+            plan["Actual Loops"].as_u64().unwrap()
+        } else {
+            0
+        };
+        own + plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(historical_decodes)
+            .sum::<u64>()
+    }
+
+    let plans = capture.take();
+    let page = plans
+        .iter()
+        .find(|plan| {
+            plan.body["Query Text"].as_str().is_some_and(|sql| {
+                sql.contains("thread_continuation_spans") && sql.contains("candidate_ids")
+            })
+        })
+        .expect("PostgreSQL reports the actual plan of the selected page");
+    assert_eq!(historical_decodes(&page.body["Plan"]), 0);
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_imported_messages_without_loading_absent_turns_or_inputs() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let open = || async {
+        Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await
+    };
+    let (first, work) = open().await;
+    let sync = first.ok().sync;
+    assert!(!sync.items.is_empty());
+    assert!(!sync.segments.is_empty());
+    assert!(sync.turns.is_empty() && sync.inputs.is_empty());
+    assert!(sync.retained_inputs.is_empty() && sync.viewed_prompt.is_none());
+    for detail in [
+        "position::text AS position",
+        "SELECT t.id,t.ordinal FROM turns t",
+        "SELECT a.lower_seq,n.upper_seq,p.id",
+        "SELECT v.input_id,v.group_id,v.continuation_id,v.ordinal,i.author_id,i.created_at",
+    ] {
+        assert!(
+            !work.statements.keys().any(|sql| sql.contains(detail)),
+            "{detail}"
+        );
+    }
+    let display = work
+        .statements
+        .keys()
+        .find(|sql| sql.contains(" recovery_has_lock"))
+        .unwrap();
+    assert!(!display.contains("last_turn.state"));
+    assert!(!display.contains("count(*) FILTER(WHERE NOT i.queue_held"));
+
+    let input = orch_types::new_id();
+    sqlx::query("INSERT INTO thread_inputs(id,thread_id,source,content,delivery,state,position,created_at,seq_created,seq_updated,queue_held,state_detail)
+        VALUES($1,$2,'system','[]','queue','pending',1,$3,201,201,false,'model_use_required')")
+        .bind(input).bind(thread).bind(world.now()).execute(world.app.app.db.pool()).await.unwrap();
+    let (next, _) = open().await;
+    assert!(next.ok().sync.inputs.iter().any(|row| row.id == input));
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_the_thread_and_its_selected_continuation_together() {
+    use orch_api_contract::threads::ThreadOpeningGetQuery;
+
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let active: orch_types::Id =
+        sqlx::query_scalar("SELECT active_continuation_id FROM threads WHERE node_id=$1")
+            .bind(thread)
+            .fetch_one(world.app.app.db.pool())
+            .await
+            .unwrap();
+    for viewed in [None, Some(active)] {
+        let query = ThreadOpeningGetQuery {
+            continuation_id: viewed,
+            ..Default::default()
+        };
+        let (reply, work) = Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .query(&query)
+                .send(),
+        )
+        .await;
+        let projection = reply.ok().sync.projection.unwrap();
+        assert_eq!(projection.viewed_continuation_id, active);
+        assert_eq!(projection.follows_active, viewed.is_none());
+        let reads: usize = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| {
+                sql.contains("AS pending_notices") || sql.contains("c.id AS viewed_continuation_id")
+            })
+            .map(|(_, work)| work.statements)
+            .sum();
+        assert_eq!(reads, 1, "thread and selected continuation for {viewed:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_team_opening_skips_recovery_detail_reads_only_when_the_thread_has_none() {
+    use serde_json::json;
+
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let open = || async {
+        Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await
+    };
+    let (reply, work) = open().await;
+    assert!(reply.ok().sync.thread.display.recovery.is_none());
+    let display = work
+        .statements
+        .keys()
+        .find(|sql| sql.contains(" recovery_has_lock"))
+        .unwrap();
+    assert!(!display.contains("JOIN model_call_recovery"));
+    assert!(
+        !work
+            .statements
+            .keys()
+            .any(|sql| sql.contains("FROM model_call_recovery WHERE node_id=$1"))
+    );
+
+    let pool = world.app.app.db.pool();
+    sqlx::query("UPDATE threads SET state='blocked',blocked_reason='error',blocked_detail='call_recovery' WHERE node_id=$1")
+        .bind(thread).execute(pool).await.unwrap();
+    let due = world.now() + chrono::Duration::seconds(55);
+    sqlx::query("INSERT INTO model_call_recovery(node_id,purpose,call_key,reference,failure,rule,cursor,action,state,due_at,context,updated_at)
+        VALUES($1,'agent',$1,$2,$3,$4,'{}',$5,'scheduled',$6,$7,$8)")
+        .bind(thread).bind(orch_types::new_id())
+        .bind(json!({"code":"provider_busy","message":"busy","said":"busy","retryable":true}))
+        .bind(json!({"id":"busy","steps":[{"type":"retry","times":3}]}))
+        .bind(json!({"attempt":2,"step":{"type":"retry","times":3}}))
+        .bind(due).bind(json!({"effects": false})).bind(world.now())
+        .execute(pool).await.unwrap();
+    let (reply, work) = open().await;
+    let retry = reply.ok().sync.thread.display.recovery.unwrap();
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(retry.due_at, Some(orch_types::Time::new(due)));
+    assert!(
+        work.statements
+            .keys()
+            .any(|sql| sql.contains("FROM model_call_recovery WHERE node_id=$1"))
+    );
+}
+
+#[tokio::test]
+async fn a_team_opening_counts_outstanding_harness_reviews_and_shows_only_live_requests() {
+    use orch_api_contract::threads::ThreadDisplayState;
+
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let approval = orch_types::new_id();
+    let pool = world.app.app.db.pool();
+    sqlx::query("INSERT INTO approvals(id,kind,state,thread_id,title,request,required_permission) VALUES($1,'harness','pending',$2,'Review','{}','')")
+        .bind(approval).bind(thread).execute(pool).await.unwrap();
+    for expired in [false, true] {
+        if expired {
+            sqlx::query("UPDATE approvals SET expires_at=$2 WHERE id=$1")
+                .bind(approval)
+                .bind(world.now() - chrono::Duration::seconds(1))
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let (reply, work) = Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await;
+        let row = reply.ok().sync.thread;
+        assert_eq!(row.pending_approvals, 1);
+        assert_eq!(
+            row.display.state == ThreadDisplayState::WaitingApproval,
+            !expired
+        );
+        let display = work
+            .statements
+            .keys()
+            .find(|sql| sql.contains(" recovery_has_lock"))
+            .unwrap();
+        assert_eq!(display.matches("FROM approvals ").count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_team_opening_counts_scheduled_inputs_once_and_keeps_personal_definitions_out_of_the_pane()
+ {
+    use orch_api_contract::nodes::OverviewPart;
+
+    let (world, reader, [_, _, topic, thread, _]) = fixture(1, true).await;
+    let pool = world.app.app.db.pool();
+    let seq: i64 = sqlx::query_scalar("SELECT topic_seq FROM topics WHERE node_id=$1")
+        .bind(topic)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    for count in [0_i64, 1] {
+        if count == 1 {
+            sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,plan,delivery,timing,state,next_run_at,topic_seq)
+                VALUES($1,$2,$3,'Personal reminder',$4,'[]',false,'queue','{}','active',$5,$6)")
+                .bind(orch_types::new_id()).bind(topic).bind(reader.id())
+                .bind(serde_json::json!({"kind":"thread","thread_id":thread}))
+                .bind(world.now()).bind(seq).execute(pool).await.unwrap();
+        }
+        let (reply, work) = Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await;
+        let opening = reply.ok();
+        assert_eq!(opening.sync.thread.display.queued_inputs, count);
+        let Some(OverviewPart::Ready { data }) = opening.pending_agent_schedules else {
+            panic!("the topic reader sees pending agent work");
+        };
+        assert_eq!(data.seq, seq);
+        assert!(data.items.is_empty());
+        let reads: usize = work
+            .statements
+            .iter()
+            .filter(|(sql, _)| sql.contains("FROM input_schedules"))
+            .map(|(_, work)| work.statements)
+            .sum();
+        assert_eq!(
+            reads,
+            if count == 0 { 1 } else { 2 },
+            "one count per opening, plus agent details only for a nonempty destination"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_directory_neighbors_open_sides_and_the_active_offer_with_the_thread()
+{
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let pool = world.app.app.db.pool();
+    let neighbor: orch_types::Id = sqlx::query_scalar(
+        "SELECT b.node_id FROM threads a JOIN threads b ON b.environment_id=a.environment_id
+         AND b.workspace_dir=a.workspace_dir AND b.node_id<>a.node_id WHERE a.node_id=$1 LIMIT 1",
+    )
+    .bind(thread)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let open = || async {
+        Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await
+    };
+    let (reply, _) = open().await;
+    let first = reply.ok();
+    assert_eq!(first.sync.thread.directory_threads, 9);
+    assert_eq!(first.sync.thread.sides.unwrap().open, 0);
+    assert!(first.parameters.unwrap().orch_tools.is_none());
+
+    sqlx::query("UPDATE threads SET side_of=$1 WHERE node_id=$2")
+        .bind(thread)
+        .bind(neighbor)
+        .execute(pool)
+        .await
+        .unwrap();
+    let (reply, work) = open().await;
+    let second = reply.ok().sync.thread;
+    assert_eq!(second.directory_threads, 8);
+    assert_eq!(second.sides.unwrap().open, 1);
+    let reads: usize = work
+        .statements
+        .iter()
+        .filter(|(sql, _)| {
+            sql.contains("c.id AS viewed_continuation_id")
+                || sql.contains("workspace_dir = $2 AND t.node_id <> $3")
+                || sql.contains("GROUP BY t.side_of")
+                || sql.contains("SELECT s.orch_tools_offer FROM threads")
+        })
+        .map(|(_, count)| count.statements)
+        .sum();
+    assert_eq!(
+        reads, 1,
+        "the selected thread carries all three first-screen facts"
+    );
+
+    sqlx::query("UPDATE nodes SET archived_at=$2 WHERE id=$1")
+        .bind(neighbor)
+        .bind(world.now())
+        .execute(pool)
+        .await
+        .unwrap();
+    let (reply, _) = open().await;
+    let archived = reply.ok().sync.thread;
+    assert_eq!(archived.directory_threads, 8);
+    assert_eq!(archived.sides.unwrap().open, 0);
+}
+
+#[tokio::test]
+async fn a_team_opening_reads_the_goal_and_holding_job_with_the_selected_thread() {
+    let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
+    let pool = world.app.app.db.pool();
+    let open = || async {
+        Statements::queries(
+            world
+                .app
+                .call(ThreadOpeningGet, &[&thread])
+                .token(&reader.token)
+                .send(),
+        )
+        .await
+    };
+    let (reply, work) = open().await;
+    let first = reply.ok().sync.thread;
+    assert!(first.lock.is_none());
+    assert!(first.goal.is_none());
+    let reads: usize = work
+        .statements
+        .iter()
+        .filter(|(sql, _)| {
+            sql.contains("c.id AS viewed_continuation_id")
+                || sql.contains("SELECT held.* FROM jobs held")
+                || (sql.contains("SELECT DISTINCT thread_id FROM unnest")
+                    && sql.contains("FROM thread_goals g"))
+        })
+        .map(|(_, count)| count.statements)
+        .sum();
+    assert_eq!(
+        reads, 1,
+        "the selected thread establishes whether a goal or a hold needs details"
+    );
+
+    let job = orch_types::new_id();
+    sqlx::query(
+        "INSERT INTO jobs(id,kind,environment_id,state)
+        SELECT $2,'environment_restart',environment_id,'running' FROM threads WHERE node_id=$1",
+    )
+    .bind(thread)
+    .bind(job)
+    .execute(pool)
+    .await
+    .unwrap();
+    let goal = orch_types::new_id();
+    sqlx::query("INSERT INTO thread_goals(id,thread_id,objective,condition,set_by,set_at,status,active_since)
+        VALUES($1,$2,'Prepare work','The work is ready',$3,$4,'active',$4)")
+        .bind(goal).bind(thread).bind(reader.id()).bind(world.now()).execute(pool).await.unwrap();
+    let (reply, _) = open().await;
+    let active = reply.ok().sync.thread;
+    assert_eq!(active.lock.unwrap().id, job);
+    assert_eq!(active.goal.unwrap().id, goal);
+
+    sqlx::query("UPDATE jobs SET state='succeeded' WHERE id=$1")
+        .bind(job)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE thread_goals SET status='cleared', ended_at=$2, active_since=NULL WHERE id=$1",
+    )
+    .bind(goal)
+    .bind(world.now())
+    .execute(pool)
+    .await
+    .unwrap();
+    let (reply, _) = open().await;
+    let finished = reply.ok().sync.thread;
+    assert!(finished.lock.is_none());
+    assert!(finished.goal.is_none());
+}

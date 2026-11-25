@@ -31,11 +31,11 @@ import { useFileDrops } from '@/features/composer/FileDrops';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { QuotedItem } from '@/features/chat/QuotedItem';
 import { firstLine, insertMention, isBlank, type MentionQuery, mentionAt, textOfParts } from '@/features/chat/text';
-import type { Chat, ChatMessage, NodeRef } from '@/generated/api-types';
+import type { Chat, ChatMessage, ChatPart, NodeRef } from '@/generated/api-types';
 import { isComposing } from '@/lib/shortcuts';
-import { attachToChat, releaseUpload } from '@/lib/uploads';
+import { releaseUpload } from '@/lib/uploads';
 import { usePastedText } from '@/features/composer/usePastedText';
-import { useUploads } from '@/lib/useUploads';
+import type { useUploads } from '@/lib/useUploads';
 import { tellTyping, useChatEntry } from '@/realtime/stores/chat';
 import { Button } from '@/ui/Button';
 import { cx } from '@/ui/cx';
@@ -53,6 +53,7 @@ const REPLY_BAR_CHARS = 100;
 export interface ComposerProps {
   chat: Chat;
   draft: Draft;
+  uploads: ReturnType<typeof useUploads<ChatPart>>;
   /** The message the draft answers, for the bar above the box. */
   replyingTo: ChatMessage | null;
   /** The box, so that something outside can put the focus in it. */
@@ -64,7 +65,7 @@ export interface ComposerProps {
   onAsk?: (thread: NodeRef, agent: string, message: ChatMessage) => void;
 }
 
-export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeholder, onAsk }: ComposerProps) {
+export function Composer({ chat, draft, uploads, replyingTo, inputRef, onEditLast, placeholder, onAsk }: ComposerProps) {
   const { t } = useTranslation();
   const shown = useViewShown();
   const { chat: current, me } = useChatContext();
@@ -76,7 +77,6 @@ export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeh
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [emoji, setEmoji] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const uploads = useUploads(chat.id, (blob, signal) => attachToChat(chat.id, blob, signal), draft.addAttachment);
   const fileDrops = useFileDrops(`chat:${chat.id}`);
   const removePart = (index: number) => {
     const part = draft.attachments[index];

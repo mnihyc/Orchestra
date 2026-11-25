@@ -12,7 +12,7 @@ use orch_engine::inputs::ScheduledInputDestination;
 
 use orch_engine::inputs::ScheduledInputOrigin;
 
-use orch_engine::inputs::Submitted;
+use orch_engine::inputs::Taken;
 
 use std::sync::Arc;
 
@@ -86,9 +86,9 @@ pub(super) fn request(row: &rows::ScheduleRow, occurrence: &str) -> ApiResult<In
         "schedule"
     };
     Ok(InputRequest {
-        plan: false,
+        plan: row.plan,
         content: content(row)?,
-        delivery: Delivery::Queue,
+        delivery: decode(json!(&row.delivery))?,
         client_id: format!("{prefix}:{}:{occurrence}", row.id),
         bypass: None,
     })
@@ -135,7 +135,7 @@ pub(super) async fn accept(
     row: &rows::ScheduleRow,
     run: &rows::RunRow,
     date: chrono::NaiveDate,
-) -> ApiResult<Submitted> {
+) -> ApiResult<Taken> {
     if run.schedule_id != row.id {
         return Err(ApiError::not_found());
     }
@@ -229,7 +229,7 @@ pub(super) async fn accept(
         }
     };
     match accepted {
-        Ok(submitted) => {
+        Ok(taken) => {
             if destination == ScheduledInputDestination::NewThread
                 && matches!(restored, authority::Restored::Captured { .. })
             {
@@ -237,13 +237,13 @@ pub(super) async fn accept(
                     conn,
                     row.author_id,
                     thread,
-                    submitted.input.id,
+                    taken.submitted.input.id,
                     reference,
                 )
                 .await
                 .map_err(ApiError::engine)?;
             }
-            Ok(submitted)
+            Ok(taken)
         }
         Err(error) => Err(crate::routes::threads::input_failed(conn, thread, error).await),
     }
@@ -351,6 +351,7 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
         input_id: None,
         turn_id: None,
         reason: None,
+        outcome: None,
         topic_seq: 0,
         created_at: now,
         started_at: None,
@@ -358,30 +359,49 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
     if !rows::insert_run(&mut tx, &run).await? {
         return Ok(false);
     }
+    let mut accepted_input = None;
+    let mut outcome = InputScheduleOccurrenceOutcome {
+        timing_policy: Some(InputTimingPolicy::of(&timing)),
+        reason_code: InputScheduleOccurrenceReason::AdmissionFailed,
+        coalesced_count: 0,
+        scheduled_for: occurrence.scheduled_for.map(Time::new),
+        accepted_input_ref: None,
+        zone: match &timing {
+            InputTiming::Once { zone, .. }
+            | InputTiming::Repeat { zone, .. }
+            | InputTiming::Cron { zone, .. } => zone.clone(),
+        },
+    };
     if !agent::allows_due(&row, now)? {
         run.state = "skipped".to_owned();
         run.reason = Some("schedule_ended".to_owned());
+        outcome.reason_code = InputScheduleOccurrenceReason::ScheduleEnded;
     } else if occurrence.scheduled_for.is_none() {
         run.state = "skipped".to_owned();
         run.reason = Some("nonexistent_local_time".to_owned());
+        outcome.reason_code = InputScheduleOccurrenceReason::NonexistentLocalTime;
     } else if pending {
         run.state = "skipped".to_owned();
         run.reason = Some("previous_input_pending".to_owned());
+        outcome.reason_code = InputScheduleOccurrenceReason::PreviousInputPending;
     } else {
         let mut trial = tx.begin().await.map_err(DbError::from)?;
         let accepted = accept(app, &mut trial, &row, &run, occurrence.date).await;
         match accepted {
-            Ok(submitted) => {
+            Ok(taken) => {
+                let submitted = &taken.submitted;
                 run.thread_id = Some(submitted.input.thread_id);
                 run.input_id = Some(submitted.input.id);
                 run.turn_id = submitted.input.turn_id;
+                outcome.reason_code = InputScheduleOccurrenceReason::Accepted;
+                outcome.coalesced_count = missed;
+                outcome.accepted_input_ref = Some(submitted.input.id);
                 if submitted.input.state_detail.is_some() {
                     run.state = "blocked".to_owned();
                     run.reason = Some("input_held".to_owned());
-                } else if missed > 0 {
-                    run.reason = Some(format!("coalesced {missed} earlier occurrences"));
                 }
                 trial.commit().await.map_err(DbError::from)?;
+                accepted_input = Some(taken);
             }
             Err(error) => {
                 trial.rollback().await.map_err(DbError::from)?;
@@ -404,6 +424,7 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
     row.revision += 1;
     row.topic_seq = stamp(&mut tx, row.topic_id).await?;
     run.topic_seq = row.topic_seq;
+    run.outcome = Some(json!(outcome));
     rows::update_run(&mut tx, &run).await?;
     rows::update(&mut tx, &row).await?;
     if run.input_id.is_some() {
@@ -429,7 +450,14 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
         .await?;
     }
     tx.commit().await.map_err(DbError::from)?;
-    app.engine.kick();
+    if let Some(taken) = accepted_input {
+        taken
+            .after_commit(&app.engine)
+            .await
+            .map_err(ApiError::engine)?;
+    } else {
+        app.engine.kick();
+    }
     Ok(true)
 }
 

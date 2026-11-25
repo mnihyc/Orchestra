@@ -11,7 +11,7 @@ mod support;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::resources::{CreateProvider, ProviderCreate, ProviderLoginStartBody};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::{identity, resources::provider_runtime};
 use orch_engine::provider_setup::{LoginAuthority, Pending};
@@ -21,11 +21,12 @@ use support::World;
 
 async fn key(world: &World, user: Id, home: Id) -> String {
     let scope = json!({"rules":[{"target":{"kind":"org","id":home,"reach":"self"},"resources":["provider"],"allow":[{"operation":"ProviderCreate","actions":["manage"]}]}]});
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Inline creator",
             token_hash: &token_hash(&token),
@@ -75,7 +76,9 @@ async fn agent(world: &World, user: Id, home: Id, machine: Option<Id>) -> Id {
 
 fn body(home: Id, agent: Id, runtime: Option<Id>, name: &str) -> CreateProvider {
     CreateProvider::Subscription {
-        runtime_machine_id: runtime,
+        runtime_location: runtime.map(|machine_id| {
+            orch_api_contract::resources::ProviderConnectionLocation::Machine { machine_id }
+        }),
         key_machine_id: None,
         name: name.into(),
         home_id: home,
@@ -235,11 +238,12 @@ async fn keeper_refusal_of_optional_inline_sign_in_keeps_the_created_provider_an
 async fn a_legacy_provider_manage_key_keeps_its_ordinary_managed_creation_premise() {
     let world = World::new().await;
     let c = resources::company(&world).await;
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: c.boss.id(),
             name: "Legacy provider management",
             token_hash: &token_hash(&token),
@@ -252,7 +256,7 @@ async fn a_legacy_provider_manage_key_keeps_its_ordinary_managed_creation_premis
     .await
     .unwrap();
     let request = CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: "Legacy narrow managed creation".into(),
         home_id: c.acme,

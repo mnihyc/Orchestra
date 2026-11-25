@@ -55,6 +55,16 @@
     "ModelParameters": {
       "type": "object",
       "properties": {
+        "purposes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ModelPurpose"
+          },
+          "description": "A provider manager's replacement for the reported purposes; absent follows discovery."
+        },
         "cache_lifetimes": {
           "type": [
             "array",
@@ -248,6 +258,46 @@
       },
       "description": "What one model can be run with at a provider. Models differ in all of it, so each member is the\nmodel's own and has three parts: what the model offers there (`offered`), what its managers\nopened (`efforts`, `service_tiers`, `access_programs`, up to `context_max`), and what a thread on\nit starts with (`default_*`). What a model *may* be run with is written here; what a thread\n*does* run with is the thread's own setting, chosen within what is open."
     },
+    "ModelPurpose": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "generation",
+          "description": "Generate conversational text, including an agent's turns and summaries."
+        },
+        {
+          "type": "string",
+          "const": "embedding",
+          "description": "Turn text into vectors for retrieval."
+        },
+        {
+          "type": "string",
+          "const": "image_generation",
+          "description": "Generate an image."
+        },
+        {
+          "type": "string",
+          "const": "transcription",
+          "description": "Turn speech into text."
+        },
+        {
+          "type": "string",
+          "const": "speech_generation",
+          "description": "Generate speech from text."
+        },
+        {
+          "type": "string",
+          "const": "rerank",
+          "description": "Rank existing retrieval candidates."
+        },
+        {
+          "type": "string",
+          "const": "decision",
+          "description": "Choose among a supplied set of structured decisions."
+        }
+      ],
+      "description": "The work a model declares it can do, independent of access and enabled options."
+    },
     "Binding": {
       "type": "object",
       "properties": {
@@ -431,6 +481,16 @@
     "ModelOffered": {
       "type": "object",
       "properties": {
+        "purposes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ModelPurpose"
+          },
+          "description": "Work explicitly reported by the model's discovery source."
+        },
         "cache_lifetimes": {
           "type": [
             "array",
