@@ -513,7 +513,7 @@ pub(crate) async fn apply(
                 .await?
                 .ok_or_else(|| fail("the carry job is gone"))?;
             if locked.plan.get("volume_archives").is_none() {
-                storage::pin_blobs(&mut tx, &pins).await?;
+                let pins = storage::pin_transfer_blobs(&mut tx, &pins).await?;
                 jobs::merge_plan(
                     &mut tx,
                     job.id(),
@@ -577,8 +577,17 @@ impl Engine {
                     .cloned()
                     .unwrap_or(json!([])),
             )?;
+            let mut released = None;
             if !pins.is_empty() {
-                storage::unpin_blobs(&mut tx, &pins, self.inner.clock.now()).await?;
+                released = Some(
+                    crate::transfers::release_transfer(
+                        &mut tx,
+                        crate::transfers::place_of(current.environment_id, current.provider_id),
+                        &pins,
+                        self.inner.clock.now(),
+                    )
+                    .await?,
+                );
                 jobs::merge_plan(
                     &mut tx,
                     row.id,
@@ -588,6 +597,9 @@ impl Engine {
                 .await?;
             }
             tx.commit().await.map_err(orch_db::DbError::from)?;
+            if let Some(released) = released {
+                released.settle(self).await;
+            }
             Ok::<_, EngineError>(())
         }
         .await;

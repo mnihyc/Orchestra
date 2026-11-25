@@ -11,7 +11,9 @@ import { useTranslation } from 'react-i18next';
 
 import { askRecovery, metaQuery } from '@/api/auth';
 import { AuthCard } from '@/features/auth/Frame';
+import { HumanCheckNotice, HumanCheckWidget, useHumanCheck } from '@/features/auth/HumanCheck';
 import { useIdentityRules } from '@/features/auth/identityRules';
+import type { HumanCheckAct } from '@/generated/api-types';
 import { useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
@@ -21,13 +23,29 @@ import { Input } from '@/ui/Input';
 import { linkClasses } from '@/ui/link';
 import { SkeletonRows } from '@/ui/Skeleton';
 
+/** What this screen asks the human check for. */
+const ASKING: readonly HumanCheckAct[] = ['recovery'];
+
 export function Recovery() {
   const { t } = useTranslation();
   const system = useQuery(metaQuery);
   const meta = system.data;
   const rules = useIdentityRules();
   const form = useForm({ email: '' }, { email: rules.email });
-  const ask = useMutation({ mutationFn: askRecovery, onError: (error) => form.refuse(error) });
+  const check = useHumanCheck(ASKING);
+  const ask = useMutation({
+    mutationFn: async (email: string) => {
+      const token = await check.take('recovery');
+      try {
+        await (token === null ? askRecovery(email) : askRecovery(email, token));
+      } catch (error) {
+        check.spend(true);
+        throw error;
+      }
+      check.spend(false);
+    },
+    onError: (error) => form.refuse(error),
+  });
 
   const back = (
     <Link to="/login" className={linkClasses}>
@@ -78,9 +96,11 @@ export function Recovery() {
           {...form.field('email')}
         />
         {ask.error !== null && form.field('email').error === undefined && <ErrorAlert error={ask.error} />}
-        <Button type="submit" variant="primary" block pending={ask.isPending}>
+        <HumanCheckWidget check={check} act="recovery" />
+        <Button type="submit" variant="primary" block pending={ask.isPending} disabled={check.waiting('recovery')} reason={check.waiting('recovery') ? t('auth.humanCheck.waiting') : undefined}>
           {t('auth.recover.submit')}
         </Button>
+        <HumanCheckNotice check={check} act="recovery" />
       </form>
     </AuthCard>
   );

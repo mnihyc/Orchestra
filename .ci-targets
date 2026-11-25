@@ -1,0 +1,1 @@
+web-e2e tests/e2e/openings.spec.ts --grep "closed at its first heading|opens again within a second" --trace off --retries=0 --reporter=line
