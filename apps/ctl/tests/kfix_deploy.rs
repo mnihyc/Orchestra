@@ -46,3 +46,9 @@ fn doctor_names_each_exposed_password_or_secret_and_passes_after_the_owner_prote
     let report = String::from_utf8(private.stdout).unwrap();
     assert!(report.contains("ok    secrets"), "{report}");
 }
+
+#[path = "kfix_deploy/public_addresses.rs"]
+mod public_addresses;
+
+#[path = "kfix_deploy/server_update.rs"]
+mod server_update;
