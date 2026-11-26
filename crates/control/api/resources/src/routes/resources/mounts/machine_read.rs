@@ -98,11 +98,24 @@ async fn authority(
         resources::Keying::Allowed
     );
     let host = host.and_then(|id| holdings.get(&id));
-    if !owns
-        && !manages
-        && !has(host, Permission::HostView)
-        && !(allow_use && has(host, Permission::HostUse))
-    {
+    let existing = owns
+        || manages
+        || has(host, Permission::HostView)
+        || allow_use && has(host, Permission::HostUse);
+    let registers = if allow_use && !existing {
+        match crate::routes::resources::machines::registrable_machine_on(conn, principal, machine)
+            .await
+        {
+            Ok(_) => true,
+            Err(error) if matches!(error.code(), ErrorCode::NotFound | ErrorCode::AuthzDenied) => {
+                false
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    if !existing && !registers {
         return Err(ApiError::not_found());
     }
     Ok(manages)
@@ -170,7 +183,7 @@ fn selected(
 
 impl native::Selected for Mounts {
     type Source = Source;
-    type Query = ();
+    type Query = api::MachineMountListQuery;
     type Value = MountsReady;
     type Reply = api::MachineMounts;
     const DECLARATION: &'static Declaration<Source> = &sources::MACHINE_MOUNT_READ;
@@ -178,7 +191,7 @@ impl native::Selected for Mounts {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a (),
+        _query: &'a Self::Query,
     ) -> BoxFuture<'a, ApiResult<(MountsReady, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let (machine, principal, plan, mut facts) =
@@ -325,7 +338,7 @@ impl native::Selected for Mounts {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a (),
+        _query: &'a Self::Query,
         old: &'a MountsReady,
         fresh: &'a MountsReady,
     ) -> BoxFuture<'a, ApiResult<bool>> {

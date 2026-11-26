@@ -88,6 +88,11 @@
       "gateRefused": "A refusal from the server",
       "meterRing": "As a ring, for a header, quiet until it fills:",
       "meterProgress": "As the bar of work under way, whose figure the page writes itself:"
+    },
+    "facts": {
+      "shortened": "Shortened",
+      "usageOwner": "Usage for",
+      "recordedUsage": "Recorded usage"
     }
   }
 }
