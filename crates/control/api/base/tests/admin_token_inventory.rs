@@ -14,7 +14,7 @@ use orch_api_contract::{
     common::ErrorCode,
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity::{self, NewApiToken};
@@ -31,7 +31,7 @@ async fn token(
     node: Option<Id>,
 ) -> (Id, String) {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -88,6 +88,7 @@ async fn system_tokens_are_bounded_include_actual_owners_and_expired_metadata_an
     )
     .await;
     let mut query = AdminTokenListQuery {
+        q: None,
         limit: Some(1),
         ..Default::default()
     };
@@ -122,6 +123,7 @@ async fn system_tokens_are_bounded_include_actual_owners_and_expired_metadata_an
     expected.sort();
     assert_eq!(ids, expected);
     let query = AdminTokenListQuery {
+        q: None,
         owner_id: Some(c.ada.id()),
         ..Default::default()
     };
@@ -235,6 +237,7 @@ async fn scoped_system_inventory_selects_keys_before_paging_and_protects_optiona
             .call(AdminTokenList, &[])
             .token(&scoped)
             .query(&AdminTokenListQuery {
+                q: None,
                 limit: Some(1),
                 ..Default::default()
             })
@@ -447,6 +450,7 @@ async fn token_metadata_preserves_conjunctive_policy_and_rejects_cursor_owner_su
             .call(AdminTokenList, &[])
             .token(&c.root.token)
             .query(&AdminTokenListQuery {
+                q: None,
                 owner_id: Some(c.ada.id()),
                 limit: Some(1),
                 cursor: None,
@@ -460,6 +464,7 @@ async fn token_metadata_preserves_conjunctive_policy_and_rejects_cursor_owner_su
         .call(AdminTokenList, &[])
         .token(&c.root.token)
         .query(&AdminTokenListQuery {
+            q: None,
             owner_id: Some(c.boss.id()),
             limit: Some(1),
             cursor: Some(cursor),
@@ -473,6 +478,7 @@ async fn token_metadata_preserves_conjunctive_policy_and_rejects_cursor_owner_su
             .call(AdminTokenList, &[])
             .token(&c.root.token)
             .query(&AdminTokenListQuery {
+                q: None,
                 owner_id: Some(c.ada.id()),
                 ..Default::default()
             })

@@ -163,11 +163,12 @@ async fn a_cold_existing_managed_generation_zero_uses_the_actual_provider_withou
         now,
         &principal,
         &Request {
+            identity: None,
             owner: s.ada.id(),
             name: Some("Never activated existing workspace"),
             home: s.tree.topic.base.id,
             template: Some(template),
-            host: Some(Some(host)),
+            host: Some(Some(orch_provider_contract::pools::Target::host(host))),
             config: &json!({}),
         },
     )

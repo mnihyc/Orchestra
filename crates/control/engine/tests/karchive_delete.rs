@@ -62,6 +62,7 @@ fn journal(value: &Json) {
 
 #[derive(Clone)]
 struct Managed {
+    source: orch_link_contract::native_target::RuntimeSource,
     environment: Id,
     runtime: Id,
     name: String,
@@ -106,6 +107,9 @@ async fn seed(
         .bind(runtime).bind(host.id).bind(&name).bind(environment).bind(template).bind(Hash::of(b"archive-delete-fixture").as_bytes().as_slice())
         .bind(&refs).execute(world.pool.pool()).await.map_err(|error|error.to_string())?;
     Ok(Managed {
+        source: orch_link_contract::native_target::RuntimeSource {
+            incarnation: Some(new_id()),
+        },
         environment,
         runtime,
         name,
@@ -173,6 +177,7 @@ async fn deleting_a_home_restarts_midway_without_repeating_unit_removal_or_erasi
         .push(json!(reader));
     journal(&resources);
     let handles = Arc::new(Mutex::new(BTreeMap::<Id, UnitRef>::new()));
+    let native_sources = Arc::new(Mutex::new(BTreeMap::new()));
     let effects = Arc::new(Mutex::new(Vec::<(K, String)>::new()));
     let hold_purge = Arc::new(AtomicBool::new(true));
     let purge_started = Arc::new(AtomicBool::new(false));
@@ -191,6 +196,11 @@ async fn deleting_a_home_restarts_midway_without_repeating_unit_removal_or_erasi
                 "printf kept > /workspace/proof; printf kept > /home/agent/proof; printf kept > /var/lib/orch/proof"])
             .await?;
             handles.lock().unwrap().insert(item.runtime, unit);
+            native_sources.lock().unwrap().insert(item.runtime,item.source);
+            let mut tx = world.pool.begin().await.map_err(|error|error.to_string())?;
+            orch_db::queries::environments::hosting::lock_environment(&mut tx,item.environment).await.map_err(|error|error.to_string())?;
+            orch_db::queries::runtime_incarnations::observe(&mut tx,host.id,item.runtime,item.source,false).await.map_err(|error|error.to_string())?;
+            tx.commit().await.map_err(|error|error.to_string())?;
         }
         for kind in [
             K::NodeRuntimeStop,
@@ -199,15 +209,18 @@ async fn deleting_a_home_restarts_midway_without_repeating_unit_removal_or_erasi
         ] {
             let driver = driver.clone();
             let handles = handles.clone();
+            let native_sources = native_sources.clone();
             let effects = effects.clone();
             let hold_purge = hold_purge.clone();
             let purge_started = purge_started.clone();
             let purge_gate = purge_gate.clone();
             let runtime = tokio::runtime::Handle::current();
-            host.added.machine.handler.on(kind, move |command| {
+            host.answer_with_context(kind, move |context,command| {
+                let target = context.native_target.clone();
                 let command = command.clone();
                 let driver = driver.clone();
                 let handles = handles.clone();
+                let native_sources = native_sources.clone();
                 let effects = effects.clone();
                 let hold_purge = hold_purge.clone();
                 let purge_started = purge_started.clone();
@@ -225,9 +238,13 @@ async fn deleting_a_home_restarts_midway_without_repeating_unit_removal_or_erasi
                                                 .get(&body.runtime_id)
                                                 .cloned()
                                                 .unwrap();
+                                            let source = *native_sources.lock().unwrap().get(&body.runtime_id).unwrap();
+                                            if target.as_ref().is_some_and(|target|matches!(target,orch_link_contract::native_target::NativeTarget::Lifecycle(target) if !target.matches_source(source.incarnation))) {
+                                                return Err(orch_driver_contract::driver::DriverError::InvalidSpec("the original native source changed".into()));
+                                            }
                                             driver.stop(&unit, STOP_GRACE).await?;
                                             (
-                                                CommandResult::NodeRuntimeStop(Empty {}),
+                                                CommandResult::NodeRuntimeStop(orch_link_contract::commands::NodeRuntimeStopResult::Stopped {source}),
                                                 body.runtime_id.to_string(),
                                             )
                                         }

@@ -1,0 +1,1 @@
+test -p orch-api-core --lib -- native_get_context_uses_actual_session_mode_and_the_same_principal_time_after_opening completed_projection_actual_http_session_expiry_withholds_full_but_acknowledges_write --test-threads=1
