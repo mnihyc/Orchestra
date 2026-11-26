@@ -13,5 +13,5 @@ orch_api_base::api_family_callback! {
     slot __ApiCallbackd8b3eca981, __API_CALLBACK_D8B3ECA981, __api_set_d8b3eca981;
     base orch_api_base::routes::gateways;
 
-    async fn thread_in<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: orch_types::Id) -> orch_api_base::middleware::requests::ApiResult<orch_api_contract::gateways::ThreadTunnelGatewayStatus>;
+    async fn thread_in<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: orch_types::Id) -> orch_api_base::middleware::requests::ApiResult<orch_api_contract::gateways::ThreadTunnelGatewayStatus>;
 }

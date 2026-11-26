@@ -275,8 +275,8 @@ pub async fn login(ctx: &Ctx, body: &AuthLoginBody) -> ApiResult<Opened> {
     complete(&capabilities, &right)?;
 
     // In: what was used is spent, and the session opened, together.
-    let mut tx = ctx.app.db.begin().await?;
-    let current = orch_db::queries::transaction_guard::lock_person(&mut tx, user.id)
+    let mut tx = orch_db::Tx::begin_on(conn).await?;
+    let current = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, user.id)
         .await?
         .ok_or_else(invalid_credentials)?;
     // Proofs are expensive and are checked before this short transaction. A

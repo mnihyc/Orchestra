@@ -437,6 +437,7 @@ async fn keep_events(
                                     direction: raw_events::FROM_HARNESS,
                                     payload: &compressed,
                                     at_most: FRAME_ALLOWANCE,
+                                    capture: None,
                                 },
                             )
                             .await
@@ -520,6 +521,7 @@ async fn three_sigterm_restarts_keep_each_raw_frame_once_in_order_in_a_real_data
             .append(
                 &stream,
                 &SpoolEvent {
+                    native_opening_id: None,
                     at,
                     kind: "session.title".to_owned(),
                     body: json!({ "title": format!("Wave {wave}") }),
@@ -534,6 +536,7 @@ async fn three_sigterm_restarts_keep_each_raw_frame_once_in_order_in_a_real_data
                 .append(
                     &stream,
                     &SpoolEvent {
+                        native_opening_id: None,
                         at,
                         kind: "raw.frame".to_owned(),
                         body: json!({ "direction": "in", "payload": payload }),
@@ -725,10 +728,10 @@ async fn a_session_open_installs_the_server_raw_floor_before_a_real_connector_re
         "workspace_root": data.path().display().to_string(), "instruction_root_marker": false,
         "directory": data.path().display().to_string(), "cwd": data.path().display().to_string(),
         "mounts": [], "model": "unconfigured", "effort": null, "params": {},
-        "approval_mode": "on_request", "sandbox_mode": "workspace", "instructions": "", "memory": null,
+        "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace", "instructions": "", "memory": null,
         "arrangement": "separated", "provider": { "path": "native", "provider_id": new_id() },
         "exec": { "executor": "codex-exec-server", "tool_set": null, "environment_id": new_id(), "generation": 1, "ticket": null },
-        "mcp": [], "orch_tools": [], "raw_events": true, "raw_after": FLOOR
+        "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": true, "raw_after": FLOOR
     })).unwrap();
     let deadline = Time::new(
         system.clock.now() + chrono::Duration::seconds(i64::try_from(PATIENCE.as_secs()).unwrap()),
@@ -763,6 +766,7 @@ async fn a_session_open_installs_the_server_raw_floor_before_a_real_connector_re
         .append(
             &stream,
             &SpoolEvent {
+                native_opening_id: None,
                 at: Time::new(system.clock.now()),
                 kind: "raw.frame".to_owned(),
                 body: json!({"direction": "in", "payload": "new capture"}),

@@ -42,8 +42,7 @@ const IDENTITY_DIR: &str = "identity";
 /// How long a request to the daemon for the record of a unit's enrollment may take: it is a small file.
 const PROBE_SECS: u64 = 10;
 
-/// The driver's settings from the operator's `[node.docker]` and `[[node.storage]]`, and from where the node
-/// keeps its tool cache. Everything else is the driver's own default.
+/// The driver's operational settings, storages from the machine policy, and the node's tool cache. Everything else is the driver's own default.
 pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
     let docker = &settings.docker;
     let mut labels = docker.labels.clone();
@@ -60,7 +59,6 @@ pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
             .live_helper_binary
             .clone()
             .or_else(orch_connector_core::installation::program_path),
-        builds: docker.builds,
         build_args: docker.build_args.clone(),
         offline_images: docker.offline_images.clone(),
         build_timeout_secs: docker.build_timeout_secs,
@@ -231,7 +229,14 @@ pub async fn connect(config: DockerConfig, desk: Arc<BlobDesk>) -> Result<HostDr
             .map_err(|error| DriverError::Unavailable(error.to_string()))?;
     let driver = Arc::new(driver);
     let contract: Arc<dyn EnvironmentDriver> = driver.clone();
-    Ok(HostDriver::new(contract).with_extras(Arc::new(DockerExtras { driver, docker })))
+    let server_update = crate::server_update::Runner::new(docker.clone(), &socket);
+    Ok(
+        HostDriver::new(contract).with_extras(Arc::new(DockerExtras {
+            driver,
+            docker,
+            server_update,
+        })),
+    )
 }
 
 /// The registration of the driver for a program: it reads the settings `adjust` is given the chance to change
@@ -247,8 +252,6 @@ pub fn registration(adjust: impl Fn(&mut DockerConfig) + Send + Sync + 'static) 
                 settings.docker = serde_json::from_value(value.clone())
                     .map_err(|error| DriverError::InvalidSpec(error.to_string()))?;
             }
-            // Permission to build is checked live; the driver reports its actual implementation.
-            settings.docker.builds = true;
             let mut config = config_of(&settings)?;
             adjust(&mut config);
             let schema = crate::composition::configuration_schema(
@@ -273,6 +276,7 @@ pub fn registration(adjust: impl Fn(&mut DockerConfig) + Send + Sync + 'static) 
 
 /// What the Docker driver has beyond the contract, as the node asks for it.
 pub struct DockerExtras {
+    server_update: crate::server_update::Runner,
     driver: Arc<DockerDriver>,
     docker: Docker,
 }
@@ -295,6 +299,27 @@ impl ProgressSink for Reporting<'_> {
 
 #[async_trait]
 impl DriverExtras for DockerExtras {
+    fn server_update_support(&self) -> Option<orch_driver_contract::descriptor::OperationSupport> {
+        self.server_update.support()
+    }
+    async fn server_update(
+        &self,
+        command: orch_types::Id,
+        body: &orch_link_contract::commands::NodeServerUpdate,
+    ) -> Result<orch_api_contract::admin::ServerUpdateObservation, DriverError> {
+        self.server_update.prepare(command, body).await
+    }
+    fn pending_server_update(&self) -> Option<orch_types::Id> {
+        self.server_update.pending()
+    }
+    fn server_update_answered(&self, command: orch_types::Id) {
+        self.server_update.answered(command);
+    }
+    async fn server_update_observation(
+        &self,
+    ) -> Result<Option<orch_link_contract::events::NodeServerUpdate>, DriverError> {
+        self.server_update.observe().await
+    }
     async fn stop_volume_work(&self, command: orch_types::Id) -> Result<(), DriverError> {
         self.driver.stop_volume_work(command).await
     }
@@ -620,6 +645,36 @@ impl BlobSource for DeskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a failed fixture or assertion must fail the test"
+    )]
+    fn build_support_stays_with_the_driver_and_live_policy_alone_permits_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config_of(&NodeSettings::in_dir(directory.path())).unwrap();
+        let sources = orch_driver_docker::descriptor::sources(&config);
+        assert!(sources.contains(&orch_driver_contract::sources::SourceKind::Build));
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "name":NAME,"version":"1","title":"Images","sources":sources,"local_accounts":false
+        }))
+        .unwrap();
+        let spec = serde_json::json!({"build":{"dockerfile":"FROM scratch"}});
+        let mut policy = orch_link_contract::policy::MachineDrivers::managed();
+        policy.images.builds = false;
+        assert!(
+            policy
+                .check(&descriptor, &spec, None, &Default::default())
+                .is_err()
+        );
+        policy.images.builds = true;
+        assert!(
+            policy
+                .check(&descriptor, &spec, None, &Default::default())
+                .is_ok()
+        );
+    }
 
     #[test]
     #[allow(
