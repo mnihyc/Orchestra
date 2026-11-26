@@ -2,12 +2,13 @@
 use super::*;
 mod audit;
 
-pub(super) async fn rerouted(
+pub(super) async fn rerouted_from(
     unit: &mut Unit<'_>,
     thread: Id,
     segment: Id,
     turn: Option<Id>,
     payload: &Json,
+    source: Option<NativeObservation>,
 ) -> Result<Option<Json>, EngineError> {
     if payload.get("code").and_then(Json::as_str) != Some("model_rerouted") {
         return Ok(None);
@@ -22,6 +23,19 @@ pub(super) async fn rerouted(
     else {
         return Ok(None);
     };
+    if let Some(source) = source {
+        let original: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE id=$1 AND native_opening_id=$2)",
+        )
+        .bind(turn)
+        .bind(source.opening_id)
+        .fetch_one(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        if !original {
+            return Ok(None);
+        }
+    }
     let Some(turn) = turn.filter(|turn| {
         details
             .get("turn_id")
@@ -76,7 +90,9 @@ pub(super) async fn rerouted(
             .execute(&mut *unit.conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        if orch_db::queries::thread_history::selected_turn(unit.conn, thread, turn).await? {
+        if source.is_none_or(|source| source.serving)
+            && orch_db::queries::thread_history::selected_turn(unit.conn, thread, turn).await?
+        {
             let current = threads::lock(unit.conn, thread).await?;
             if let Some(mut usage) = current
                 .and_then(|thread| thread.usage)
@@ -115,13 +131,15 @@ pub(super) async fn completed_marker(
 }
 
 /// One committed native item supplies both context repair and the factual audit.
-pub(super) async fn completed_item(
+pub(super) async fn completed_item_from(
     unit: &mut Unit<'_>,
     row: &ItemRow,
     payload: &Json,
     previous: Option<&Json>,
+    serving: bool,
 ) -> Result<(), EngineError> {
-    if row.kind == "marker"
+    if serving
+        && row.kind == "marker"
         && (row.status == "in_progress"
             || previous.is_none_or(|previous| !context_compaction(previous)))
     {

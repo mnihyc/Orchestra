@@ -7,18 +7,21 @@
  * definition or adds one; one that ships with Orch cannot be removed, and one an environment holds
  * cannot be removed while it does.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useInfiniteQuery } from '@tanstack/react-query';
 import { Ellipsis, Pencil, Plus, ShieldQuestionMark, Trash } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 
-import { capabilitiesQuery, deleteCapability, saveCapability } from '@/api/admin';
-import { capabilityDescription, capabilityName } from '@/features/resources/capabilityWords';
+import { capabilitiesPageQuery, deleteCapability, saveCapability } from '@/api/admin';
+import { capabilityDescription, capabilityName,capabilitySearchAliases } from '@/features/resources/capabilityWords';
 import { ApiError } from '@/api/client';
 import { parseObject, patchedDrivers } from '@/features/admin/harnesses';
 import type { ApproverScope, CapabilityDef, CapabilityDefaultDecision, Risk } from '@/generated/api-types';
 import { useForm } from '@/lib/forms';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
 import { StatusTag, type TagTone } from '@/features/admin/StatusTag';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -106,8 +109,8 @@ function CapabilityForm({ def, onClose }: { def: CapabilityDef | null; onClose: 
     >
       <form id="admin-capability-form" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => save.mutate(values))}>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Input label={t('admin.capabilities.key')} hint={t('admin.capabilities.keyHint')} autoComplete="off" autoCapitalize="none" mono readOnly={def !== null} {...form.field('key')} />
           <Input label={t('admin.capabilities.label')} autoComplete="off" {...form.field('label')} />
+          <Input label={t('admin.capabilities.key')} hint={t('admin.capabilities.keyHint')} autoComplete="off" autoCapitalize="none" mono readOnly={def !== null} {...form.field('key')} />
         </div>
         <Textarea label={t('admin.capabilities.description')} optional rows={2} {...form.field('description')} />
         <div className="grid gap-4 sm:grid-cols-3">
@@ -138,7 +141,9 @@ function CapabilityForm({ def, onClose }: { def: CapabilityDef | null; onClose: 
 export function Capabilities() {
   const { t } = useTranslation();
   const driverNames=(def:CapabilityDef)=>patchedDrivers(def.driver_patch).map((driver)=>t(`templates.driverChoices.${driver}.name`, { defaultValue: driver })).join(t('startFlow.separator'));
-  const defs = useQuery(capabilitiesQuery);
+  const search=useCollectionSearch('admin-capabilities');
+  const defs=useInfiniteQuery(capabilitiesPageQuery(search.q,capabilitySearchAliases(search.q,t).join(',')));
+  const rows=defs.data?.pages.flatMap((page)=>page.items)??[];
   const [editing, setEditing] = useState<CapabilityDef | 'new' | null>(null);
   const [removing, setRemoving] = useState<CapabilityDef | null>(null);
 
@@ -202,16 +207,18 @@ export function Capabilities() {
           {t('admin.capabilities.addTitle')}
         </Button>
       </div>
+      <CollectionSearch name={t('admin.sections.capabilities.title')} {...search}/>
       {defs.isPending ? (
         <SkeletonRows read={defs} rows={4} />
       ) : defs.isError ? (
         <ErrorState error={defs.error} retrying={defs.isRefetching} onRetry={() => void defs.refetch()} />
-      ) : defs.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<ShieldQuestionMark aria-hidden />} title={t('admin.capabilities.none')} />
       ) : (
-        <Table label={t('admin.sections.capabilities.title')} columns={columns} rows={defs.data} rowKey={(def) => def.key} />
+        <Table label={t('admin.sections.capabilities.title')} columns={columns} rows={rows} virtual rowKey={(def) => def.key} />
       )}
 
+      <Pagination hasMore={defs.hasNextPage} loading={defs.isFetchingNextPage} error={defs.isFetchNextPageError?defs.error:null} onMore={()=>{void defs.fetchNextPage();}}/>
       {editing !== null && <CapabilityForm key={editing === 'new' ? 'new' : editing.key} def={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
       <ConfirmDialog
         open={removing !== null}

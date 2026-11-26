@@ -320,8 +320,14 @@ async fn off_removes_background_arguments_from_the_real_claude_offer_and_keeps_c
     proof.close().await;
 }
 
+/// Whether the stopped turn's follow-up waits, held, as a finished task.
+async fn followup_held(proof: &Bridge) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state_detail='background_stopped' AND state='pending')")
+        .bind(proof.thread).fetch_one(proof.world.pool.pool()).await.unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_persons_stop_holds_the_real_followup_until_a_new_human_input() {
+async fn a_persons_stop_keeps_the_real_followup_from_starting_a_turn_by_itself() {
     let mut proof = Bridge::start(Kind::Claude, false, true).await;
     proof
         .world
@@ -334,10 +340,10 @@ async fn a_persons_stop_holds_the_real_followup_until_a_new_human_input() {
         .pump_until(|state| state.interrupted && state.quiet)
         .await;
     proof.flush().await;
-    let held:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state_detail='background_stopped' AND state='pending')")
-        .bind(proof.thread).fetch_one(proof.world.pool.pool()).await.unwrap();
-    assert!(held);
+    assert!(followup_held(&proof).await);
     assert_eq!(proof.world.turn_starts(proof.thread).len(), 1);
+    // A message the person sends after Stop does not let the stopped turn's follow-up run in its stead: it stays a
+    // finished task waiting, which the person may send, and starts no paid work by itself.
     proof
         .world
         .engine()
@@ -348,8 +354,14 @@ async fn a_persons_stop_holds_the_real_followup_until_a_new_human_input() {
         )
         .await
         .unwrap();
-    proof.pump_until(|state| state.completed.len() > 1).await;
-    assert!(proof.wake.is_some());
+    proof.flush().await;
+    assert!(followup_held(&proof).await);
+    let woken: i64 = sqlx::query_scalar("SELECT count(*) FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.thread_id=$1 AND i.client_id LIKE 'background:%'")
+        .bind(proof.thread).fetch_one(proof.world.pool.pool()).await.unwrap();
+    assert_eq!(
+        woken, 0,
+        "the stopped turn's follow-up never starts a turn by itself"
+    );
     proof.close().await;
 }
 

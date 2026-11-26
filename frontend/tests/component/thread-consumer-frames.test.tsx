@@ -11,33 +11,52 @@ import { isThreadForScreen, threadCapabilities } from '@/features/thread/cached'
 import { mayExportThread } from '@/features/export/pending';
 import type { Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
+import { flushDeltas, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { agentMessage } from '../doubles/thread-rows';
 import { World } from '../doubles/world';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+import { Profiler, useLayoutEffect } from 'react';
+import { QueryClient } from '@tanstack/react-query';
+import { KeptQueryScope } from '@/features/workbench/KeptQueries';
+import { ViewOpening, ViewOpeningContext, showViewOpening, forgetViewOpening } from '@/features/workbench/viewOpening';
+import { ThreadReadProvider } from '@/realtime/threadReadContext';
+import { resultThreadRead } from '@/realtime/threadScope';
+import { useThreadPart, useThreadView } from '@/realtime/stores/thread';
+import { useThreadDoor } from '@/features/files/door';
+import type { FeedListener } from '@/realtime/socket';
+import { serve, OLDER } from '../unit/thread-read-fixtures';
+import { answer } from '../unit/continuation-fixtures';
+import { captureThreadRead } from '@/api/threadRead';
 
-const calls = vi.hoisted(() => ({ reload: vi.fn() }));
-vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined, reloadThread: calls.reload }));
+const calls = vi.hoisted(() => ({ reload: vi.fn(), feed: vi.fn<typeof Live.useThreadFeed>(), header: vi.fn(), composer: vi.fn(), native: false }));
+vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: calls.feed, useOrgTreeFeed: () => undefined, reloadThread: calls.reload }));
 vi.mock('@/shell/screen', async (load) => ({ ...await load<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/thread/Header', () => ({ ThreadHeader: ({ thread }: { thread: Thread }) => <header><h1>{thread.name}</h1></header> }));
-vi.mock('@/features/composer/Composer', () => ({ Composer: () => <textarea aria-label="Thread draft" /> }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/thread/Header', () => ({ ThreadHeader: ({ thread, notes }: { thread: Thread; notes: HTMLElement | null }) => { calls.header(notes); return <header><h1>{thread.name}</h1></header>; } }));
+vi.mock('@/features/composer/Composer', () => ({ Composer: () => { calls.composer(); return <textarea aria-label="Thread draft" />; } }));
 vi.mock('@/features/composer/QueueTray', () => ({ QueueTray: () => null }));
-vi.mock('@/features/schedules/Schedules', () => ({ PendingAgentSchedules: () => null }));
+vi.mock('@/features/schedules/PendingAgentSchedules', () => ({ PendingAgentSchedules: () => null }));
 vi.mock('@/features/thread/ConnectionBanner', () => ({ ConnectionBanner: () => null }));
 vi.mock('@/features/thread/BlockedBanner', () => ({ BlockedBanner: () => null }));
 vi.mock('@/features/thread/LockBanner', () => ({ LockBanner: () => null }));
 vi.mock('@/features/source/Preparation', () => ({ SourcePreparation: () => null }));
 vi.mock('@/features/source/Review', () => ({ ReviewTray: () => null }));
 vi.mock('@/features/timeline/FindInConversation', () => ({ FindInConversation: () => null }));
-vi.mock('@/features/timeline/Timeline', () => ({ Timeline: () => <p>The redirect has been checked.</p> }));
+vi.mock('@/features/timeline/Timeline', () => ({ Timeline: () => calls.native ? <RetainedNativeRows /> : <p>The redirect has been checked.</p> }));
+vi.mock('@/features/summaries/ThreadSummaryInspector', () => ({ ThreadSummaryInspector: () => null }));
+vi.mock('@/features/gateways/ThreadGatewayStatus', () => ({ ThreadGatewayStatus: () => null }));
 vi.mock('@/features/ports/LocalAddresses', () => ({ LocalAddresses: ({ children }: { children: ReactNode }) => children }));
 
 let native: Thread;
+function RetainedNativeRows() {
+  const view = useThreadView(native.id);
+  return <>{view.order.map((id) => { const item = view.items.get(id); return item?.kind === 'agent_message' ? <p key={id}>{item.payload.text}</p> : null; })}</>;
+}
 let theme: string | null = null;
 beforeEach(() => {
   calls.reload.mockReset(); theme = document.documentElement.getAttribute('data-theme');
+  calls.native = false; calls.feed.mockReset().mockImplementation(() => undefined);
   const world = new World(); const person = world.people.get('ada');
   const node = world.places.rowOf(ACME.mainThread);
   if (person === undefined || node === undefined) throw new Error('A native thread is required');
@@ -45,6 +64,24 @@ beforeEach(() => {
   threadWriter.reset(native.id, { thread: native, items: [{ ...agentMessage('answer', 'The redirect has been checked.'), thread_id: native.id, seq_created: 1, seq_updated: 1 }] }, false);
 });
 afterEach(async () => { threadWriter.evict(native.id); await setLocale('en'); if (theme === null) document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', theme); });
+
+it('keeps the reading area from loading through the first answer, with its header notes ready on the first draw', () => {
+  threadWriter.evict(native.id);
+  calls.header.mockClear();
+  calls.native = true;
+  const view = show(<ThreadScreen threadId={native.id} item={null} />);
+  const viewport = view.container.querySelector('[data-scroll-area]');
+  expect(viewport).toBeInstanceOf(HTMLElement);
+  expect(screen.queryByRole('heading', { name: native.name })).toBeNull();
+  act(() => {
+    threadWriter.reset(native.id, { thread: native, items: [
+      { ...agentMessage('answer', 'The redirect has been checked.'), thread_id: native.id, seq_created: 1, seq_updated: 1 },
+    ] }, false);
+  });
+  expect(view.container.querySelector('[data-scroll-area]')).toBe(viewport);
+  expect(viewport).toContainElement(screen.getByText('The redirect has been checked.'));
+  expect(calls.header.mock.calls[0]?.[0]).toBe(viewport?.querySelector('[data-thread-notes]'));
+});
 
 it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('retains the conversation without capability guesses, and contains an incomplete frame with Retry in %s/%s', async (locale, look) => {
   await setLocale(locale); document.documentElement.setAttribute('data-theme', look);
@@ -73,6 +110,80 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
   expect(calls.reload).toHaveBeenCalledTimes(1);
 });
 
+it.each([{ hiddenFor: 15_000, hold: false }, { hiddenFor: 6 * 60_000, hold: true }])('keeps the actual thread screen and cut after $hiddenFor hidden milliseconds with pending work=$hold', { timeout: 30_000 }, async ({ hiddenFor, hold }) => {
+  skipOverflowFallback();
+  const live = await vi.importActual<typeof Live>('@/realtime/live');
+  live.feeds.clear(); threadWriter.clear(); calls.native = true;
+  calls.feed.mockImplementation(live.useThreadFeed); calls.reload.mockImplementation(live.reloadThread);
+  const server = serve(), owner = 'retained-native-screen', read = resultThreadRead(native.id, owner);
+  const listeners = new Map<string, FeedListener>();
+  const subscribed = vi.spyOn(live.socket, 'subscribe').mockImplementation((feed, listener) => {
+    listeners.set(feed, listener); return { unsubscribe: () => { if (listeners.get(feed) === listener) listeners.delete(feed); } };
+  });
+  const watched = vi.spyOn(live.socket, 'visible');
+  function Slot() { useLayoutEffect(() => showViewOpening(owner, 'native-route'), []); return null; }
+  function Kept({ shown }: { shown: boolean }) { return <ThreadReadProvider read={read}>
+    <ViewOpening view={owner} route="native-route" hold={hold}><ThreadScreen threadId={native.id} item={null} /></ViewOpening>{shown && <Slot />}
+  </ThreadReadProvider>; }
+  vi.useFakeTimers();
+  const view = show(<Kept shown />);
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(threadViewOf(read).read?.ready).toBe(true);
+    act(() => threadWriter.older(read, [answer(OLDER, 'Older native history', undefined, 5)], false, captureThreadRead(read)));
+    const before = threadViewOf(read), cut = before.read;
+    const historyRow = screen.getByText('Older native history');
+    const viewport = view.container.querySelector('[data-scroll-area]');
+    if (!(viewport instanceof HTMLElement)) throw new Error('The actual ThreadScreen viewport must be mounted');
+    viewport.scrollTop = 317;
+    const draft = screen.getByRole('textbox', { name: 'Thread draft' });
+    (draft as HTMLTextAreaElement).value = 'Retained local draft';
+    const listener = listeners.get(`thread:${native.id}`);
+    if (listener === undefined) throw new Error('The actual thread must own a native subscription');
+    view.rerender(<Kept shown={false} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(listeners.has(`thread:${native.id}`)).toBe(false);
+    expect(watched).toHaveBeenLastCalledWith(`thread:${native.id}`, false);
+    await act(async () => {
+      listener.onFrame({ op: 'resync', id: 1, feed: `thread:${native.id}`, reload: true });
+      await vi.advanceTimersByTimeAsync(hiddenFor);
+    });
+    expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))).toHaveLength(1);
+    expect(threadViewOf(read).items.has(OLDER)).toBe(true); expect(threadViewOf(read).read?.identity).toBe(cut?.identity);
+    view.rerender(<Kept shown />); await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(listeners.get(`thread:${native.id}`)?.since()).toBe(20);
+    expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))).toHaveLength(1);
+    expect(screen.getByText('Older native history')).toBe(historyRow);
+    expect(historyRow).toBeVisible();
+    expect(view.container.querySelector('[data-scroll-area]')).toBe(viewport); expect(viewport.scrollTop).toBe(317);
+    expect(screen.getByRole('textbox', { name: 'Thread draft' })).toBe(draft); expect(draft).toHaveValue('Retained local draft');
+    expect(threadViewOf(read).read?.epoch).toBe(cut?.epoch);
+  } finally {
+    view.unmount(); live.feeds.clear(); subscribed.mockRestore(); watched.mockRestore();
+    calls.native = false; calls.feed.mockImplementation(() => undefined); vi.unstubAllGlobals(); vi.useRealTimers(); forgetViewOpening(owner);
+  }
+});
+
+it('pauses an early thread read when its slot hides before its screen mounts', async () => {
+  const live = await vi.importActual<typeof Live>('@/realtime/live');
+  live.feeds.clear(); threadWriter.clear(); const server = serve(), read = resultThreadRead(native.id, 'early-thread-slot');
+  const listeners = new Set<FeedListener>();
+  const subscribed = vi.spyOn(live.socket, 'subscribe').mockImplementation((_feed, listener) => {
+    listeners.add(listener); return { unsubscribe: () => { listeners.delete(listener); } };
+  });
+  vi.useFakeTimers(); const warm = live.warmThread(read, 10 * 60_000);
+  try {
+    await vi.advanceTimersByTimeAsync(0); expect(listeners.size).toBe(1);
+    const before = threadViewOf(read), old = [...listeners][0];
+    warm.shown(false); expect(listeners.size).toBe(0);
+    old?.onFrame({ op: 'resync', id: 1, feed: `thread:${native.id}`, reload: true });
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(threadViewOf(read).read).toBe(before.read); expect(server.calls).toHaveLength(1);
+    warm.shown(true); await vi.advanceTimersByTimeAsync(0);
+    expect(listeners.size).toBe(1); expect([...listeners][0]?.since()).toBe(20); expect(server.calls).toHaveLength(1);
+  } finally { warm(); live.feeds.clear(); subscribed.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+});
+
 it('refuses foreign, incomplete or wrong-thread frames and keeps unknown capabilities distinct from denied or granted', () => {
   for (const value of [null, [], {}, { id: native.id, kind: 'thread', name: native.name }, { ...native, id: 'another' }, { ...native, kind: 'topic' }, { ...native, binding: {} }, { ...native, owner: null }]) {
     expect(isThreadForScreen(value, native.id)).toBe(false);
@@ -81,4 +192,106 @@ it('refuses foreign, incomplete or wrong-thread frames and keeps unknown capabil
   expect(threadCapabilities({ ...native, can: undefined })).toBeNull();
   expect(mayExportThread({ ...native, can: { ...native.can, export: false } })).toBe(false);
   expect(mayExportThread({ ...native, can: { ...native.can, export: true } })).toBe(true);
+});
+
+it('profiles thread screen renders while a running turn receives live answers with a large cache', () => {
+  skipOverflowFallback();
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  for (let i = 0; i < 5_000; i++) cache.setQueryData(['background', i], i);
+  const durations: number[] = [];
+  calls.native = true;
+  threadWriter.apply(native.id, { thread: { ...native, state: 'running', seq: native.seq + 1 } });
+  const view = show(<KeptQueryScope shown><Profiler id="running-thread" onRender={(_id, _phase, ms) => durations.push(ms)}>
+    <ThreadScreen threadId={native.id} item={null} />
+  </Profiler></KeptQueryScope>, cache);
+  try {
+    durations.length = 0;
+    expect(calls.composer).toHaveBeenCalled();
+    calls.composer.mockClear();
+    const scans = vi.spyOn(cache.getQueryCache(), 'getAll');
+    for (let i = 0; i < 10; i++) {
+      act(() => threadWriter.apply(native.id, { items: [{ ...agentMessage('answer', `Running output ${i}`), thread_id: native.id, seq_created: 1, seq_updated: i + 2 }] }));
+    }
+    expect(view.container).toHaveTextContent('Running output 9');
+    expect(durations.length).toBeGreaterThan(0);
+    process.stdout.write(`Running thread React updates ${JSON.stringify({ commits: durations.length, maxMs: Math.max(...durations) })}\n`);
+    expect(scans).not.toHaveBeenCalled();
+    expect(calls.composer).not.toHaveBeenCalled();
+    act(() => threadWriter.apply(native.id, { thread: { ...native, seq: native.seq + 2 } }));
+    expect(calls.composer).toHaveBeenCalled();
+  } finally { view.unmount(); cache.clear(); }
+});
+
+it('keeps the workspace controls at their admitted permissions while conversation rows arrive', () => {
+  const renders = vi.fn();
+  function Workspace() {
+    const door = useThreadDoor(native.id);
+    renders();
+    return <p>{door.kind === 'ready' ? String(door.access.mayView) : door.kind}</p>;
+  }
+  const environment: NonNullable<Thread['environment']> = { id: 'workspace', name: 'Workspace', address: 'workspace', owner: native.owner, placement: 'connected', ports_exposed: false, status: 'running' };
+  threadWriter.apply(native.id, { thread: { ...native, environment, environment_permissions: ['files.view'], seq: native.seq + 1 } });
+  show(<Workspace />);
+  expect(screen.getByText('true')).toBeVisible();
+  renders.mockClear();
+  act(() => threadWriter.apply(native.id, { items: [{ ...agentMessage('reply', 'Still working'), thread_id: native.id, seq_created: 3, seq_updated: 3 }] }));
+  expect(threadViewOf(native.id).items.has('reply')).toBe(true);
+  expect(renders).not.toHaveBeenCalled();
+  act(() => threadWriter.apply(native.id, { thread: { ...native, environment, environment_permissions: [], seq: native.seq + 2 } }));
+  expect(screen.getByText('false')).toBeVisible();
+});
+
+it('draws streamed text in its item while the thread heading stays at the last reported state', () => {
+  skipOverflowFallback();
+  calls.native = true;
+  threadWriter.apply(native.id, {
+    thread: { ...native, state: 'running', seq: native.seq + 1 },
+    items: [{ ...agentMessage('stream', '', { status: 'in_progress' }), thread_id: native.id, seq_created: 2, seq_updated: 2 }],
+  });
+  const view = show(<ThreadScreen threadId={native.id} item={null} />);
+  try {
+    expect(screen.getByRole('heading', { name: native.name })).toBeVisible();
+    calls.header.mockClear();
+    for (let n = 0; n < 10; n++) act(() => {
+      threadWriter.delta(native.id, { item_id: 'stream', field: 'text', offset: n, len: 1, data: String(n) });
+      flushDeltas();
+    });
+    expect(screen.getByText('0123456789')).toBeVisible();
+    expect(calls.header).not.toHaveBeenCalled();
+    act(() => threadWriter.apply(native.id, { thread: { ...native, seq: native.seq + 2, name: 'Completed thread' } }));
+    expect(screen.getByRole('heading', { name: 'Completed thread' })).toBeVisible();
+  } finally { view.unmount(); }
+});
+
+it('changes the slot’s read demand without rebuilding the retained conversation around it', () => {
+  skipOverflowFallback();
+  const body = <ThreadScreen threadId={native.id} item={null} />;
+  const frame = (opening: string | null) => <ViewOpeningContext.Provider value={opening}>{body}</ViewOpeningContext.Provider>;
+  const view = show(frame('first-opening'));
+  expect(screen.getByRole('heading', { name: native.name })).toBeVisible();
+  calls.header.mockClear();
+  view.rerender(frame(null));
+  view.rerender(frame('next-opening'));
+  expect(calls.header.mock.calls.length).toBe(0);
+  act(() => threadWriter.apply(native.id, { thread: { ...native, name: 'New thread name', seq: native.seq + 1 } }));
+  expect(screen.getByRole('heading', { name: 'New thread name' })).toBeVisible();
+});
+
+it('checks the reader that received a frame without running selectors for nine other open windows', () => {
+  const others = Array.from({ length: 9 }, (_, i) => resultThreadRead(native.id, `other-window-${i}`));
+  const selected = vi.fn<(read: ReturnType<typeof resultThreadRead>) => void>();
+  function State({ read }: { read: ReturnType<typeof resultThreadRead> }) {
+    const name = useThreadPart(read, (view) => { selected(read); return view.thread?.name; });
+    return <output>{name}</output>;
+  }
+  const active = resultThreadRead(native.id, 'active-window');
+  const view = show(<>{[active, ...others].map((read) => <State key={read.key.owner} read={read} />)}</>);
+  try {
+    selected.mockClear();
+    act(() => { threadWriter.reset(active, { thread: { ...native } }, false); });
+    expect(screen.getByText(native.name)).toBeVisible();
+    expect(new Set(selected.mock.calls.map(([read]) => read))).toEqual(new Set([active]));
+    act(() => threadWriter.evict(active));
+    expect(screen.queryByText(native.name)).not.toBeInTheDocument();
+  } finally { view.unmount(); threadWriter.evict(active); }
 });

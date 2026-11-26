@@ -209,6 +209,45 @@ fn uninstall_keeps_data_without_purge_and_purge_removes_it_while_supplied_config
 }
 
 #[test]
+fn a_purge_removes_the_host_units_directory_beside_the_data_directory_and_an_uninstall_keeps_it() {
+    for purge in [false, true] {
+        let installed = Installed::new(true);
+        // What host-process units worked in: a unit's own directory and a volume of the default storage.
+        let units = installed.data.with_file_name("node data-units");
+        std::fs::create_dir_all(units.join("orch-environment-0123456789ab")).unwrap();
+        std::fs::write(
+            units.join("orch-environment-0123456789ab/connector.log"),
+            b"a unit's own file",
+        )
+        .unwrap();
+        std::fs::create_dir_all(units.join("volumes/ws-disposable")).unwrap();
+        std::fs::write(units.join("volumes/ws-disposable/work"), b"a unit's work").unwrap();
+        let preview = installed.run(&["uninstall", "--purge", "--plan"]);
+        assert!(preview.status.success());
+        assert!(
+            String::from_utf8_lossy(&preview.stdout).contains(units.to_str().unwrap()),
+            "the plan names the units directory"
+        );
+        let output = if purge {
+            installed.run(&["uninstall", "--purge", "--yes"])
+        } else {
+            installed.run(&["uninstall", "--yes"])
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(installed.data.exists(), !purge);
+        assert_eq!(
+            units.exists(),
+            !purge,
+            "the units directory goes with a purge"
+        );
+    }
+}
+
+#[test]
 fn an_active_instance_blocks_file_purge_and_keeps_the_receipt_for_a_retry() {
     let installed = Installed::new(true);
     let _running = orch_connector_core::uninstall::InstanceLock::running(&installed.data).unwrap();

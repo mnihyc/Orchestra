@@ -282,13 +282,30 @@ export function matcherWords(matcher: ApprovalMatcher, t: TFunction): string {
   }
 }
 
-/** One button for each option the harness offers, in the order it gave them. */
-export function OptionButtons({ options, disabled, pressed, reason, onChoose, target }: { target?: string; options: readonly ApprovalOption[]; disabled: boolean; pressed: string | null; reason?: string | undefined; onChoose: (option: ApprovalOption) => void }) {
+/** One button for each option the harness offers, in the order it gave them. A refusal whose words the agent reads
+ * opens one line for them in place: the agent is told what to do instead. Escape there goes back to the buttons and
+ * never denies. */
+export function OptionButtons({ options, disabled, pressed, reason, onChoose, target }: { target?: string; options: readonly ApprovalOption[]; disabled: boolean; pressed: string | null; reason?: string | undefined; onChoose: (option: ApprovalOption, note?: string) => void }) {
   const { t } = useTranslation();
+  const [noting, setNoting] = useState<ApprovalOption | null>(null);
+  const [words, setWords] = useState('');
   // An option for this thread is offered only with the matcher it keeps, shown before it is chosen; one without
   // a matcher offers nothing for the thread.
   const offered = options.filter((option) => option.scope !== 'thread' || option.rule !== null);
   const rules = offered.flatMap((option) => (option.scope === 'thread' && option.rule !== null ? [option.rule] : []));
+  const noted = offered.find((option) => option.style === 'deny' && option.note === true);
+  if (noting !== null) {
+    const said = words.trim();
+    return (
+      <form className="flex flex-wrap items-center gap-2" data-approval-note onSubmit={(event) => { event.preventDefault(); onChoose(noting, said === '' ? undefined : said); }}>
+        <Input label={t('approvals.denyNote')} hideLabel placeholder={t('approvals.denyNote')} autoFocus value={words} disabled={disabled}
+          onChange={(event) => setWords(event.target.value)} fieldClassName="min-w-0 flex-[1_1_16rem]"
+          onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setNoting(null); } }} />
+        <Button type="submit" action="deny" variant="danger-ghost" size="md" pending={pressed === noting.label} disabled={disabled} reason={reason}>{optionWords(noting, t)}</Button>
+        <Button variant="ghost" size="md" disabled={pressed === noting.label} onClick={() => setNoting(null)}>{t('common.cancel')}</Button>
+      </form>
+    );
+  }
   return (
     <div className="flex flex-col gap-2">
       {rules.map((rule) => (
@@ -313,12 +330,17 @@ export function OptionButtons({ options, disabled, pressed, reason, onChoose, ta
           {optionWords(option, t)}
         </Button>
       ))}
+      {noted !== undefined && (
+        <Button variant="ghost" size="md" disabled={disabled} reason={reason} onClick={() => { setWords(''); setNoting(noted); }}>
+          {t('approvals.denyWithNote')}
+        </Button>
+      )}
     </div>
     </div>
   );
 }
 
-/** The decision that an option stands for. */
-export function decisionOfOption(option: ApprovalOption): ApprovalDecision {
-  return { option_id: option.id };
+/** The decision that an option stands for, with the person's words where the option takes them. */
+export function decisionOfOption(option: ApprovalOption, note?: string): ApprovalDecision {
+  return note === undefined || option.note !== true ? { option_id: option.id } : { option_id: option.id, note };
 }

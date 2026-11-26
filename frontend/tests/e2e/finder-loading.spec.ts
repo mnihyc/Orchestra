@@ -2,7 +2,7 @@
 import { expect, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { ACME, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, PEOPLE, readsOneByOne, scenario, signIn } from './support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
@@ -24,6 +24,7 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       const path = new URL(request.url()).pathname;
       if (request.method() === 'GET' && path.startsWith('/api/v1/')) reads.push(path.slice('/api/v1'.length));
     });
+    await readsOneByOne(page);
     await page.route('**/api/v1/me/bootstrap', async (route) => { requested?.(); await held; await route.continue(); });
     try {
       if (locale === 'en') {

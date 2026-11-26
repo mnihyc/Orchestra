@@ -146,6 +146,7 @@ impl native::Stored for Reservations {
 struct Issued {
     machine: Id,
     made: NewToken,
+    installation: orch_config::ServerConfig,
 }
 
 struct Projection;
@@ -230,13 +231,19 @@ impl native::reply::Projection for Projection {
         Box::pin(async { Ok(((), Vec::new())) })
     }
     fn render<'a>(
-        ctx: &'a Ctx,
+        _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
         input: &'a Issued,
         prepared: &'a native::reply::Prepared<Self>,
     ) -> BoxFuture<'a, ApiResult<EnrollmentToken>> {
-        Box::pin(async move { response(ctx, &prepared.subject, &input.made) })
+        Box::pin(async move {
+            Ok(response(
+                &input.installation,
+                &prepared.subject,
+                &input.made,
+            ))
+        })
     }
     fn check_opened<'a>(
         _ctx: &'a Ctx,
@@ -295,7 +302,7 @@ async fn create_on(ctx: Ctx) -> ApiResult<MachineEnrollmentAgainResponse> {
             "A machine declared lost needs a new enrollment and identity",
         ));
     }
-    let installation = super::installation_config(&ctx);
+    let installation = super::installation_config(&ctx, &mut tx).await?;
     if value.host.is_some() {
         super::require_node_installable(&installation)?;
     } else {
@@ -332,6 +339,7 @@ async fn create_on(ctx: Ctx) -> ApiResult<MachineEnrollmentAgainResponse> {
         })?;
     guard.check_deadline(&ctx)?;
     super::acknowledgement::deadline(&ctx, &accepted, until)?;
+    let installation = super::installation_config(&ctx, &mut tx).await?;
     tx.commit().await.map_err(DbError::from)?;
     let receipt = MachineEnrollmentAgainResponse::Receipt(MachineEnrollmentAgainReceipt {
         projection: ReceiptProjection::Receipt,
@@ -342,7 +350,16 @@ async fn create_on(ctx: Ctx) -> ApiResult<MachineEnrollmentAgainResponse> {
     });
     crate::key_operations::publication::receipt(&ctx, &receipt)?;
     Ok(
-        match native::reply::render::<Projection>(&ctx, &accepted, Issued { machine, made }).await?
+        match native::reply::render::<Projection>(
+            &ctx,
+            &accepted,
+            Issued {
+                machine,
+                made,
+                installation,
+            },
+        )
+        .await?
         {
             Some(value) => MachineEnrollmentAgainResponse::Full(Box::new(value)),
             None => receipt,
@@ -350,15 +367,18 @@ async fn create_on(ctx: Ctx) -> ApiResult<MachineEnrollmentAgainResponse> {
     )
 }
 
-fn response(ctx: &Ctx, subject: &Subject, made: &NewToken) -> ApiResult<EnrollmentToken> {
+fn response(
+    installation: &orch_config::ServerConfig,
+    subject: &Subject,
+    made: &NewToken,
+) -> EnrollmentToken {
     let row = &subject.row;
     let installer = if subject.host.is_some() {
         Installer::Node
     } else {
         Installer::Connector
     };
-    let installation = super::installation_config(ctx);
-    let mut commands = enrollment_commands(&installation, &made.token, installer);
+    let mut commands = enrollment_commands(installation, &made.token, installer);
     if matches!(installer, Installer::Connector) {
         let roles = row
             .roles
@@ -441,10 +461,10 @@ fn response(ctx: &Ctx, subject: &Subject, made: &NewToken) -> ApiResult<Enrollme
             ));
         }
     }
-    Ok(EnrollmentToken {
+    EnrollmentToken {
         receipt: Some(made.receipt.clone()),
         commands,
         token: made.token.clone(),
         expires_at: made.expires_at,
-    })
+    }
 }

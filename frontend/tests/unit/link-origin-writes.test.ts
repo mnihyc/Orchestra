@@ -3,7 +3,8 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type * as Client from '@/api/client';
 import { grantPerson } from '@/api/personActions';
 import { shareWithAgents } from '@/api/share';
-import type { AgentGift } from '@/features/sharing/linkPlan';
+import type { LinkOrigin } from '@/api/linkOrigin';
+import type { ShareWithAgents } from '@/generated/api-types';
 import { pageFor } from './general-access-fixtures';
 import { bodyOf, type HttpTransport } from '../doubles/http-wire';
 
@@ -44,7 +45,7 @@ it('keeps ordinary non-link gifts byte-compatible when no origin is supplied', a
 
 it('keeps structured origin on the ordinary live agent producer', async () => {
   calls.post.mockResolvedValue({ data: { shares: [] }, response: new Response(null, { status: 200 }) });
-  const body: AgentGift = { client_id: 'agent-key', mode: 'live', what: { document_id: 'document' }, to: [{ thread_id: 'recipient' }], parts: { documents: 'read' }, link_origin: { kind: 'thread_input', thread_id: 'composing-thread' } };
+  const body: ShareWithAgents & { link_origin: LinkOrigin } = { client_id: 'agent-key', mode: 'live', what: { document_id: 'document' }, to: [{ thread_id: 'recipient' }], parts: { documents: 'read' }, link_origin: { kind: 'thread_input', thread_id: 'composing-thread' } };
   const key = '01950000-0000-7000-8000-000000000072';
   await shareWithAgents(body, key);
   expect(calls.post).toHaveBeenCalledWith('/share/agents', { body, headers: { 'Idempotency-Key': key } });

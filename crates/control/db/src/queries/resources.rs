@@ -53,7 +53,7 @@ pub struct LinkCertificates {
 pub struct MachineRow {
     /// Its identifier.
     pub id: Id,
-    /// Advances with every stored machine-row update.
+    /// Editable choices and accepted role claims, independent of factual reports and presence.
     pub revision: i64,
     /// What it is called.
     pub name: String,
@@ -262,7 +262,7 @@ pub async fn machine_registration_home(
     Ok(sqlx::query_as(
         "SELECT n.id,n.org_id FROM machines m LEFT JOIN users u ON u.id=m.owner_id
          JOIN nodes n ON n.id=COALESCE(m.home_id,u.personal_org_id,$2)
-         WHERE m.id=$1 AND m.deleted_at IS NULL AND n.deleted_at IS NULL FOR SHARE OF m,n",
+         WHERE m.id=$1 AND m.deleted_at IS NULL AND n.deleted_at IS NULL FOR KEY SHARE OF m FOR SHARE OF n",
     )
     .bind(machine)
     .bind(legacy)
@@ -382,9 +382,8 @@ pub async fn set_machine_facts(
 ) -> Result<(), DbError> {
     // A report may change who may drive the environment's threads. Its writer has
     // taken the authority gate; retain the report and its cache invalidation together.
-    // The row is locked as its update locks it: every command and session row that names the
-    // machine holds a key-share lock until its transaction ends, and FOR UPDATE waited behind
-    // all of them, then held every new one back (deliveries of ten threads on one machine timed out).
+    // Hardware observations coexist with native source pins and foreign-key references.
+    // The schema upgrades changes of policy, capabilities or identity against those pins.
     let mut tx = sqlx::Connection::begin(conn).await?;
     let previous: Option<Json> =
         sqlx::query_scalar("SELECT facts FROM machines WHERE id=$1 FOR NO KEY UPDATE")
@@ -409,7 +408,9 @@ pub async fn set_machine_facts(
             cert_next_again = COALESCE(cert_next_again, CASE WHEN facts #>> '{$link,next,fingerprint}' IS NOT NULL
                 THEN COALESCE((facts #>> '{$link,next,again}')::boolean, false) END),
             facts = CASE WHEN jsonb_typeof($2::jsonb) = 'object'
-                THEN $2::jsonb - '$link' ELSE $2::jsonb END,
+                THEN ($2::jsonb - '$link' - 'spool') ||
+                    CASE WHEN facts ? 'spool' THEN jsonb_build_object('spool',facts->'spool') ELSE '{}'::jsonb END
+                ELSE $2::jsonb END,
             rate_up_bps = CASE WHEN $3::bigint IS NULL OR $3 < 0 THEN rate_up_bps
                                WHEN rate_up_bps IS NULL THEN $3
                                ELSE round(rate_up_bps * (1 - $5) + $3 * $5)::bigint END,
@@ -432,6 +433,18 @@ pub async fn set_machine_facts(
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Stores only the authenticated machine's typed out-of-band storage observation.
+pub async fn set_machine_spool_status(
+    conn: &mut Conn,
+    id: Id,
+    status: &orch_api_contract::resources::SpoolStatus,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let status = serde_json::json!(status);
+    Ok(sqlx::query("UPDATE machines SET facts=jsonb_set(COALESCE(facts,'{}'::jsonb),'{spool}',$2::jsonb,true),updated_at=$3 WHERE id=$1 AND status='active' AND deleted_at IS NULL AND facts->'spool' IS DISTINCT FROM $2::jsonb")
+        .bind(id).bind(status).bind(at).execute(conn).await?.rows_affected()>0)
 }
 
 /// Records the certificate a renewal issued. Until a session shows it, the
@@ -796,8 +809,10 @@ pub mod thread_engine {
         pub sources: Json,
         /// What the harness or the endpoint last reported.
         pub facts: Json,
-        /// The binding and credential revision captured for a correlated observation.
+        /// The revision of editable configuration, independent of factual reports.
         pub revision: i64,
+        /// Factual reports since creation, independent of the configuration revision.
+        pub observation_revision: i64,
         /// When it was deleted.
         pub deleted_at: Option<DateTime<Utc>>,
     }
@@ -806,7 +821,7 @@ pub mod thread_engine {
     pub async fn provider(conn: &mut Conn, id: Id) -> Result<Option<ProviderRow>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, protocols, provider_placement(machine_id) AS placement, machine_id,
-                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, deleted_at
+                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, observation_revision, deleted_at
                FROM providers WHERE id = $1",
         )
         .bind(id)
@@ -821,7 +836,7 @@ pub mod thread_engine {
         }
         Ok(sqlx::query_as(
             "SELECT id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, protocols, provider_placement(machine_id) AS placement, machine_id,
-                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, deleted_at
+                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, observation_revision, deleted_at
                FROM providers WHERE id = ANY($1)",
         ).bind(ids).fetch_all(conn).await?)
     }
@@ -907,6 +922,39 @@ pub mod thread_engine {
         .bind(model_name)
         .fetch_optional(conn)
         .await?)
+    }
+
+    /// The selected model's display name, including models the provider has since disabled.
+    pub async fn model_display_name(
+        conn: &mut Conn,
+        provider: Id,
+        model: &str,
+    ) -> Result<Option<String>, DbError> {
+        if let Some(name) = crate::queries::read_facts::with_opening(conn, |facts| {
+            let (seen_provider, seen_model, name) = facts.selected_model_name.as_ref()?;
+            (*seen_provider == provider && seen_model == model).then(|| name.clone())
+        })
+        .flatten()
+        {
+            return Ok(Some(name));
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT display_name FROM provider_models WHERE provider_id=$1 AND model_name=$2",
+        )
+        .bind(provider)
+        .bind(model)
+        .fetch_optional(conn)
+        .await?)
+    }
+
+    /// An unambiguous enabled model for a creation without a place or explicit choice.
+    /// Two rows suffice to prove ambiguity; this does not truncate a person's model list.
+    pub async fn sole_enabled_model(
+        conn: &mut Conn,
+        provider: Id,
+    ) -> Result<Option<String>, DbError> {
+        Ok(sqlx::query_scalar("SELECT min(model_name) FROM (SELECT model_name FROM provider_models WHERE provider_id=$1 AND enabled LIMIT 2) offered HAVING count(*)=1")
+            .bind(provider).fetch_optional(conn).await?)
     }
 
     /// Stable factual candidates for direct model helpers. Admission remains with the native
@@ -1032,6 +1080,8 @@ pub mod thread_engine {
     /// What a harness process says of itself.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct HarnessReport<'a> {
+        /// Actual process home, only when the report supplied fresh evidence.
+        pub home: Option<&'a Json>,
         /// `online`, `starting`, `offline`, `error`: its state.
         pub status: &'a str,
         /// A sentence about it.
@@ -1063,10 +1113,11 @@ pub mod thread_engine {
         .await?;
         sqlx::query(
             "INSERT INTO harnesses (provider_id, agent_id, machine_id, status, status_detail, harness_version,
-                                    sessions_open, last_active_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+                                    sessions_open, last_active_at, updated_at, home)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9)
              ON CONFLICT (provider_id, agent_id, machine_id) DO UPDATE
                 SET status = EXCLUDED.status, status_detail = EXCLUDED.status_detail,
+                    home = COALESCE(EXCLUDED.home, harnesses.home),
                     harness_version = COALESCE(EXCLUDED.harness_version, harnesses.harness_version),
                     sessions_open = EXCLUDED.sessions_open, last_active_at = EXCLUDED.last_active_at,
                     updated_at = EXCLUDED.updated_at",
@@ -1079,6 +1130,7 @@ pub mod thread_engine {
         .bind(report.version)
         .bind(report.sessions_open)
         .bind(at)
+        .bind(report.home)
         .execute(conn)
         .await?;
         Ok(before)
@@ -1189,12 +1241,19 @@ pub mod thread_engine {
         pub platform_os: String,
         /// `connected` or `managed`.
         pub placement: String,
+        /// The host of a managed machine.
+        pub host_id: Option<Id>,
     }
 
-    /// A machine, as a reference to it names it.
+    /// A machine, as a reference to it names it. The machine of a host's container is called by its host's name:
+    /// its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_name(conn: &mut Conn, id: Id) -> Result<Option<MachineName>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines WHERE id = $1",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement, m.host_id
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = $1",
         )
         .bind(id)
         .fetch_optional(conn)
@@ -1301,7 +1360,7 @@ pub mod testing {
 // needs, the same for every kind, in one statement however many kinds are asked about.
 
 /// The kinds of resource, by the words their rows and pages are kept under.
-pub const RESOURCE_KINDS: [&str; 9] = [
+pub const RESOURCE_KINDS: [&str; 10] = [
     "provider",
     "agent",
     "environment",
@@ -1311,6 +1370,7 @@ pub const RESOURCE_KINDS: [&str; 9] = [
     "mcp_server",
     "mount",
     "skill",
+    "pool",
 ];
 
 /// A resource of any kind, with what a decision about it needs and nothing else.
@@ -1404,8 +1464,15 @@ const SKILL_FACTS: &str =
         '{}'::text[] AS arrangements, NULL::uuid AS machine_id, NULL::uuid AS machine_owner_id
    FROM skills x";
 
+const POOL_FACTS: &str =
+    "SELECT 'pool'::text AS kind, x.id, x.name, x.owner_id, x.home_id, x.org_id,
+        (NOT (x.definition->>'enabled')::boolean) AS disabled, (x.deleted_at IS NOT NULL) AS deleted,
+        NULL::text AS placement, false AS subscription, NULL::text AS harness_kind,
+        '{}'::text[] AS arrangements, NULL::uuid AS machine_id, NULL::uuid AS machine_owner_id
+   FROM pools x";
+
 /// The select that reads the facts of the kind `kind`, if it is one.
-fn facts_select(kind: &str) -> Option<&'static str> {
+pub(crate) fn facts_select(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "provider" => PROVIDER_FACTS,
         "agent" => AGENT_FACTS,
@@ -1416,6 +1483,7 @@ fn facts_select(kind: &str) -> Option<&'static str> {
         "mcp_server" => MCP_FACTS,
         "mount" => MOUNT_FACTS,
         "skill" => SKILL_FACTS,
+        "pool" => POOL_FACTS,
         _ => return None,
     })
 }
@@ -1490,6 +1558,7 @@ fn resource_table(kind: &str) -> Option<&'static str> {
         "mcp_server" => "mcp_servers",
         "mount" => "mounts",
         "skill" => "skills",
+        "pool" => "pools",
         _ => return None,
     })
 }
@@ -1497,7 +1566,95 @@ fn resource_table(kind: &str) -> Option<&'static str> {
 /// The facts of the resources `ids`, of whatever kinds, deleted or not, in one statement. An
 /// identifier that is no resource is not among them.
 pub async fn resource_facts(conn: &mut Conn, ids: &[Id]) -> Result<Vec<AccessFacts>, DbError> {
-    let selects: Vec<String> = RESOURCE_KINDS
+    match opening_resource_facts(conn, ids, None).await? {
+        Some(rows) => Ok(rows),
+        None => stored_resource_facts(conn, ids, false, &RESOURCE_KINDS).await,
+    }
+}
+
+/// Reads just the named resource table in an opening snapshot. A caller outside that snapshot
+/// uses the ordinary lookup, which also records the dependencies of a guarded write.
+pub async fn opening_resource_facts_of_kind(
+    conn: &mut Conn,
+    ids: &[Id],
+    kind: &str,
+) -> Result<Option<Vec<AccessFacts>>, DbError> {
+    let Some(kind) = RESOURCE_KINDS.into_iter().find(|&known| known == kind) else {
+        return Ok(None);
+    };
+    opening_resource_facts(conn, ids, Some(kind)).await
+}
+
+async fn opening_resource_facts(
+    conn: &mut Conn,
+    ids: &[Id],
+    kind: Option<&'static str>,
+) -> Result<Option<Vec<AccessFacts>>, DbError> {
+    let seen = super::read_facts::with_opening(conn, |facts| {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut rows = Vec::new();
+        let mut missing = Vec::new();
+        for id in ids {
+            if let Some(found) = facts.resources.get(&(id, kind)) {
+                rows.extend_from_slice(found);
+            } else if let Some(found) = facts.resources.get(&(id, None)) {
+                rows.extend(
+                    found
+                        .iter()
+                        .filter(|row| Some(row.kind.as_str()) == kind)
+                        .cloned(),
+                );
+            } else {
+                missing.push(id);
+            }
+        }
+        (rows, missing)
+    });
+    let Some((mut rows, missing)) = seen else {
+        return Ok(None);
+    };
+    if !missing.is_empty() {
+        let kinds = if kind.is_some() {
+            kind.as_slice()
+        } else {
+            &RESOURCE_KINDS
+        };
+        let found = stored_resource_facts(conn, &missing, true, kinds).await?;
+        // An absent identifier in one table can still name a resource in another.
+        let _ = super::read_facts::with_opening(conn, |facts| {
+            for id in missing {
+                facts.resources.entry((id, kind)).or_default();
+            }
+            for row in &found {
+                facts
+                    .resources
+                    .entry((row.id, kind))
+                    .or_default()
+                    .push(row.clone());
+            }
+        });
+        rows.extend(found);
+    }
+    rows.sort_unstable_by_key(|row| {
+        (
+            RESOURCE_KINDS
+                .iter()
+                .position(|&kind| kind == row.kind.as_str()),
+            row.id,
+        )
+    });
+    Ok(Some(rows))
+}
+
+async fn stored_resource_facts(
+    conn: &mut Conn,
+    ids: &[Id],
+    read_only: bool,
+    kinds: &[&str],
+) -> Result<Vec<AccessFacts>, DbError> {
+    let selects: Vec<String> = kinds
         .iter()
         .filter_map(|kind| facts_select(kind))
         .map(|select| {
@@ -1511,19 +1668,20 @@ pub async fn resource_facts(conn: &mut Conn, ids: &[Id]) -> Result<Vec<AccessFac
         .collect();
     // Every permission decision about a resource reads it here. In a write whose commit checks the authorization
     // epochs through `transaction_guard`, the epochs of these resources' root orgs are read in this same statement.
-    Ok(
-        sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "WITH found AS MATERIALIZED ({}), watched AS MATERIALIZED (
+    let select = selects.join(" UNION ALL ");
+    let statement = if read_only {
+        select
+    } else {
+        format!("WITH found AS MATERIALIZED ({select}), watched AS MATERIALIZED (
                  SELECT orch_authz_saw(orch_authz_epochs(ARRAY(SELECT DISTINCT org_id FROM found WHERE org_id IS NOT NULL)))
                   WHERE COALESCE(current_setting('orch.authz_seen', true), '') <> ''
              )
-             SELECT found.* FROM found, (SELECT count(*) FROM watched) w",
-            selects.join(" UNION ALL ")
-        )))
+             SELECT found.* FROM found, (SELECT count(*) FROM watched) w")
+    };
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(statement))
         .bind(ids)
         .fetch_all(conn)
-        .await?,
-    )
+        .await?)
 }
 
 /// Who is looking, as far as a list of resources is narrowed to what they might see.
@@ -1547,7 +1705,7 @@ pub struct Looker<'a> {
 /// with an identifier after `after` first, at most `limit` of them. It is a superset, narrowed by
 /// what a person could hold at all and nothing more: a resource of the system; any resource, for a
 /// system admin; one whose home lies in a tree they are a member of or hold a role in; one whose
-/// own page names them, a group of theirs, a role, everyone, or the work in a place. Every other
+/// own page names them, a group or membership of theirs, a role, everyone, or the work in a place. Every other
 /// resource gives them nothing, whatever the defaults say, because a defaults page names only the
 /// members of its own tree.
 pub async fn candidate_resources(
@@ -1585,7 +1743,8 @@ pub async fn candidate_resources(
                            AND e.removed_at IS NULL AND (e.expires_at IS NULL OR e.expires_at > $4)
                            AND ((e.holder_kind = 'user' AND e.holder_id = $5)
                              OR (e.holder_kind = 'group' AND e.holder_id = ANY($6))
-                             OR e.holder_kind IN ('role', 'everyone', 'node', 'members'))))
+                             OR (e.holder_kind = 'members' AND e.holder_id = ANY($7))
+                             OR e.holder_kind IN ('role', 'everyone', 'node'))))
           ORDER BY f.id
           LIMIT $8"
     )))
@@ -1664,6 +1823,16 @@ pub async fn provider_models(conn: &mut Conn, provider: Id) -> Result<Vec<ModelF
     .bind(provider)
     .fetch_all(conn)
     .await?)
+}
+
+/// Native request-scoped checks need only the named model, never a provider-wide catalogue per leaf.
+pub async fn provider_model(
+    conn: &mut Conn,
+    provider: Id,
+    model: &str,
+) -> Result<Option<ModelFacts>, DbError> {
+    Ok(sqlx::query_as("SELECT model_name,enabled,CASE WHEN jsonb_typeof(parameters->'efforts')='array' THEN ARRAY(SELECT jsonb_array_elements_text(parameters->'efforts')) ELSE '{}'::text[] END efforts,groups FROM provider_models WHERE provider_id=$1 AND model_name=$2")
+        .bind(provider).bind(model).fetch_optional(conn).await?)
 }
 
 /// The resources of the kind `kind` (`environment` or `provider`) that are registered from the
@@ -1974,6 +2143,13 @@ pub mod access_fixtures {
                 .execute(conn)
                 .await?;
             }
+            "pool" => {
+                sqlx::query(r#"INSERT INTO pools(id,org_id,home_id,owner_id,name,kind,definition)
+                    SELECT $1,n.org_id,n.id,$2,$3,'model',
+                        '{"kind":"model","enabled":true,"policy":{"type":"ordered"},"lend_members":false,"members":[],"config":{}}'::jsonb
+                    FROM nodes n WHERE n.id=$4"#)
+                    .bind(id).bind(owner).bind(name).bind(home).execute(conn).await?;
+            }
             "skill" => {
                 // A skill always has a home and a first owner; its name follows the skill format.
                 sqlx::query(
@@ -2132,6 +2308,9 @@ pub mod access_fixtures {
             "mcp_server" => "UPDATE mcp_servers SET enabled = NOT $2 WHERE id = $1",
             "mount" => "UPDATE mounts SET enabled = NOT $2 WHERE id = $1",
             "skill" => "UPDATE skills SET enabled = NOT $2 WHERE id = $1",
+            "pool" => {
+                "UPDATE pools SET definition=jsonb_set(definition,'{enabled}',to_jsonb(NOT $2::boolean)) WHERE id=$1"
+            }
             _ => return Ok(()),
         };
         sqlx::query(sql)
@@ -2161,6 +2340,7 @@ pub mod access_fixtures {
             "mcp_server" => "UPDATE mcp_servers SET deleted_at = $2 WHERE id = $1",
             "mount" => "UPDATE mounts SET deleted_at = $2 WHERE id = $1",
             "skill" => "UPDATE skills SET deleted_at = $2 WHERE id = $1",
+            "pool" => "UPDATE pools SET deleted_at = $2 WHERE id = $1",
             _ => return Ok(()),
         };
         sqlx::query(sql).bind(id).bind(at).execute(conn).await?;
@@ -2382,6 +2562,7 @@ mod access_reads_tests {
             "machine",
             "mcp_server",
             "mount",
+            "pool",
             "provider",
             "skill",
             "template",
@@ -2394,6 +2575,9 @@ mod access_reads_tests {
         ids.sort_unstable();
         assert_eq!(actual_ids, ids, "every requested resource exactly once");
         let by_kind = |kind: &str| facts.iter().find(|f| f.kind == kind).unwrap();
+        assert_eq!(by_kind("pool").home_id, Some(w.research));
+        assert_eq!(by_kind("pool").org_id, Some(w.acme));
+        assert_eq!(by_kind("pool").owner_id, Some(w.ada));
         assert_eq!(by_kind("provider").home_id, Some(w.research));
         assert_eq!(by_kind("provider").org_id, Some(w.acme));
         assert_eq!(by_kind("environment").home_id, Some(w.web), "its home node");
@@ -2532,6 +2716,70 @@ mod access_reads_tests {
     }
 
     #[tokio::test]
+    async fn a_resource_candidate_names_the_readers_actual_membership_even_in_another_tree() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        insert_member(&mut conn, w.acme, w.bob, w.acme)
+            .await
+            .unwrap();
+        let elsewhere =
+            insert_resource(&mut conn, "agent", Some(w.ada), Some(w.other), "elsewhere")
+                .await
+                .unwrap();
+        let entry = new_id();
+        sqlx::query(
+            "INSERT INTO permission_entries(id,object_kind,object_id,page,profile,permission,holder_kind,holder_id,created_by)
+             VALUES ($1,'agent',$2,'live','any','agent.use','members',$3,$4)",
+        )
+        .bind(entry)
+        .bind(elsewhere)
+        .bind(w.other)
+        .bind(w.ada)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        let looker = Looker {
+            user: w.bob,
+            groups: &[],
+            roots: &[w.acme],
+            member_of: &[w.acme],
+            system_admin: false,
+            now: clock::start(),
+        };
+        assert!(
+            candidate_resources(&mut conn, "agent", &looker, None, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "another team's membership does not make its resource a candidate"
+        );
+        sqlx::query("UPDATE permission_entries SET holder_id=$2 WHERE id=$1")
+            .bind(entry)
+            .bind(w.acme)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let found = candidate_resources(&mut conn, "agent", &looker, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.iter().map(|f| f.id).collect::<Vec<_>>(), [elsewhere]);
+        sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE id=$1")
+            .bind(entry)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            candidate_resources(&mut conn, "agent", &looker, None, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a removed entry stops contributing immediately"
+        );
+    }
+
+    #[tokio::test]
     async fn the_models_of_a_provider_list_their_efforts() {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
@@ -2595,7 +2843,8 @@ mod tests {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION)
+                .unwrap_or(i32::MAX),
             cert_serial: "01",
             cert_fingerprint: fingerprint,
             cert_not_after: clock::start() + Duration::days(365),
@@ -2622,6 +2871,208 @@ mod tests {
         assert_eq!(row.roles, roles);
         assert_eq!(row.link().public_key, "cHVibGlj");
         assert!(!row.online);
+    }
+
+    #[tokio::test]
+    async fn a_machine_report_finishes_while_an_in_flight_command_references_its_identity() {
+        machine_report_while_referenced(MachinePin::Reference, false).await;
+    }
+
+    #[tokio::test]
+    async fn a_machine_observation_finishes_while_a_native_command_pins_its_authority() {
+        machine_report_while_referenced(MachinePin::Native, false).await;
+    }
+
+    #[tokio::test]
+    async fn a_machine_observation_finishes_while_a_port_publisher_keeps_its_allocation_order() {
+        machine_report_while_referenced(MachinePin::Publisher, false).await;
+    }
+
+    #[tokio::test]
+    async fn directory_inventory_and_gateway_samples_finish_while_native_authority_is_pinned() {
+        machine_report_while_referenced(MachinePin::Native, true).await;
+    }
+
+    enum MachinePin {
+        Reference,
+        Native,
+        Publisher,
+    }
+
+    async fn machine_report_while_referenced(pin: MachinePin, inventory_and_samples: bool) {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let id = new_id();
+        insert_machine(&mut conn, &enrolled(id, &[7u8; 32], &[]), clock::start())
+            .await
+            .unwrap();
+        let mut report = json!({"hostname":"A new observation","os_version":"synthetic",
+            "cpus":8,"memory_bytes":16_000_000_000i64,"rates":{"round_trip_ms":20},
+            "clock_offset_ms":42});
+        if inventory_and_samples {
+            use orch_api_contract::storage::{
+                MachineDataInventory, MachineDataKind, MachineDataPart,
+            };
+            use orch_link_contract::{
+                enrollment::{Endpoint, Trust},
+                gateways::{GatewayChoice, GatewayMeasurement, GatewayStatusReport},
+            };
+            let mut gateway = GatewayStatusReport {
+                choice: GatewayChoice::default(),
+                measured_at: None,
+                measurements: Vec::new(),
+            };
+            report["gateway"] = serde_json::to_value(&gateway).unwrap();
+            // The actual gateway choice is fixed before the command pins its source.
+            set_machine_facts(&mut conn, id, &report, (None, None), 1.0, clock::start())
+                .await
+                .unwrap();
+            gateway.measured_at = Some(clock::start().into());
+            gateway.measurements.push(GatewayMeasurement {
+                gateway_id: "measured-gateway".into(),
+                endpoint: Endpoint {
+                    url: "wss://gateway.test:9443".into(),
+                    trust: Trust::Pinned,
+                },
+                round_trip_ms: 12,
+            });
+            report["gateway"] = serde_json::to_value(gateway).unwrap();
+            report["data_directory"] = serde_json::to_value(MachineDataInventory {
+                observed_at: clock::start().into(),
+                complete: true,
+                parts: vec![MachineDataPart {
+                    id: "opaque-data".into(),
+                    name: "environments".into(),
+                    kind: MachineDataKind::EnvironmentData,
+                    bytes: Some(200_000_000_000),
+                    problem: None,
+                }],
+                unlisted_parts: 0,
+                problem: None,
+            })
+            .unwrap();
+        }
+        let mut reference = test.pool.begin().await.unwrap();
+        match pin {
+            MachinePin::Native => {
+                crate::queries::transaction_guard::share_machine(&mut reference, id)
+                    .await
+                    .unwrap();
+            }
+            MachinePin::Publisher => {
+                crate::queries::ports::lock_publisher_machine(&mut reference, id)
+                    .await
+                    .unwrap();
+            }
+            MachinePin::Reference => {
+                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
+                    .bind(id)
+                    .fetch_one(&mut *reference)
+                    .await
+                    .unwrap();
+            }
+        }
+        sqlx::query("SET lock_timeout='1s'")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let reported = set_machine_facts(
+            &mut conn,
+            id,
+            &report,
+            (Some(1_000), Some(2_000)),
+            1.0,
+            clock::start(),
+        )
+        .await;
+        reference.rollback().await.unwrap();
+        reported.expect("an observation does not wait for a command's identity or authority pin");
+        let observed = machine(&mut conn, id).await.unwrap().unwrap();
+        assert_eq!(observed.facts["hostname"], "A new observation");
+        assert_eq!(observed.rate_up_bps, Some(1_000));
+        assert_eq!(observed.rate_down_bps, Some(2_000));
+        assert_eq!(observed.facts, report);
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_with_a_stable_session_marker_finishes_while_native_authority_is_pinned() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let id = new_id();
+        insert_machine(&mut conn, &enrolled(id, &[7u8; 32], &[]), clock::start())
+            .await
+            .unwrap();
+        set_presence(&mut conn, id, true, None, clock::start())
+            .await
+            .unwrap();
+        let before = machine(&mut conn, id).await.unwrap().unwrap();
+        assert!(before.session_started_at.is_some());
+        let mut reference = test.pool.begin().await.unwrap();
+        crate::queries::transaction_guard::share_machine(&mut reference, id)
+            .await
+            .unwrap();
+        sqlx::query("SET lock_timeout='1s'")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let later = clock::start() + Duration::seconds(2);
+        let touched = touch_seen(&mut conn, &[id], later, 1).await;
+        reference.rollback().await.unwrap();
+        assert_eq!(touched.unwrap(), 1);
+        let after = machine(&mut conn, id).await.unwrap().unwrap();
+        assert_eq!(after.last_seen_at, Some(later));
+        assert_eq!(after.session_marker(), before.session_marker());
+        assert_eq!(after.revision, before.revision);
+    }
+
+    #[tokio::test]
+    async fn a_native_machine_guard_still_pins_identity_policy_session_and_reported_capabilities() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let id = new_id();
+        insert_machine(&mut conn, &enrolled(id, &[7u8; 32], &[]), clock::start())
+            .await
+            .unwrap();
+        let mut reference = test.pool.begin().await.unwrap();
+        crate::queries::transaction_guard::share_machine(&mut reference, id)
+            .await
+            .unwrap();
+        let mut outcomes = Vec::new();
+        for change in [
+            "UPDATE machines SET status='revoked' WHERE id=$1",
+            "UPDATE machines SET roles=ARRAY['agent'] WHERE id=$1",
+            "UPDATE machines SET cert_serial='a new serial' WHERE id=$1",
+            "UPDATE machines SET online=true,session_started_at=now() WHERE id=$1",
+            "UPDATE machines SET last_seen_at=now() WHERE id=$1",
+            "UPDATE machines SET facts=jsonb_build_object('policy',jsonb_build_object('environment.remote_write',true)) WHERE id=$1",
+            "UPDATE machines SET facts=jsonb_build_object('programs',jsonb_build_object('programs',jsonb_build_array())) WHERE id=$1",
+            "UPDATE machines SET facts=jsonb_build_object('environment_descriptor',jsonb_build_object('lifecycle','directory')) WHERE id=$1",
+            "UPDATE machines SET facts=jsonb_build_object('gateway',jsonb_build_object('choice',jsonb_build_object('selection','selected','gateway_id','chosen-gateway'))) WHERE id=$1",
+        ] {
+            let mut tx = test.pool.begin().await.unwrap();
+            sqlx::query("SET LOCAL lock_timeout='1s'")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let changed = sqlx::query(sqlx::AssertSqlSafe(change))
+                .bind(id)
+                .execute(&mut *tx)
+                .await;
+            tx.rollback().await.unwrap();
+            outcomes.push((change, changed));
+        }
+        reference.rollback().await.unwrap();
+        for (change, changed) in outcomes {
+            let error = changed.expect_err("a command's authority pin still orders this mutation");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("55P03"),
+                "the actual machine mutation must wait for the retained guard: {change}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2990,6 +3441,21 @@ pub async fn models_of_provider(
     .await?)
 }
 
+/// Only model rows whose names a thread's first screen actually draws.
+pub async fn models_named_of_provider(
+    conn: &mut Conn,
+    provider: Id,
+    names: &[String],
+) -> Result<Vec<ProviderModelRow>, DbError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(
+        "SELECT model_name,display_name,parameters,provider_option_layers(provider_id,groups) AS option_layers,groups,enabled
+           FROM provider_models WHERE provider_id=$1 AND model_name=ANY($2) ORDER BY model_name",
+    ).bind(provider).bind(names).fetch_all(conn).await?)
+}
+
 /// The same native model rows for several actual providers, grouped after one query.
 pub async fn models_of_providers(
     conn: &mut Conn,
@@ -3081,6 +3547,18 @@ pub mod routes {
         .await?)
     }
 
+    /// Machine metadata for already selected connector identities, without one query per environment.
+    pub async fn machines_among(conn: &mut Conn, ids: &[Id]) -> Result<Vec<MachineRow>, DbError> {
+        Ok(sqlx::query_as(concat!(
+            "SELECT ",
+            machine_columns!(),
+            " FROM machines WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY id"
+        ))
+        .bind(ids)
+        .fetch_all(conn)
+        .await?)
+    }
+
     /// Just the physical machines selected by a bounded inventory page.
     pub async fn physical_machines_among(
         conn: &mut Conn,
@@ -3143,6 +3621,8 @@ pub mod routes {
         pub platform_os: String,
         /// `connected` or `managed`.
         pub placement: String,
+        /// The host of a managed machine.
+        pub host_id: Option<Id>,
     }
 
     /// Live physical reference identities, before any machine payload is projected.
@@ -3155,14 +3635,18 @@ pub mod routes {
         )
     }
 
-    /// The machines `ids` that are not deleted, in one statement.
+    /// The machines `ids` that are not deleted, in one statement. The machine of a host's container is called by
+    /// its host's name: its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_names(
         conn: &mut Conn,
         ids: &[Id],
     ) -> Result<Vec<MachineNameRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines
-              WHERE id = ANY($1) AND deleted_at IS NULL",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement, m.host_id
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.deleted_at IS NULL",
         )
         .bind(ids)
         .fetch_all(conn)
@@ -3540,6 +4024,8 @@ pub mod routes {
         pub facts_at: Option<DateTime<Utc>>,
         /// The revision a change names.
         pub revision: i64,
+        /// Factual reports since creation, independent of configuration edits.
+        pub observation_revision: i64,
         /// When it was made.
         pub created_at: DateTime<Utc>,
         /// When it was last changed.
@@ -3548,7 +4034,7 @@ pub mod routes {
 
     const PROVIDER_COLUMNS: &str = "id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, upstreams,
         config, model_group_options, service_offerings, protocols, provider_placement(machine_id) AS placement, machine_id, key_machine_id, arrangements, held_by_environment_id, held_since,
-        runtime_config, status, status_detail, runtime_unavailable, sources, facts, facts_overrides, facts_at, revision, created_at, updated_at";
+        runtime_config, status, status_detail, runtime_unavailable, sources, facts, facts_overrides, facts_at, revision, observation_revision, created_at, updated_at";
 
     /// The providers `ids` that are not deleted, in the order they were made.
     pub async fn providers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<ProviderRow>, DbError> {
@@ -3572,6 +4058,8 @@ pub mod routes {
         pub owner_id: Id,
         /// Its home: an org.
         pub home_id: Id,
+        /// Whether the person selected this home explicitly, saved as part of the initial row.
+        pub home_overridden: bool,
         /// Its endpoints.
         pub upstreams: &'a Json,
         /// What it can serve.
@@ -3596,10 +4084,10 @@ pub mod routes {
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
         let made = sqlx::query(
-            "INSERT INTO providers (id, name, owner_id, org_id, home_id, kind, upstreams, protocols,
+            "INSERT INTO providers (id, name, owner_id, org_id, home_id, home_overridden_at, kind, upstreams, protocols,
                                     machine_id, key_machine_id, arrangements, runtime_config, status,
                                     created_at, updated_at)
-             SELECT $1, $2, $3, n.org_id, n.id, 'api', $5, $6, $7, $8, $9, $10, $11, $12, $12
+             SELECT $1, $2, $3, n.org_id, n.id, CASE WHEN $13 THEN $12::timestamptz ELSE NULL END, 'api', $5, $6, $7, $8, $9, $10, $11, $12, $12
                FROM nodes n WHERE n.id = $4 AND n.deleted_at IS NULL",
         )
         .bind(provider.id)
@@ -3614,6 +4102,7 @@ pub mod routes {
         .bind(provider.runtime_config)
         .bind(provider.status)
         .bind(at)
+        .bind(provider.home_overridden)
         .execute(conn)
         .await?
         .rows_affected();
@@ -3623,6 +4112,8 @@ pub mod routes {
     /// What a change of a provider sets; what is left out stays.
     #[derive(Debug, Clone, Copy, Default, PartialEq)]
     pub struct ProviderChange<'a> {
+        /// Replacement public relay choice.
+        pub relay: Option<&'a Json>,
         /// A new name.
         pub name: Option<&'a str>,
         /// New endpoints, with the protocols they serve.
@@ -3657,7 +4148,7 @@ pub mod routes {
             "UPDATE providers SET name = COALESCE($3, name), upstreams = COALESCE($4, upstreams),
                     protocols = COALESCE($5, protocols), config = COALESCE($6, config),
                     arrangements = COALESCE($7, arrangements), runtime_config = COALESCE($8, runtime_config),
-                    facts_overrides = COALESCE($9, facts_overrides), model_group_options = COALESCE($11, model_group_options), service_offerings = COALESCE($12, service_offerings), revision = revision + 1, updated_at = $10
+                    facts_overrides = COALESCE($9, facts_overrides), model_group_options = COALESCE($11, model_group_options), service_offerings = COALESCE($12, service_offerings), relay = COALESCE($13, relay), revision = revision + 1, updated_at = $10
               WHERE id = $1 AND revision = $2 AND deleted_at IS NULL",
         )
         .bind(id)
@@ -3672,6 +4163,7 @@ pub mod routes {
         .bind(at)
         .bind(change.model_group_options)
         .bind(change.service_offerings)
+        .bind(change.relay)
         .execute(conn)
         .await?
         .rows_affected();
@@ -3826,6 +4318,8 @@ pub mod routes {
     /// A harness process started for a provider, with the profile and the machine.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct HarnessProcessRow {
+        /// Home evidence from this actual start, not the current profile.
+        pub home: Option<Json>,
         /// The provider.
         pub provider_id: Id,
         /// The profile it runs.
@@ -3854,7 +4348,7 @@ pub mod routes {
         ids: &[Id],
     ) -> Result<Vec<HarnessProcessRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT provider_id, agent_id, machine_id, status, status_detail, harness_version, sessions_open,
+            "SELECT home, provider_id, agent_id, machine_id, status, status_detail, harness_version, sessions_open,
                     last_active_at, last_error_at, last_error_detail
                FROM harnesses WHERE provider_id = ANY($1) ORDER BY provider_id, agent_id, machine_id",
         )
@@ -4220,6 +4714,8 @@ pub mod routes {
     /// A host, as stored, with the units that run there.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct HostRow {
+        /// Protected enrollment origin, never inferred from its name or current home.
+        pub bundled_with_server: bool,
         /// The last measured load, distinct from resource declarations.
         pub load: Json,
         /// When that load was observed.
@@ -4275,7 +4771,7 @@ pub mod routes {
     /// on each; `caller` is who the count of their own environments is for.
     pub async fn hosts(conn: &mut Conn, ids: &[Id], caller: Id) -> Result<Vec<HostRow>, DbError> {
         let mut rows:Vec<HostRow>=sqlx::query_as(
-            "SELECT h.id, h.machine_id, m.offline_since, m.lost_at, h.owner_id, h.org_id, h.home_id, h.name, h.labels, h.drivers, h.capacity,
+            "SELECT h.id, h.machine_id, h.bundled_with_server, m.offline_since, m.lost_at, h.owner_id, h.org_id, h.home_id, h.name, h.labels, h.drivers, h.capacity,
                     h.load, h.load_at,
                     COALESCE(u.stopped_environments, 0) AS stopped_environments,
                     h.storages, (h.schedulable AND NOT h.disabled) AS schedulable, h.when_full, h.ports, h.ports_revision,
@@ -4522,10 +5018,11 @@ pub mod keeper {
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
         use sqlx::Connection;
-        // A savepoint inside an existing transaction keeps the reading, its samples and its audit atomic.
+        // A savepoint keeps the reading, its samples and its audit atomic. A non-key
+        // lock orders observations without waiting for a thread's foreign-key reference.
         let mut tx = conn.begin().await?;
         let previous: Option<PreviousProviderFacts> = sqlx::query_as(
-            "SELECT facts,facts_overrides,facts_at,home_id,org_id,credit_source_revision FROM providers WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",
+            "SELECT facts,facts_overrides,facts_at,home_id,org_id,credit_source_revision FROM providers WHERE id=$1 AND deleted_at IS NULL FOR NO KEY UPDATE",
         ).bind(provider).fetch_optional(&mut *tx).await?;
         let Some(PreviousProviderFacts {
             facts: before,
@@ -4540,7 +5037,7 @@ pub mod keeper {
             return Ok(false);
         };
         let done = sqlx::query(
-            "UPDATE providers SET facts = $2, facts_at = $3, revision = revision + 1, updated_at = $3
+            "UPDATE providers SET facts = $2, facts_at = $3, revision = revision + 1, observation_revision = observation_revision + 1, updated_at = $3
               WHERE id = $1 AND deleted_at IS NULL AND (facts IS DISTINCT FROM $2 OR facts_at IS DISTINCT FROM $3)",
         )
         .bind(provider)
@@ -4604,6 +5101,41 @@ pub mod keeper {
 
     /// The sentence a provider is `offline` with.
     pub const OFFLINE_DETAIL: &str = "the machine that keeps it is offline";
+
+    /// Corrects the last recorded presence of a connected key keeper when its primary route is gone.
+    /// A session registered after the observation always wins over that observation.
+    pub async fn reconcile_keeper_sessions(
+        conn: &mut Conn,
+        at: DateTime<Utc>,
+        connected: impl Fn(Id) -> bool,
+    ) -> Result<(), DbError> {
+        let keepers: Vec<(Id, Option<Id>)> = sqlx::query_as(
+            "SELECT DISTINCT m.id, m.current_session_id
+               FROM providers p JOIN machines m ON m.id = p.key_machine_id
+              WHERE p.kind = 'api' AND p.status IN ('ready','exhausted','offline')
+                AND p.deleted_at IS NULL AND m.placement = 'connected' AND m.online",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        let (machines, sessions): (Vec<Id>, Vec<Option<Id>>) = keepers
+            .into_iter()
+            .filter(|(id, _)| !connected(*id))
+            .unzip();
+        if !machines.is_empty() {
+            sqlx::query(
+                "UPDATE machines m SET online = false, offline_since = $3, updated_at = $3
+                   FROM unnest($1::uuid[], $2::uuid[]) AS observed(id, session_id)
+                  WHERE m.id = observed.id AND m.online
+                    AND m.current_session_id IS NOT DISTINCT FROM observed.session_id",
+            )
+            .bind(&machines)
+            .bind(&sessions)
+            .bind(at)
+            .execute(conn)
+            .await?;
+        }
+        Ok(())
+    }
 
     /// Puts the providers on a key whose machine (the one that keeps the key, else the one its runtime is on
     /// when that is a person's machine) is away into `offline`, and brings back the ones whose machine is there
@@ -5102,6 +5634,8 @@ pub mod hosting {
         pub driver_configuration_schemas: Json,
         /// What it reports that it has.
         pub capacity: Json,
+        /// Receipt time of the actual capacity report, independent of edits and load reports.
+        pub capacity_at: Option<DateTime<Utc>>,
         /// What it reports that it uses.
         pub load: Json,
         /// Its storages, as it reports them.
@@ -5127,7 +5661,7 @@ pub mod hosting {
     }
 
     const HOST_COLUMNS: &str = "h.id, h.machine_id, h.owner_id, h.org_id, h.home_id, h.name, h.labels, h.drivers, h.driver_configuration_schemas,
-        h.capacity, h.load, h.storages, h.schedulable, h.disabled, h.when_full, m.lost_at, m.online, m.offline_since, m.status AS machine_status,
+        h.capacity, h.capacity_at, h.load, h.storages, h.schedulable, h.disabled, h.when_full, m.lost_at, m.online, m.offline_since, m.status AS machine_status,
         m.platform_os, m.platform_arch";
 
     /// The hosts `ids` whose machine is not deleted; every host when none are named.
@@ -5156,6 +5690,21 @@ pub mod hosting {
         )
     }
 
+    /// Whether a host that a check of a build for `os` and `arch` can be given to is online: one of the system or
+    /// of a shared home, as the fleet's selector takes them, its machine active and not switched off.
+    pub async fn check_host_online(conn: &mut Conn, os: &str, arch: &str) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM hosts h JOIN machines m ON m.id = h.machine_id AND m.deleted_at IS NULL
+              WHERE m.online AND m.status = 'active' AND NOT h.disabled
+                AND m.platform_os = $1 AND m.platform_arch = $2
+                AND NOT EXISTS (SELECT 1 FROM orgs o WHERE o.node_id = h.org_id AND o.org_kind = 'personal'))",
+        )
+        .bind(os)
+        .bind(arch)
+        .fetch_one(conn)
+        .await?)
+    }
+
     /// Host facades of these physical machines, in one read for resource-page projection.
     pub async fn machine_hosts(
         conn: &mut Conn,
@@ -5169,6 +5718,45 @@ pub mod hosting {
         )
     }
 
+    /// The host that runs `machine` as the container of one of its providers or environments (a
+    /// unit). Any other machine has none. A unit enrols as a machine of its own that has no owner,
+    /// home or page: the page of the host that runs it governs it.
+    pub async fn host_running(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT host_id FROM machines WHERE id = $1 AND runtime_id IS NOT NULL AND host_id IS NOT NULL",
+        )
+        .bind(machine)
+        .fetch_optional(conn)
+        .await?)
+    }
+
+    /// The host whose page names each of these machines, as `(machine, host, host name)`: the host
+    /// whose node a machine is, or the host that runs it as a unit. A machine that is neither is
+    /// not among them.
+    pub async fn hosts_naming(
+        conn: &mut Conn,
+        machines: &[Id],
+    ) -> Result<Vec<(Id, Id, String)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT machine_id, id, name FROM hosts WHERE machine_id = ANY($1)
+             UNION ALL
+             SELECT m.id, h.id, h.name FROM machines m JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.runtime_id IS NOT NULL",
+        )
+        .bind(machines)
+        .fetch_all(conn)
+        .await?)
+    }
+
+    /// The host whose page names `machine`, as [`hosts_naming`] answers it for one machine.
+    pub async fn host_naming(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+        Ok(hosts_naming(conn, &[machine])
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, host, _)| host))
+    }
+
     /// Records what a host's node reports it has and can make.
     pub async fn record_node_facts(
         conn: &mut Conn,
@@ -5180,7 +5768,7 @@ pub mod hosting {
         at: DateTime<Utc>,
     ) -> Result<(), DbError> {
         sqlx::query(
-            "UPDATE hosts SET capacity = $2, drivers = $3, driver_configuration_schemas = $4, storages = $5, updated_at = GREATEST(updated_at, $6)
+            "UPDATE hosts SET capacity = $2, capacity_at = $6, drivers = $3, driver_configuration_schemas = $4, storages = $5, updated_at = GREATEST(updated_at, $6)
               WHERE id = $1",
         )
         .bind(host)
@@ -5201,12 +5789,15 @@ pub mod hosting {
         load: &Json,
         at: DateTime<Utc>,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE hosts SET load = $2, load_at = $3 WHERE id = $1")
-            .bind(host)
-            .bind(load)
-            .bind(at)
-            .execute(conn)
-            .await?;
+        sqlx::query(
+            "UPDATE hosts SET load = $2, load_at = $3
+             WHERE id = $1 AND (load_at IS NULL OR load_at <= $3)",
+        )
+        .bind(host)
+        .bind(load)
+        .bind(at)
+        .execute(conn)
+        .await?;
         Ok(())
     }
 
@@ -5603,15 +6194,21 @@ pub mod management {
     pub async fn expiring_machine_certificates(
         conn: &mut Conn,
         before: DateTime<Utc>,
+        patterns: &[String],
+        after: Option<(DateTime<Utc>, Id)>,
         limit: i64,
     ) -> Result<Vec<MachineCertificateExpiryRow>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id, cert_not_after AS not_after FROM machines
               WHERE status = 'active' AND deleted_at IS NULL AND cert_not_after <= $1
+                AND name ILIKE ALL($3::text[]) AND ($4::timestamptz IS NULL OR (cert_not_after,id)>($4,$5::uuid))
               ORDER BY cert_not_after, id LIMIT $2",
         )
         .bind(before)
         .bind(limit)
+        .bind(patterns)
+        .bind(after.map(|(at,_)|at))
+        .bind(after.map(|(_,id)|id))
         .fetch_all(conn)
         .await?)
     }
@@ -5652,6 +6249,25 @@ pub mod management {
         )))
         .fetch_all(conn)
         .await?)
+    }
+
+    /// Literal visible definition text and public alias keys are selected before this native keyset page.
+    pub async fn capabilities_page(
+        conn: &mut Conn,
+        words: &[String],
+        aliases: &[String],
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<CapabilityRow>, DbError> {
+        let patterns = words
+            .iter()
+            .map(|word| crate::queries::search::substring(word))
+            .collect::<Vec<_>>();
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {CAPABILITY_COLUMNS} FROM capability_defs
+             WHERE ((cardinality($1::text[])=0 OR ((key || ' ' || label || ' ' || description) ILIKE ($1::text[])[1] AND (key || ' ' || label || ' ' || description) ILIKE ALL($1::text[]))) OR key=ANY($2::text[]))
+               AND ($3::text IS NULL OR key>$3) ORDER BY key LIMIT $4"
+        ))).bind(patterns).bind(aliases).bind(after).bind(limit).fetch_all(conn).await?)
     }
 
     /// The definition of the capability `key`.
@@ -5810,7 +6426,7 @@ pub mod management {
     pub async fn stored_harness_builds(conn: &mut Conn) -> Result<Vec<(String, Json)>, DbError> {
         Ok(sqlx::query_as(
             "SELECT key, value FROM settings
-              WHERE node_id IS NULL AND (starts_with(key, $1) OR starts_with(key, $2)) ORDER BY key",
+              WHERE node_id IS NULL AND (starts_with(key, $1) OR starts_with(key, $2) OR starts_with(key, 'harness_release:')) ORDER BY key",
         )
         .bind(HARNESS_CHANNEL_PREFIX)
         .bind(HARNESS_BUILD_PREFIX)
@@ -6073,8 +6689,15 @@ pub mod provider_runtime {
     pub const STOPPED_IDLE: &str = "provider_idle_stop";
     /// A person asked the runtime to stay stopped.
     pub const STOPPED_PERSON: &str = "provider_person_stop";
+    /// A person stopped the runtime by force: it reads as stopped, and its host has not yet said that it stopped it.
+    pub const STOPPED_FORCED: &str = "provider_forced_stop";
+    /// The unit an update made beside the provider's was left when the update was ended where it stood; its host is
+    /// to stop and remove it.
+    pub const UPDATE_ENDED: &str = "provider_update_ended";
+    /// A unit that read as being made, that no work made any more, and that its host reported.
+    pub const UNFINISHED: &str = "provider_unit_unfinished";
     /// Shared by scheduled candidate, admission and start guards.
-    pub const INTENTIONAL_STOP_DETAILS: [&str; 2] = [STOPPED_IDLE, STOPPED_PERSON];
+    pub const INTENTIONAL_STOP_DETAILS: [&str; 3] = [STOPPED_IDLE, STOPPED_PERSON, STOPPED_FORCED];
 
     /// Whether this unit is being or has been stopped deliberately.
     #[must_use]
@@ -6086,7 +6709,7 @@ pub mod provider_runtime {
                 .is_some_and(|detail| INTENTIONAL_STOP_DETAILS.contains(&detail))
     }
 
-    const RUNTIME_COLUMNS: &str = "id, kind, host_id, machine_id, unit_name, successor_of, provider_id,
+    const RUNTIME_COLUMNS: &str = "id, kind, host_id, machine_id, unit_name, successor_of, provider_id, loss_missing,
         environment_id, driver, template_id, spec_hash, generation, state, state_detail, remove_at, volumes,
         last_active_at, created_at, updated_at";
 
@@ -6480,6 +7103,29 @@ pub mod provider_runtime {
         .await?)
     }
 
+    /// The units of providers stopped by force whose online hosts have not confirmed their stops,
+    /// excluding units this process already follows so one busy batch cannot hide later ones.
+    pub async fn forced_stops(
+        conn: &mut Conn,
+        followed: &[Id],
+        limit: i64,
+    ) -> Result<Vec<RuntimeFull>, DbError> {
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {RUNTIME_COLUMNS} FROM runtimes
+              WHERE kind = 'provider' AND state = 'stopped' AND state_detail = $1
+                AND native_stop->'forced'='true'::jsonb AND native_stop->'ready'='true'::jsonb
+                AND id IN (SELECT runtime_id FROM runtime_withdrawals)
+                AND NOT (id = ANY($2))
+                AND host_id IN (SELECT h.id FROM hosts h JOIN machines m ON m.id = h.machine_id WHERE m.online)
+              ORDER BY updated_at, id LIMIT $3"
+        )))
+        .bind(STOPPED_FORCED)
+        .bind(followed)
+        .bind(limit)
+        .fetch_all(conn)
+        .await?)
+    }
+
     /// The retired runtimes of providers whose time to be removed has come.
     pub async fn retired_due(
         conn: &mut Conn,
@@ -6613,6 +7259,8 @@ pub mod provider_runtime {
         pub owner_id: Id,
         /// Its home: an org.
         pub home_id: Id,
+        /// Whether the person selected this home explicitly, saved as part of the initial row.
+        pub home_overridden: bool,
         /// The harness whose login it is.
         pub harness_kind: &'a str,
         /// The profile whose harness holds the login.
@@ -6633,9 +7281,9 @@ pub mod provider_runtime {
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
         Ok(sqlx::query(
-            "INSERT INTO providers (id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, config,
+            "INSERT INTO providers (id, name, owner_id, org_id, home_id, home_overridden_at, kind, harness_kind, agent_id, config,
                                     arrangements, runtime_config, status, created_at, updated_at)
-             SELECT $1, $2, $3, n.org_id, n.id, 'subscription', $5, $6, $7, $8, $9, 'needs_setup',
+             SELECT $1, $2, $3, n.org_id, n.id, CASE WHEN $11 THEN $10::timestamptz ELSE NULL END, 'subscription', $5, $6, $7, $8, $9, 'needs_setup',
                     $10, $10
                FROM nodes n WHERE n.id = $4 AND n.deleted_at IS NULL",
         )
@@ -6649,6 +7297,7 @@ pub mod provider_runtime {
         .bind(provider.arrangements)
         .bind(provider.runtime_config)
         .bind(at)
+        .bind(provider.home_overridden)
         .execute(conn)
         .await?
         .rows_affected()
@@ -6814,32 +7463,27 @@ pub mod provider_runtime {
         pub provider_id: Id,
         /// When the token lapses.
         pub expires_at: DateTime<Utc>,
-        /// When the credential was issued, where its own claims or stated life supplied it.
-        pub issued_at: Option<DateTime<Utc>>,
-        /// Where it stands.
-        pub status: String,
-        /// The root org of its home.
-        pub org_id: Id,
-        /// Its name.
-        pub name: String,
     }
 
     /// The providers not deleted whose facts say when a token lapses.
-    pub async fn token_ends(conn: &mut Conn, limit: i64) -> Result<Vec<TokenEnd>, DbError> {
+    pub async fn token_ends(
+        conn: &mut Conn,
+        after: Option<Id>,
+        limit: i64,
+    ) -> Result<Vec<TokenEnd>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id AS provider_id,
                     (facts #>> '{credential,expires_at}')
-                        ::timestamptz AS expires_at,
-                    (facts #>> '{credential,issued_at}')
-                        ::timestamptz AS issued_at,
-                    status, org_id, name
+                        ::timestamptz AS expires_at
                FROM providers
               WHERE deleted_at IS NULL AND facts #>> '{credential,yields}' IN ('token','key')
                 AND (facts #>> '{credential,expires_at}')
                     IS NOT NULL
+                AND ($2::uuid IS NULL OR id > $2)
               ORDER BY id LIMIT $1",
         )
         .bind(limit)
+        .bind(after)
         .fetch_all(conn)
         .await?)
     }
