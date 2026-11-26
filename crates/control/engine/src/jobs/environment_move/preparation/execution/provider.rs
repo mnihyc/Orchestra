@@ -8,7 +8,7 @@ use orch_access_contract::{
 };
 use orch_db::queries::resources::provider_runtime as providers;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
     Replace {
@@ -19,20 +19,29 @@ enum Action {
         recipe: Hash,
     },
     Make {
-        host: Id,
+        host: orch_provider_contract::pools::Target,
         template: Id,
         recipe: Hash,
     },
 }
 impl Action {
-    fn host(self) -> Id {
+    async fn host(&self, conn: &mut Conn, row: &JobRow) -> Result<Option<Id>, EngineError> {
         match self {
-            Self::Replace { host, .. } | Self::Make { host, .. } => host,
+            Self::Replace { host, .. } => Ok(Some(*host)),
+            Self::Make { host, .. } => {
+                crate::provider_recovery::selected_host(conn, row, host).await
+            }
         }
     }
-    fn template(self) -> Id {
+    fn target(&self) -> orch_provider_contract::pools::Target {
         match self {
-            Self::Replace { template, .. } | Self::Make { template, .. } => template,
+            Self::Replace { host, .. } => orch_provider_contract::pools::Target::host(*host),
+            Self::Make { host, .. } => host.clone(),
+        }
+    }
+    fn template(&self) -> Id {
+        match self {
+            Self::Replace { template, .. } | Self::Make { template, .. } => *template,
         }
     }
 }
@@ -99,7 +108,7 @@ impl ProviderParentSource {
             host,
             template,
             ..
-        } = self.action
+        } = self.action.clone()
         else {
             return Ok(false);
         };
@@ -183,7 +192,7 @@ impl ProviderParentSource {
                 recipe.provider,
                 recipe.by,
                 Action::Make {
-                    host: recipe.host,
+                    host: recipe.host.clone(),
                     template: recipe.template,
                     recipe: crate::jobs::command_identity::hash(&serde_json::to_value(recipe)?)?,
                 },
@@ -207,7 +216,7 @@ impl ProviderParentSource {
         if !value.matches(child)? {
             return Err(closed());
         }
-        if let Action::Replace { old, .. } = action {
+        if let Action::Replace { old, .. } = value.action.clone() {
             if value.source.runtime != Some(old) {
                 return Err(closed());
             }
@@ -228,7 +237,7 @@ impl ProviderParentSource {
         {
             return Ok(false);
         }
-        Ok(match self.action {
+        Ok(match self.action.clone() {
             Action::Replace {
                 old,
                 host,
@@ -319,13 +328,13 @@ impl ProviderParentSource {
             if runtime.provider_id != Some(self.provider)
                 || runtime.environment_id.is_some()
                 || runtime.kind != "provider"
-                || runtime.host_id != self.action.host()
+                || Some(runtime.host_id) != self.action.host(conn, row).await?
                 || runtime.template_id != self.action.template()
                 || matches!(runtime.state.as_str(), "retired" | "removed")
             {
                 return Err(closed());
             }
-            match self.action {
+            match self.action.clone() {
                 Action::Make { .. } if self.source.runtime.is_none() => {}
                 Action::Replace { old, .. }
                     if self.source.runtime == Some(old)
@@ -342,9 +351,10 @@ impl ProviderParentSource {
         if current
             .runtime_config
             .get("runtime.host_id")
-            .and_then(Json::as_str)
-            .and_then(|value| value.parse::<Id>().ok())
-            != Some(self.action.host())
+            .cloned()
+            .map(serde_json::from_value::<orch_provider_contract::pools::Target>)
+            .transpose()?
+            != Some(self.action.target())
         {
             return Err(closed());
         }
@@ -362,28 +372,41 @@ impl ProviderParentSource {
         }
         match selection {
             Selection::Current => {}
-            Selection::Host(host) if host == self.action.host() => {}
+            Selection::Host(host) if Some(host) == self.action.host(conn, row).await? => {}
             _ => return Err(closed()),
         }
         self.physical(conn, row).await?;
         let http = current_http(self.parent, &self.http, conn, clock).await?;
         let raw = http.current(conn, clock).await.map_err(raw_error)?;
-        let needs = [
-            (
+        let mut needs = vec![(
+            ObjectRef {
+                kind: ObjectKind::Template,
+                id: self.action.template(),
+            },
+            Permission::TemplateUse,
+        )];
+        match self.action.target() {
+            orch_provider_contract::pools::Target::Single {
+                resource: orch_provider_contract::pools::Leaf::Host { id },
+            } => needs.push((
                 ObjectRef {
                     kind: ObjectKind::Host,
-                    id: self.action.host(),
+                    id,
                 },
                 Permission::HostUse,
-            ),
-            (
+            )),
+            orch_provider_contract::pools::Target::Pool {
+                id,
+                kind: orch_provider_contract::pools::Kind::Host,
+            } => needs.push((
                 ObjectRef {
-                    kind: ObjectKind::Template,
-                    id: self.action.template(),
+                    kind: ObjectKind::Pool,
+                    id,
                 },
-                Permission::TemplateUse,
-            ),
-        ];
+                Permission::PoolUse,
+            )),
+            _ => return Err(closed()),
+        }
         let principal = host_principal(
             conn,
             self.parent,
@@ -399,15 +422,20 @@ impl ProviderParentSource {
         .await?;
         // The provider's own placement eligibility remains an independent native prerequisite.
         // It never supplies the requester's operation or destination permission.
-        if !crate::updates::provider_owner_host_usable(
-            conn,
-            self.provider,
-            self.action.host(),
-            clock.time(),
-        )
-        .await?
-        {
-            return Err(closed());
+        if let Some(host) = self.action.host(conn, row).await? {
+            let allowed = if matches!(
+                self.action.target(),
+                orch_provider_contract::pools::Target::Pool { .. }
+            ) {
+                crate::jobs::provider_provision::current_pool_placement(conn, &principal, row, host)
+                    .await?
+            } else {
+                crate::updates::provider_owner_host_usable(conn, self.provider, host, clock.time())
+                    .await?
+            };
+            if !allowed {
+                return Err(closed());
+            }
         }
         raw.check(clock).map_err(raw_error)?;
         if !principal.caller().key_deadline_allows(clock) {

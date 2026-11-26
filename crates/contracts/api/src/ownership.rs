@@ -381,6 +381,9 @@ pub struct RestoreBy {
 /// minutes as a plan that the deletion names: a changed subtree, or a later last day, asks again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeDeletePlan {
+    /// Current automatic eligibility, independent of this review and its frozen recovery cutoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<crate::nodes::NodeRetention>,
     /// The plan, for the deletion to name.
     pub preflight_id: Id,
     /// When it goes out of date.
@@ -391,7 +394,7 @@ pub struct NodeDeletePlan {
     pub revision: Revision,
     /// What goes with it, counted.
     pub counts: NodeDeleteCounts,
-    /// When what is deleted now is gone for good.
+    /// The frozen restoration cutoff of this review; physical cleanup can wait for dependencies.
     pub purge_at: Time,
     /// Who may bring it back until then.
     pub restore_by: RestoreBy,
@@ -570,6 +573,7 @@ const NODE_TRANSFER_FACETS: &[Facet] = &[
             Object(K::McpServer),
             Object(K::Mount),
             Object(K::Skill),
+            Object(K::Pool),
         ],
         Target::ResolvedCollection("transfer_sources"),
     ),
@@ -588,6 +592,7 @@ const OBJECT_TRANSFER_FACETS: &[Facet] = &[
             Object(K::McpServer),
             Object(K::Mount),
             Object(K::Skill),
+            Object(K::Pool),
             Object(K::Document),
             Object(K::DocumentContainer),
         ],
@@ -604,6 +609,7 @@ const OBJECT_TRANSFER_FACETS: &[Facet] = &[
             Object(K::McpServer),
             Object(K::Mount),
             Object(K::Skill),
+            Object(K::Pool),
             Object(K::Document),
             Object(K::DocumentContainer),
         ],
@@ -626,6 +632,7 @@ const OBJECT_TRANSFER_FACETS: &[Facet] = &[
             Object(K::McpServer),
             Object(K::Mount),
             Object(K::Skill),
+            Object(K::Pool),
         ],
         Target::ResolvedCollection("transfer_sources"),
     ),
