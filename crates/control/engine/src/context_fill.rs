@@ -43,6 +43,16 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::unit::Unit;
 
+mod projection;
+
+/// An estimate prepared without the thread row, and the exact native facts it may replace.
+#[derive(Serialize, serde::Deserialize)]
+pub(crate) struct TerminalContext {
+    source_detail: Option<Json>,
+    source_context: Option<Json>,
+    fill: Json,
+}
+
 /// A stored value read as `T`, as the wire has it; `null` where it is none or of another shape, so that an
 /// older record never makes what holds it unreadable.
 #[must_use]
@@ -130,7 +140,7 @@ fn ceil_div(numerator: i64, denominator: i64) -> i64 {
     if numerator <= 0 || denominator <= 0 {
         0
     } else {
-        (numerator + denominator - 1) / denominator
+        numerator.saturating_add(denominator - 1) / denominator
     }
 }
 
@@ -143,8 +153,19 @@ fn count(value: usize) -> i64 {
 pub fn estimate_text(text: &str, family: Family, kind: TextKind) -> i64 {
     let ascii = count(text.bytes().filter(u8::is_ascii).count());
     let other = count(text.chars().filter(|c| !c.is_ascii()).count());
-    ceil_div(ascii * HUNDRED, ascii_bytes_per_token_x100(family, kind))
-        + ceil_div(other * HUNDRED, other_chars_per_token_x100(family))
+    estimate_text_counts(ascii, other, family, kind)
+}
+
+/// The same text estimate from counts already verified against the blob's bytes.
+pub(crate) fn estimate_text_counts(ascii: i64, other: i64, family: Family, kind: TextKind) -> i64 {
+    ceil_div(
+        ascii.saturating_mul(HUNDRED),
+        ascii_bytes_per_token_x100(family, kind),
+    )
+    .saturating_add(ceil_div(
+        other.saturating_mul(HUNDRED),
+        other_chars_per_token_x100(family),
+    ))
 }
 
 /// The tokens of a text known only by its length in bytes, counted as ASCII of its kind.
@@ -154,6 +175,15 @@ pub fn estimate_bytes(bytes: i64, family: Family, kind: TextKind) -> i64 {
         bytes.max(0) * HUNDRED,
         ascii_bytes_per_token_x100(family, kind),
     )
+}
+
+/// The most bytes of text of this kind that [`estimate_bytes`] counts as `tokens` tokens or fewer.
+#[must_use]
+pub fn bytes_within_tokens(tokens: i64, family: Family, kind: TextKind) -> i64 {
+    tokens
+        .max(0)
+        .saturating_mul(ascii_bytes_per_token_x100(family, kind))
+        / HUNDRED
 }
 
 /// The tokens of `images` images.
@@ -288,8 +318,8 @@ impl SentBlock {
 struct Seen {
     /// The blocks the session was opened with.
     session: Vec<SentBlock>,
-    /// The blocks of each input since.
-    inputs: Vec<SentBlock>,
+    /// Each input block rounded on its own, then summed by its key.
+    inputs: BTreeMap<String, i64>,
     /// What the agent said, in bytes.
     said: i64,
     /// Tool calls by the name the harness gave them: how many, the bytes of their calls and of their results.
@@ -317,12 +347,11 @@ fn estimates_of(seen: &Seen, family: Family) -> Vec<ContextPart> {
         }
     }
     let mut people = 0;
-    for block in &seen.inputs {
-        if block.key == "input" {
-            people += block.tokens(family, TextKind::Prose);
+    for (key, tokens) in &seen.inputs {
+        if key == "input" {
+            people += *tokens;
         } else {
-            *instructions.entry(block.key.clone()).or_default() +=
-                block.tokens(family, TextKind::Prose);
+            *instructions.entry(key.clone()).or_default() += *tokens;
         }
     }
     let calls: Vec<ContextRow> = seen
@@ -382,6 +411,7 @@ fn exchange_most_bytes(family: Family) -> i64 {
 }
 
 /// Items of one kind (and, for tool calls, of one name and kind of tool), summed.
+#[cfg(test)]
 #[derive(Debug, sqlx::FromRow)]
 struct SeenRow {
     kind: String,
@@ -426,6 +456,27 @@ struct CostRow {
 /// inputs since, and the items of its main stream since (a sub-agent's work is in a context of its own).
 async fn seen_of(conn: &mut Conn, segment: Id, family: Family) -> Result<Seen, EngineError> {
     let since: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(max(seq_created),0)::bigint FROM items WHERE segment_id=$1 AND kind='marker' AND payload->>'marker'='compacted'",
+    ).bind(segment).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let session: Option<Json> = sqlx::query_scalar(
+        "SELECT blocks FROM model_inputs WHERE segment_id=$1 AND purpose='session' ORDER BY seq_created DESC LIMIT 1",
+    ).bind(segment).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let totals = projection::read(conn, segment, since, family).await?;
+    Ok(Seen {
+        session: session
+            .and_then(|blocks| serde_json::from_value(blocks).ok())
+            .unwrap_or_default(),
+        inputs: totals.inputs,
+        said: totals.said,
+        tools: totals.tools,
+        images: totals.images,
+    })
+}
+
+/// The recorded calculation is retained only as an independent oracle for incremental estimates.
+#[cfg(test)]
+async fn scan_seen(conn: &mut Conn, segment: Id, family: Family) -> Result<Seen, EngineError> {
+    let since: i64 = sqlx::query_scalar(
         "SELECT COALESCE(max(seq_created), 0)::bigint FROM items
           WHERE segment_id = $1 AND kind = 'marker' AND payload->>'marker' = 'compacted'",
     )
@@ -456,7 +507,10 @@ async fn seen_of(conn: &mut Conn, segment: Id, family: Family) -> Result<Seen, E
     .map_err(orch_db::DbError::from)?;
     for blocks in inputs {
         let blocks: Vec<SentBlock> = serde_json::from_value(blocks).unwrap_or_default();
-        seen.inputs.extend(blocks);
+        for block in blocks {
+            *seen.inputs.entry(block.key.clone()).or_default() +=
+                block.tokens(family, TextKind::Prose);
+        }
     }
     let rows: Vec<SeenRow> = sqlx::query_as(
         "SELECT kind, COALESCE(payload->'raw'->>'name', '') AS name, COALESCE(payload->'tool'->>'kind', '') AS tool,
@@ -534,8 +588,8 @@ fn with_orch_share(mut fill: ContextFill, seen: &Seen, family: Family) -> Contex
     let added: i64 = seen
         .inputs
         .iter()
-        .filter(|block| block.key != "input")
-        .map(|block| block.tokens(family, TextKind::Prose))
+        .filter(|(key, _)| key.as_str() != "input")
+        .map(|(_, tokens)| *tokens)
         .sum();
     for part in &mut fill.parts {
         let share = match part.kind {
@@ -712,67 +766,79 @@ impl Engine {
         Ok(())
     }
 
-    /// At the end of a turn: what filled the context, estimated by Orch where the harness breaks nothing down
-    /// itself and reported the size of its prompt. The estimate runs inside a savepoint of its own: a fault in
-    /// it is logged, and the turn ends all the same.
-    pub(crate) async fn estimate_context_at_end(
+    /// Aggregates terminal context without the thread row; failure leaves the native report intact.
+    pub(crate) async fn prepare_context_at_end(
         &self,
-        unit: &mut Unit<'_>,
-        thread: Id,
+        conn: &mut Conn,
         turn: Id,
-    ) -> Result<(), EngineError> {
-        let Some(row) = orch_db::queries::threads::turn(&mut *unit.conn, turn).await? else {
-            return Ok(());
+    ) -> Result<Option<TerminalContext>, EngineError> {
+        let Some(row) = orch_db::queries::threads::turn(conn, turn).await? else {
+            return Ok(None);
         };
         let detail: TurnUsageDetail = read(row.usage_detail.as_ref()).unwrap_or_default();
         let kept: Option<ContextFill> = read(row.context.as_ref());
         let Some(used) = detail.context_used.filter(|_| !detail.breakdown) else {
-            return Ok(());
+            return Ok(None);
         };
         if kept.is_some_and(|fill| fill.count != ContextCount::Orch) {
-            return Ok(());
+            return Ok(None);
         }
-        let at = unit.now();
-        let mut savepoint = sqlx::Connection::begin(&mut *unit.conn)
+        let mut savepoint = sqlx::Connection::begin(conn)
             .await
             .map_err(orch_db::DbError::from)?;
         let family =
             crate::token_density::of(detail.effective_model.as_deref().unwrap_or(&row.model));
         let estimated = async {
             let seen = seen_of(&mut savepoint, row.segment_id, family).await?;
-            let fill = compose(
+            serde_json::to_value(compose(
                 used,
                 detail.context_window,
                 detail.compact_at,
                 estimates_of(&seen, family),
-                Time::new(at),
-            );
-            sqlx::query("UPDATE turns SET context = $2 WHERE id = $1")
-                .bind(row.id)
-                .bind(serde_json::to_value(&fill)?)
-                .execute(&mut *savepoint)
-                .await
-                .map_err(orch_db::DbError::from)?;
-            Ok::<(), EngineError>(())
+                Time::new(self.inner.clock.now()),
+            ))
+            .map_err(EngineError::from)
         }
         .await;
         match estimated {
-            Ok(()) => {
+            Ok(fill) => {
                 savepoint.commit().await.map_err(orch_db::DbError::from)?;
-                // The turn's row changed: it is stamped, so that whoever has the thread open reads it.
-                let seq = unit.stamp(thread).await?;
-                sqlx::query("UPDATE turns SET seq_updated = $2 WHERE id = $1")
-                    .bind(row.id)
-                    .bind(seq)
-                    .execute(&mut *unit.conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?;
+                Ok(Some(TerminalContext {
+                    source_detail: row.usage_detail,
+                    source_context: row.context,
+                    fill,
+                }))
             }
             Err(error) => {
                 savepoint.rollback().await.map_err(orch_db::DbError::from)?;
-                tracing::warn!(%error, %thread, %turn, "what filled the context could not be estimated");
+                tracing::warn!(%error, %turn, "what filled the context could not be estimated");
+                Ok(None)
             }
         }
+    }
+
+    /// A later native report wins over a prepared estimate. Only a small checked write takes the thread row.
+    pub(crate) async fn apply_context_at_end(
+        &self,
+        unit: &mut Unit<'_>,
+        thread: Id,
+        turn: Id,
+        prepared: TerminalContext,
+    ) -> Result<(), EngineError> {
+        let Some(row) = orch_db::queries::threads::turn(unit.conn, turn).await? else {
+            return Ok(());
+        };
+        if row.usage_detail != prepared.source_detail || row.context != prepared.source_context {
+            return Ok(());
+        }
+        let seq = unit.stamp(thread).await?;
+        sqlx::query("UPDATE turns SET context=$2, seq_updated=$3 WHERE id=$1")
+            .bind(turn)
+            .bind(prepared.fill)
+            .bind(seq)
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
         Ok(())
     }
 
@@ -1132,6 +1198,9 @@ pub async fn turn_cost(
 }
 
 #[cfg(test)]
+mod projection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1275,10 +1344,18 @@ mod tests {
                 block("preamble", "orch", &"a".repeat(482)),
                 block("send_message", "tool", &"{".repeat(437)),
             ],
-            inputs: vec![
+            inputs: [
                 block("where_you_are", "orch", &"b".repeat(964)),
                 block("input", "input", &"c".repeat(482)),
-            ],
+            ]
+            .into_iter()
+            .map(|block| {
+                (
+                    block.key.clone(),
+                    block.tokens(crate::token_density::of("gpt-6-sol"), TextKind::Prose),
+                )
+            })
+            .collect(),
             said: 4_820,
             tools,
             images: 1,

@@ -1,7 +1,7 @@
 /** Ask uses the ordinary authenticated client and keeps credentials out of event addresses. */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 import { api, client, ok, repeatable } from '@/api/client';
-import type { AskCreateBody, AskEvent, AskGetReply, AskKeepBody, AskKeepReply, AskListReply, AskMessageBody, AskModelsReply, AskReceipt } from '@/generated/api-types';
+import type { AskCreateBody, AskEvent, AskGetReply, AskKeepBody, AskKeepReply, AskListReply, AskMessageBody, AskModelsReply, AskReceipt,AskMoveOutPlan,AskMoveOutBody } from '@/generated/api-types';
 import { NetworkError, newActKey } from '@/lib/requests';
 import { queryClient } from '@/api/query';
 import { newerAskSnapshot } from '@/features/ask/events';
@@ -23,7 +23,6 @@ export const askModelsQuery = (root: string) => {
       current(); const reply = await ok(api.GET('/ask/models', { params: { query: { root_org_id: root } }, signal })); current();
       if (reply.root_org_id !== root) throw new NetworkError('malformed'); return reply;
     },
-    staleTime: 0,
   });
 };
 export const askQuery = (id: string, inspect = false) => {
@@ -38,7 +37,6 @@ export const askQuery = (id: string, inspect = false) => {
       if (reply.conversation.id !== id) throw new NetworkError('malformed');
       return newerAskSnapshot(queryClient.getQueryData<AskGetReply>(key), reply);
     },
-    staleTime: 0,
   });
 };
 
@@ -74,6 +72,12 @@ export function stopAsk(id: string): Promise<AskReceipt> {
 export function keepAsk(id: string, body: AskKeepBody, options: { key?: string; toTurn?: number } = {}): Promise<AskKeepReply> {
   const request = { ...body, ...(options.toTurn === undefined ? {} : { to_turn: options.toTurn }) };
   return ok(api.POST('/ask/conversations/{id}/keep', { params: { path: { id } }, body: request, ...repeatable(options.key ?? newActKey()) }));
+}
+export function previewMoveAsk(id:string,body:AskKeepBody,signal?:AbortSignal):Promise<AskMoveOutPlan>{
+  return ok(api.POST('/ask/conversations/{id}/move-out/preview',{params:{path:{id}},body,...(signal===undefined?{}:{signal})}));
+}
+export function moveAsk(id:string,body:AskMoveOutBody,key:string):Promise<AskKeepReply>{
+  return ok(api.POST('/ask/conversations/{id}/move-out',{params:{path:{id}},body,...repeatable(key)}));
 }
 export function exportAsk(id: string): Promise<Blob> { return ok(api.GET('/ask/conversations/{id}/export', { params: { path: { id } }, parseAs: 'blob' })); }
 export function olderAsk(id: string, before: string, signal?: AbortSignal): Promise<AskGetReply> {

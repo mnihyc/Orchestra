@@ -1,10 +1,7 @@
 //! Native machine-policy preparation shared by the HTTP writer and retained command checks.
 
 use crate::EngineError;
-use orch_access_contract::{
-    decisions::{ObjectRef, Refusal},
-    permissions::{ObjectKind, Permission},
-};
+use orch_access_contract::{decisions::Refusal, permissions::Permission};
 use orch_api_contract::{common::FieldFault, resources::MachinePolicySection};
 use orch_authz::{
     Policy, Principal,
@@ -36,15 +33,13 @@ pub async fn policy_sections(
     principal: &Principal,
     machine: Id,
 ) -> Result<Vec<MachinePolicySection>, EngineError> {
-    let (kind, id, permission) = match resources::hosting::host_of_machine(conn, machine).await? {
-        Some(host) => (ObjectKind::Host, host, Permission::HostView),
-        None => (ObjectKind::Machine, machine, Permission::MachineView),
-    };
-    if orch_authz::resources::check(
+    // A host's node and a unit that a host runs are governed by that host's page, a person's own
+    // machine by its own.
+    if orch_authz::resources::check_machine(
         conn,
         principal,
-        ObjectRef { kind, id },
-        permission,
+        machine,
+        Permission::MachineView,
         Policy::default(),
     )
     .await?
@@ -161,6 +156,20 @@ pub async fn prepare_policy(
         changes.insert(key, value.clone());
     }
     let facts = environment_facts::machine(conn, machine, None).await?;
+    // A managed unit reads its host node's policy. That same node owns the write and its
+    // retained authority; the unit's connector has no local policy to change.
+    let row = match facts
+        .as_ref()
+        .and_then(|facts| facts.machine_id)
+        .filter(|physical| *physical != machine)
+    {
+        Some(physical) => resources::machine(conn, physical)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(PolicyFailure::Missing)?,
+        None => row,
+    };
+    let machine = row.id;
     let before = match facts
         .as_ref()
         .and_then(|facts| facts.policy.as_ref())

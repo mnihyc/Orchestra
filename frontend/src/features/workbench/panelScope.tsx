@@ -21,12 +21,17 @@ const contextual = new Set(['files', 'changes', 'git', 'environment', 'processes
 const environmentPanels = new Set(['files', 'terminal']);
 const useTargetChoice = create<{ tab: string | null }>(() => ({ tab: null }));
 
-export function panelTarget(tab: Tab, layout: Layout, active: string | null, heading: ScreenHeading | null): InspectorTarget | null {
+export function explicitPanelTarget(tab: Tab): InspectorTarget | null {
   if (tab.scope?.mode === 'fixed') return tab.scope.target;
   if (tab.scope === undefined) {
     if (tab.of?.thread !== undefined) return { kind: 'thread', id: tab.of.thread };
     if (tab.of?.environment !== undefined) return { kind: 'environment', id: tab.of.environment };
   }
+  return null;
+}
+export function panelTarget(tab: Tab, layout: Layout, active: string | null, heading: ScreenHeading | null): InspectorTarget | null {
+  const explicit = explicitPanelTarget(tab);
+  if (explicit !== null) return explicit;
   const page = active === null ? null : findTab(layout, active)?.tab;
   const resource = page === null || page === undefined ? null : contentTarget(page);
   if (resource !== null) return resource;
@@ -35,12 +40,13 @@ export function panelTarget(tab: Tab, layout: Layout, active: string | null, hea
 }
 /** Follow shares the exact content owner; only fixed panels acquire a separate retained reader. */
 export function panelRead(tab: Tab, layout: Layout, active: string | null, target: InspectorTarget | null): ThreadReadRef | null {
+  const page = active === null ? null : findTab(layout, active)?.tab;
+  return panelReadForTarget(tab, target, page?.id ?? null, page === undefined || page === null ? null : contentTarget(page));
+}
+export function panelReadForTarget(tab: Tab, target: InspectorTarget | null, pageId: string | null, source: InspectorTarget | null): ThreadReadRef | null {
   if (target?.kind !== 'thread') return null;
   if (tab.scope?.mode === 'fixed' || tab.scope === undefined && tab.of?.thread !== undefined) return resultThreadRead(target.id, tab.id);
-  const page = active === null ? null : findTab(layout, active)?.tab;
-  const source = page === null || page === undefined ? null : contentTarget(page);
-  if (page === null || page === undefined || source?.kind !== 'thread' || source.id !== target.id) return null;
-  return contentThreadRead(target.id, page.id);
+  return pageId !== null && source?.kind === 'thread' && source.id === target.id ? contentThreadRead(target.id, pageId) : null;
 }
 export function panelContinuation(tab: Tab): string | null {
   if (tab.scope?.mode === 'fixed') return tab.scope.continuationId ?? null;

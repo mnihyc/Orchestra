@@ -19,6 +19,25 @@ const before = { id: 'p1', name: 'Team provider', status: 'active', home: { id: 
 const after = { ...before, name: 'Research provider', revision: 2 };
 
 describe('answers replace rows', () => {
+  it.each([
+    { generation: 7, reportedGeneration: 7, registered: '/registered', reported: '/native', expected: '/native' },
+    { generation: 8, reportedGeneration: 8, registered: '/new-registration', reported: '/new-native', expected: '/new-native' },
+    { generation: 8, reportedGeneration: 7, registered: '/new-registration', reported: '/old-native', expected: '/new-registration' },
+  ])('keeps a thread workspace current after a full environment view at generation $generation', ({ generation, reportedGeneration, registered, reported, expected }) => {
+    const cache = new QueryClient();
+    const key = ['thread-parameters', 'thread'];
+    cache.setQueryData(key, { environment: { id: 'environment', workspace_root: '/native', registered_root: '/registered', generation: 7 } });
+    applyRow(cache, { kind: 'environment', id: 'environment', value: {
+      id: 'environment', workspace_root: registered, generation,
+      facts: { workspace_root: reported, generation: reportedGeneration },
+      access: { permissions: ['environment.view'] },
+    } });
+    expect(cache.getQueryData(key)).toEqual({ environment: {
+      id: 'environment', workspace_root: expected, registered_root: registered, generation,
+    } });
+    cache.clear();
+  });
+
   it('keeps unrelated tree projections intact and replaces only the changed path through a loaded page', async () => {
     // Projection identity must not depend on Query's optional deep structural sharing.
     const cache = new QueryClient({ defaultOptions: { queries: { structuralSharing: false } } });
@@ -188,6 +207,109 @@ describe('answers replace rows', () => {
     cache.setQueryData(['providers'], [before]);
     expect(cachedRow(cache, 'provider', 'p1')).toEqual(before);
     cache.clear();
+  });
+
+  it('resolves initial data for missing, disabled and available details without enumerating 5,000 cached reads', () => {
+    const cache = new LiveQueryClient();
+    for (let i = 0; i < 5_000; i++) cache.setQueryData(['background', i], i);
+    const list = ['environments', 'reader'];
+    const row = { id: 'env', name: 'Workspace', access: { permissions: ['environment.view'] } };
+    cache.setQueryData(list, [row]);
+    const all = vi.spyOn(cache.getQueryCache(), 'getAll');
+    try {
+      for (let i = 0; i < 20; i++) {
+        expect(cachedRow(cache, 'environment', '')).toBeUndefined();
+        expect(cachedRow(cache, 'environment', 'missing')).toBeUndefined();
+        expect(cachedRow(cache, 'environment', row.id)).toBe(row);
+      }
+      expect(all).not.toHaveBeenCalled();
+      expect(cachedRow(cache, 'provider', row.id)).toBeUndefined();
+      const second = ['everything', 'reader', 'resources'];
+      cache.setQueryData(second, { pages: [{ items: [{ id: row.id, resource: { kind: 'environment', value: row } }] }] });
+      cache.removeQueries({ queryKey: list, exact: true });
+      expect(cachedRow(cache, 'environment', row.id)).toBe(row);
+      cache.setQueryData(second, { pages: [{ items: [{ id: row.id, content_hidden: true }] }] });
+      expect(cachedRow(cache, 'environment', row.id)).toBeUndefined();
+    } finally { all.mockRestore(); cache.clear(); }
+  });
+
+  it('sees a list replacement or withdrawal while that list is notifying its detail readers', () => {
+    const cache = new LiveQueryClient();
+    const key = ['providers', 'mine'];
+    cache.setQueryData(key, [before]);
+    const names: (string | undefined)[] = [];
+    const observer = new QueryObserver(cache, { queryKey: key, enabled: false });
+    const off = observer.subscribe(() => names.push(cachedRow(cache, 'provider', before.id)?.name));
+    try {
+      cache.setQueryData(key, [after]);
+      cache.setQueryData(key, []);
+      expect(names).toEqual([after.name, undefined]);
+    } finally { off(); cache.clear(); }
+  });
+
+  it('does not seed a provider page from a list row that holds none of its models', () => {
+    const cache = new QueryClient();
+    const row = { ...before, models_count: 2, models: [] };
+    cache.setQueryData(['everything', 'u1', 'resources'], { pages: [{ items: [{ id: 'p1', kind: 'provider', resource: { kind: 'provider', value: row } }] }], pageParams: [null] });
+    expect(cachedRow(cache, 'provider', 'p1')).toBeUndefined();
+    const whole = { ...row, models: [{ id: 'm1' }, { id: 'm2' }] };
+    cache.setQueryData(['providers'], [whole]);
+    expect(cachedRow(cache, 'provider', 'p1')).toEqual(whole);
+    cache.clear();
+  });
+
+  it('updates the table counts when a model or an environment thread changes', () => {
+    const cache = new QueryClient();
+    const providerKey = ['providers', 'reader', 'resources', { kinds: ['provider'], resource: { rows: true } }];
+    const environmentKey = ['environments', 'reader', 'resources', { kinds: ['environment'], resource: { rows: true } }];
+    const page = (kind: string, value: object) => ({ pages: [{ items: [{ id: 'p1', kind, resource_row: { kind, value } }] }], pageParams: [null] });
+    cache.setQueryData(providerKey, page('provider', { ...before, list_row: true, enabled_models_count: 0 }));
+    cache.setQueryData(environmentKey, page('environment', { ...before, list_row: true, threads_count: 0, topics_count: 0, start_allowed: true }));
+    applyRow(cache, { kind: 'provider', id: 'p1', value: { ...after, models: [{ enabled: true }, { enabled: false }] } });
+    applyRow(cache, { kind: 'environment', id: 'p1', value: { ...after, threads: [{ topic: { id: 'a' } }, { topic: { id: 'a' } }], network: { required_mode: 'restricted', mode: 'open' } } });
+    const first = (key: readonly unknown[]) => cache.getQueryData<{ pages: { items: { resource_row: { value: unknown } }[] }[] }>(key)?.pages[0]?.items[0]?.resource_row.value;
+    expect(first(providerKey)).toMatchObject({ enabled_models_count: 1 });
+    expect(first(environmentKey)).toMatchObject({ threads_count: 2, topics_count: 1, start_allowed: false });
+    cache.clear();
+  });
+
+  it('refreshes an embedded sharing summary after its home defaults change without reading unrelated lists', async () => {
+    const cache = new QueryClient();
+    const key = (kind: string) => [kind, 'reader', 'resources', { kinds: [kind], resource: { rows: true } }];
+    const page = (home: string, permission: string) => ({ pages: [{ items: [{ id: home, sharing: { home_id: home, rows: [{ permission }] }, home_path: [] }] }], pageParams: [null] });
+    const fresh = page('home-a', 'provider.manage');
+    const read = vi.fn(() => Promise.resolve(fresh)), unrelated = vi.fn(() => Promise.resolve(page('home-b', 'host.view')));
+    cache.setQueryData(key('providers'), page('home-a', 'provider.view'));
+    cache.setQueryData(key('hosts'), page('home-b', 'host.view'));
+    cache.setQueryData(key('agents'), page('home-a', 'agent.view'));
+    const shown = new QueryObserver(cache, { queryKey: key('providers'), queryFn: read, staleTime: Infinity });
+    const other = new QueryObserver(cache, { queryKey: key('hosts'), queryFn: unrelated, staleTime: Infinity });
+    const off = shown.subscribe(() => undefined), offOther = other.subscribe(() => undefined);
+    try {
+      expect(read).not.toHaveBeenCalled();
+      await applyChanges([{ key: ['defaults'], id: 'home-a' }], cache);
+      expect(read).toHaveBeenCalledOnce();
+      expect(unrelated).not.toHaveBeenCalled();
+      expect(cache.getQueryData(key('providers'))).toEqual(fresh);
+      expect(cache.getQueryData(key('agents'))).toBeUndefined();
+    } finally { off(); offOther(); cache.clear(); }
+  });
+
+  it('keeps every table projection separate from a full resource page after a live update', () => {
+    for (const kind of ['provider', 'agent', 'environment', 'host', 'machine', 'template', 'mcp_server', 'mount', 'skill'] as const) {
+      const cache = new QueryClient();
+      const key = ['everything', 'reader', 'resources', { kinds: [kind], resource: { rows: true } }];
+      const row = { ...before, list_row: true };
+      cache.setQueryData(key, { pages: [{ items: [{ id: 'p1', kind, resource_row: { kind, value: row } }] }], pageParams: [null] });
+      expect(cachedRow(cache, kind, 'p1')).toBeUndefined();
+      applyRow(cache, { kind, id: 'p1', value: { ...after, config: { onlyOnThePage: true } } });
+      const held = cache.getQueryData<{ pages: { items: { resource_row: { value: typeof row } }[] }[] }>(key)?.pages[0]?.items[0]?.resource_row.value;
+      expect(held).toMatchObject({ list_row: true, name: after.name });
+      expect(held).not.toHaveProperty('config');
+      cache.removeQueries({ queryKey: [kind === 'mcp_server' ? 'mcp-server' : kind, 'p1'], exact: true });
+      expect(cachedRow(cache, kind, 'p1')).toBeUndefined();
+      cache.clear();
+    }
   });
 
   it('removes a withdrawn private name stored beside readable resource rows', () => {
