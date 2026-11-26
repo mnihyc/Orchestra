@@ -20,7 +20,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), pr
 vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(), shareWithAgents: calls.share }));
 vi.mock('@/features/people/ThreadIdentity', () => ({ ThreadIdentity: () => null }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 skipOverflowFallback();
 const target = { kind: 'topic' as const, id: TOPIC.id, name: 'Shared topic' };
 const preview: SharePreview = { allowed: true, revision: 1, permissions: [], holders: [], effects: { pages: 0, orgs: null, gaining: [], losing: [], more: 0 }, already: [], already_more: 0, agents: [], rows: [], rules: [], refusal: null };

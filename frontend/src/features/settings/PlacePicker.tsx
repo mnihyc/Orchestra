@@ -1,64 +1,141 @@
-/** Choosing one place of the orgs a person belongs to, by typing part of where it lies: "Acme / Research / Web".
- *
- * A token can be kept to one place and what lies under it. The orgs, projects and topics of every root
- * org the person belongs to are listed as a path of names, narrowed as they type, and the one chosen
- * is shown with the way to take it back. Threads are left out: a token is not kept to one conversation.
- */
-import { useQueries, useQuery } from '@tanstack/react-query';
-import { X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
+/** A destination uses its native name page, without loading every organization's tree. */
+import {skipToken,useInfiniteQuery,useQuery} from '@tanstack/react-query';
+import {X} from 'lucide-react';
+import {useEffect,useMemo,useState} from 'react';
+import {useTranslation} from 'react-i18next';
+import {useStore} from 'zustand';
+import {client} from '@/api/client';
+import { buildRows } from '@/features/navigation/treeRows';
+import { orgsQuery } from '@/api/nodes';
+import { usePlacePages, PlacePageFoot } from '@/features/navigation/usePlacePages';
+import {pickerNamesQuery,type NameKind} from '@/api/search';
+import type {AdminAccess,NameHit,NodeKind,NodeRef,TreeNode} from '@/generated/api-types';
+import {useDebounced} from '@/lib/debounce';
+import {usePickerCursorRestart} from '@/lib/pickerPages';
+import {AsAdminMark,adminAccessOf} from '@/ui/AsAdminMark';
+import {recentChoiceRows,usePickerRecents} from '@/lib/pickerRecents';
+import {useRef,useCallback} from 'react';
+import {Tree,type TreeRow} from '@/ui/Tree';
+import {Popover} from '@/ui/Popover';
+import {Input,fieldBoxClasses} from '@/ui/Input';
+import {Field} from '@/ui/Field';
+import {Choice} from '@/ui/Choice';
+import {ChevronDown} from 'lucide-react';
+import {IconButton} from '@/ui/IconButton';
+import type {ChoiceHelp} from '@/ui/Choice';
+import {NodeIcon} from '@/ui/NodeIcon';
+import {Button} from '@/ui/Button';
+import {ErrorState} from '@/ui/ErrorState';
 
-import { fetchTree, orgsQuery } from '@/api/nodes';
-import type { AdminAccess, NodeKind, TreeNode } from '@/generated/api-types';
-import { useTreeStore } from '@/realtime/stores/tree';
-import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
-import { Combobox, type ComboboxGroup } from '@/ui/Combobox';
-import { IconButton } from '@/ui/IconButton';
-import type { ChoiceHelp } from '@/ui/Choice';
-import { NodeIcon } from '@/ui/NodeIcon';
-import { Button } from '@/ui/Button';
-import { ErrorState } from '@/ui/ErrorState';
-
-/** The most places listed under what is typed: past it the list is no help in choosing, and typing more narrows it. */
-const MOST_LISTED = 30;
-
-const NO_ROWS: readonly TreeNode[] = [];
-
-/** A place as the picker offers it. */
 export interface PickedPlace {
-  adminAccess?: AdminAccess;
-  /** Actual root of the native tree which supplied this place. */
-  rootOrgId?: string;
-  rootName?: string;
-  id: string;
-  kind: NodeKind;
-  /** The colour it was given, 1 to 12; `null` for the colour of its kind. */
-  color: number | null;
-  /** A colour of its own, where the place has one. */
-  custom_color?: string | null;
-  /** A project that lies in a project. */
-  folder: boolean;
-  /** "Acme / Research / Web". */
-  path: string;
+  adminAccess?:AdminAccess;
+  rootOrgId?:string;
+  rootName?:string;
+  id:string;
+  kind:NodeKind;
+  color:number|null;
+  custom_color?:string|null;
+  folder:boolean;
+  path:string;
+}
+
+type PlaceHit = Pick<NameHit, 'id' | 'kind' | 'name' | 'path' | 'color' | 'custom_color'>;
+
+/** A move requires the complete active branch. Other pickers may offer a disclosed detached node. */
+function treePath(row: TreeNode, byId: ReadonlyMap<string, TreeNode>, liveRoot?: string): NodeRef[] | null {
+  const path: NodeRef[] = [];
+  const seen = new Set<string>();
+  let root: string | undefined;
+  for (let at: TreeNode | undefined = row; at !== undefined && !seen.has(at.id); at = at.parent_id === null ? undefined : byId.get(at.parent_id)) {
+    if (liveRoot !== undefined && (at.archived || at.deleted)) return null;
+    if (at.parent_id === null) root = at.id;
+    seen.add(at.id);
+    path.push({id:at.id, kind:at.kind, name:at.name, redacted:false});
+  }
+  return liveRoot === undefined || root === liveRoot ? path.reverse() : null;
+}
+
+/** Include only ancestors disclosed by this page. A shared node can have no readable parent. */
+function treeHits(rows: readonly TreeNode[], matches: ReadonlySet<string>, rootId: string, locale: string, includeThreads: boolean, liveBranchesOnly: boolean): PlaceHit[] {
+  const byId = new Map(rows.filter((node) => !node.deleted).map((node) => [node.id, {...node, folded:null}]));
+  const layout = buildRows({nodes:byId, loaded:true, lastSeq:0, error:null}, rootId, new Set(byId.keys()), locale, {showArchived:true, threads:includeThreads});
+  const ordered = new Set([rootId, ...layout.flatMap((row) => row.item.type === 'node' ? [row.item.node.id] : []), ...matches]);
+  return [...ordered].flatMap((id) => {
+    const node = byId.get(id);
+    if (!matches.has(id) || node === undefined) return [];
+    const path = treePath(node, byId, liveBranchesOnly ? rootId : undefined);
+    return path === null ? [] : [{...node, custom_color:node.custom_color ?? null, path}];
+  });
+}
+
+/** Only the native reply supplies names; unavailable ancestors stay unnamed. */
+export function placesOfNames(rows:readonly PlaceHit[],separator:string,hidden:string,includeThreads=false,rootId?:string):PickedPlace[] {
+  return rows.flatMap((hit)=>{
+    const kind=hit.kind;
+    if(kind!=='org'&&kind!=='project'&&kind!=='topic'&&kind!=='thread')return [];
+    if(kind==='thread'&&!includeThreads)return [];
+    const self:NodeRef={id:hit.id,kind,name:hit.name,redacted:false};
+    const path=hit.path.at(-1)?.id===hit.id?[...hit.path.slice(0,-1),self]:[...hit.path,self];
+    const root=rootId??(path[0]?.kind==='org'?path[0].id:undefined);
+    const namedRoot=path.find((node)=>node.id===root&&!node.redacted&&node.name!==null);
+    const admin=adminAccessOf(hit);
+    return [{id:hit.id,kind,color:hit.color??null,custom_color:hit.custom_color,
+      folder:kind==='project'&&path.at(-2)?.kind==='project',
+      path:path.map((node)=>node.redacted||node.name===null?hidden:node.name).join(separator),
+      ...(root===undefined?{}:{rootOrgId:root}),...(namedRoot?.name===null||namedRoot?.name===undefined?{}:{rootName:namedRoot.name}),
+      ...(admin===null?{}:{adminAccess:admin}),
+    }];
+  });
+}
+
+/** Build just the disclosed paths leading to this native page. Ancestors provide navigation. */
+export function placeHierarchy(hits: readonly PlaceHit[], places: readonly PickedPlace[], separator: string, hidden: string): TreeRow<PickedPlace>[] {
+  const selected = new Map(places.map(place => [place.id, place]));
+  const nodes = new Map<string, PickedPlace>();
+  const children = new Map<string | null, string[]>();
+  for (const hit of hits) {
+    const place = selected.get(hit.id);
+    if (place === undefined) continue;
+    const path = [...hit.path.filter(node => node.id !== hit.id), {id:hit.id,kind:place.kind,name:hit.name,redacted:false}];
+    const names:string[]=[];
+    let parent:string|null=null;
+    for(const node of path){
+      names.push(node.redacted || node.name===null ? hidden : node.name);
+      if(node.redacted || node.name===null)continue;
+      if(!nodes.has(node.id)){
+        nodes.set(node.id,selected.get(node.id) ?? {id:node.id,kind:node.kind,color:null,folder:false,path:names.join(separator)});
+        const siblings=children.get(parent);
+        if(siblings===undefined)children.set(parent,[node.id]);else siblings.push(node.id);
+      }
+      parent=node.id;
+    }
+  }
+  const stack=(children.get(null)??[]).toReversed().map(id=>({id,parentId:null as string|null,depth:0}));
+  const rows:TreeRow<PickedPlace>[]=[];
+  const visited=new Set<string>();
+  while(stack.length){
+    const next=stack.pop();
+    if(next===undefined || visited.has(next.id))continue;
+    visited.add(next.id);
+    const item=nodes.get(next.id);
+    if(item===undefined)continue;
+    const below=children.get(next.id)??[];
+    rows.push({...next,item,label:item.path,expandable:below.length>0,expanded:true});
+    for(const id of below.toReversed())stack.push({id,parentId:next.id,depth:next.depth+1});
+  }
+  return rows;
 }
 
 /** The places of one tree as paths of names, in the order of the tree. */
-export function placesOfTree(rows: readonly TreeNode[], separator: string, includeThreads = false): PickedPlace[] {
+export function placesOfTree(rows: readonly TreeNode[], separator: string, includeThreads = false, liveRoot?: string): PickedPlace[] {
   const byId = new Map(rows.map((row) => [row.id, row]));
-  const pathOf = (row: TreeNode): string => {
-    const names: string[] = [];
-    for (let at: TreeNode | undefined = row, steps = 0; at !== undefined && steps < 64; steps += 1) {
-      names.unshift(at.name);
-      at = at.parent_id === null ? undefined : byId.get(at.parent_id);
-    }
-    return names.join(separator);
-  };
   return rows
     .filter((row) => !row.deleted && (includeThreads || row.kind !== 'thread'))
-    .map((row) => {
+    .flatMap((row) => {
+      const path = treePath(row, byId, liveRoot);
+      if (path === null) return [];
       const adminAccess = adminAccessOf(row);
-      return { id: row.id, kind: row.kind, color: row.color, ...(row.custom_color === undefined ? {} : { custom_color: row.custom_color }), folder: row.kind === 'project' && (row.parent_id === null ? undefined : byId.get(row.parent_id))?.kind === 'project', path: pathOf(row), ...(adminAccess === null ? {} : { adminAccess }) };
+      return { id: row.id, kind: row.kind, color: row.color, ...(row.custom_color === undefined ? {} : { custom_color: row.custom_color }), folder: row.kind === 'project' && (row.parent_id === null ? undefined : byId.get(row.parent_id))?.kind === 'project', path: path.map((step) => step.name).join(separator), ...(adminAccess === null ? {} : { adminAccess }) };
     })
     .sort((one, other) => one.path.localeCompare(other.path));
 }
@@ -73,6 +150,7 @@ export interface PlacePickerProps {
   rootOrgId?: string;
   /** Offers only places of this kind: the topic a thread is made in. */
   only?: NodeKind;
+  liveBranchesOnly?: boolean;
   /** Settings can be applied to a thread as well as the places above it. */
   includeThreads?: boolean;
   /** Native destination rules keep an unavailable place visible, with its own reason. */
@@ -82,60 +160,101 @@ export interface PlacePickerProps {
   optionDescription?: (place: PickedPlace) => string | undefined;
 }
 
-export function PlacePicker({ label, hint, value, onChange, disabled = false, rootOrgId, only, includeThreads = false, refusal, onCandidatesChange, optionHelp, optionDescription }: PlacePickerProps) {
-  const { t } = useTranslation();
-  const [query, setQuery] = useState('');
-  const [open, setOpen] = useState(false);
-  const orgs = useQuery({ ...orgsQuery, enabled: open && value === null });
-  const live = useTreeStore((state) => state.byOrg);
-  const roots = useMemo(() => (orgs.data ?? []).filter((org) => rootOrgId === undefined || org.id === rootOrgId), [orgs.data, rootOrgId]);
-  const heldAt = (index: number) => { const id = roots[index]?.id; return id === undefined ? undefined : live.get(id); };
-  const trees = useQueries({
-    queries: roots.map((org) => ({
-      queryKey: ['tree-places', org.id] as const,
-      queryFn: ({ signal }: { signal: AbortSignal }) => fetchTree(org.id, null, signal),
-      enabled: open && value === null && live.get(org.id)?.loaded !== true,
-    })),
-    // The rows of every tree as one value, which stays the same object while nothing in it changed.
-    combine: (results) => ({ trees: results.map((result, index) => {
-      const held = heldAt(index);
-      return held?.loaded === true ? [...held.nodes.values()] : result.data?.nodes ?? NO_ROWS;
-    }), pending: results.some((result, index) => heldAt(index)?.loaded !== true && result.isPending),
-    failed: results.find((result, index) => heldAt(index)?.loaded !== true && result.isError),
-    retry: () => Promise.all(results.filter((result) => result.isError).map((result) => result.refetch())) }),
-  });
-  const loading = open && (orgs.isPending || trees.pending);
-  const places = useMemo(() => {
-    const separator = t('settings.place.separator');
-    return trees.trees.flatMap((rows, index) => {
+export function PlacePicker({label,hint,value,onChange,disabled=false,rootOrgId,only,includeThreads=false,liveBranchesOnly=false,refusal,onCandidatesChange,optionHelp,optionDescription}:PlacePickerProps) {
+  const {t,i18n}=useTranslation();
+  const reader=useStore(client.session,(state)=>`${state.userId}:${state.readerVersion}`);
+  const [query,setQuery]=useState('');const [open,setOpen]=useState(false);
+  const text=query.trim(),rested=useDebounced(text),waiting=text!==rested;
+  const kinds:NameKind[]=only===undefined?['org','project','topic',...(includeThreads?['thread' as const]:[])]:[only];
+  // Search across roots in one names request unless the action requires proof of each ancestor's state.
+  const orgs = useQuery(liveBranchesOnly ? { ...orgsQuery, enabled:open && value === null } : { ...orgsQuery, queryFn:skipToken });
+  const roots = useMemo(() => (orgs.data ?? []).filter((org) => rootOrgId === undefined
+    ? liveBranchesOnly || orgs.data?.length === 1 : org.id === rootOrgId), [orgs.data, rootOrgId, liveBranchesOnly]);
+  const hierarchySource = liveBranchesOnly || roots.length > 0;
+  const selection=useMemo(()=>({q:rested, include_threads:includeThreads || only === 'thread', ...(only === undefined ? {} : {kind:only})}), [rested,includeThreads,only]);
+  const live = usePlacePages(roots, selection, open && value === null && !waiting);
+  const scope=JSON.stringify([reader,rootOrgId,kinds,rested]);
+  const [page,setPage]=useState({scope,index:0});
+  if(page.scope!==scope)setPage({scope,index:0});
+  const request=pickerNamesQuery({q:rested,kinds,...(rootOrgId===undefined?{}:{orgId:rootOrgId})});
+  const source=useInfiniteQuery({...request,enabled:!hierarchySource&&open&&value===null&&!waiting});
+  usePickerCursorRestart(source,request.queryKey);
+  const pages=source.data?.pages??[];
+  const index=page.scope===scope?Math.min(page.index,Math.max(0,pages.length-1)):0;
+  if(source.data!==undefined&&page.scope===scope&&page.index!==index)setPage({scope,index});
+  const liveChoices = useMemo(() => {
+    const rows: PlaceHit[] = [], places: PickedPlace[] = [];
+    for (const [index, part] of live.pages.entries()) {
       const root = roots[index];
-      const namedRoot = root?.path.find((step) => step.id === root.org_id && !step.redacted);
-      const rootName = root?.id === root?.org_id ? root?.name : namedRoot?.name;
-      return placesOfTree(rows, separator, includeThreads).map((place) => ({ ...place, ...(root === undefined ? {} : { rootOrgId: root.org_id, ...(rootName === null || rootName === undefined ? {} : { rootName }) }) }));
-    });
-  }, [trees.trees, roots, t, includeThreads]);
-  const needle = query.trim().toLocaleLowerCase();
-  const found = useMemo(() => places
-    .filter((place) => only === undefined || place.kind === only)
-    .filter((place) => needle === '' || place.path.toLocaleLowerCase().includes(needle))
-    .slice(0, MOST_LISTED), [places, only, needle]);
-  useEffect(() => { onCandidatesChange?.(found); }, [found, onCandidatesChange]);
-  const groups: ComboboxGroup<string>[] = [
-    {
-      id: 'places',
-      label: t('settings.place.group'),
-      options: found.map((place) => ({
-        value: place.id,
-        label: <span className="flex min-w-0 items-center gap-2"><span>{place.path}</span><AsAdminMark of={place.adminAccess?.place} /></span>,
-        text: place.path,
-        icon: <NodeIcon kind={place.folder ? 'folder' : place.kind} color={place.color} own={place.custom_color} />,
-        description: optionDescription?.(place) ?? t(`settings.place.kinds.${place.kind}`),
-        help: optionHelp?.(place),
-        disabled: refusal?.(place) ?? false,
-      })),
-    },
-  ];
+      if (root === undefined) continue;
+      const hits = treeHits(part.rows, part.matches, root.org_id, i18n.language, selection.include_threads, liveBranchesOnly);
+      rows.push(...hits);
+      places.push(...placesOfNames(hits, t('settings.place.separator'), t('access.place.hidden'), selection.include_threads, root.org_id));
+    }
+    return {rows, places};
+  }, [live.pages, roots, i18n.language, selection.include_threads, liveBranchesOnly, t]);
+  const rows = hierarchySource ? liveChoices.rows : pages[index]?.items;
+  const failed = hierarchySource ? live.error !== null || orgs.isError : source.isError;
+  const places = useMemo(() => waiting || failed ? [] : hierarchySource ? liveChoices.places :
+    placesOfNames(rows ?? [], t('settings.place.separator'), t('access.place.hidden'), selection.include_threads, rootOrgId),
+  [rows, t, waiting, failed, hierarchySource, liveChoices.places, selection.include_threads, rootOrgId]);
+  const more=index+1<pages.length||source.hasNextPage;
+  const next=async()=>{
+    if(index+1>=pages.length){const result=await source.fetchNextPage();if(result.isError||result.data===undefined||result.data.pages.length<=index+1)return;}
+    setPage((before)=>before.scope===scope&&before.index===index?{scope,index:index+1}:before);
+  };
+  const retry=()=>{setPage({scope,index:0});void source.refetch();};
 
+  const recent = usePickerRecents(open);
+  const search = useRef<HTMLInputElement>(null);
+  const holder = useRef<HTMLDivElement>(null);
+  const [closed,setClosed] = useState<ReadonlySet<string>>(() => new Set());
+  const hierarchy = useMemo(() => placeHierarchy(rows ?? [], places, t('settings.place.separator'), t('access.place.hidden')), [rows,places,t]);
+  const candidateIds = useMemo(() => new Set(places.map((p) => p.id)), [places]);
+  const treeRows = useMemo(() => {
+    const recentPlaces = text === '' ? recentChoiceRows(places,Object.entries(recent.choices ?? {}).flatMap(([kind,ids]) => ids.slice(0,recent.count).map((id) => kind+':'+id)),p=>p.kind+':'+p.id,p=>!refusal?.(p)) : [];
+    const promoted = new Set(recentPlaces.map((p)=>p.id));
+    const output: TreeRow<PickedPlace>[] = [];
+    const firstRecent = recentPlaces[0];
+    if (firstRecent !== undefined) {
+      const expanded = !closed.has('recent-places');
+      output.push({ id: 'recent-places', item: firstRecent, label: t('ui.picker.recent'), depth: 0, parentId: null, expandable: true, expanded, disabled: true });
+      if (expanded) for (const place of recentPlaces) {
+        output.push({ id: 'recent:'+place.id, item: place, label: place.path, depth: 1, parentId: 'recent-places', expandable: false, expanded: false });
+      }
+    }
+    const hidden = new Set<string>();
+    for (const row of hierarchy) {
+      if (row.parentId !== null && hidden.has(row.parentId)) { hidden.add(row.id); continue; }
+      const expanded = text !== '' || !closed.has(row.id);
+      if (!expanded) hidden.add(row.id);
+      if (promoted.has(row.id) && !row.expandable) continue;
+      const eligible = candidateIds.has(row.id) && !promoted.has(row.id);
+      const reason = eligible ? refusal?.(row.item) : false;
+      output.push({...row,expanded,disabled:!eligible || Boolean(reason),description:typeof reason==='string'?reason:optionDescription?.(row.item) ?? t(`settings.place.kinds.${row.item.kind}`)});
+    }
+    return output;
+  },[places,recent.choices,recent.count,text,hierarchy,closed,candidateIds,refusal,optionDescription,t]);
+  const visibleCandidates = useMemo(() => {
+    const visible = new Set(treeRows.filter(row => row.id !== 'recent-places').map(row => row.item.id));
+    return places.filter(place => visible.has(place.id));
+  }, [treeRows,places]);
+  useEffect(()=>{onCandidatesChange?.(open ? visibleCandidates : []);},[open,visibleCandidates,onCandidatesChange]);
+  const choose = (row:TreeRow<PickedPlace>) => {
+    if(row.disabled || disabled)return;
+    recent.record({kind:row.item.kind,key:row.item.id});onChange(row.item);setQuery('');setOpen(false);
+  };
+  const renderRow=useCallback((row:TreeRow<PickedPlace>)=>{
+    if (row.id === 'recent-places') return <span>{t('ui.picker.recent')}</span>;
+    const refusalReason = candidateIds.has(row.item.id) ? refusal?.(row.item) : undefined;
+    const description = typeof refusalReason === 'string' ? refusalReason : optionDescription?.(row.item);
+    return <span className="flex min-w-0 flex-1 items-center gap-2" title={row.item.path}>
+    <NodeIcon kind={row.item.folder?'folder':row.item.kind} color={row.item.color} own={row.item.custom_color}/>
+    <Choice presentation="picker" name={row.item.path} help={candidateIds.has(row.item.id)?optionHelp?.(row.item):undefined}/>
+    <AsAdminMark of={row.item.adminAccess?.place} iconOnly/>
+    {candidateIds.has(row.item.id) && description && <span className="ml-auto text-xs text-text-muted">{description}</span>}
+  </span>;},[candidateIds,optionHelp,refusal,optionDescription,t]);
+  const loading=waiting || (hierarchySource ? live.pending || liveBranchesOnly && orgs.isPending : source.isPending) || recent.loading;
   if (value !== null) {
     return (
       <div className="flex flex-col gap-1">
@@ -150,27 +269,30 @@ export function PlacePicker({ label, hint, value, onChange, disabled = false, ro
       </div>
     );
   }
-  return (
-    <Combobox
-      label={label}
-      hint={hint}
-      query={query}
-      onQueryChange={setQuery}
-      onOpenChange={setOpen}
-      groups={groups}
-      loading={loading}
-      empty={t('settings.place.none')}
-      placeholder={t('settings.place.placeholder')}
-      disabled={disabled}
-      footer={orgs.isError ? <ErrorState compact error={orgs.error} action={<Button size="sm" onClick={() => void orgs.refetch()}>{t('common.tryAgain')}</Button>} />
-        : trees.failed === undefined ? undefined : <ErrorState compact error={trees.failed.error} action={<Button size="sm" onClick={() => void trees.retry()}>{t('common.tryAgain')}</Button>} />}
-      onSelect={(option) => {
-        const place = places.find((entry) => entry.id === option.value);
-        if (place !== undefined) {
-          onChange(place);
-          setQuery('');
-        }
-      }}
-    />
-  );
+  return <Field label={label} hint={hint}>{(control) => <Popover label={label} open={open} onOpenChange={setOpen} scroll="children"
+    className="w-(--radix-popover-trigger-width) min-w-64 gap-2 p-2"
+    onOpenAutoFocus={(event) => { event.preventDefault(); search.current?.focus(); }}
+    trigger={<button type="button" {...control} role="combobox" aria-haspopup="tree" aria-expanded={open} disabled={disabled} className={`${fieldBoxClasses} flex items-center gap-2 text-left`}>
+      <span className="min-w-0 flex-1 truncate text-text-subtle">{t('settings.place.placeholder')}</span><ChevronDown aria-hidden className="size-4 shrink-0 text-text-subtle" />
+    </button>}>
+    <Input ref={search} label={t('settings.place.placeholder')} hideLabel type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowDown') { event.preventDefault(); holder.current?.querySelector<HTMLElement>('[role="treeitem"][tabindex="0"]')?.focus(); }
+        if (event.key === 'Escape' && query !== '') { event.preventDefault(); event.stopPropagation(); setQuery(''); }
+      }} />
+    {loading ? <p role="status" className="text-sm text-text-muted">{t('common.loading')}</p> : treeRows.length === 0 ? <p className="text-sm text-text-muted">{t('settings.place.none')}</p> : <div ref={holder} className="min-h-0 max-h-80 overflow-y-auto overscroll-contain">
+      <Tree label={label} rows={treeRows} nameOf={(place) => place.path} renderRow={renderRow} onPick={choose}
+        onExpandedChange={(id, expanded) => setClosed((before) => { const next = new Set(before); if (expanded) next.delete(id); else next.add(id); return next; })} />
+    </div>}
+
+    {liveBranchesOnly && orgs.isError && <ErrorState compact error={orgs.error} onRetry={() => void orgs.refetch()} />}
+    {hierarchySource && <PlacePageFoot pages={live.pages} />}
+    {live.error !== null && <ErrorState compact error={live.error} onRetry={live.retry} />}
+    {!hierarchySource && source.isError && <ErrorState compact error={source.error} onRetry={retry}/>}
+    {recent.error!==null && <ErrorState compact error={recent.error} onRetry={recent.retry}/>}
+    {!hierarchySource && (index>0||more) && <div className="flex justify-end gap-2">
+      <Button size="sm" disabled={index===0||waiting} onClick={()=>setPage({scope,index:index-1})}>{t('resourceDetails.layout.previous')}</Button>
+      <Button size="sm" disabled={!more||waiting} pending={source.isFetchingNextPage} onClick={()=>void next()}>{t('resourceDetails.layout.next')}</Button>
+    </div>}
+  </Popover>}</Field>;
 }

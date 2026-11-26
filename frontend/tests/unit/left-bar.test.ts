@@ -97,6 +97,7 @@ const nameOfRow = (item: NavItem): string => {
       return item.node.name;
     case 'doc':
       return `doc ${item.doc.title}`;
+    case 'children':
     case 'docs':
       return `(${item.state})`;
     case 'chat':
@@ -1028,12 +1029,13 @@ describe('the Resources view of the left bar', () => {
     mcp: none,
     mounts: none,
     skills: none,
+    pools: none,
   };
   const names = (open: ResourceKind[]) =>
     resourceRows(lists, new Set(open), 'en').map((row) => `${'  '.repeat(row.depth)}${row.item.type === 'kind' ? `${row.item.kind} ${row.item.count ?? '?'}` : row.item.type === 'thing' ? row.item.name : `(${row.item.state})`}`);
 
   it('lists every kind there is, in the order the screens of resources name them, each with how many its reader may see', () => {
-    expect(names([])).toEqual(['providers 2', 'agents 1', 'machines 0', 'environments ?', 'templates ?', 'hosts 0', 'mcp 0', 'mounts 0', 'skills 0']);
+    expect(names([])).toEqual(['providers 2', 'agents 1', 'machines 0', 'environments ?', 'templates ?', 'hosts 0', 'mcp 0', 'mounts 0', 'skills 0', 'pools 0']);
   });
 
   it('opens a kind to its things by name, says that they are on their way or could not be read, and gives a kind with nothing in it nothing to open', () => {
@@ -1051,6 +1053,7 @@ describe('the Resources view of the left bar', () => {
       'mcp 0',
       'mounts 0',
       'skills 0',
+      'pools 0',
     ]);
     const rows = resourceRows(lists, new Set<ResourceKind>(['machines']), 'en');
     expect(rows.find((row) => row.id === 'kind:machines')).toMatchObject({ expandable: false, expanded: false });
