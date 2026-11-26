@@ -91,7 +91,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       expect((await cleared).status()).toBe(200);
       await expect.poll(async () => (await settings()).own?.value).toEqual({ native_kept: true, 'provider_options:another-interface': { untouched: true } });
       await guide.click();
-      await expect(page.getByRole('heading', { name: language === 'en' ? 'Thread options' : '线程选项', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: language === 'en' ? 'Thread options' : '会话选项', exact: true })).toBeVisible();
     }
   });
 }

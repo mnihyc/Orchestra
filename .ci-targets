@@ -1,0 +1,2 @@
+test -p orch-adapter-claude-code --test interface
+test -p orch-adapter-claude-code --test managed_readback

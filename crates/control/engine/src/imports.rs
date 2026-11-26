@@ -893,34 +893,6 @@ impl Engine {
             .ok_or(ImportError::NotFound)
     }
 
-    /// Names of the same admitted source, with the existing one-based cursor.
-    pub async fn import_file_names_for(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        id: Id,
-        after: Option<&str>,
-        limit: i64,
-    ) -> Result<(Vec<String>, Option<String>), ImportError> {
-        let row = self.read_import(conn, principal, id).await?;
-        let after = after
-            .map(str::parse::<usize>)
-            .transpose()
-            .map_err(|_| ImportError::Invalid {
-                field: "cursor".into(),
-                message: "is not one".into(),
-            })?
-            .unwrap_or(0);
-        let limit = usize::try_from(limit).map_err(|_| ImportError::Invalid {
-            field: "limit".into(),
-            message: "is not one".into(),
-        })?;
-        let more = row.files.len().saturating_sub(after) > limit;
-        let names: Vec<_> = row.files.into_iter().skip(after).take(limit).collect();
-        let next = more.then(|| after.saturating_add(names.len()).to_string());
-        Ok((names, next))
-    }
-
     /// The imports of `user` as their list shows them, newest first: a page after the cursor of the last one shown.
     pub async fn import_lines_of(
         &self,
@@ -930,7 +902,7 @@ impl Engine {
         after: Option<&str>,
         limit: i64,
     ) -> Result<(Vec<ImportLine>, Option<String>), ImportError> {
-        let (rows, next) = self.import_line_rows(conn, user, after, limit).await?;
+        let (rows, next) = self.import_line_rows(conn, user, after, limit, "").await?;
         let prepared = self.prepare_import_lines(conn, principal, rows).await?;
         Ok((prepared.render(), next))
     }
@@ -942,6 +914,7 @@ impl Engine {
         user: Id,
         after: Option<&str>,
         limit: i64,
+        search: &str,
     ) -> Result<(Vec<ImportLineRow>, Option<String>), ImportError> {
         let after = match after {
             None => None,
@@ -950,7 +923,7 @@ impl Engine {
                 message: "is not one".to_owned(),
             })?),
         };
-        let mut list = rows::lines_of_user(conn, user, after, limit + 1).await?;
+        let mut list = rows::lines_of_user(conn, user, after, limit + 1, search).await?;
         let more = i64::try_from(list.len()).unwrap_or(i64::MAX) > limit;
         if more {
             list.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
