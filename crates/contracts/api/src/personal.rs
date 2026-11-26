@@ -17,7 +17,7 @@ use orch_types::{Id, Json, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::SubscriptionLevel;
+use crate::common::{Page, SubscriptionLevel};
 use crate::nodes::{NodeRef, TopicSort, TopicStatusFilter};
 use crate::routes::Access::{Permission, Rule, User};
 use crate::threads::{ContentPart, Delivery};
@@ -42,20 +42,87 @@ pub struct Draft {
     pub updated_at: Time,
 }
 
-/// A node a person keeps close, with the way down to it.
+/// A shortcut: a pointer to a document, a chat, a thread or a place, kept in a person's own list (what they starred)
+/// or in a place (an org, a project or a topic). It points by identity, so a move or a rename of its target changes
+/// nothing; it names the target as its reader may see the target now, and grants nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Favorite {
-    /// The node.
-    pub node: NodeRef,
-    /// The way down to it.
-    pub path: Vec<NodeRef>,
-    /// Its place among the favorites; the list is in order.
+pub struct Shortcut {
+    /// Its identity, by which it is moved or removed.
+    pub id: Id,
+    /// The place it is kept in; `null` in the reader's own list.
+    pub node_id: Option<Id>,
+    /// What it points to.
+    pub target: PersonalTarget,
+    /// Its place in its list; the list is in order.
     pub position: String,
-    /// For a project: the view it was starred with, opened as that view's ordinary address; `null`
-    /// stars the place alone.
+    /// Whether its reader may open the target.
+    pub state: ShortcutTargetState,
+    /// The target as its reader sees it now; absent unless the target is open to them.
+    pub item: Option<ShortcutItem>,
+    /// For a project in the reader's own list: the view it was starred with, opened as that view's ordinary address;
+    /// `null` stars the place alone.
     #[serde(default)]
     pub view: Option<ProjectView>,
 }
+
+/// Whether the reader of a shortcut may open its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutTargetState {
+    /// They may: its name and where it lies are given.
+    Open,
+    /// It is there, and not theirs to open; nothing more is said of it.
+    Unavailable,
+    /// It was deleted; restored from the trash, it opens again.
+    Deleted,
+}
+
+/// The target of a shortcut, as its reader sees it now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ShortcutItem {
+    /// Its current name or title; `null` where the reader may not know it.
+    pub name: Option<String>,
+    /// The way down from the root org to the place it lies in: for a place or a thread the places above it, for a
+    /// document or a place's chat its place too; empty for a direct or group chat.
+    pub path: Vec<NodeRef>,
+    /// The root org it lies in, where the address of a direct or group chat begins.
+    #[serde(default)]
+    pub org_id: Option<Id>,
+    /// Whether it, or a place above it, is archived.
+    pub archived: bool,
+    /// The palette colour of a place's icon; `null` for anything else or a place in its kind's colour.
+    #[serde(default)]
+    pub color: Option<u32>,
+    /// A place's own icon colour, `#rrggbb`, in place of the palette's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_color: Option<String>,
+    /// A readable thread's current icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_display: Option<crate::threads::ThreadDisplay>,
+}
+
+/// Where a shortcut is put.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShortcutMoveBody {
+    /// The place it goes to; `null` puts it in the caller's own list.
+    pub node_id: Option<Id>,
+}
+
+/// A page of the shortcuts kept in a place.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeShortcutListQuery {
+    /// How many; [`SHORTCUTS_PAGE_DEFAULT`] when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the page before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// How many shortcuts of a place a page holds when its reader does not say.
+pub const SHORTCUTS_PAGE_DEFAULT: u32 = 100;
 
 /// How a project's topics were last looked at: a list or a board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -373,6 +440,8 @@ pub enum PersonalStateKey {
     /// How a conversation is shown to them: how much of the agent's work opens on its own, and
     /// whether a difference is drawn in one column or in two.
     Timeline,
+    /// How this person's interface retains views and indicates reading progress.
+    Interface,
     /// Which sidebar sections are folded and whether its tree shows documents, the place last in,
     /// and the order of each org's tree.
     Sidebar,
@@ -382,8 +451,59 @@ pub enum PersonalStateKey {
     Keys,
     /// The last few emoji chosen, newest first.
     Reactions,
+    /// Recently selected picker keys, newest first within each kind.
+    PickerRecents,
     /// How the Inbox groups its rows.
     Inbox,
+    /// The person's last successful, currently revalidated new-thread setup.
+    ThreadSetup,
+}
+
+/// A model identity deliberately selected by this person, without another reader's names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRecent {
+    /// The provider distinguishes equal routing names at different sources.
+    pub provider_id: Id,
+    /// The exact model routing name, never a display name.
+    pub model_name: String,
+}
+
+/// Private model history and the configured size of its short Recent group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRecents {
+    /// Distinct provider/model identities, ordered by the server's accepted selections.
+    pub recent: Vec<ModelRecent>,
+    /// How many matching choices to place in Recent; zero hides the group, retaining history.
+    pub recent_count: i64,
+}
+
+/// The person's private recent picker choices, with the system's current group length.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MePickerRecents {
+    /// Entries retained and offered per kind; zero disables remembering.
+    pub count: u64,
+    /// Newest-first distinct opaque keys. Names and authority come only from the picker source.
+    pub choices: BTreeMap<String, Vec<String>>,
+}
+
+/// A selection write acknowledges only its effect, without disclosing any stored private history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MePickerRecentReceipt {
+    /// The current system group length.
+    pub count: u64,
+    /// False when remembering is switched off; no earlier choice was erased.
+    pub remembered: bool,
+}
+
+/// One deliberate selection; opening or inspecting a choice does not record it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MePickerRecentChoice {
+    /// Native resource kind, or model. The same kind shares history across screens.
+    pub kind: String,
+    /// Stable choice key. Models use their provider-qualified key.
+    pub key: String,
 }
 
 /// Where to put a favorite.
@@ -490,8 +610,8 @@ pub struct ThreadReadReply {
 pub type PersonalState = BTreeMap<String, Json>;
 
 crate::endpoints! {
-    /// Lists the caller's favorites, in order.
-    MeFavoriteList: GET "/me/favorites", User, none, none, json Vec<Favorite>, 200,
+    /// Lists the caller's own shortcuts (what they starred), in order: places and threads, documents and chats.
+    MeFavoriteList: GET "/me/favorites", User, none, none, json Vec<Shortcut>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
             Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("favorite_nodes")),
@@ -524,6 +644,18 @@ crate::endpoints! {
     /// Removes only this kind/id favorite, including when the target is no longer readable.
     MeItemFavoriteDelete: DELETE "/me/favorites/{kind}/{id}", User, none, none, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Lists the shortcuts kept in a place, in order, each with its target as the caller may see it now.
+    NodeShortcutList: GET "/nodes/{id}/shortcuts", Permission("node.view"), query NodeShortcutListQuery, none, json Page<Shortcut>, 200,
+        operation Op::single(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic)], Target::PermissionObject);
+    /// Keeps a shortcut to a thing the caller may open in a place where they may add documents; the one kept there already answers.
+    NodeShortcutCreate: POST "/nodes/{id}/shortcuts", Permission("doc.create"), none, json PersonalTarget, json Shortcut, 201,
+        operation Op::returning(Write, &[Object(K::Org), Object(K::Project), Object(K::Topic)], Target::PermissionObject);
+    /// Moves a shortcut to another place, or into the caller's own list; its target is not touched.
+    ShortcutMove: POST "/shortcuts/{id}/move", User, none, json ShortcutMoveBody, json Shortcut, 200,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Removes a shortcut; its target is not touched.
+    ShortcutDelete: DELETE "/shortcuts/{id}", User, none, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Records one visit to a readable thing, using the server's clock and decaying count.
     MeVisitCreate: POST "/me/visits", User, none, json PersonalTarget, none, 204,
         operation Op::receipt(&Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount));
@@ -551,6 +683,18 @@ crate::endpoints! {
     /// Replaces the whole value of one key of that state.
     MeStateSet: PUT "/me/state/{key}", User, none, json Json, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Reads this person's recent picker choices in one preference read.
+    MePickerRecentsGet: GET "/me/picker-recents", User, none, none, json MePickerRecents, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Promotes one key atomically without replacing another device's choices.
+    MePickerRecentCreate: POST "/me/picker-recents", User, none, json MePickerRecentChoice, json MePickerRecentReceipt, 200,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Reads only this person's selected models, shared across their devices.
+    MeModelRecentList: GET "/me/model-recents", User, none, none, json ModelRecents, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Records one deliberate choice without replacing another device's history.
+    MeModelRecentCreate: POST "/me/model-recents", User, none, json ModelRecent, none, 204,
+        operation Op::receipt(&Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount));
     /// Keeps the caller's last view of one project, beside those of the others.
     MeProjectViewSet: PUT "/me/state/project_views/{project_id}", Rule("the caller, who may view the project"), none, json ProjectView, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
@@ -665,17 +809,19 @@ mod tests {
     }
 
     #[test]
-    fn the_interface_state_is_kept_under_nine_keys() {
+    fn the_interface_state_keeps_reading_choices_under_their_own_key() {
         assert_eq!(
             serde_json::to_value([
                 PersonalStateKey::Help,
                 PersonalStateKey::Layouts,
                 PersonalStateKey::Viewers,
                 PersonalStateKey::Timeline,
+                serde_json::from_value::<PersonalStateKey>(json!("interface")).unwrap(),
                 PersonalStateKey::Sidebar,
                 PersonalStateKey::ProjectViews,
                 PersonalStateKey::Keys,
                 PersonalStateKey::Reactions,
+                PersonalStateKey::PickerRecents,
                 PersonalStateKey::Inbox
             ])
             .unwrap(),
@@ -684,10 +830,12 @@ mod tests {
                 "layouts",
                 "viewers",
                 "timeline",
+                "interface",
                 "sidebar",
                 "project_views",
                 "keys",
                 "reactions",
+                "picker_recents",
                 "inbox"
             ])
         );

@@ -1,4 +1,4 @@
-//! The API as a program, started the way a deployment starts it: from a configuration file and a directory of secrets, with the browser's listener in plain HTTP. What it must do from that start alone is serve the first setup, make an org, and seal with the master key it was given every kind of secret a person can store: an authenticator, a secret of a node, and the key of a provider. To run it by hand, `cargo test -p orch-api --test program -- --nocapture`.
+//! The API as a program, started the way a deployment starts it: from a configuration file and a directory of secrets, with the browser's listener in plain HTTP or under TLS. What it must do from that start alone is serve the first setup, make an org, and seal with the master key it was given every kind of secret a person can store: an authenticator, a secret of a node, and the key of a provider. To run it by hand, `cargo test -p orch-api --test program -- --nocapture`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -38,8 +38,8 @@ fn free_port(other: Option<u16>) -> u16 {
 }
 
 /// What `orchctl compose-secrets` makes, as far as the API reads it: the authority, the master key
-/// (returned, in hexadecimal) and the API's own certificate.
-fn secrets_in(dir: &Path) -> String {
+/// and the API's own certificate. Return the public authority for the test clients.
+fn secrets_in(dir: &Path) -> reqwest::Certificate {
     let clock = SystemClock;
     let authority = CertificateAuthority::create("Test", CA_VALIDITY_DAYS, &clock).unwrap();
     write_private_file(&dir.join("orch_ca_key.pem"), &authority.key_pem()).unwrap();
@@ -58,21 +58,34 @@ fn secrets_in(dir: &Path) -> String {
         .unwrap();
     write_private_file(&dir.join("service_api_key.pem"), &key.to_pem()).unwrap();
     write_file(&dir.join("service_api_cert.pem"), &certificate.pem()).unwrap();
-    master
+    reqwest::Certificate::from_pem(authority.certificate_pem().as_bytes()).unwrap()
 }
 
 /// The program, running, and what it needs to be stopped.
 struct Api {
     child: Child,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    ca: reqwest::Certificate,
     base: String,
     client: reqwest::Client,
 }
 
 impl Api {
-    async fn start(dir: &Path, database: &str) -> Self {
+    fn client(ca: &reqwest::Certificate) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .tls_certs_merge([ca.clone()])
+            .build()
+            .unwrap()
+    }
+
+    async fn start(dir: &Path, database: &str, plain_http: bool) -> Self {
+        // Keep both listener choices reserved for this startup until the child has bound them.
+        static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _starting = STARTING.lock().await;
         let secrets = dir.join("secrets");
         std::fs::create_dir(&secrets).unwrap();
-        secrets_in(&secrets);
+        let ca = secrets_in(&secrets);
         let browser = free_port(None);
         let internal = free_port(Some(browser));
         let config = dir.join("orch.toml");
@@ -86,12 +99,15 @@ impl Api {
             ),
         )
         .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_orch-api"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_orch-api"));
+        if plain_http {
+            command.arg("--plain-http");
+        }
+        let child = command
             .arg("--config")
             .arg(&config)
             .arg("--secrets-dir")
             .arg(&secrets)
-            .arg("--plain-http")
             .env("ORCH_DATABASE_URL", database)
             .env(
                 "ORCH_MIGRATION_STATUS_FILE",
@@ -109,10 +125,13 @@ impl Api {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        let scheme = if plain_http { "http" } else { "https" };
         let api = Self {
             child,
-            base: format!("http://127.0.0.1:{browser}/api/v1"),
-            client: reqwest::Client::new(),
+            base: format!("{scheme}://127.0.0.1:{browser}/api/v1"),
+            client: Self::client(&ca),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            ca,
         };
         let started = Instant::now();
         loop {
@@ -170,7 +189,7 @@ async fn a_program_started_from_its_secrets_directory_seals_every_kind_of_secret
  {
     let database = TestDb::fresh().await;
     let dir = tempfile::tempdir().unwrap();
-    let api = Api::start(dir.path(), &database.url).await;
+    let api = Api::start(dir.path(), &database.url, true).await;
     let status: Value = serde_json::from_slice(
         &std::fs::read(dir.path().join("update-status/migrations.json")).unwrap(),
     )
@@ -273,3 +292,7 @@ async fn a_program_started_from_its_secrets_directory_seals_every_kind_of_secret
 
     api.stop().await;
 }
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "program/memory.rs"]
+mod memory;

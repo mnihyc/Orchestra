@@ -654,12 +654,12 @@ async fn new_environment_confirmations_retain_their_real_make_child_before_a_tar
                 .id;
         let (host, template) = creator_support::managed(&w.s).await;
         let new = orch_api_contract::forks::ForkEnvironment::New {
-            new: orch_api_contract::forks::ForkNewEnvironment {
-                host_id: Some(Some(host)),
+            new: Box::new(orch_api_contract::forks::ForkNewEnvironment {
+                host_id: Some(Some(orch_provider_contract::pools::Target::host(host))),
                 template_id: Some(template),
                 files: Some(orch_api_contract::forks::FileSelection::Nothing),
                 ..Default::default()
-            },
+            }),
         };
         let preflight = if is_batch {
             let mut request = w.batch_of(vec![a]);

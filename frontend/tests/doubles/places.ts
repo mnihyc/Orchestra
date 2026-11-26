@@ -12,7 +12,7 @@ import { treeNode } from './tree-node.ts';
 import type {
   Access,
   ActivityEntry,
-  Favorite,
+  Shortcut,
   Invitation,
   Member,
   NotificationException,
@@ -174,6 +174,8 @@ export class Places {
   roles = new Map<string, Map<string, RoleOf>>();
   invitations = new Map<string, InviteRecord[]>();
   favorites = new Map<string, string[]>();
+  /** The shortcuts kept in places, by place: what each points to and who put it there. */
+  shortcuts = new Map<string, { id: string; kind: string; target: string; by: string }[]>();
   subscriptions = new Map<string, 'all' | 'important' | 'off'>();
   /** Permissions a test took away from somebody, by username: what a stale page would still believe they hold. */
   denied = new Map<string, Set<string>>();
@@ -643,7 +645,8 @@ export class Places {
    */
   private searchPeople(person: Person, query: URLSearchParams): UserRef[] {
     const q = (query.get('q') ?? '').trim().toLowerCase();
-    if (Array.from(q).length < 2) throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'q', message: 'must be at least 2 characters' }] });
+    if (query.get('picker')!=='true' && Array.from(q).length < 2) throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'q', message: 'must be at least 2 characters' }] });
+    const picked=query.get('picker')==='true'&&q===''?this.world.settings.pickerRecentsOf(person).choices.user??[]:[];
     const orgId = query.get('org_id');
     const inOrg = orgId === null ? null : new Set(this.roles.get(this.rootOf(orgId) ?? orgId)?.keys() ?? []);
     const shared = new Set<string>();
@@ -653,10 +656,14 @@ export class Places {
         if (other.suspended) return false;
         const exact = other.me.username.toLowerCase() === q || (other.me.email ?? '').toLowerCase() === q;
         const near = other.me.username.toLowerCase().startsWith(q) || other.me.display_name.toLowerCase().includes(q);
-        if (inOrg !== null) return near && inOrg.has(other.me.username);
-        return exact || (near && shared.has(other.me.username));
+        if (inOrg !== null && query.get('include_external') !== 'true') return (near || exact) && inOrg.has(other.me.username);
+        if (inOrg?.has(other.me.username) === true && (near || exact)) return true;
+        return exact || (near && shared.has(other.me.username)) || picked.includes(other.me.id);
       })
-      .slice(0, 20)
+      .sort((one,other)=>{
+        const rank=(id:string)=>{const at=picked.indexOf(id);return at<0?Infinity:at;};
+        return rank(one.me.id)-rank(other.me.id)||Number(other.me.username.toLowerCase()===q)-Number(one.me.username.toLowerCase()===q)||one.me.username.localeCompare(other.me.username)||one.me.id.localeCompare(other.me.id);
+      })
       .map((other) => userRef(other.me));
   }
 
@@ -665,7 +672,12 @@ export class Places {
     const text = (member: string): string | null => (typeof body[member] === 'string' ? body[member] : null);
     let found: RegExpExecArray | null;
 
-    if (route === 'GET /users/search') return { status: 200, body: this.searchPeople(person, query) };
+    if (route === 'GET /users/search') {
+      const rows=this.searchPeople(person,query),from=Number(query.get('cursor')??0),limit=Number(query.get('limit')??20);
+      const items=rows.slice(from,from+limit),orgId=query.get('org_id');
+      const membership=orgId===null||query.get('include_external')!=='true'?{}:{org_member_ids:items.filter((user)=>this.roles.get(this.rootOf(orgId)??orgId)?.has(user.username)===true).map((user)=>user.id)};
+      return {status:200,body:{items,next_cursor:from+limit<rows.length?String(from+limit):null,...membership}};
+    }
     // Native UserGet is an authenticated exact-ID public reference, independent of name search scope.
     if ((found = /^GET \/users\/([^/]+)$/.exec(route))) {
       const selected = [...this.world.people.values()].find((candidate) => candidate.me.id === found?.[1]);
@@ -673,6 +685,58 @@ export class Places {
       return { status: 200, body: { ...userRef(selected.me), address: `@${selected.me.username}` } };
     }
     if (route === 'GET /me/favorites') return { status: 200, body: this.favoriteList(person) };
+    if ((found = /^GET \/nodes\/([^/]+)\/shortcuts$/.exec(route))) {
+      const place = found[1] ?? '';
+      this.node(person, place);
+      return { status: 200, body: { items: this.shortcutList(person, place), next_cursor: null } };
+    }
+    if ((found = /^POST \/nodes\/([^/]+)\/shortcuts$/.exec(route))) {
+      const place = found[1] ?? '';
+      this.node(person, place);
+      const kind = asText(body.kind);
+      const target = asText(body.id);
+      const kept = this.shortcuts.get(place) ?? [];
+      const held = kept.find((one) => one.kind === kind && one.target === target);
+      const made = held ?? { id: randomUUID(), kind, target, by: person.me.username };
+      if (held === undefined) {
+        this.shortcuts.set(place, [...kept, made]);
+        this.countShortcuts(place);
+      }
+      return { status: 201, body: this.shortcutList(person, place).find((one) => one.id === made.id) };
+    }
+    if ((found = /^POST \/shortcuts\/([^/]+)\/move$/.exec(route))) {
+      const id = found[1] ?? '';
+      const from = [...this.shortcuts.entries()].find(([, kept]) => kept.some((one) => one.id === id));
+      if (from === undefined) throw new Refusal(404, 'not_found', 'no such shortcut');
+      const [place, kept] = from;
+      const moving = kept.find((one) => one.id === id);
+      const to = body.node_id === null ? null : asText(body.node_id);
+      this.shortcuts.set(place, kept.filter((one) => one.id !== id));
+      this.countShortcuts(place);
+      if (moving === undefined) throw new Refusal(404, 'not_found', 'no such shortcut');
+      if (to === null) {
+        const key = `${moving.kind}:${moving.target}`;
+        this.favorites.set(person.me.username, [...(this.favorites.get(person.me.username) ?? []).filter((one) => one !== key), key]);
+        return { status: 200, body: this.favoriteList(person).find((one) => one.target.id === moving.target) };
+      }
+      this.node(person, to);
+      this.shortcuts.set(to, [...(this.shortcuts.get(to) ?? []).filter((one) => one.target !== moving.target), moving]);
+      this.countShortcuts(to);
+      return { status: 200, body: this.shortcutList(person, to).find((one) => one.id === id) };
+    }
+    if ((found = /^DELETE \/shortcuts\/([^/]+)$/.exec(route))) {
+      const id = found[1] ?? '';
+      if (id.startsWith('star:')) {
+        const key = id.slice('star:'.length);
+        this.favorites.set(person.me.username, (this.favorites.get(person.me.username) ?? []).filter((one) => one !== key));
+        return { status: 204 };
+      }
+      const from = [...this.shortcuts.entries()].find(([, kept]) => kept.some((one) => one.id === id));
+      if (from === undefined) throw new Refusal(404, 'not_found', 'no such shortcut');
+      this.shortcuts.set(from[0], from[1].filter((one) => one.id !== id));
+      this.countShortcuts(from[0]);
+      return { status: 204 };
+    }
     if (route === 'GET /shared') return { status: 200, body: { items: [], partial: false, next_cursor: null } };
     if (route === 'POST /orgs') {
       // Who may make a team org is the system's `orgs.created_by`, held to here as the server does; an
@@ -747,7 +811,16 @@ export class Places {
     if ((found = /^GET \/nodes\/([^/]+)\/deleted$/.exec(route))) return { status: 200, body: this.deletedUnder(person, found[1] ?? '', query) };
     if ((found = /^GET \/nodes\/([^/]+)\/children$/.exec(route))) return { status: 200, body: this.childList(person, found[1] ?? '', query) };
     if ((found = /^GET \/nodes\/([^/]+)\/activity$/.exec(route))) return { status: 200, body: this.activity(person, found[1] ?? '', query) };
-    if ((found = /^GET \/nodes\/([^/]+)\/tags$/.exec(route))) return { status: 200, body: this.tagsFor(person, found[1] ?? '') };
+    if ((found = /^GET \/nodes\/([^/]+)\/tags$/.exec(route))) {
+      const id = found[1] ?? '', text = (query.get('q') ?? '').trim().toLowerCase(), words = text.split(/\s+/u).filter(Boolean);
+      const recent = query.get('picker') === 'true' && text === '' ? this.world.settings.pickerRecentsOf(person).choices.tag ?? [] : [];
+      const path = this.pathTo(id).map((row) => row.id), rank = (tag: Tag) => { const index = recent.indexOf(tag.id); return index < 0 ? Infinity : index; };
+      const rows = this.tagsFor(person, id).filter((tag) => words.every((word) => tag.name.toLowerCase().includes(word))).sort((one, other) =>
+        Number(text !== '' && one.name.toLowerCase() !== text) - Number(text !== '' && other.name.toLowerCase() !== text)
+        || rank(one) - rank(other) || path.indexOf(one.node.id) - path.indexOf(other.node.id) || one.id.localeCompare(other.id));
+      const from = Number(query.get('cursor') ?? 0), limit = Number(query.get('limit') ?? 50);
+      return { status: 200, body: { items: rows.slice(from, from + limit), next_cursor: from + limit < rows.length ? String(from + limit) : null } };
+    }
     if ((found = /^POST \/nodes\/([^/]+)\/tags$/.exec(route))) return { status: 200, body: this.makeTag(person, found[1] ?? '', body) };
     if ((found = /^PUT \/nodes\/([^/]+)\/tags$/.exec(route))) return { status: 200, body: this.setTags(person, found[1] ?? '', body) };
     if ((found = /^(PATCH|DELETE) \/tags\/([^/]+)$/.exec(route))) return this.changeTag(person, found[2] ?? '', found[1] === 'DELETE', body);
@@ -861,13 +934,43 @@ export class Places {
     return {items,next_cursor:rows.length>limit && last!==undefined?Buffer.from(prefix+last.node.id).toString('base64url'):null};
   }
 
-  favoriteList(person: Person): Favorite[] {
-    return (this.favorites.get(person.me.username) ?? []).flatMap((key, index): Favorite[] => {
+  favoriteList(person: Person): Shortcut[] {
+    return (this.favorites.get(person.me.username) ?? []).flatMap((key, index): Shortcut[] => {
+      const kind = key.slice(0, key.indexOf(':'));
       const id = key.slice(key.indexOf(':') + 1);
+      if (kind === 'document') return [{ ...this.shortcutTo(person, kind, id), id: `star:${key}`, node_id: null, position: String(index + 1) }];
       const row = this.row(id);
       if (row === undefined || row.deleted || key !== `${row.kind}:${row.id}`) return [];
-      return [{ node: this.ref(row), path: this.pathTo(id).slice(0, -1).map((entry) => this.ref(entry)), position: String(index + 1), view: null }];
+      return [{ ...this.shortcutTo(person, row.kind, id), id: `star:${key}`, node_id: null, position: String(index + 1) }];
     });
+  }
+
+  /** A shortcut's target as `person` may see it now: a place or a thread of the tree; anything else opens to nobody here. */
+  private shortcutTo(person: Person, kind: string, id: string): Omit<Shortcut, 'id' | 'node_id' | 'position'> {
+    const target = { kind: kind as Shortcut['target']['kind'], id };
+    if (kind === 'document') {
+      const doc = this.world.documents.docs.get(id);
+      if (doc === undefined || doc.deleted) return { target, state: 'deleted', item: null, view: null };
+      if (!this.world.documents.readable(person).includes(doc)) return { target, state: 'unavailable', item: null, view: null };
+      const path = this.pathTo(doc.nodeId).map((entry) => this.ref(entry));
+      return { target, state: 'open', item: { name: doc.title, path, org_id: path[0]?.id ?? null, archived: false, color: null }, view: null };
+    }
+    const row = this.row(id);
+    if (row === undefined || row.deleted) return { target, state: 'deleted', item: null, view: null };
+    if (!this.visibleTo(person, row)) return { target, state: 'unavailable', item: null, view: null };
+    const path = this.pathTo(id).slice(0, -1).map((entry) => this.ref(entry));
+    return { target, state: 'open', item: { name: row.name, path, org_id: path[0]?.id ?? id, archived: row.archived, color: row.color }, view: null };
+  }
+
+  /** The shortcuts kept in a place, as `person` sees them. */
+  private shortcutList(person: Person, place: string): Shortcut[] {
+    return (this.shortcuts.get(place) ?? []).map((one, index) => ({ ...this.shortcutTo(person, one.kind, one.target), id: one.id, node_id: place, position: String(index + 1) }));
+  }
+
+  /** Says on the tree's feed how many shortcuts a place keeps now. */
+  private countShortcuts(place: string): void {
+    const row = this.row(place);
+    if (row !== undefined) this.change(this.rootOf(place) ?? '', [{ id: place, shortcuts: (this.shortcuts.get(place) ?? []).length }]);
   }
 
   childList(person: Person, id: string, query: URLSearchParams) {
@@ -1548,8 +1651,8 @@ export class Places {
     if (this.rootIsPersonal(root)) throw new Refusal(409, 'org.closed', 'a personal org takes no members');
     const email = typeof body.email === 'string' && body.email !== '' ? body.email : null;
     if (email !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) this.invalid('email', 'is not an address');
-    const hours = typeof body.expires_in_hours === 'number' ? body.expires_in_hours : 168;
-    if (hours > 720) this.invalid('expires_in_hours', 'at most 720 hours are allowed here');
+    const minutes = typeof body.expires_in_minutes === 'number' ? body.expires_in_minutes : 10080;
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 43200) this.invalid('expires_in_minutes', 'from 1 to 43200 minutes are allowed here');
     const token = `inv_${randomUUID()}`;
     const role = (ROLES as readonly string[]).includes(String(body.role)) ? (body.role as Role) : 'viewer';
     const row = this.must(orgId);
@@ -1566,7 +1669,7 @@ export class Places {
       max_uses: email === null ? Number(body.max_uses ?? 1) : 1,
       uses: 0,
       note: typeof body.note === 'string' ? body.note : '',
-      expires_at: new Date(Date.now() + hours * 3_600_000).toISOString(),
+      expires_at: new Date(Math.floor(Date.now() / 60_000 + minutes) * 60_000).toISOString(),
       revoked: false,
       created_by: userRef(person.me),
       created_at: new Date().toISOString(),

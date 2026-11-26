@@ -48,3 +48,13 @@ it('keeps the hint rule for what shows above its trigger, and lets a dropdown na
   expect(floatingRoom({ top: 400, bottom: 436 }, 900, 100, 'below').above).toBe(false);
   expect(floatingRoom({ top: 770, bottom: 806 }, 900, 300, 'below', 4)).toEqual({ above: true, height: 758 });
 });
+
+it('opens a list below whenever below shows the rows it promises, even where all of it would fit above', () => {
+  // A field in the lower half of a dialog (bottom at 530 of 900): 358 px below, 482 above, a 470 px list promising 160.
+  // As VS Code's lists do, it opens below and scrolls; it no longer climbs over the dialog's title because above would hold it whole.
+  expect(layerRoom({ anchor: field(530), viewport, natural: 470, least: 160, gap: 4, list: true })).toEqual({ above: false, height: 358 });
+  // Below too little for the rows it promises: where all of it fits, as before.
+  expect(layerRoom({ anchor: field(800), viewport, natural: 470, least: 160, gap: 4, list: true })).toEqual({ above: true, height: 752 });
+  // A card has no rows to scroll to: it still opens where it is seen whole.
+  expect(layerRoom({ anchor: field(530), viewport, natural: 470, least: 128, gap: 4 })).toEqual({ above: true, height: 482 });
+});
