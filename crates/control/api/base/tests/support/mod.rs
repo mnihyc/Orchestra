@@ -585,19 +585,27 @@ pub struct World {
 
 impl World {
     pub async fn new() -> Self {
-        Self::with_request_limits(None).await
+        Self::with_request_limits(None, None).await
     }
 
     /// A server using the deployed request profile, with raw fixture seeding kept separate.
     pub async fn for_requests() -> Self {
-        Self::with_request_limits(Some(orch_db::pool::Limits::REQUESTS)).await
+        Self::with_request_limits(Some(orch_db::pool::Limits::REQUESTS), None).await
     }
 
-    async fn with_request_limits(limits: Option<orch_db::pool::Limits>) -> Self {
+    /// [`Self::for_requests`] whose server may hold `connections` database connections at once.
+    pub async fn for_requests_holding(connections: u32) -> Self {
+        Self::with_request_limits(Some(orch_db::pool::Limits::REQUESTS), Some(connections)).await
+    }
+
+    async fn with_request_limits(
+        limits: Option<orch_db::pool::Limits>,
+        connections: Option<u32>,
+    ) -> Self {
         let mut config = ServerConfig::default();
         config.system.public_url = "https://orch.test".into();
         config.gateway.endpoints[0].url = "wss://gateway.test:9443".into();
-        Self::with_parts_and_limits(config, std::sync::Arc::default(), limits).await
+        Self::with_parts_and_limits(config, std::sync::Arc::default(), limits, connections).await
     }
 
     /// A world whose wrong tries are locked after `limit` of them, so that a
@@ -623,13 +631,14 @@ impl World {
         config: ServerConfig,
         sources: std::sync::Arc<orch_provider_contract::builtins::BuiltinSources>,
     ) -> Self {
-        Self::with_parts_and_limits(config, sources, None).await
+        Self::with_parts_and_limits(config, sources, None, None).await
     }
 
     async fn with_parts_and_limits(
         config: ServerConfig,
         sources: std::sync::Arc<orch_provider_contract::builtins::BuiltinSources>,
         limits: Option<orch_db::pool::Limits>,
+        connections: Option<u32>,
     ) -> Self {
         let db = TestDb::fresh().await;
         codes::install_master_key(MasterKey::new([7; 32]));
@@ -654,7 +663,7 @@ impl World {
         let serving = match limits {
             Some(limits) => Db::connect_with_limits(
                 &db.url,
-                db.pool.options().get_max_connections(),
+                connections.unwrap_or_else(|| db.pool.options().get_max_connections()),
                 std::time::Duration::from_millis(config.database.slow_statement_ms),
                 std::time::Duration::from_millis(config.database.slow_acquire_ms),
                 limits,
@@ -1087,6 +1096,23 @@ thread_local! {
 
 tokio::task_local! {
     static MEASURED_COUNT: std::cell::Cell<usize>;
+    static MEASURED_READS: std::cell::RefCell<StatementReads>;
+    static MEASURED_QUERIES: std::cell::RefCell<std::collections::BTreeMap<String,StatementReads>>;
+    static MEASURED_ROWS: std::cell::Cell<usize>;
+}
+
+/// Database result rows returned while a request is polled, alongside its round trips.
+/// This measures rows crossing the database boundary, not tuples visited inside an execution plan.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StatementReads {
+    pub statements: usize,
+    pub rows: u64,
+}
+
+/// The statement templates behind one request's result-row counts; never their bound values.
+pub struct QueryMeasurements {
+    pub totals: StatementReads,
+    pub statements: std::collections::BTreeMap<String, StatementReads>,
 }
 
 impl Statements {
@@ -1100,6 +1126,18 @@ impl Statements {
         COUNT.with(std::cell::Cell::get)
     }
 
+    /// Counts database rows actually returned to one request, including native authorization graph reads.
+    /// This observes SQLx's completed-query counter without retaining SQL bindings or row contents.
+    pub async fn measure_rows<F: std::future::Future>(future: F) -> (F::Output, usize) {
+        Self::now();
+        MEASURED_ROWS
+            .scope(std::cell::Cell::new(0), async {
+                let output = future.await;
+                (output, MEASURED_ROWS.with(std::cell::Cell::get))
+            })
+            .await
+    }
+
     /// Counts statements while one request future is polled, excluding separately spawned tasks.
     /// Use one measured scope at a time; measurements are not nested.
     pub async fn measure<F: std::future::Future>(future: F) -> (F::Output, usize) {
@@ -1108,6 +1146,29 @@ impl Statements {
             .scope(std::cell::Cell::new(0), async {
                 let output = future.await;
                 (output, MEASURED_COUNT.with(std::cell::Cell::get))
+            })
+            .await
+    }
+
+    /// Measures the database work delivered to one request, excluding detached background tasks.
+    pub async fn reads<F: std::future::Future>(future: F) -> (F::Output, StatementReads) {
+        Self::now();
+        MEASURED_READS
+            .scope(std::cell::RefCell::default(), async {
+                let output = future.await;
+                (output, MEASURED_READS.with(|reads| *reads.borrow()))
+            })
+            .await
+    }
+
+    /// Adds source templates when a page's row budget needs a narrower diagnosis.
+    pub async fn queries<F: std::future::Future>(future: F) -> (F::Output, QueryMeasurements) {
+        MEASURED_QUERIES
+            .scope(std::cell::RefCell::default(), async {
+                let (output, totals) = Self::reads(future).await;
+                let statements =
+                    MEASURED_QUERIES.with(|queries| std::mem::take(&mut *queries.borrow_mut()));
+                (output, QueryMeasurements { totals, statements })
             })
             .await
     }
@@ -1172,8 +1233,86 @@ impl tracing::Subscriber for Statements {
             }
         }
         if event.metadata().target() == "sqlx::query" {
+            struct ReturnedRows(usize);
+            impl tracing::field::Visit for ReturnedRows {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "rows_returned" {
+                        self.0 = format!("{value:?}").parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut returned = ReturnedRows(0);
+            event.record(&mut returned);
+            let _ =
+                MEASURED_ROWS.try_with(|count| count.set(count.get().saturating_add(returned.0)));
             COUNT.with(|count| count.set(count.get() + 1));
             let _ = MEASURED_COUNT.try_with(|count| count.set(count.get() + 1));
+            let _ = MEASURED_READS.try_with(|reads| {
+                struct Rows(u64);
+                impl tracing::field::Visit for Rows {
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        if field.name() == "rows_returned" {
+                            self.0 = value;
+                        }
+                    }
+
+                    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                    }
+                }
+                let mut rows = Rows(0);
+                event.record(&mut rows);
+                let mut reads = reads.borrow_mut();
+                reads.statements += 1;
+                reads.rows += rows.0;
+            });
+            let _ = MEASURED_QUERIES.try_with(|queries| {
+                #[derive(Default)]
+                struct Query {
+                    sql: String,
+                    summary: String,
+                    rows: u64,
+                }
+                impl tracing::field::Visit for Query {
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        if field.name() == "rows_returned" {
+                            self.rows = value;
+                        }
+                    }
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        match field.name() {
+                            "db.statement" => self.sql = value.to_owned(),
+                            "summary" => self.summary = value.to_owned(),
+                            _ => {}
+                        }
+                    }
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        match field.name() {
+                            "db.statement" => self.sql = format!("{value:?}"),
+                            "summary" => self.summary = format!("{value:?}"),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut query = Query::default();
+                event.record(&mut query);
+                let sql = if query.sql.is_empty() {
+                    query.summary
+                } else {
+                    query.sql
+                };
+                let mut queries = queries.borrow_mut();
+                let counts = queries.entry(sql).or_default();
+                counts.statements += 1;
+                counts.rows += query.rows;
+            });
             static TIMINGS: OnceLock<bool> = OnceLock::new();
             if *TIMINGS.get_or_init(|| std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some()) {
                 // SQL summaries and durations identify a slow read without logging bound values.

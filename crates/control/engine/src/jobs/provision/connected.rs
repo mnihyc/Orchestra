@@ -169,13 +169,14 @@ pub(super) async fn run(job: &Job, environment: Id, phase: &str) -> Result<Done,
                     "the connected copy generation changed",
                 ));
             }
-            let session:Option<chrono::DateTime<Utc>>=sqlx::query_scalar("SELECT COALESCE(session_started_at,last_seen_at) FROM machines WHERE id=$1 AND status='active' AND online AND deleted_at IS NULL FOR SHARE")
+            let session:Option<chrono::DateTime<Utc>>=sqlx::query_scalar("SELECT COALESCE(session_started_at,last_seen_at) FROM machines WHERE id=$1 AND status='active' AND online AND deleted_at IS NULL FOR KEY SHARE")
                 .bind(machine).fetch_optional(&mut *tx).await.map_err(DbError::from)?
                 .ok_or_else(||failed("copy_unavailable","the target machine is offline"))?;
             sqlx::query("UPDATE environments SET status='running',status_detail=NULL,attached_session=$2,updated_at=$3 WHERE id=$1 AND status='provisioning'")
                 .bind(environment).bind(session).bind(job.now()).execute(&mut *tx).await.map_err(DbError::from)?;
             jobs::stamp_environment(&mut tx, environment, job.now()).await?;
-            crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await?;
+            let copy_released =
+                crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await?;
             crate::environments::ending::finish(
                 job.engine(),
                 &mut tx,
@@ -193,6 +194,9 @@ pub(super) async fn run(job: &Job, environment: Id, phase: &str) -> Result<Done,
             .await?;
             checked.check(job.engine().inner.clock.as_ref())?;
             tx.commit().await.map_err(DbError::from)?;
+            if let Some(released) = copy_released {
+                released.settle(job.engine()).await;
+            }
             // The copied workspace is now committed. Finishing that truthful job
             // outcome and waking independent consumers cannot repeat creator work.
             job.engine().reevaluate_environment(environment).await?;
@@ -230,10 +234,11 @@ pub(super) async fn undo(job: &Job, environment: Id, _why: &Stop) -> Undone {
             && !matches!(&stop,Stop::Failed(error) if error.code=="not_found") {return Err(stop);}
         let mut tx=job.engine().db().begin().await?;
         job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-        crate::initial_files::release(&mut tx,job.id(),Time::new(job.now())).await?;
+        let copy_released=crate::initial_files::release(&mut tx,job.id(),Time::new(job.now())).await?;
         sqlx::query("UPDATE environments SET status='failed',status_detail='The initial workspace copy did not finish',updated_at=$2 WHERE id=$1 AND status='provisioning'")
             .bind(environment).bind(job.now()).execute(&mut *tx).await.map_err(DbError::from)?;
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(released)=copy_released {released.settle(job.engine()).await;}
         Ok(())
     }.await;
     match cleanup {

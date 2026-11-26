@@ -1,0 +1,13 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- simultaneous:: read_facts:: resource_lists:: --nocapture --test-threads=1
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-db --lib -- pool::tests
+test -p orch-api-core --test everything_resources -- --skip figures_scopes::resource_impact_publication_rechecks_the_original_model_qualified_binding_after_activity_wait
+test -p orch-api-core --test permission_reader_scopes
+test -p orch-api-core --test access
+test -p orch-api-core --test resource_facts
+test -p orch-api-core --test bound
+test -p orch-authz --test pages
+test -p orch-db --test participation_summaries
+test -p orch-api-core --lib -- --skip completed_projection_actual_http_session_expiry_withholds_full_but_acknowledges_write --skip native_get_context_uses_actual_session_mode_and_the_same_principal_time_after_opening
