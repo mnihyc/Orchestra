@@ -1,4 +1,4 @@
-/** Where the Browser view stands: beside a thread (registered only for a reader who may watch the browsers of its environment, and only where they are on), as the Browsers tab of an environment's page, the "Open" of the agent's tool in a conversation, and a port's "Here in its browser".
+/** Where the Browser view stands: beside a thread (registered only for a reader who may watch the browsers of its environment, and only where they are on), as the Browsers tab of an environment's page, and a port's "Here in its browser".
  *
  * What the view needs is asked of the thread's environment, never of the thread's own page. A port's
  * address is opened through the same chooser of profiles as any browser, by somebody who may drive
@@ -18,7 +18,6 @@ import { registerView } from '@/features/workbench/views';
 import { BrowsersSection } from '@/features/workbench/TargetSections';
 import type { Environment } from '@/generated/api-types';
 import { i18n } from '@/i18n';
-import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -72,31 +71,4 @@ export function portsBrowser(environment: Environment, show: () => void): PortsB
 /** The Ports view beside a thread brings the Browser view forward there. */
 export function showBrowserBeside(): void {
   revealView('browser');
-}
-
-/** "Open" on the row of the agent's tool: the browser or display the answer names, in front of its view. */
-export function OpenFromTool({ tool, result }: { tool: string; result: unknown }) {
-  const { t } = useTranslation();
-  if (typeof result !== 'object' || result === null) return null;
-  const record = result as Record<string, unknown>;
-  const browser = tool === 'use_browser' && typeof record.browser === 'string' ? record.browser : null;
-  const display = tool === 'use_display' && typeof record.display === 'string' ? record.display : null;
-  if (browser === null && display === null) return null;
-  return (
-    <Button
-      action="open"
-      size="sm"
-      onClick={() => {
-        if (browser !== null) {
-          useBrowserRequests.getState().showBrowser(browser);
-          revealView('browser');
-        } else if (display !== null) {
-          useBrowserRequests.getState().showDisplay(display);
-          revealView('vnc');
-        }
-      }}
-    >
-      {browser !== null ? t('browser.tool.open') : t('vnc.tool.open')}
-    </Button>
-  );
 }

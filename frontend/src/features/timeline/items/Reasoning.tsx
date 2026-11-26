@@ -1,14 +1,18 @@
 /** Available reasoning summaries.
  *
  * The agent's thinking, as one line: "Thought for 4 s", which opens to the summary of it in quiet
- * type. Where the upstream kept the full reasoning back, the line says so.
+ * type. Where the upstream kept the full reasoning back, the line says so; where it gave no words at all, the line
+ * alone stands, and does not open.
  */
 import { ChevronDown, ChevronRight, Lock } from 'lucide-react';
-import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { Item } from '@/generated/api-types';
 import { ItemFrame } from '@/features/timeline/ItemActions';
+import { QUIET } from '@/features/timeline/items/AgentMessage';
+import { useTimelineContext } from '@/features/timeline/context';
+import { timelineUi, useThreadUi } from '@/features/timeline/state';
+import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { useFormatContext } from '@/lib/appearance';
 import { formatSpan, useRunningClock } from '@/lib/time';
 import { Markdown } from '@/ui/Markdown';
@@ -18,7 +22,10 @@ type ReasoningItem = Extract<Item, { kind: 'reasoning' }>;
 export function Reasoning({ item }: { item: ReasoningItem }) {
   const { t } = useTranslation();
   const context = useFormatContext();
-  const [open, setOpen] = useState(false);
+  const { threadId } = useTimelineContext();
+  const read = useThreadReadRef(threadId);
+  const ui = useThreadUi(threadId);
+  const open = ui.steps.get(item.id) ?? false;
   const running = item.status === 'in_progress';
   const now = useRunningClock(running);
   const took = Math.max(0, (running ? now : Date.parse(item.updated_at)) - Date.parse(item.created_at));
@@ -31,20 +38,22 @@ export function Reasoning({ item }: { item: ReasoningItem }) {
           type="button"
           aria-expanded={canOpen ? open : undefined}
           disabled={!canOpen}
-          onClick={() => setOpen((on) => !on)}
+          onClick={() => timelineUi.setStep(read, item.id, !open)}
           className="flex w-fit items-center gap-1 rounded-md text-left hover:text-text disabled:cursor-default disabled:hover:text-text-muted"
         >
           {canOpen ? open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden /> : <span className="size-4" />}
-          {running ? t('timeline.reasoning.thinking', { duration: formatSpan(took, context) }) : t('timeline.reasoning.thought', { duration: formatSpan(took, context) })}
+          {running ? t('timeline.reasoning.thinking', { duration: formatSpan(took, context) })
+            : took < 1000 ? t('timeline.reasoning.thoughtBriefly') : t('timeline.reasoning.thought', { duration: formatSpan(took, context) })}
         </button>
-        {hidden && (
+        {/* Where the program gave no words at all the line alone says it thought; the note is for a summary whose whole is kept back. */}
+        {hidden && canOpen && (
           <p className="ml-[calc(1rem+var(--spacing-1))] flex items-center gap-1 text-text-subtle">
             <Lock aria-hidden /> {t('timeline.reasoning.hidden')}
           </p>
         )}
         {open && canOpen && (
           <div className="ml-[calc(1rem+var(--spacing-1))] text-text-muted">
-            <Markdown text={summary} streaming={running} compact />
+            <Markdown text={summary} streaming={running} compact className={QUIET} />
           </div>
         )}
       </div>

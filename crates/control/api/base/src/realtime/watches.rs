@@ -126,7 +126,7 @@ pub(crate) async fn delivery_guard(
         .ok_or_else(|| Fail::other("the realtime application is unavailable"))?;
     let identity = match crate::key_operations::snapshot_read::retry_conflict(|| async {
         let mut tx = inner.db.begin().await?;
-        let identity = super::server::current_identity(&app, &mut tx, &before).await?;
+        let identity = super::server::delivery_identity(&app, &mut tx, &before).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(identity)
     })

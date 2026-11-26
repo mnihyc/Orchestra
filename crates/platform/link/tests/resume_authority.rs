@@ -19,6 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "resume_authority/tool_lifetime.rs"]
+mod tool_lifetime;
+
 #[tokio::test]
 async fn a_different_tool_ticket_cannot_take_over_an_existing_tunnel() {
     let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(
@@ -31,6 +34,7 @@ async fn a_different_tool_ticket_cannot_take_over_an_existing_tunnel() {
     let hub = Hub::new(Arc::clone(&clock), pki.certificate());
     let signer = TicketSigner::generate();
     hub.set_ticket_verifier(signer.verifier());
+    hub.admit_test_tool_sessions();
     let (source, destination, thread) = (new_id(), new_id(), new_id());
     let _controllers = [
         ScriptedController::attach(&hub, Arc::clone(&clock), source, vec![Role::Agent]),
@@ -76,8 +80,10 @@ async fn a_different_tool_ticket_cannot_take_over_an_existing_tunnel() {
         tool_set: None,
         expires_at: Time::new(clock.now() + chrono::Duration::hours(1)),
     };
-    let first = signer.issue_for_tool(&request, new_id(), 0).unwrap();
-    let other = signer.issue_for_tool(&request, new_id(), 0).unwrap();
+    let first = orch_testkit::doubles::link::session_ticket(&signer, &request, Some((new_id(), 0)))
+        .unwrap();
+    let other = orch_testkit::doubles::link::session_ticket(&signer, &request, Some((new_id(), 0)))
+        .unwrap();
     let mut incoming = far.link.incoming_tunnels();
     let (opened, accepted) = tokio::join!(near.link.open_tunnel(&first), async {
         incoming.next().await.unwrap().accept()
@@ -122,6 +128,7 @@ async fn a_new_relay_map_requires_the_exact_retained_ticket_before_resuming_a_so
     let hub = Hub::new(clock.clone(), pki.certificate());
     let signer = TicketSigner::generate();
     hub.set_ticket_verifier(signer.verifier());
+    hub.admit_test_tool_sessions();
     let (source, destination, thread) = (new_id(), new_id(), new_id());
     let _controllers = [
         ScriptedController::attach(&hub, clock.clone(), source, vec![Role::Agent]),
@@ -162,8 +169,10 @@ async fn a_new_relay_map_requires_the_exact_retained_ticket_before_resuming_a_so
         tool_set: None,
         expires_at: Time::new(clock.now() + chrono::Duration::hours(1)),
     };
-    let first = signer.issue_for_tool(&request, new_id(), 0).unwrap();
-    let other = signer.issue_for_tool(&request, new_id(), 0).unwrap();
+    let first = orch_testkit::doubles::link::session_ticket(&signer, &request, Some((new_id(), 0)))
+        .unwrap();
+    let other = orch_testkit::doubles::link::session_ticket(&signer, &request, Some((new_id(), 0)))
+        .unwrap();
     let mut incoming = far.link.incoming_tunnels();
     let (opened, accepted) = tokio::join!(near.link.open_tunnel(&first), async {
         incoming.next().await.unwrap().accept()

@@ -64,11 +64,12 @@ pub struct NodeSettings {
     pub host: orch_config::server::NodeHost,
     /// Driver-owned connection values captured when drivers are opened.
     pub driver_configurations: std::collections::BTreeMap<String, orch_types::Json>,
-    /// What the system is called, which is the value of `orch.system` until the node is given another.
+    /// What the system is called, which is the value of `orch.system`: the name the system answered the node's
+    /// enrollment with, or the configured one while the node is not enrolled ([`NodeSettings::follow_enrollment`]).
     pub system_name: String,
-    /// The operator's ceiling for host ports (`[ports]`), which no page of the host can widen.
+    /// Host-port ceilings supplied by the effective machine policy.
     pub ports: orch_config::server::Ports,
-    /// The previous configuration file, read only for the one-time local-policy import.
+    /// The configuration file used to resolve driver-relative files and installation paths.
     pub config_file: Option<PathBuf>,
     /// Initial hooks for a standalone node; a running connector supplies its live machine policy.
     pub hooks: crate::hooks::HookSettings,
@@ -103,26 +104,38 @@ impl NodeSettings {
             image_check_every: Duration::from_secs(
                 node.image_check_hours.saturating_mul(SECS_PER_HOUR),
             ),
-            storages: node
-                .storage
-                .iter()
-                .map(|storage| StorageSetting {
-                    name: storage.name.clone(),
-                    path: PathBuf::from(&storage.path),
-                    default: storage.default,
-                })
-                .collect(),
+            storages: Vec::new(),
             docker: node.docker.clone(),
             host: node.host.clone(),
             driver_configurations: std::collections::BTreeMap::new(),
             system_name: config.system.name.clone(),
-            ports: config.ports.clone(),
+            ports: orch_config::server::Ports::default(),
             config_file: None,
-            hooks: crate::hooks::HookSettings::from_policy(&node.hooks),
+            hooks: crate::hooks::HookSettings::from_policy(
+                &orch_link_contract::policy::MachineHooks::default(),
+            ),
         }
     }
 
-    /// The initial imported ceiling. Running roles read their live PolicyStore instead.
+    /// Takes the system's name from the answer to this node's enrollment, in place of the configured one. The
+    /// system names a host's volumes and units with its own name, and an installer writes no `[system]` table:
+    /// a node that labelled them with the shipped name would make volumes its own runtimes then refuse. A node
+    /// that is not enrolled keeps the configured name.
+    pub fn follow_enrollment(
+        &mut self,
+    ) -> Result<(), orch_connector_core::enrollment::EnrollError> {
+        use orch_connector_core::enrollment::DataDir;
+        if !DataDir::enrolled_at(&self.data_dir) {
+            return Ok(());
+        }
+        let system = DataDir::inspect(&self.data_dir)?.record()?.system;
+        if !system.name.trim().is_empty() {
+            self.system_name = system.name;
+        }
+        Ok(())
+    }
+
+    /// The configured ceiling. Running roles read their live PolicyStore.
     #[must_use]
     pub fn ports_now(&self) -> orch_config::server::Ports {
         self.ports.clone()
@@ -134,6 +147,19 @@ impl NodeSettings {
         let mut settings = Self::from_config(&ServerConfig::default());
         settings.data_dir = data_dir.to_owned();
         settings
+    }
+
+    /// The units directory beside the data directory (`/var/lib/orch-node-units` for `/var/lib/orch-node`): what
+    /// the units of the host driver's local accounts must reach, each unit's own directory and the default
+    /// storage's volumes, so that the data directory stays the node's alone.
+    #[must_use]
+    pub fn units_dir(&self) -> PathBuf {
+        match self.data_dir.file_name() {
+            Some(name) => self
+                .data_dir
+                .with_file_name(format!("{}-units", name.to_string_lossy())),
+            None => self.data_dir.join("units"),
+        }
     }
 
     /// The tool cache.
@@ -200,15 +226,13 @@ mod tests {
         config.node.data_dir = "/srv/node".to_owned();
         config.node.image_check_hours = 2;
         config.node.stop_grace_secs = 7;
-        config.node.storage = vec![orch_config::server::NodeStorage {
-            name: "fast".to_owned(),
-            path: "/mnt/fast".to_owned(),
-            default: true,
-        }];
         let settings = NodeSettings::from_config(&config);
         assert_eq!(settings.image_check_every, Duration::from_secs(7_200));
         assert_eq!(settings.stop_grace, Duration::from_secs(7));
-        assert_eq!(settings.storages[0].path, PathBuf::from("/mnt/fast"));
+        assert!(
+            settings.storages.is_empty(),
+            "storages come from the canonical machine policy"
+        );
         assert_eq!(
             settings.connector_dir(),
             PathBuf::from("/srv/node/tools/orch-connector/current")
