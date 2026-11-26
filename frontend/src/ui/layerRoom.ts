@@ -123,7 +123,7 @@ export function useLayerRoom({ shown, anchor, side = 'bottom', watch, gap, rows 
       const reading = `${size.natural} ${size.least} ${box.top} ${box.bottom} ${viewport.top} ${viewport.bottom}`;
       if (reading === seen) return;
       seen = reading;
-      const room = layerRoom({ anchor: box, viewport, ...size, ...(stood.current === null ? {} : { now: stood.current }), prefer: side === 'top' ? 'above' : 'below', gap });
+      const room = layerRoom({ anchor: box, viewport, ...size, ...(stood.current === null ? {} : { now: stood.current }), prefer: side === 'top' ? 'above' : 'below', list: parts.rows > 0, gap });
       stood.current = room.above ? 'above' : 'below';
       const height = Math.floor(room.height);
       const next: LayerPlace = { side: room.above ? 'top' : 'bottom', height: height > 0 ? height : undefined };

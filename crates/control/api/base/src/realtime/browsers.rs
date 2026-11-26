@@ -254,7 +254,8 @@ impl Sockets {
         let Ok(Some(site)) = rows::site(&mut conn, row.environment_id).await else {
             return BrowserClosedReason::EnvironmentStopped;
         };
-        if row.env_generation != site.generation
+        if site.stopping
+            || row.env_generation != site.generation
             || !matches!(site.status.as_str(), "running" | "offline")
         {
             return BrowserClosedReason::EnvironmentStopped;

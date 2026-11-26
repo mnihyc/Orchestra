@@ -35,7 +35,7 @@ pub fn data() -> Result<Value, String> {
     Ok(Value::Array(rows))
 }
 
-/// Writes one generated TypeScript artifact; the integrator invokes this through contracts.
+/// Writes one generated TypeScript artifact; the contracts command invokes this.
 pub fn write(out: &Path) -> Result<(), String> {
     let rows = serde_json::to_string_pretty(&data()?).map_err(|error| error.to_string())?;
     let text = format!(

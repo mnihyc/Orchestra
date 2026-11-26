@@ -31,6 +31,67 @@ function clipsText(style: CSSStyleDeclaration): boolean {
     Number.parseInt(style.getPropertyValue('-webkit-line-clamp') || style.getPropertyValue('line-clamp'), 10) > 0;
 }
 
+/** The properties that let CSS shorten text. None of them is inherited, so only an element that a
+ * rule or its own style gives one of them can shorten anything. */
+const CLIPPING_PROPERTIES = ['text-overflow', '-webkit-line-clamp', 'line-clamp'] as const;
+
+function declaresClipping(style: CSSStyleDeclaration | undefined): boolean {
+  return style !== undefined && CLIPPING_PROPERTIES.some((name) => style.getPropertyValue(name) !== '');
+}
+
+/** The CSSOM members a rule of any kind may have. */
+type AnyRule = CSSRule & { selectorText?: string; style?: CSSStyleDeclaration; cssRules?: CSSRuleList; styleSheet?: CSSStyleSheet | null };
+
+/** Whether a declaration anywhere in `rules` may shorten text. */
+function anyClipping(rules: CSSRuleList): boolean {
+  return (Array.from(rules) as AnyRule[]).some((rule) => declaresClipping(rule.style) || (rule.cssRules !== undefined && anyClipping(rule.cssRules)));
+}
+
+/** Adds to `found` the selectors of the rules that may shorten text. False when some rule's elements
+ * cannot be named by one selector (an unreadable import, a nested or keyframe declaration). */
+function clippingRules(rules: CSSRuleList, found: string[]): boolean {
+  for (const rule of Array.from(rules) as AnyRule[]) {
+    if (rule.styleSheet !== undefined) {
+      if (rule.styleSheet === null) continue;
+      let imported: CSSRuleList;
+      try { imported = rule.styleSheet.cssRules; } catch { return false; }
+      if (!clippingRules(imported, found)) return false;
+    } else if (typeof rule.selectorText === 'string') {
+      if (declaresClipping(rule.style)) found.push(rule.selectorText);
+      // A nested rule's selector is relative to this one's.
+      if (rule.cssRules !== undefined && anyClipping(rule.cssRules)) return false;
+    } else if (declaresClipping(rule.style) || (rule.cssRules !== undefined && !clippingRules(rule.cssRules, found))) return false;
+  }
+  return true;
+}
+
+const sheetSelectors = new WeakMap<CSSStyleSheet, { count: number; selectors: readonly string[] | null }>();
+
+/** One selector for every loaded rule that may shorten text ('' when none does), or null when the
+ * loaded sheets cannot say, and every element with text is then asked for its style. */
+function clippingSelector(doc: Document): string | null {
+  const owner: { adoptedStyleSheets?: readonly CSSStyleSheet[] } = doc;
+  const selectors: string[] = [];
+  for (const sheet of [...Array.from(doc.styleSheets), ...(owner.adoptedStyleSheets ?? [])]) {
+    let rules: CSSRuleList;
+    try { rules = sheet.cssRules; } catch { return null; }
+    let known = sheetSelectors.get(sheet);
+    if (known?.count !== rules.length) {
+      const found: string[] = [];
+      // A selector relative to a scope or a parent rule names no element by itself.
+      const named = clippingRules(rules, found) && found.every((selector) => {
+        if (/(?:^|[^\\])(?:&|:scope\b)/.test(selector)) return false;
+        try { doc.documentElement.matches(selector); return true; } catch { return false; }
+      });
+      known = { count: rules.length, selectors: named ? found : null };
+      sheetSelectors.set(sheet, known);
+    }
+    if (known.selectors === null) return null;
+    selectors.push(...known.selectors);
+  }
+  return selectors.join(',');
+}
+
 function keyboardOwner(element: HTMLElement): HTMLElement | null {
   if (element.matches(CONTROLS) || element.hasAttribute('tabindex')) return element;
   return element.parentElement?.closest<HTMLElement>(CONTROLS) ?? null;
@@ -96,7 +157,8 @@ export function installOverflowTooltips(doc: Document): () => void {
     opening = undefined;
     leaving = undefined;
     if (active === null) return;
-    const { owner, tooltip } = active;
+    const { owner, source, tooltip } = active;
+    if (!candidates.has(source)) sizes?.unobserve(source);
     const remaining = (owner.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((id) => id !== '' && id !== tooltip.id);
     if (remaining.length === 0) owner.removeAttribute('aria-describedby');
     else owner.setAttribute('aria-describedby', remaining.join(' '));
@@ -154,6 +216,7 @@ export function installOverflowTooltips(doc: Document): () => void {
       const ids = (owner.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean);
       owner.setAttribute('aria-describedby', [...ids, tooltip.id].join(' '));
       active = { source, owner, tooltip, keyboard };
+      if (!candidates.has(source)) sizes?.observe(source);
     };
     if (keyboard || immediate) open();
     else opening = view.setTimeout(open, OVERFLOW_REST_MS);
@@ -281,17 +344,30 @@ export function installOverflowTooltips(doc: Document): () => void {
         if (at === root) break;
       }
     };
-    const texts = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let text = texts.nextNode(); text !== null; text = texts.nextNode()) mark(text.parentElement);
+    // Links and controls already receive focus. Their hints are read on focus or hover
+    // and observed while open; only standalone labels need a keyboard stop discovered here.
+    // A control's own words and value make no standalone label of the elements around it
+    // either: focus on the control finds a clipping ancestor through the same delegation.
+    const inControl = new Set<Element>(root.querySelectorAll(CONTROLS));
+    if (root.closest(CONTROLS) !== null) inControl.add(root);
     for (const element of elements) {
-      // Native input previews and shadow hosts can render values without light-DOM text.
-      if (element instanceof HTMLElement && (element.shadowRoot !== null ||
-        element instanceof HTMLInputElement && element.type === 'text' && element.getAttribute('role') === 'combobox')) mark(element);
+      if (element.parentElement && inControl.has(element.parentElement)) inControl.add(element);
+      // Shadow hosts can render values without light-DOM text.
+      if (element instanceof HTMLElement && !inControl.has(element) && element.shadowRoot !== null) mark(element);
     }
+    const texts = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let text = texts.nextNode(); text !== null; text = texts.nextNode()) {
+      if (text.parentElement !== null && !inControl.has(text.parentElement)) mark(text.parentElement);
+    }
+    // Only an element that a loaded rule or its own style lets shorten text is asked for its style;
+    // a shadow host can take a rule from its own root, and is always asked.
+    const ruled = clippingSelector(doc);
     for (const element of elements) {
-      if (!(element instanceof HTMLElement)) continue;
+      if (!(element instanceof HTMLElement) || (inControl.has(element) && !candidates.has(element))) continue;
       if (!withText.has(element) && !candidates.has(element) && !element.hasAttribute('data-overflow-text') && !element.hasAttribute('title')) continue;
-      const wanted = clipsText(getComputedStyle(element)) || element.hasAttribute('data-overflow-text') || (element.hasAttribute('title') && renderedText(element).includes('…'));
+      const mayClip = ruled === null || element.shadowRoot !== null || (element.hasAttribute('style') && declaresClipping(element.style))
+        || (ruled !== '' && element.matches(ruled));
+      const wanted = (mayClip && clipsText(getComputedStyle(element))) || element.hasAttribute('data-overflow-text') || (element.hasAttribute('title') && renderedText(element).includes('…'));
       if (!wanted && !candidates.has(element)) continue;
       if (element.closest(EXCLUDED) !== null || renderedText(element).trim() === '') continue;
       if (wanted) {
