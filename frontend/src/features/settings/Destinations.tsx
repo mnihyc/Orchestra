@@ -6,13 +6,20 @@
  * whether it takes everything or only what is important, a Test whose answer is shown with what the far
  * side said when it fails, and how the last delivery went. One sentence says what is sent.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { client } from '@/api/client';
+import { useStore } from 'zustand';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { useRetainedRows } from '@/lib/retainedRows';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, Send, Trash2, Webhook } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption, offeredChoice } from '@/i18n/choices';
 
-import { destinationsKey, destinationsQuery, createDestination, deleteDestination, notifiersQuery, testDestination, updateDestination } from '@/api/settings';
+import { destinationsKey, destinationsPageQuery, createDestination, deleteDestination, notifiersQuery, testDestination, updateDestination } from '@/api/settings';
 import { KIND_LOOK } from '@/features/inbox/kinds';
 import { TestDialog } from '@/features/settings/org/Channels';
 import { NotifierDialog, type NotifierFormValue } from '@/features/settings/NotifierForm';
@@ -161,7 +168,7 @@ function DestinationDialog({
   );
 }
 
-function DestinationRow({ destination, node, notifier, notifiers, may }: { destination: Destination; node: Org | Project | Topic; notifier: Notifier | undefined; notifiers: readonly Notifier[]; may: boolean }) {
+function DestinationRow({ destination, node, notifier, notifiers, may, visible, keep }: { visible: boolean; keep: (row: Destination, active: boolean) => void; destination: Destination; node: Org | Project | Topic; notifier: Notifier | undefined; notifiers: readonly Notifier[]; may: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [dialog, setDialog] = useState<'edit' | 'test' | 'remove' | null>(null);
@@ -175,8 +182,10 @@ function DestinationRow({ destination, node, notifier, notifiers, may }: { desti
     },
   });
   const enabled = toggle.isPending ? !destination.enabled : destination.enabled;
+  const busy = dialog !== null || toggle.isPending || remove.isPending;
+  useEffect(() => { keep(destination, busy); }, [destination, busy, keep]);
   return (
-    <li className="flex flex-col gap-3 px-4 py-4" data-destination={destination.id}>
+    <li hidden={!visible} className={visible ? "flex flex-col gap-3 px-4 py-4" : "hidden"} data-destination={destination.id}>
       <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
         <Webhook className="mt-1 size-4 shrink-0 text-text-subtle" aria-hidden />
         <div className="min-w-0 flex-1 basis-[min(100%,14rem)]">
@@ -245,11 +254,18 @@ function DestinationRow({ destination, node, notifier, notifiers, may }: { desti
   );
 }
 
-export function Destinations({ node, level = 2 }: { node: Org | Project | Topic; level?: 2 | 3 }) {
+export function Destinations(props: { node: Org | Project | Topic; level?: 2 | 3 }) {
+  const reader = useStore(client.session, (state) => state.readerVersion ?? 0);
+  return <DestinationList key={String(reader) + ':' + props.node.id} {...props} />;
+}
+function DestinationList({ node, level = 2 }: { node: Org | Project | Topic; level?: 2 | 3 }) {
   const { t } = useTranslation();
   const may = holds(node.access, 'settings.manage');
   const notifiers = useQuery(notifiersQuery);
-  const list = useQuery(destinationsQuery(node.id));
+  const search = useCollectionSearch("destinations:" + node.id);
+  const list = useInfiniteQuery(destinationsPageQuery(node.id, search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
+  const held = useRetainedRows(rows);
   const [making, setMaking] = useState(false);
   const kinds = (notifiers.data ?? []).filter((entry) => entry.targets.includes('destination'));
   return (
@@ -267,21 +283,22 @@ export function Destinations({ node, level = 2 }: { node: Org | Project | Topic;
       }
     >
       <p className="text-sm text-text-muted">{t('settings.destinations.sends', { name: node.name })}</p>
+      <CollectionSearch name={t("settings.destinations.list", { name: node.name })} {...search} />
       {list.isPending || notifiers.isPending ? (
         <SkeletonRows reads={[list, notifiers]} rows={2} />
-      ) : list.isError ? (
+      ) : list.isError && rows.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : notifiers.isError ? (
         <ErrorState compact error={notifiers.error} retrying={notifiers.isRefetching} onRetry={() => void notifiers.refetch()} />
-      ) : list.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<Webhook aria-hidden />} title={t('settings.destinations.none', { name: node.name })} description={may ? t('settings.destinations.noneAbout') : undefined} />
-      ) : (
+      ) : null}
+      {held.rows.length > 0 && <ScrollRegion kind="table" label={t('settings.destinations.list', { name: node.name })} className={rows.length === 0 ? "hidden" : "max-h-96 overflow-y-auto"}>
         <ul className={`${boxClasses} divide-y divide-border`} aria-label={t('settings.destinations.list', { name: node.name })}>
-          {list.data.map((destination) => (
-            <DestinationRow key={destination.id} destination={destination} node={node} notifier={kinds.find((entry) => entry.name === destination.channel)} notifiers={kinds} may={may} />
-          ))}
+          {held.rows.map((destination) => <DestinationRow key={destination.id} destination={destination} node={node} notifier={kinds.find((entry) => entry.name === destination.channel)} notifiers={kinds} may={may} visible={held.visible.has(destination.id)} keep={held.keep} />)}
         </ul>
-      )}
+      </ScrollRegion>}
+      <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       {making && <DestinationDialog node={node} notifiers={kinds} existing={null} onClose={() => setMaking(false)} />}
     </Section>
   );

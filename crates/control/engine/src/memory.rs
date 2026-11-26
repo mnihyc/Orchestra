@@ -49,6 +49,93 @@ pub fn is_note(relative: &str) -> bool {
     relative == DIRECTORY || relative.starts_with(&format!("{DIRECTORY}/"))
 }
 
+/// A completed or partly applied change shows only its captured receipt, without new path or setting reads.
+#[must_use]
+pub fn outcome(
+    row: &orch_db::queries::jobs::JobRow,
+) -> Option<orch_api_contract::forks::MemoryOutcome> {
+    if row.kind != crate::jobs::fork::KIND {
+        return None;
+    }
+    row.plan
+        .get("memory_outcome")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+/// Partition the already captured manifest; no filesystem probe or extra source walk is made.
+pub(crate) async fn partition(
+    engine: &crate::Engine,
+    conn: &mut orch_db::Conn,
+    blob: &orch_types::Hash,
+    source_root: &str,
+) -> Result<(orch_types::Hash, Option<orch_types::Hash>), crate::EngineError> {
+    use crate::manifest::{EntryKind, build};
+    let manifest = engine.read_manifest(blob).await?;
+    let source_root = source_root.replace('\\', "/");
+    let notes_root = format!("{}/{DIRECTORY}", source_root.trim_end_matches('/'));
+    let original_root = manifest.header().root.replace('\\', "/");
+    let mut notes = Vec::new();
+    let mut regular = Vec::new();
+    for entry in manifest.entries() {
+        let absolute = if entry.path.is_empty() {
+            original_root.clone()
+        } else {
+            format!("{}/{}", original_root.trim_end_matches('/'), entry.path)
+        };
+        if absolute == notes_root {
+            continue;
+        }
+        if let Some(relative) = absolute.strip_prefix(&format!("{notes_root}/")) {
+            let mut entry = entry.clone();
+            entry.path = relative.to_owned();
+            notes.push(entry);
+        } else {
+            let relative = absolute
+                .strip_prefix(&format!("{}/", source_root.trim_end_matches('/')))
+                .or_else(|| (absolute == source_root).then_some(""))
+                .ok_or_else(|| {
+                    crate::EngineError::unreadable(
+                        "the captured files leave the original notes source",
+                    )
+                })?;
+            if relative.is_empty() && entry.kind == EntryKind::Dir {
+                continue;
+            }
+            let mut entry = entry.clone();
+            entry.path = relative.to_owned();
+            regular.push(entry);
+        }
+    }
+    let mut header = manifest.header().clone();
+    header.root = source_root;
+    let regular = engine
+        .put_manifest(
+            conn,
+            build(&header, regular)
+                .map_err(crate::EngineError::unreadable)?
+                .bytes,
+        )
+        .await?
+        .hash;
+    let notes = if notes.is_empty() {
+        None
+    } else {
+        header.root = notes_root;
+        Some(
+            engine
+                .put_manifest(
+                    conn,
+                    build(&header, notes)
+                        .map_err(crate::EngineError::unreadable)?
+                        .bytes,
+                )
+                .await?
+                .hash,
+        )
+    };
+    Ok((regular, notes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

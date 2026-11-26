@@ -2,7 +2,7 @@
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type * as Router from '@tanstack/react-router';
-import type * as PerformancePlaces from '@/features/usage/PerformancePlaces';
+import type * as ProviderHealth from '@/features/usage/ProviderHealth';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,7 +26,7 @@ vi.mock('@/api/context', () => ({
   turnCostQuery: (thread: string, turn: string, revision: number) => ({ queryKey: ['test-cost', thread, turn, revision], queryFn: () => Promise.resolve(answers.cost) }),
   threadTurnUsageQuery: (thread: string, revision: number) => ({ queryKey: ['test-turns', thread, revision], queryFn: () => Promise.resolve(answers.turns), initialPageParam: null, getNextPageParam: () => undefined }),
 }));
-vi.mock('@/features/usage/PerformancePlaces', async (original) => ({ ...await original<typeof PerformancePlaces>(), useProviderHealth: vi.fn() }));
+vi.mock('@/features/usage/ProviderHealth', async (original) => ({ ...await original<typeof ProviderHealth>(), useProviderHealth: vi.fn() }));
 
 const AT = '2026-10-14T10:00:00.000Z';
 
@@ -88,9 +88,21 @@ describe('the context ring', () => {
     expect(document.querySelector('[data-context-ring="red"]')).not.toBeNull();
   });
 
-  it('is absent where the harness reported no size of its prompt', () => {
+  it('shows the tokens alone where the harness named no window, and the share where it did', () => {
+    show(<ContextRing thread={threadWith(152_000, null, null)} />);
+    const ring = screen.getByRole('button', { name: /Show what fills the context \(Context 152k used; no window reported\)/ });
+    expect(ring).toHaveAttribute('data-context-ring', 'unmeasured');
+    expect(ring).toHaveTextContent('152k');
+    expect(ring).not.toHaveTextContent('%');
+  });
+
+  it('keeps unreported context inspectable without guessing its size', () => {
     show(<ContextRing thread={threadWith(null, null, null)} />);
-    expect(screen.queryByRole('button')).toBeNull();
+    const ring = screen.getByRole('button', { name: /Context window not reported/ });
+    expect(ring).toBeVisible();
+    expect(ring).toHaveAttribute('data-context-ring', 'unmeasured');
+    expect(ring).not.toHaveTextContent('0');
+    expect(ring).not.toHaveTextContent('%');
   });
 });
 
