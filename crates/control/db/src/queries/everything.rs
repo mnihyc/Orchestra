@@ -44,8 +44,26 @@ pub struct AccessSeed {
 /// Read places and exceptional thread pages, plus the much smaller resource and document inventories.
 /// Ordinary ownership entries are resolved by the same live Owners rows in the final statement.
 pub async fn access_seeds(conn: &mut Conn, parent: Option<Id>) -> Result<Vec<AccessSeed>, DbError> {
+    seeds(conn, parent, None).await
+}
+
+/// The seeds of a list that shows only resources of `kinds`: those resources and the places of their tags. Their homes
+/// and the places above them come with the resources themselves, so no other place, document or chat is read.
+pub async fn resource_access_seeds(
+    conn: &mut Conn,
+    kinds: &[String],
+) -> Result<Vec<AccessSeed>, DbError> {
+    seeds(conn, None, Some(kinds)).await
+}
+
+async fn seeds(
+    conn: &mut Conn,
+    parent: Option<Id>,
+    kinds: Option<&[String]>,
+) -> Result<Vec<AccessSeed>, DbError> {
     Ok(sqlx::query_as(include_str!("everything_seeds.sql"))
         .bind(parent)
+        .bind(kinds)
         .fetch_all(conn)
         .await?)
 }
@@ -191,7 +209,7 @@ pub struct ResourceFilter<'a> {
     pub state: Option<&'a str>,
     /// An agent's harness.
     pub harness: Option<&'a str>,
-    /// Template kind or environment origin.
+    /// Template kind, environment origin, or system for an agent without a home.
     pub kind: Option<&'a str>,
     /// Apply the existing provider-scope policy projected into the grant.
     pub provider_scope: bool,
@@ -277,9 +295,12 @@ impl Default for NavigationFilter<'_> {
 /// Reads a level in one statement; visibility, filters, ordering and keyset paging all precede LIMIT.
 pub async fn level(conn: &mut Conn, ask: &Query<'_>) -> Result<Vec<Row>, DbError> {
     let words = super::search::Query::parse(ask.text);
-    // Each level is planned with its own parent and filters because branch sizes differ widely.
-    Ok(sqlx::query_as(sqlx::AssertSqlSafe(statement()))
-        .persistent(false)
+    // Each level is planned with its own parent and filters because branch sizes differ widely. Only resources
+    // stand under Resources: its list is one statement without the place, document and chat branches, prepared on
+    // the connection, so that the connection's statement cache keeps its plan from one list to the next.
+    let resources = ask.parent == Some("resources");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(statement(resources)))
+        .persistent(resources)
         .bind(ask.user)
         .bind(ask.groups)
         .bind(ask.member_roots)
@@ -398,7 +419,10 @@ pub fn node_visibility_sql(
         .replace("__AT__", at)
 }
 
-fn statement() -> String {
+/// The listing for any parent, and the one for Resources: there the place, document and chat branches are false
+/// as they are written, not by a parameter, so that the statement is the same for every Resources list and its
+/// plan holds for all of them.
+fn statement(resources: bool) -> String {
     const GRANTS: &str = "(SELECT grants FROM reader_projection)";
     // Resource lists also search their visible owner/home labels. Normal hierarchy search remains name-only.
     const NAME: &str = "CASE WHEN $35::boolean THEN concat_ws(' ',i.name,
@@ -422,6 +446,14 @@ fn statement() -> String {
         &super::hierarchy::visit_score_sql("r.visit_count", "r.visited_at", "$26"),
     )
     .replace("__GRANTS__", GRANTS)
+    .replace(
+        "__NOT_RESOURCES__",
+        if resources {
+            "false"
+        } else {
+            "$5::text IS DISTINCT FROM 'resources'"
+        },
+    )
 }
 
 /// The plan of the production statement, for the large-inventory regression check.
@@ -429,7 +461,7 @@ pub async fn explain(conn: &mut Conn, ask: &Query<'_>) -> Result<Json, DbError> 
     let words = super::search::Query::parse(ask.text);
     Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-        statement()
+        statement(ask.parent == Some("resources"))
     )))
     .persistent(false)
     .bind(ask.user)

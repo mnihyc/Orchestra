@@ -1,6 +1,7 @@
-/** A topic selection has one frozen combined review, per-row results and one revision-guarded Undo for confirmed successes. */
+/** The acts on a topic selection: status changes with their review and Undo, the place acts, and Delete, which moves them to the trash at once. */
+import { READ_NOW } from '@/api/freshness';
 import { useQueryClient } from '@tanstack/react-query';
-import { CircleCheck, CircleDot, RotateCcw, Search, Share2, X } from 'lucide-react';
+import { CircleCheck, CircleDot, RotateCcw, Search, Share2, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -10,6 +11,8 @@ import type { ReviewAction } from '@/features/project/reviewBatch';
 import { topicQuery } from '@/api/nodes';
 import { openAccessToMany } from '@/features/access/AccessDialog';
 import { invalidatePlaces } from '@/features/navigation/refresh';
+import { placeOfNode } from '@/features/navigation/places';
+import { usePlaceTrash } from '@/features/trash/usePlaceTrash';
 import { confirmedInverses, statusBatch, statusBlockers, type StatusResult } from '@/features/project/selection';
 import type { Topic, TopicStatus } from '@/generated/api-types';
 import { denial } from '@/lib/permissions';
@@ -17,10 +20,11 @@ import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
+import { SelectedBar } from '@/ui/RowSelection';
 import { StateChip } from '@/ui/StateChip';
 
 const STATUSES: readonly TopicStatus[] = ['done', 'open'];
-const PLACE_ACTIONS: readonly ReviewAction[] = ['move', 'archive', 'unarchive', 'delete'];
+const PLACE_ACTIONS: readonly ReviewAction[] = ['move', 'archive', 'unarchive'];
 const STATUS_PERMISSION = 'topic.interact';
 
 export function TopicSelection({ selected, onClear }: { selected: readonly Topic[]; onClear: () => void }) {
@@ -33,6 +37,15 @@ export function TopicSelection({ selected, onClear }: { selected: readonly Topic
   const [busy, setBusy] = useState(false);
   const [reading, setReading] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<unknown>(null);
+  const trash = usePlaceTrash();
+  const [deleting, setDeleting] = useState(false);
+  const remove = async () => {
+    setDeleting(true);
+    try {
+      await trash(selected.map(placeOfNode));
+      onClear();
+    } finally { setDeleting(false); }
+  };
   const update = (result: StatusResult) => setResults((before) => before?.some((one) => one.before.id === result.before.id) ? before.map((one) => one.before.id === result.before.id ? result : one) : [...before ?? [], result]);
   const confirm = async () => {
     if (review === null) return;
@@ -57,7 +70,7 @@ export function TopicSelection({ selected, onClear }: { selected: readonly Topic
     setReading(row.id);
     setCheckError(null);
     try {
-      const current = await client.query({ ...topicQuery(row.id), staleTime: 0 });
+      const current = await client.query({ ...topicQuery(row.id), ...READ_NOW });
       // A write whose reply was lost may have happened: this explicit check also rereads its related lists.
       void invalidatePlaces(client, current.org_id);
       setResults((before) => before?.map((result) => result.before.id === row.id ? { ...result, observed: current } : result) ?? null);
@@ -69,13 +82,14 @@ export function TopicSelection({ selected, onClear }: { selected: readonly Topic
   return (
     <>
       {places !== null && <PlaceReview rows={places.rows} action={places.action} onClose={() => setPlaces(null)} onApplied={onClear} />}
-      {selected.length > 0 && <div role="region" className="flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent-subtle p-3" aria-label={t('day100.batch.selection')}>
-        <span className="text-sm font-medium text-text">{t('day100.batch.selected', { count: selected.length })}</span>
-        <Button size="sm" icon={<Share2 aria-hidden />} onClick={() => openAccessToMany(selected.map((topic) => ({kind:'topic',id:topic.id,name:topic.name})))}>{t('access.menu.share')}</Button>
-        {PLACE_ACTIONS.map((action) => <Button key={action} size="sm" onClick={() => setPlaces({ rows: [...selected], action })}>{t(action === 'move' ? 'actions.move.label' : action === 'archive' ? 'actions.archive.label' : action === 'unarchive' ? 'places.menu.unarchive' : 'actions.delete.label')}</Button>)}
-        {STATUSES.map((status) => <Button key={status} size="sm" icon={status === 'done' ? <CircleCheck aria-hidden /> : <CircleDot aria-hidden />} disabled={blockers(status).length > 0} onClick={() => setReview({ rows: [...selected], status })}>{t(status === 'done' ? 'places.menu.markDone' : 'places.menu.reopen')}</Button>)}
-        <Button size="sm" variant="ghost" icon={<X aria-hidden />} onClick={onClear}>{t('day100.batch.clear')}</Button>
-        {STATUSES.filter((status) => blockers(status).some((one) => one.reason !== 'already')).map((status) => <p key={status} className="w-full text-sm text-text-muted">{blockers(status).filter((one) => one.reason !== 'already').map(({ topic, reason }) => reason === 'permission' ? denial(t, STATUS_PERMISSION, topic.name, topic.owner) : t('day100.batch.archived', { name: topic.name })).join(' ')}</p>)}
+      {selected.length > 0 && <div role="region" aria-label={t('day100.batch.selection')} className="sticky top-0 z-(--layer-sticky) flex flex-col gap-1 bg-bg">
+        <SelectedBar count={selected.length} busy={deleting} onClear={onClear}>
+          <Button size="sm" icon={<Share2 aria-hidden />} onClick={() => openAccessToMany(selected.map((topic) => ({kind:'topic',id:topic.id,name:topic.name})))}>{t('access.menu.share')}</Button>
+          {PLACE_ACTIONS.map((action) => <Button key={action} size="sm" blocked={deleting} onClick={() => setPlaces({ rows: [...selected], action })}>{t(action === 'move' ? 'actions.move.label' : action === 'archive' ? 'actions.archive.label' : 'places.menu.unarchive')}</Button>)}
+          {STATUSES.map((status) => <Button key={status} size="sm" icon={status === 'done' ? <CircleCheck aria-hidden /> : <CircleDot aria-hidden />} disabled={blockers(status).length > 0 || deleting} onClick={() => setReview({ rows: [...selected], status })}>{t(status === 'done' ? 'places.menu.markDone' : 'places.menu.reopen')}</Button>)}
+          <Button size="sm" variant="danger-ghost" icon={<Trash2 aria-hidden />} pending={deleting} onClick={() => void remove()}>{t('actions.delete.label')}</Button>
+        </SelectedBar>
+        {STATUSES.filter((status) => blockers(status).some((one) => one.reason !== 'already')).map((status) => <p key={status} className="text-sm text-text-muted">{blockers(status).filter((one) => one.reason !== 'already').map(({ topic, reason }) => reason === 'permission' ? denial(t, STATUS_PERMISSION, topic.name, topic.owner) : t('day100.batch.archived', { name: topic.name })).join(' ')}</p>)}
       </div>}
       <Dialog open={open} dismissible={!busy} onOpenChange={(on) => { if (!on) close(); }} title={t(results === null ? 'day100.batch.review' : 'day100.batch.results', { count: review?.rows.length ?? results?.length ?? 0 })} footer={<>
         {results === null && review !== null && <Button variant="primary" icon={review.status === 'done' ? <CircleCheck aria-hidden /> : <CircleDot aria-hidden />} pending={busy} onClick={() => void confirm()}>{t(review.status === 'done' ? 'day100.batch.markDone' : 'day100.batch.reopen', { count: review.rows.length })}</Button>}

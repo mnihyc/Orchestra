@@ -1,4 +1,6 @@
 /** Destination ownership and deletion effects come from native read-only facts before the one write. */
+import type * as SearchApi from '@/api/search';
+import { namedPlace, placeNamePage } from './picker-name-fixture';
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -17,19 +19,23 @@ import { org, me, userRef } from '../doubles/fixtures';
 import { treeNode } from '../doubles/tree-node';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ preview: vi.fn<typeof Moves.previewMoveOut>(), execute: vi.fn<typeof Moves.executeMoveOut>(), recipients: vi.fn<typeof Loss.moreOperationRecipients>(), same: vi.fn<() => boolean>(), navigate: vi.fn<(options: { href: string }) => Promise<void>>() }));
+vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), pickerNamesQuery: (search: SearchApi.NameSearch) => {
+  const places = [namedPlace('other-org','org','Other org')];
+  return placeNamePage(search, places);
+} }));
 vi.mock('@/api/moveOut', async (original) => ({ ...await original<typeof Moves>(), previewMoveOut: calls.preview, executeMoveOut: calls.execute }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof Resources>(), machinesQuery: { queryKey: ['move-machines'], queryFn: () => Promise.resolve([{ id: 'receiver', name: 'Receiving machine' }]) } }));
 vi.mock('@/api/loss', async (original) => ({ ...await original<typeof Loss>(), moreOperationRecipients: calls.recipients }));
 vi.mock('@/api/resourceLibrary', async (original) => ({ ...await original<typeof Library>(), sameLibraryReader: () => calls.same() }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), useNavigate: () => calls.navigate }));
 vi.mock('@/api/copyDestinations', async (original) => ({ ...await original<typeof Destinations>(), copyDestinationsQuery: (request: Destinations.CopyDestinationsRequest) => ({ queryKey: ['copy-destinations', request], queryFn: () => Promise.resolve({ subject: request.subject, intent: request.intent, source_owned: true, destinations: request.destinations.map((destination) => ({ destination, cross_root: true, outcome: { state: 'needs_choice', choice: 'delete_preview' } })) }) }) }));
-vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), orgsQuery: { queryKey: ['move-orgs'], queryFn: () => Promise.resolve([org('other-org', 'other', 'Other org', userRef(me(1, 'ada', 'Ada')))]) }, fetchTree: () => Promise.resolve({ seq: 1, since: null, complete: true, hidden: [], nodes: [treeNode({ id: 'other-org', kind: 'org', parent_id: null, name: 'Other org' })] }) }));
+vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), orgsQuery: { queryKey: ['move-orgs'], queryFn: () => Promise.resolve([org('other-org', 'other', 'Other org', userRef(me(1, 'ada', 'Ada')))]) }, fetchTreePage: () => Promise.resolve({ seq: 1, since: null, complete: true, hidden: [], nodes: [treeNode({ id: 'other-org', kind: 'org', parent_id: null, name: 'Other org' })] }) }));
 const target = { kind: 'agent', id: 'source', name: 'Profile', rootOrgId: 'source-org', revision: 7 } as const;
 beforeEach(() => { vi.clearAllMocks(); calls.same.mockReturnValue(true); calls.navigate.mockResolvedValue(undefined); calls.preview.mockResolvedValue({ subject: { kind: 'agent', id: 'source' }, destination: { kind: 'node', id: 'other-org' }, revision: 7, stamp: 'native-footprint', effects: ['remove_source', 'stop_bound_work'] }); calls.execute.mockResolvedValue({ kind: 'agent', id: 'new-copy' }); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 async function choose(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  const option = await screen.findByRole('option', { name: 'Other org' }); await waitFor(() => expect(option).not.toHaveAttribute('aria-disabled', 'true')); await user.click(option);
+  const option = await screen.findByRole('treeitem', { name: 'Other org' }); await waitFor(() => expect(option).not.toHaveAttribute('aria-disabled', 'true')); await user.click(option);
 }
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`reviews actual deletion/stop consequences before one cross-org move (${locale})`, async () => {

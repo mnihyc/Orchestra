@@ -1,4 +1,5 @@
 /** A plan's fixed percentage scale: measured fill and its forecast, or consumption bars with reset markers. */
+import { PathLink } from '@/shell/TrailLink';
 import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { RotateCcw } from 'lucide-react';
@@ -121,7 +122,7 @@ export function PlanChart({label,mode,from,to,now,points,history,resets,forecast
       {hasForecast && <><circle cx={x(forecastEnd)} cy={y(endPercent)} r={3} fill="var(--chart-1)" /><text x={Math.min(width-RIGHT,x(forecastEnd))} y={Math.max(TOP+FONT,y(endPercent)-5)} textAnchor="end" fontSize={FONT} fill="var(--text-muted)">{forecastTime(forecastEnd,now,format)}</text></>}
       {TICK_FRACTIONS.map((fraction)=><text key={fraction} x={x(from+span*fraction)} y={HEIGHT-5} textAnchor={fraction===0 ? 'start' : fraction===1 ? 'end' : 'middle'} fontSize={FONT} fill="var(--text-muted)">{when(from+span*fraction)}</text>)}
     </svg>
-    {resets.filter((reset)=>Date.parse(reset.at)>=from && Date.parse(reset.at)<=to).map((reset)=><Tooltip key={reset.id} content={markerWords(reset)}><a href={auditHref?.(reset)} aria-label={markerWords(reset)} className="absolute -top-1 flex size-6 -translate-x-1/2 items-center justify-center rounded-full text-text-muted hover:text-text" style={{left:x(Date.parse(reset.at))}}>{reset.count>1 ? <span className="text-xs tabular-nums">{formatNumber(reset.count,format.locale,{notation:'compact',maximumFractionDigits:0})}</span> : <RotateCcw aria-hidden className="size-3" />}</a></Tooltip>)}
+    {resets.filter((reset)=>Date.parse(reset.at)>=from && Date.parse(reset.at)<=to).map((reset)=><Tooltip key={reset.id} content={markerWords(reset)}><PathLink href={auditHref?.(reset)} aria-label={markerWords(reset)} className="absolute -top-1 flex size-6 -translate-x-1/2 items-center justify-center rounded-full text-text-muted hover:text-text" style={{left:x(Date.parse(reset.at))}}>{reset.count>1 ? <span className="text-xs tabular-nums">{formatNumber(reset.count,format.locale,{notation:'compact',maximumFractionDigits:0})}</span> : <RotateCcw aria-hidden className="size-3" />}</PathLink></Tooltip>)}
     {hover!==null && <span role="status" className="pointer-events-none absolute inset-x-0 top-5 z-10 w-fit max-w-full rounded border border-border bg-surface-raised px-2 py-1 text-xs text-text shadow-sm">{hover}</span>}
   </div>;
 }
