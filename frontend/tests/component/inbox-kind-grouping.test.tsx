@@ -3,6 +3,7 @@ import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type * as Router from '@tanstack/react-router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type * as Notices from '@/api/notifications';
 import type * as Personal from '@/api/personal';
 import type * as Live from '@/realtime/live';
 import type * as Presentation from '@/features/inbox/presentation';
@@ -13,7 +14,8 @@ import { i18n, setLocale } from '@/i18n';
 import { userWriter, useUserStore } from '@/realtime/stores/user';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ save: vi.fn(), navigate: vi.fn(), read: vi.fn() }));
+const calls = vi.hoisted(() => ({ save: vi.fn(), navigate: vi.fn(), read: vi.fn(), search:vi.fn() }));
+vi.mock('@/api/notifications', async (load)=>({...await load<typeof Notices>(),fetchNotifications:(query:Notices.InboxQuery,signal?:AbortSignal)=>{calls.search(query,signal);return Promise.resolve({items:query.q?[{...row('1','milestone'),title:'An older special notice'}]:[],next_cursor:null});}}));
 vi.mock('@/api/personal', async (load) => ({ ...await load<typeof Personal>(),
   meStateQuery: { queryKey: ['kind-grouping-state'], queryFn: () => Promise.resolve({ inbox: { group_by: 'kind', retained: true } }) },
   setMeState: calls.save,
@@ -24,7 +26,7 @@ vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useU
 vi.mock('@/features/settings/personal/away/live', () => ({ useAwayLive: () => undefined }));
 vi.mock('@/features/settings/personal/away/Pause', () => ({ PauseControls: () => null }));
 vi.mock('@/features/inbox/presentation', async (load) => ({ ...await load<typeof Presentation>(), useNotificationLabels: () => new Map() }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 
 const before = useUserStore.getState();
@@ -103,3 +105,15 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(calls.save).toHaveBeenCalledOnce();
   });
 }
+
+it('finds an older notice through its native query without changing the held live inbox', async () => {
+  userWriter.reset([row('5','milestone')],{unread:1,approvalsPending:0},5,null);
+  show(<Inbox filter="all" onFilter={()=>undefined}/>);
+  await screen.findByRole('combobox',{name:i18n.t('away.inbox.grouping')});
+  await userEvent.type(screen.getByRole('searchbox'),'special');
+  expect(await screen.findByText('An older special notice')).toBeVisible();
+  expect(calls.search).toHaveBeenLastCalledWith(expect.objectContaining({q:'special'}),expect.anything());
+  expect(screen.queryByText('Notice 5')).not.toBeInTheDocument();
+  expect(useUserStore.getState().rows.get('5')?.title).toBe('Notice 5');
+  expect(calls.read).not.toHaveBeenCalled();
+});

@@ -161,6 +161,52 @@ where
     register_list::<F, L>(registry, list_endpoint);
 }
 
+/// Child selection is a pure presentation of the same native Get and its publication checks.
+pub(super) fn register_children<F, G, L>(registry: &mut Registry, get_endpoint: G, list_endpoint: L)
+where
+    F: Family,
+    F::Item: super::child_pages::Children,
+    G: Endpoint<
+            Query = orch_api_contract::common::ChildCollectionQuery,
+            Body = (),
+            Reply = F::Item,
+        >,
+    L: Endpoint<Query = F::ListQuery, Body = (), Reply = Vec<Listed<F::Item>>>,
+{
+    registry.on_snapshot_read_with_optional_operation(
+        get_endpoint,
+        prepare_children::<F>,
+        get_children::<F>,
+    );
+    register_list::<F, L>(registry, list_endpoint);
+}
+fn prepare_children<'a, F: Family>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    _query: orch_api_contract::common::ChildCollectionQuery,
+    (): (),
+) -> OptionalOperationFuture<'a> {
+    prepare_get::<F>(ctx, conn, caller, (), ())
+}
+async fn get_children<F: Family>(
+    ctx: Ctx,
+    query: orch_api_contract::common::ChildCollectionQuery,
+    (): (),
+) -> ApiResult<F::Item>
+where
+    F::Item: super::child_pages::Children,
+{
+    use super::child_pages::Children;
+    let source = format!(
+        "resource-children:{}:{}:{}",
+        ctx.route.name,
+        ctx.user()?.id(),
+        ctx.id("id")?
+    );
+    get::<F>(ctx, (), ()).await?.child_page(&query, &source)
+}
+
 /// Register a native list without coupling it to a Get-only auxiliary effect.
 pub(super) fn register_list<F, L>(registry: &mut Registry, endpoint: L)
 where

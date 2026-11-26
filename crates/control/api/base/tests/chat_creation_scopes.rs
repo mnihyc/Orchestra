@@ -15,7 +15,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::access::{Holder, HolderInput, PermissionPageUpdate};
 use orch_api_contract::chats::{ChatStateSet, ChatStateSetBody, OrgChatCreate, OrgChatCreateBody};
 use orch_api_contract::directory::{GroupHolderAdd, OrgGroupCreate, OrgGroupCreateBody};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
 use places::Who;
@@ -36,11 +36,12 @@ fn full(root: Id) -> Json {
 async fn key(room: &Room, actor: &Who, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor.id(),
             name: "Native opening fixture",
             token_hash: &token_hash(&secret),
