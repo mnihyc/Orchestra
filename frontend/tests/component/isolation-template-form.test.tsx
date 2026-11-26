@@ -33,8 +33,8 @@ it('chooses a reported runtime and retains an expert name through the actual set
   }
   show(<Form />);
   const user = userEvent.setup();
-  const choice = await screen.findByRole('combobox', { name: 'Runtime' });
-  expect(screen.queryByRole('textbox', { name: 'Runtime' })).not.toBeInTheDocument();
+  const choice = await screen.findByRole('combobox', { name: 'Container runtime' });
+  expect(screen.queryByRole('textbox', { name: 'Container runtime' })).not.toBeInTheDocument();
   await user.click(choice);
   await user.click(await screen.findByRole('option', { name: /gVisor/ }));
   expect(changed).toHaveBeenLastCalledWith({ runtime: 'runsc' });
@@ -50,6 +50,6 @@ it('chooses a reported runtime and retains an expert name through the actual set
 it('keeps runtime values read-only when the template cannot be managed', () => {
   show(<SchemaForm schema={schema} spec={{ runtime: 'custom-runtime' }} driver="docker" readOnly onChange={vi.fn()} />);
   expect(screen.getByText('custom-runtime')).toBeVisible();
-  expect(screen.queryByRole('combobox', { name: 'Runtime' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('textbox', { name: 'Runtime' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: 'Container runtime' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('textbox', { name: 'Container runtime' })).not.toBeInTheDocument();
 });

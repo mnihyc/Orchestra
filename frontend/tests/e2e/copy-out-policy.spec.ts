@@ -18,7 +18,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const words = locale === 'en' ? english : chinese;
     const title = words.settingRegistry.sharing.allow_copy_out.title;
     const definition: SettingDef = {
-      key: KEY, title: 'Copies to other orgs', description: 'Whether things here may be duplicated or moved into another org.',
+      key: KEY, title: 'Copies to other orgs', description: 'Whether things here may be duplicated or moved into another organization.',
       group: 'collaboration', class: 'policy', scopes: ['system', 'org', 'project'], merge: 'replace',
       schema: { type: 'boolean' }, default: true, example: true, text_key: 'day100.builtin.sharing.allow_copy_out', keywords: [],
     };

@@ -46,3 +46,11 @@ it.each(['en', 'zh-CN'] as const)('shows a known accepted date and leaves an old
   expect(screen.getByText(i18n.t('orgTerms.accepted'), { exact: false })).toBeVisible();
   expect(view.container.querySelector('time')).toHaveAttribute('dateTime', accepted.terms_accepted_at);
 });
+
+it.each(['en','zh-CN'] as const)('names current joining terms separately from recorded acceptance in %s',async(locale)=>{
+  await setLocale(locale);const localized=localizedSetting(def,i18n);
+  show(<><SettingValue def={localized} setting={setting} target={{kind:'node',id:here.id}} shape={{type:'text',maxLength:null,pattern:null}} value="# Local" label={localized.title} onChange={()=>undefined}/><MemberTerms member={{...member,terms_hash:'a'.repeat(64),terms_accepted_at:'2026-11-01T08:00:00Z'}}/></>);
+  expect(screen.getByRole('button',{name:i18n.t('help.hint.label',{term:locale==='en'?'Current joining terms':'新加入者的当前条款'})})).toBeVisible();
+  expect(screen.getByText(locale==='en'?'Accepted when joining':'加入时已接受', {exact:false})).toBeVisible();
+  expect(screen.queryByText('a'.repeat(64))).not.toBeInTheDocument();
+});

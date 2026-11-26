@@ -51,9 +51,11 @@ use crate::volumes::Volumes;
 
 /// The kinds of command the role takes.
 pub const NODE_KINDS: &[CommandKind] = &[
+    CommandKind::NodeServerUpdate,
     CommandKind::NodeResourcesList,
     CommandKind::NodeResourcesRemove,
     CommandKind::NodeRuntimeCreate,
+    CommandKind::NodeProgramAdmit,
     CommandKind::NodeRuntimeStart,
     CommandKind::NodeRuntimeStop,
     CommandKind::NodeRuntimeRemove,
@@ -177,6 +179,7 @@ struct Inner {
     images: Arc<Images>,
     desk: Arc<BlobDesk>,
     runtimes: Runtimes,
+    programs: Arc<crate::program_work::Programs>,
     facts: Arc<Facts>,
     reconciler: Arc<Reconciler>,
     storages: Arc<Storages>,
@@ -189,6 +192,7 @@ struct Inner {
     skills: Option<crate::skill_fetch::SkillFetch>,
     /// Opens the source address sealed to this machine for a fetch command.
     keys: Arc<Keys>,
+    link: orch_link::machine::MachineLink,
     link_connected: std::sync::atomic::AtomicBool,
     stop: CancellationToken,
 }
@@ -264,6 +268,18 @@ impl NodeRole {
         runtimes.set_link(services.link.clone());
         images.set_policy(Arc::clone(&services.policy));
         volumes.set_policy(Arc::clone(&services.policy));
+        let programs = crate::program_work::Programs::new(
+            Arc::clone(&drivers),
+            Arc::clone(&ledger),
+            Arc::clone(&services.clock),
+            services.link.clone(),
+            runtimes.clone(),
+            settings.stop_grace,
+        );
+        services.tunnels.register(
+            orch_link_contract::tunnels::TunnelKind::Program,
+            programs.clone(),
+        );
         let facts = Arc::new(Facts::new(
             Arc::clone(&drivers),
             Arc::clone(&storages),
@@ -289,6 +305,7 @@ impl NodeRole {
                 images,
                 desk,
                 runtimes,
+                programs,
                 facts,
                 reconciler,
                 storages,
@@ -298,6 +315,7 @@ impl NodeRole {
                 skills: crate::skill_fetch::SkillFetch::new(Some(Arc::clone(&services.policy)))
                     .ok(),
                 keys: Arc::clone(&services.keys),
+                link: services.link.clone(),
                 link_connected: std::sync::atomic::AtomicBool::new(false),
                 stop: CancellationToken::new(),
             }),
@@ -364,10 +382,29 @@ impl Inner {
                 );
             }
         }
+        for (_, driver) in self.drivers.all() {
+            if let Some(command) = driver.extras().pending_server_update()
+                && self
+                    .link
+                    .command_succeeded(command, CommandKind::NodeServerUpdate)
+            {
+                driver.extras().server_update_answered(command);
+            }
+            match driver.extras().server_update_observation().await {
+                Ok(Some(report)) => {
+                    self.reports.server_update(report).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "the server updater's phase could not be read")
+                }
+            }
+        }
         self.facts.report_if_changed().await;
         self.reconciler.pass().await;
         self.runtimes.report_networks().await;
         self.runtimes.recover_volume_copy_holds().await;
+        self.programs.sweep().await;
         // A unit that came up and ended by itself is given the operator's post_down.
         self.runtimes.settle_hooks().await;
         self.runtimes.reconcile_live_mounts().await;
@@ -445,6 +482,12 @@ impl Inner {
 
 #[async_trait]
 impl RoleHandler for NodeRole {
+    fn answered(&self, id: orch_types::Id) {
+        for (_, driver) in self.inner.drivers.all() {
+            driver.extras().server_update_answered(id);
+        }
+    }
+
     async fn interrupted(&self, id: orch_types::Id, command: &Command) -> Result<(), CommandError> {
         let driver = match command {
             Command::NodeMountMeasure(body) => Some(body.driver.clone()),
@@ -496,6 +539,12 @@ impl RoleHandler for NodeRole {
         });
         // A node reports its actual driver storages through the same machine facts as a directory role.
         facts.storages = self.inner.facts.current().storages;
+        facts.server_update = self
+            .inner
+            .drivers
+            .all()
+            .into_iter()
+            .find_map(|(_, driver)| driver.extras().server_update_support());
     }
 
     fn role(&self) -> Role {
@@ -531,6 +580,7 @@ impl RoleHandler for NodeRole {
             id,
             Arc::clone(&node.clock),
             report,
+            call.work_deadline.clone(),
             cancel.clone(),
             u64::from(command.kind().deadline_secs()),
         );
@@ -548,20 +598,153 @@ impl RoleHandler for NodeRole {
             Command::NodeRuntimeCreate(body) => {
                 let body = serde_json::to_value(body.0)
                     .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
-                let made = node.runtimes.create(id, body, cancel).await;
+                let made = if let Some(target) = &call.context.native_target {
+                    let orch_link_contract::native_target::NativeTarget::Lifecycle(target) = target
+                    else {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native birth has another kind of target",
+                        ));
+                    };
+                    let fences = call.context.native_fences.as_deref().ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native birth has no persistent control order",
+                        )
+                    })?;
+                    node.runtimes
+                        .create_original(id, body, cancel, target, fences, Some(&call.context))
+                        .await
+                        .and_then(|result| {
+                            result.ok_or_else(|| {
+                                CommandError::new(
+                                    ErrorCode::Conflict,
+                                    "the original birth was superseded; no replacement was created",
+                                )
+                            })
+                        })
+                } else {
+                    node.runtimes
+                        .create(id, body, cancel, Some(&call.context))
+                        .await
+                };
                 node.images.finish(id).await;
                 made.map(CommandResult::NodeRuntimeCreate)
             }
-            Command::NodeRuntimeStart(body) => node
-                .runtimes
-                .start(body.runtime_id)
-                .await
-                .map(|()| CommandResult::NodeRuntimeStart(Empty {})),
-            Command::NodeRuntimeStop(body) => node
-                .runtimes
-                .stop(body.runtime_id, body.reason)
-                .await
-                .map(|()| CommandResult::NodeRuntimeStop(Empty {})),
+            Command::NodeProgramAdmit(body) => {
+                if body.runtime_id != body.work.work
+                    || body.work.work == body.work.helper
+                    || body.work.deadline <= node.clock.time()
+                {
+                    return Err(failure(
+                        &orch_driver_contract::driver::DriverError::InvalidSpec(
+                            "the program work has an invalid identity or an ended lifetime".into(),
+                        ),
+                    ));
+                }
+                node.ledger
+                    .retain_program(&body.work)
+                    .map_err(|_| {
+                        CommandError::new(
+                            ErrorCode::Internal,
+                            "the program placement could not be retained",
+                        )
+                    })?
+                    .filter(|work| !work.retired)
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the program placement is unknown, changed or retired",
+                        )
+                    })?;
+                Ok(CommandResult::NodeProgramAdmit(Empty {}))
+            }
+            Command::NodeRuntimeStart(body) => {
+                if let Some(target) = &call.context.native_target {
+                    let orch_link_contract::native_target::NativeTarget::Lifecycle(target) = target
+                    else {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native runtime start has another kind of target",
+                        ));
+                    };
+                    if target.subject
+                        != (orch_link_contract::native_target::LifecycleSubject::Runtime {
+                            runtime_id: body.runtime_id,
+                        })
+                    {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native runtime start target names another runtime",
+                        ));
+                    }
+                    let fences = call.context.native_fences.as_deref().ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native runtime start has no persistent control order",
+                        )
+                    })?;
+                    let Some(result) = node
+                        .runtimes
+                        .start_original(target, fences, Some(&call.context))
+                        .await?
+                    else {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the original runtime start was superseded; the current unit was unchanged",
+                        ));
+                    };
+                    Ok(CommandResult::NodeRuntimeStart(result))
+                } else {
+                    node.runtimes
+                        .start(body.runtime_id, Some(&call.context))
+                        .await
+                        .map(CommandResult::NodeRuntimeStart)
+                }
+            }
+            Command::NodeRuntimeStop(body) => {
+                if let Some(target) = &call.context.native_target {
+                    let orch_link_contract::native_target::NativeTarget::Lifecycle(target) = target
+                    else {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native runtime stop has another kind of target",
+                        ));
+                    };
+                    if target.subject
+                        != (orch_link_contract::native_target::LifecycleSubject::Runtime {
+                            runtime_id: body.runtime_id,
+                        })
+                    {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native runtime stop target names another runtime",
+                        ));
+                    }
+                    let fences = call.context.native_fences.as_deref().ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native runtime stop has no persistent control order",
+                        )
+                    })?;
+                    let Some(result) = node
+                        .runtimes
+                        .stop_original(target, fences, body.reason, Some(&call.context))
+                        .await?
+                    else {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the original runtime stop was superseded; the current unit was unchanged",
+                        ));
+                    };
+                    Ok(CommandResult::NodeRuntimeStop(result))
+                } else {
+                    node.runtimes
+                        .stop(body.runtime_id, body.reason, Some(&call.context))
+                        .await
+                        .map(CommandResult::NodeRuntimeStop)
+                }
+            }
             Command::NodeNetworkApply(body) => node
                 .runtimes
                 .apply_network(&body)
@@ -746,6 +929,35 @@ impl RoleHandler for NodeRole {
                     .map(CommandResult::NodeToolCheck)
                     .map_err(CommandError::from)
             }
+            Command::NodeServerUpdate(body) => {
+                let mut result = Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "the bundled installation has no host Docker access",
+                ));
+                for (_, driver) in node.drivers.all() {
+                    if driver.extras().server_update_support().is_some() {
+                        if let Some(previous) = driver
+                            .extras()
+                            .server_update_observation()
+                            .await
+                            .map_err(|error| failure(&error))?
+                            && previous.job_id != body.job_id
+                            && previous.observation.stage.terminal()
+                            && !node.reports.server_update(previous).await
+                        {
+                            return Err(CommandError::new(ErrorCode::Internal, "the previous updater outcome could not be kept in the node's spool").retryable());
+                        }
+                        result = driver
+                            .extras()
+                            .server_update(id, &body)
+                            .await
+                            .map(CommandResult::NodeServerUpdate)
+                            .map_err(|error| failure(&error));
+                        break;
+                    }
+                }
+                result
+            }
             Command::NodeToolConformance(body) => {
                 let _resources = node.runtimes.hold_resources().await;
                 crate::resources::tool_used(
@@ -867,6 +1079,7 @@ impl RoleHandler for NodeRole {
         self.disconnected().await;
         self.inner.publisher.close_all().await;
         self.inner.stop.cancel();
+        self.inner.programs.stop();
         self.inner.runtimes.stop_watching();
         self.inner.runtimes.stop_copy_work().await;
         let tasks: Vec<JoinHandle<()>> = self
@@ -882,6 +1095,7 @@ impl RoleHandler for NodeRole {
 
     fn abandon(&self) {
         self.inner.stop.cancel();
+        self.inner.programs.stop();
         self.inner.runtimes.abandon_watches();
         let tasks: Vec<JoinHandle<()>> = self
             .tasks
