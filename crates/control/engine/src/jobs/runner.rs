@@ -41,12 +41,98 @@ const WHOLE: u32 = 100;
 const PHASE_RETRIES: u32 = 2;
 /// The code of a failure that is the system's own and not the host's or the person's.
 pub const INTERNAL: &str = "internal";
+
+tokio::task_local! {static PHASE_ATTEMPT: u32;}
 /// How many jobs one sweep takes up at most.
 const RUN_BATCH: i64 = 50;
 /// How many jobs of one batch of forks and switches run at once when the setting is not there.
 const BATCH_PARALLEL_DEFAULT: i64 = 4;
 /// How many finished jobs of an environment its sync shows beside those that are not over.
 pub const RECENT_JOBS: i64 = 5;
+
+/// Project only the actual job's retained retry and lease decisions, without reading current defaults.
+#[must_use]
+pub fn lifecycle_wait(row: &JobRow) -> Option<orch_api_contract::workspace::JobLifecycleWait> {
+    use orch_api_contract::workspace::{JobLifecycleWait, JobWaitTime};
+    use orch_types::Time;
+    let saved = row.plan.get("lifecycle_wait");
+    let abort = row.plan.get("abort").filter(|value| !value.is_null());
+    if saved.is_none()
+        && abort.is_none()
+        && !matches!(
+            row.kind.as_str(),
+            kind::ENVIRONMENT_PROVISION
+                | kind::ENVIRONMENT_REMOVE
+                | kind::ENVIRONMENT_RECREATE
+                | kind::ENVIRONMENT_RESTART
+                | kind::ENVIRONMENT_MOVE
+                | kind::PROVIDER_PROVISION
+                | kind::PROVIDER_RECREATE
+        )
+    {
+        return None;
+    }
+    let runner = row.plan.get("runner");
+    let time = |value: Option<&Json>| {
+        value
+            .and_then(Json::as_str)
+            .and_then(|value| value.parse::<Time>().ok())
+    };
+    let recorded =
+        |value: Option<Time>| value.map_or(JobWaitTime::Unreported, |at| JobWaitTime::At { at });
+    let retry = saved.and_then(|value| value.get("retry_eligible_at"));
+    let retry_eligible_at = match retry {
+        _ if matches!(row.state.as_str(), state::CANCELLED | state::LOST) => {
+            JobWaitTime::NotApplicable
+        }
+        Some(Json::Null) => JobWaitTime::NotApplicable,
+        Some(value) => recorded(time(Some(value))),
+        None if abort.is_some() || row.state == state::FAILED => JobWaitTime::Unreported,
+        None => JobWaitTime::NotApplicable,
+    };
+    let lease_recoverable_at = if row.is_open() && row.state != state::QUEUED {
+        recorded(time(runner.and_then(|value| value.get("until"))))
+    } else {
+        JobWaitTime::NotApplicable
+    };
+    let attempted = time(saved.and_then(|value| value.get("last_attempt_at")))
+        .or_else(|| time(runner.and_then(|value| value.get("attempted_at"))));
+    let reason = saved
+        .and_then(|value| value.get("reason_code"))
+        .and_then(Json::as_str)
+        .or_else(|| {
+            abort
+                .and_then(|value| value.pointer("/failure/code"))
+                .and_then(Json::as_str)
+        });
+    Some(JobLifecycleWait {
+        phase: if abort.is_some() {
+            "cleanup".to_owned()
+        } else {
+            read_progress(row).0.phase
+        },
+        retry_eligible_at,
+        lease_recoverable_at,
+        last_attempt_at: if row.state == state::QUEUED {
+            JobWaitTime::NotApplicable
+        } else {
+            recorded(attempted)
+        },
+        reason: reason.map(orch_api_contract::messages::for_failure),
+        reason_code: reason.map(str::to_owned),
+        recovering: runner
+            .and_then(|value| {
+                value.get(if abort.is_some() {
+                    "cleanup_recovered"
+                } else {
+                    "recovered"
+                })
+            })
+            .and_then(Json::as_bool),
+        observed_at: time(runner.and_then(|value| value.get("observed_at")))
+            .max(time(saved.and_then(|value| value.get("observed_at")))),
+    })
+}
 
 // Content/capture work does not change anybody's authority. Lifecycle, retained
 // resource and capability jobs still declare the exclusive barrier before a phase.
@@ -173,8 +259,26 @@ impl From<Failure> for Stop {
 
 impl From<EngineError> for Stop {
     fn from(error: EngineError) -> Self {
+        if let Some(code) = error.data_code() {
+            return Self::from(orch_db::DbError::Data {
+                code: code.to_owned(),
+            });
+        }
         match error {
             EngineError::Db(error) => Self::from(error),
+            EngineError::BeforeEffect(error)
+                if matches!(
+                    error.downcast_ref::<crate::operation_scope::continuing::Error>(),
+                    Some(
+                        crate::operation_scope::continuing::Error::Refused
+                            | crate::operation_scope::continuing::Error::Binding(
+                                crate::operation_scope::BindingError::Refused
+                            )
+                    )
+                ) =>
+            {
+                Self::Failed(Failure::new("access.denied", error.to_string()))
+            }
             other => Self::Failed(Failure::new(INTERNAL, other.to_string())),
         }
     }
@@ -183,16 +287,25 @@ impl From<EngineError> for Stop {
 impl From<orch_db::DbError> for Stop {
     fn from(error: orch_db::DbError) -> Self {
         let facts = persistence_facts(&error);
-        tracing::error!(
-            phase = "job_persistence",
-            category = facts.category,
-            sqlstate = facts.sqlstate.as_deref().unwrap_or("unknown"),
-            constraint = facts.constraint.as_deref().unwrap_or("unknown"),
-            column = facts.column.unwrap_or("unknown"),
-            "a job could not persist its change"
-        );
+        if PHASE_ATTEMPT
+            .try_with(|attempt| *attempt == 0)
+            .unwrap_or(true)
+        {
+            tracing::error!(
+                phase = "job_persistence",
+                category = facts.category,
+                sqlstate = facts.sqlstate.as_deref().unwrap_or("unknown"),
+                constraint = facts.constraint.as_deref().unwrap_or("unknown"),
+                column = facts.column.unwrap_or("unknown"),
+                "a job could not persist its change"
+            );
+        }
         Self::Failed(Failure::new(
-            INTERNAL,
+            if error.data_code().is_some() {
+                "storage.data"
+            } else {
+                INTERNAL
+            },
             "The change could not be saved. Try again.",
         ))
     }
@@ -254,7 +367,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -338,6 +450,7 @@ fn persistence_facts(error: &orch_db::DbError) -> PersistenceFacts {
         column: None,
     };
     let (state, constraint) = match error {
+        DbError::Data { code } => (Some(code.clone()), None),
         DbError::Unique { constraint } => (Some("23505".to_owned()), Some(constraint.as_str())),
         DbError::Reference { constraint } => (Some("23503".to_owned()), Some(constraint.as_str())),
         DbError::Check { constraint, .. } => (Some("23514".to_owned()), Some(constraint.as_str())),
@@ -351,7 +464,10 @@ fn persistence_facts(error: &orch_db::DbError) -> PersistenceFacts {
             facts.category = "transaction_retry";
             (None, None)
         }
-        DbError::Other(error) => {
+        DbError::Other(error)
+        | DbError::Timeout {
+            source: orch_db::pool::DatabaseTimeout { source: error, .. },
+        } => {
             if let Some(database) = error.as_database_error() {
                 facts.column = database
                     .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
@@ -538,6 +654,19 @@ fn stored(progress: &JobProgress, log: Option<&str>) -> Json {
     value
 }
 
+/// Keeps the public failure reason beside the native output, including after cleanup overwrites a tail.
+fn keep_failure_log(progress: &JobProgress, log: &mut Option<String>, failure: &Failure) {
+    let reason = format!("{} · {}: {}", progress.phase, failure.code, failure.message);
+    let tail = log.get_or_insert_with(String::new);
+    if tail.contains(reason.as_str()) {
+        return;
+    }
+    if !tail.is_empty() && !tail.ends_with('\n') {
+        tail.push('\n');
+    }
+    tail.push_str(&reason);
+}
+
 /// A job's progress as the row holds it, and the end of what a phase printed.
 #[must_use]
 pub fn read_progress(row: &JobRow) -> (JobProgress, Option<String>) {
@@ -649,6 +778,32 @@ pub async fn make_before(
     .await?)
 }
 
+/// Only the exact active invocation can supply its first immutable native execution timer.
+pub(crate) fn reported_deadline(
+    row: &JobRow,
+    command: Option<Id>,
+    incoming: Option<&orch_api_contract::workspace::JobActivity>,
+    previous: Option<&orch_api_contract::workspace::JobActivity>,
+) -> Option<orch_api_contract::workspace::JobWorkDeadline> {
+    let id: Id = serde_json::from_value(row.plan.pointer("/active_command/id")?.clone()).ok()?;
+    let phase = row.plan.pointer("/active_command/phase")?.as_str()?;
+    if command != Some(id) {
+        return None;
+    }
+    let matches = |value: &orch_api_contract::workspace::JobWorkDeadline| {
+        value.command == id && value.phase == phase
+    };
+    previous
+        .and_then(|value| value.captured_deadline.as_ref())
+        .filter(|value| matches(value))
+        .or_else(|| {
+            incoming
+                .and_then(|value| value.captured_deadline.as_ref())
+                .filter(|value| matches(value))
+        })
+        .cloned()
+}
+
 /// Applies how far a host says a piece of work has come to the job it was done for: while the job's
 /// image phase runs, the host's percentage is how far that phase is, and the end of what it printed is
 /// kept on the job. A report for a job that is over, or about another phase, changes nothing.
@@ -704,8 +859,10 @@ pub(crate) async fn report_progress(
                 .pointer("/active_command/kind")
                 .and_then(Json::as_str),
             Some(
-                "fs.snapshot"
+                "git.prepare"
+                    | "fs.snapshot"
                     | "fs.materialize"
+                    | "fs.materialize_if_absent"
                     | "fs.data.export"
                     | "fs.data.import"
                     | "fs.restore"
@@ -781,14 +938,24 @@ pub(crate) async fn report_progress(
             .as_ref()
             .and_then(|activity| activity.directories_done)
             != directories_done;
+    let deadline = reported_deadline(
+        &row,
+        command_id,
+        reported.activity.as_ref(),
+        progress.activity.as_ref(),
+    );
     if changed || progress.activity.is_none() {
         progress.activity = Some(orch_api_contract::workspace::JobActivity {
+            captured_deadline: deadline.clone(),
             waiting_for: None,
             updated_at: orch_types::Time::new(at),
             stall_after_seconds: 0,
             directories_done,
             stopping: false,
         });
+    }
+    if let Some(activity) = &mut progress.activity {
+        activity.captured_deadline = deadline;
     }
     if reported.message.is_some() {
         progress.message = reported.message;
@@ -800,7 +967,7 @@ pub(crate) async fn report_progress(
     Ok(())
 }
 
-fn preserve_creator_report(
+pub(super) fn preserve_creator_report(
     command: &mut Outgoing,
     retained: &crate::commands::RetainedCommand,
 ) -> Result<(), Stop> {
@@ -842,9 +1009,15 @@ fn command_totals(
     plan: &Json,
     command: &Outgoing,
 ) -> Result<(Option<i64>, Option<i64>), EngineError> {
-    if command.kind == orch_link_contract::commands::CommandKind::FsWrite
-        && let Some(upload) = plan.get("workspace_upload")
-        && upload.pointer("/write/blob") == command.body.get("blob")
+    if matches!(
+        command.kind,
+        orch_link_contract::commands::CommandKind::FsWrite
+            | orch_link_contract::commands::CommandKind::FsRelayPrepare
+            | orch_link_contract::commands::CommandKind::FsRelayCommit
+    ) && let Some(upload) = plan.get("workspace_upload")
+        && (upload.pointer("/write/blob") == command.body.get("blob")
+            || upload.pointer("/write/blob") == command.body.get("hash")
+            || command.kind == orch_link_contract::commands::CommandKind::FsRelayPrepare)
     {
         return Ok((Some(1), upload["size"].as_i64()));
     }
@@ -1043,6 +1216,7 @@ impl Job {
         let Some(mut row) = self.lock_owned(&mut tx).await? else {
             return Ok(None);
         };
+        let first = abort_reason(&row)?.is_none();
         let reason = if let Some(reason) = abort_reason(&row)? {
             reason
         } else {
@@ -1051,7 +1225,22 @@ impl Job {
             row.plan["abort"] = value;
             why.clone()
         };
+        if first && let Stop::Failed(failure) = &reason {
+            let (progress, mut log) = read_progress(&row);
+            if failure.log.is_some() {
+                log.clone_from(&failure.log);
+            }
+            keep_failure_log(&progress, &mut log, failure);
+            row.progress = stored(&progress, log.as_deref());
+            rows::save_progress(&mut tx, self.id, &row.progress, self.now()).await?;
+        }
         tx.commit().await.map_err(orch_db::DbError::from)?;
+        if first && let Stop::Failed(failure) = &reason {
+            let (progress, _) = read_progress(&row);
+            tracing::warn!(job = %self.id, kind = %row.kind, environment = ?row.environment_id,
+                provider = ?row.provider_id, phase = %progress.phase, code = %failure.code,
+                reason = %failure.message, "a job failed");
+        }
         Ok(Some((row, reason)))
     }
 
@@ -1070,6 +1259,19 @@ impl Job {
             self.flags.cancelled.store(true, Ordering::SeqCst);
             Err(Stop::Cancelled)
         }
+    }
+
+    /// A native operation may hold the thread while asking this job to retain its command.
+    /// Renew first; publish only when the feed's whole row footprint is immediately available.
+    async fn publish_lease(&self) -> Result<bool, EngineError> {
+        let mut tx = self.engine.inner.db.begin().await?;
+        let published = rows::publish_claim(&mut tx, self.id, self.runner, self.now()).await?;
+        if published {
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+        } else {
+            tx.rollback().await.map_err(orch_db::DbError::from)?;
+        }
+        Ok(published)
     }
 
     /// Changes the progress of the job in a transaction that holds its row, and writes it with the
@@ -1110,6 +1312,14 @@ impl Job {
                 .as_ref()
                 .and_then(|activity| activity.directories_done);
             progress.activity = Some(orch_api_contract::workspace::JobActivity {
+                captured_deadline: if progress.phase == before.phase {
+                    before
+                        .activity
+                        .as_ref()
+                        .and_then(|activity| activity.captured_deadline.clone())
+                } else {
+                    None
+                },
                 waiting_for,
                 updated_at: orch_types::Time::new(self.now()),
                 stall_after_seconds: 0,
@@ -1153,36 +1363,61 @@ impl Job {
     /// The native immutable work report and retained deadline, before original-source capture.
     pub async fn prepare_command(&self, mut command: Outgoing) -> Result<Outgoing, Stop> {
         use orch_link_contract::commands::{CommandKind, WorkReport};
+        let row = self.row().await?;
+        command.content_transit |= matches!(
+            row.kind.as_str(),
+            orch_db::queries::jobs::kind::ENVIRONMENT_PROVISION
+                | orch_db::queries::jobs::kind::ENVIRONMENT_RECREATE
+                | orch_db::queries::jobs::kind::ENVIRONMENT_MOVE
+                | orch_db::queries::jobs::kind::PROVIDER_RECREATE
+                | orch_db::queries::jobs::forks::THREAD_FORK
+        );
+
         if matches!(
             command.kind,
-            CommandKind::FsWrite
+            CommandKind::GitPrepare
+                | CommandKind::FsWrite
+                | CommandKind::FsRelayPrepare
+                | CommandKind::FsRelayCommit
                 | CommandKind::NodeMountExport
                 | CommandKind::NodeMountImport
                 | CommandKind::NodeRuntimeVolumesExport
                 | CommandKind::NodeRuntimeVolumeImport
                 | CommandKind::FsSnapshot
                 | CommandKind::FsMaterialize
+                | CommandKind::FsMaterializeIfAbsent
                 | CommandKind::FsDataExport
                 | CommandKind::FsDataImport
                 | CommandKind::FsRestore
         ) {
-            let row = self.row().await?;
             let (progress, _) = read_progress(&row);
             if command.body.get("work").is_none_or(Json::is_null) {
-                let timeout_secs = crate::jobs::measurement::setting(
-                    &mut *self
-                        .engine
-                        .db()
-                        .acquire()
-                        .await
-                        .map_err(EngineError::from)?,
-                    orch_settings_contract::registry::keys::JOB_IO_TIMEOUT_SECS,
-                )
-                .await?;
-                let timeout_secs = u64::try_from(timeout_secs)
-                    .map_err(|_| EngineError::unreadable("the file-work allowance is invalid"))?;
+                let clone = command.kind == CommandKind::GitPrepare;
+                let retained_idle = row.plan["clone_idle_seconds"].as_u64().filter(|_| clone);
+                let (timeout_secs, timeout_policy) = if let Some(seconds) = retained_idle {
+                    (seconds, None)
+                } else {
+                    let policy = crate::jobs::measurement::policy_setting(
+                        &mut *self
+                            .engine
+                            .db()
+                            .acquire()
+                            .await
+                            .map_err(EngineError::from)?,
+                        if clone {
+                            orch_settings_contract::registry::keys::SOURCE_CLONE_IDLE_SECS
+                        } else {
+                            orch_settings_contract::registry::keys::JOB_IO_TIMEOUT_SECS
+                        },
+                    )
+                    .await?;
+                    let seconds = u64::try_from(policy.seconds)
+                        .map_err(|_| EngineError::unreadable("the work allowance is invalid"))?;
+                    (seconds, (!clone).then_some(policy.policy))
+                };
                 let (files_total, bytes_total) = command_totals(&row.plan, &command)?;
                 command.body["work"] = serde_json::to_value(WorkReport {
+                    timeout_policy,
                     files_total,
                     bytes_total,
                     job_id: self.id,
@@ -1190,7 +1425,7 @@ impl Job {
                     timeout_secs,
                 })
                 .map_err(EngineError::from)?;
-                if command.deadline.is_none() {
+                if command.kind != CommandKind::GitPrepare && command.deadline.is_none() {
                     let first = self
                         .engine
                         .inner
@@ -1353,7 +1588,27 @@ impl Job {
                 continue;
             }
             return match ended {
-                Ended::Succeeded(result) => Ok(result),
+                Ended::Succeeded(result) => {
+                    if matches!(
+                        command.kind,
+                        CommandKind::NodeRuntimeCreate | CommandKind::NodeMountsApply
+                    ) {
+                        let mut conn = self
+                            .engine
+                            .db()
+                            .acquire()
+                            .await
+                            .map_err(EngineError::from)?;
+                        crate::resource_facts::applications::inputs::record_command(
+                            &mut conn,
+                            &command,
+                            &result,
+                            self.now(),
+                        )
+                        .await?;
+                    }
+                    Ok(result)
+                }
                 Ended::Failed(error) => Err(Stop::Failed(
                     Failure::new(error.code, error.detail).answered(),
                 )),
@@ -1413,12 +1668,17 @@ impl Job {
                     command.kind,
                     orch_link_contract::commands::CommandKind::FsSnapshot
                         | orch_link_contract::commands::CommandKind::FsMaterialize
+                        | orch_link_contract::commands::CommandKind::FsMaterializeIfAbsent
                         | orch_link_contract::commands::CommandKind::FsDataExport
                         | orch_link_contract::commands::CommandKind::FsDataImport
                         | orch_link_contract::commands::CommandKind::FsRestore
                         | orch_link_contract::commands::CommandKind::GitWorktreeSnapshot
                 );
-            self.remember(&json!({"active_command":{"id":id,"machine":command.machine,"kind":command.kind.as_str(),"reported":reported,"phase":read_progress(&row).0.phase,"span":span}})).await?;
+            let mut update = json!({"active_command":{"id":id,"machine":command.machine,"kind":command.kind.as_str(),"reported":reported,"phase":read_progress(&row).0.phase,"span":span}});
+            if command.kind == orch_link_contract::commands::CommandKind::GitPrepare {
+                update["clone_idle_seconds"] = command.body["work"]["timeout_secs"].clone();
+            }
+            self.remember(&update).await?;
         }
         self.check_with(respect_cancel)?;
         if creator_effect {
@@ -1559,6 +1819,7 @@ impl Job {
             .await?;
         super::retained::operation::decorate(self, &mut command, !respect_cancel).await?;
         super::lifecycle_commands::decorate(self, &mut command, respect_cancel).await?;
+        super::mount_copy::command::decorate(self, &mut command, respect_cancel).await?;
         let update_boundary = if respect_cancel
             && super::recreate::environment_authority::is_restricted(&self.row().await?)
         {
@@ -1566,11 +1827,15 @@ impl Job {
         } else {
             None
         };
+        if respect_cancel {
+            super::workspace_upload::authority::decorate(self, &mut command).await?;
+        }
         let update_receipt = matches!(
             &command.authority,
             Some(crate::commands::CommandAuthority::UpdateJob(_))
         )
         .then(|| command.clone());
+        super::provider_provision::decorate_placement(self, &mut command, respect_cancel).await?;
         let issued = match update_boundary {
             Some(before) => commands.issue_before(command, before).await,
             None => commands.issue(command).await,
@@ -1628,6 +1893,38 @@ impl Job {
         }
     }
 
+    /// A recovered phase honors its recorded retry boundary before admitting more native work.
+    async fn wait_for_retry(&self) -> Result<(), Stop> {
+        let row = self.row().await?;
+        let Some(value) = row
+            .plan
+            .pointer("/lifecycle_wait/retry_eligible_at")
+            .filter(|value| !value.is_null())
+        else {
+            return Ok(());
+        };
+        let until: orch_types::Time =
+            serde_json::from_value(value.clone()).map_err(EngineError::from)?;
+        if until.get() > self.now() {
+            let mut waiting = row.plan["lifecycle_wait"].clone();
+            waiting["waiting"] = Json::Bool(true);
+            self.amend_and_remember(Some(&json!({"lifecycle_wait":waiting})), |_, _| {})
+                .await?;
+        }
+        while until.get() > self.now() {
+            let remaining = (until.get() - self.now()).to_std().unwrap_or_default();
+            self.pause(remaining).await?;
+        }
+        let at = orch_types::Time::new(self.now());
+        self.amend_and_remember(
+            Some(&json!({"lifecycle_wait":{"retry_eligible_at":null,
+            "last_attempt_at":at,"observed_at":at,"waiting":false}})),
+            |_, _| {},
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Waits for `how_long`, ending early with the reason when the job is cancelled or lost.
     pub async fn pause(&self, how_long: Duration) -> Result<(), Stop> {
         let until = tokio::time::Instant::now() + how_long;
@@ -1664,11 +1961,15 @@ impl Job {
             let Ok(mut conn) = self.engine.inner.db.acquire().await else {
                 continue;
             };
+            let mut changed = false;
             if renewed.elapsed() >= renew_every {
                 let now = self.now();
                 let until = now + chrono::Duration::from_std(lease).unwrap_or_default();
                 match rows::claim(&mut conn, self.id, self.runner, until, now).await {
-                    Ok(true) => renewed = tokio::time::Instant::now(),
+                    Ok(true) => {
+                        renewed = tokio::time::Instant::now();
+                        changed = true;
+                    }
                     Ok(false) => {
                         self.flags.lost.store(true, Ordering::SeqCst);
                         return;
@@ -1680,6 +1981,10 @@ impl Job {
             }
             if let Ok(true) = rows::cancel_requested(&mut conn, self.id).await {
                 self.flags.cancelled.store(true, Ordering::SeqCst);
+            }
+            drop(conn);
+            if changed && let Err(error) = self.publish_lease().await {
+                tracing::warn!(%error, job = %self.id, "the renewed job lease could not be published");
             }
         }
     }
@@ -1697,6 +2002,11 @@ fn commands_stop(error: crate::commands::CommandsError) -> Stop {
     use crate::commands::CommandsError;
     match error {
         CommandsError::Stopping => Stop::Lost,
+        CommandsError::BeforeEffect(error)
+            if error.is::<crate::operation_scope::continuing::Error>() =>
+        {
+            Stop::from(EngineError::BeforeEffect(error))
+        }
         CommandsError::UnknownMachine | CommandsError::Revoked => Stop::Failed(Failure::new(
             "host_gone",
             "the host's machine is not known to the system any more",
@@ -1713,6 +2023,11 @@ impl Engine {
     pub(crate) async fn run_jobs(&self) -> Result<(), EngineError> {
         self.expire_measurements().await?;
         self.run_document_notice_jobs().await?;
+        crate::mount_copies::claims::reap_finished(
+            &mut *self.db().acquire().await?,
+            self.inner.config.sweep_batch,
+        )
+        .await?;
         let now = self.inner.clock.now();
         let lease =
             chrono::Duration::from_std(self.inner.config.hosting.job_lease).unwrap_or_default();
@@ -1724,6 +2039,8 @@ impl Engine {
                     kind::ENVIRONMENT_PROVISION,
                     kind::ENVIRONMENT_RESTART,
                     crate::jobs::mcp_restart::KIND,
+                    crate::jobs::server_update::KIND,
+                    crate::jobs::mount_copy::KIND,
                     crate::jobs::capability_change::KIND,
                     crate::jobs::kept_images::KIND,
                     crate::jobs::cleanup::KIND,
@@ -1862,6 +2179,7 @@ impl Engine {
 
     /// Asks that jobs be looked at at once, instead of at the next sweep.
     pub fn kick(&self) {
+        self.fresh_database_work();
         self.inner.signal.notify_one();
     }
 
@@ -1876,6 +2194,58 @@ impl Engine {
             self.kick();
         }
         Ok(asked)
+    }
+
+    /// Ends a job that a person has overruled, where it stands: it is cancelled and none of it is undone,
+    /// so that what the person asks instead takes over what it left. A job that has passed its commit is
+    /// finishing, and is not ended. Returns whether the job is over.
+    pub async fn overrule_job(&self, job: Id, by: Id, why: &str) -> Result<bool, EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let Some(row) = rows::lock_cancellation(&mut tx, job).await? else {
+            return Ok(true);
+        };
+        if !row.is_open() {
+            return Ok(true);
+        }
+        if row.plan.get("committed").is_some() {
+            return Ok(false);
+        }
+        let now = self.inner.clock.now();
+        let (progress, log) = read_progress(&row);
+        let error = json!({
+            "code": "overruled",
+            "message": why,
+            "phase": progress.phase,
+            "undone": false,
+            "by": by,
+        });
+        let ended = rows::finish(
+            &mut tx,
+            job,
+            state::CANCELLED,
+            &stored(&progress, log.as_deref()),
+            None,
+            Some(&error),
+            now,
+        )
+        .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        if ended {
+            tracing::warn!(%job, kind = %row.kind, provider = ?row.provider_id, phase = %progress.phase, %why, "a job was ended where it stood because a person overruled it");
+            if let Some(command) = row
+                .plan
+                .pointer("/active_command/id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse::<Id>().ok())
+            {
+                let _ = self.inner.commands.cancel(command).await;
+            }
+            let closed = rows::job(&mut *self.db().acquire().await?, job).await?;
+            if let Some(closed) = closed {
+                self.after_job(&closed).await;
+            }
+        }
+        Ok(true)
     }
 
     /// Sends the accepted job cancellation to its active machine command without waiting for cleanup.
@@ -1913,6 +2283,12 @@ impl Engine {
     /// The phased work of a job of this kind.
     async fn phased_for(&self, row: &JobRow) -> Result<Option<Box<dyn Phased>>, EngineError> {
         Ok(match row.kind.as_str() {
+            crate::jobs::mount_copy::KIND => {
+                Some(Box::new(crate::jobs::mount_copy::Copying::of(row)?))
+            }
+            crate::jobs::server_update::KIND => {
+                Some(Box::new(crate::jobs::server_update::Updating::of(row)?))
+            }
             crate::jobs::continuation::KIND => {
                 Some(Box::new(crate::jobs::continuation::Continuing::of(row)?))
             }
@@ -2056,6 +2432,9 @@ impl Engine {
         if let Some(reason) = abort_reason(&row)? {
             return self.end_job(job, Some(phased.as_ref()), reason).await;
         }
+        if let Err(stop) = job.wait_for_retry().await {
+            return self.end_job(job, Some(phased.as_ref()), stop).await;
+        }
         let names: Vec<String> = read_progress(&row)
             .0
             .phases
@@ -2076,7 +2455,10 @@ impl Engine {
                 return self.end_job(job, Some(phased.as_ref()), stop).await;
             }
             let running = name.clone();
-            job.amend(move |progress, _| {
+            let at = job.now();
+            let attempt = json!({"lifecycle_wait":{"retry_eligible_at":null,
+                "last_attempt_at":orch_types::Time::new(at),"observed_at":orch_types::Time::new(at)}});
+            job.amend_and_remember(Some(&attempt), move |progress, _| {
                 progress.phase.clone_from(&running);
                 for phase in &mut progress.phases {
                     if phase.name == running {
@@ -2096,7 +2478,7 @@ impl Engine {
             let mut attempts = 0;
             let result = loop {
                 let step = tokio::select! {
-                    done = crate::notifications::operation_scope(row.plan.get("notification_operation").and_then(Json::as_str).and_then(|id|id.parse().ok()),orch_db::queries::transaction_guard::request_scope(phase_scope(&row.kind), phased.run(job, &name))) => done,
+                    done = PHASE_ATTEMPT.scope(attempts,crate::notifications::operation_scope(row.plan.get("notification_operation").and_then(Json::as_str).and_then(|id|id.parse().ok()),orch_db::queries::transaction_guard::request_scope(phase_scope(&row.kind), phased.run(job, &name)))) => done,
                     () = job.gone() => Err(Stop::Lost),
                 };
                 match step {
@@ -2106,8 +2488,22 @@ impl Engine {
                             && !(failure.answered && phased.answers_are_final()) =>
                     {
                         attempts += 1;
-                        tracing::warn!(job = %job.id, phase = %name, message = %failure.message, "a phase failed on the system's side; it is asked again");
-                        tokio::time::sleep(self.inner.config.hosting.phase_retry_pause).await;
+                        let pause = self.inner.config.hosting.phase_retry_pause;
+                        let at = job.now();
+                        let eligible = chrono::Duration::from_std(pause)
+                            .ok()
+                            .and_then(|span| at.checked_add_signed(span))
+                            .ok_or_else(|| {
+                                EngineError::unreadable(
+                                    "the phase retry is outside the supported time range",
+                                )
+                            })?;
+                        job.remember(&json!({"lifecycle_wait":{"retry_eligible_at":orch_types::Time::new(eligible),
+                            "last_attempt_at":orch_types::Time::new(at),"reason_code":failure.code,
+                            "observed_at":orch_types::Time::new(at)}})).await?;
+                        if let Err(stop) = job.wait_for_retry().await {
+                            return self.end_job(job, Some(phased.as_ref()), stop).await;
+                        }
                     }
                     other => break other,
                 }
@@ -2282,6 +2678,9 @@ impl Engine {
         if failure.log.is_some() {
             log.clone_from(&failure.log);
         }
+        if to == state::FAILED {
+            keep_failure_log(&progress, &mut log, &failure);
+        }
         let error = json!({
             "code": failure.code,
             "message": failure.message,
@@ -2338,6 +2737,14 @@ impl Engine {
     }
 
     async fn after_job_inner(&self, row: &JobRow) {
+        if let Err(error) = self.release_command_pins(row.id).await {
+            tracing::warn!(job = %row.id, %error, "what the commands of a job held for it waits for the sweep");
+        }
+        if row.plan.get("workspace_file_bytes").and_then(Json::as_bool) == Some(true)
+            && let Err(error) = super::source::workspace_files::release(self, row.id).await
+        {
+            tracing::warn!(%error,job=%row.id,"completed workspace file bytes await release");
+        }
         self.after_volume_carry(row).await;
         self.after_mount_copies(row).await;
         if row.plan.get("recovery").is_some() {
@@ -2423,6 +2830,71 @@ impl Engine {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_lease_publication_keeps_renewing_when_native_work_holds_its_thread()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let world = crate::test_common::World::new().await;
+        let thread = world.thread("A native end with a live lease").await;
+        let (id, runner) = (new_id(), new_id());
+        let at = world.clock.now();
+        let progress = stored(&initial_progress(crate::jobs::background_end::PHASES), None);
+        let mut tx = world.pool.begin().await?;
+        rows::insert(
+            &mut tx,
+            &NewJob {
+                id,
+                kind: crate::jobs::background_end::KIND,
+                node_id: Some(thread),
+                environment_id: None,
+                provider_id: None,
+                plan: &json!({}),
+                progress: &progress,
+                created_by: Some(world.ada),
+            },
+            at,
+        )
+        .await?;
+        assert!(rows::claim(&mut tx, id, runner, at + chrono::Duration::hours(1), at).await?);
+        tx.commit().await?;
+        let job = Job::claimed(world.engine(), id, runner);
+        let mut native = world.pool.begin().await?;
+        orch_db::queries::threads::lock(&mut native, thread).await?;
+        assert!(
+            !job.publish_lease().await?,
+            "native work keeps the thread; publishing defers without waiting"
+        );
+        assert!(
+            rows::claim(
+                &mut *world.pool.acquire().await?,
+                id,
+                runner,
+                at + chrono::Duration::hours(2),
+                at
+            )
+            .await?,
+            "the publisher holds no job row behind that thread"
+        );
+        native.commit().await?;
+        assert!(
+            job.publish_lease().await?,
+            "the next publication uses the same ordinary job feeds"
+        );
+        let row = rows::job(&mut *world.pool.acquire().await?, id)
+            .await?
+            .ok_or("the retained job")?;
+        assert_eq!(
+            row.progress, progress,
+            "a lease observation is not a progress event"
+        );
+        assert_eq!(row.plan["runner"]["id"], json!(runner.to_string()));
+        let other = Job::claimed(world.engine(), id, new_id());
+        assert!(
+            !other.publish_lease().await?,
+            "a successor cannot publish another runner's claim"
+        );
+        Ok(())
+    }
+
     #[test]
     fn retained_creator_report_keeps_the_original_budget_but_never_a_changed_effect() {
         use crate::commands::RetainedCommand;
@@ -2433,6 +2905,7 @@ mod tests {
             machine,
             SerialKey::Environment(environment),
             &FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 job_id: job,
                 selection: Selection {
@@ -2440,6 +2913,7 @@ mod tests {
                     exclude: vec![],
                 },
                 work: Some(WorkReport {
+                    timeout_policy: None,
                     files_total: Some(2),
                     bytes_total: Some(32),
                     job_id: job,
@@ -2450,6 +2924,7 @@ mod tests {
         )
         .unwrap();
         let retained = RetainedCommand {
+            after: None,
             machine,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -2524,6 +2999,24 @@ mod tests {
             }
         );
         assert_eq!(schema_identity(&"x".repeat(64)), None);
+    }
+
+    #[test]
+    fn a_closed_native_source_ends_without_retrying_while_system_failures_remain_retryable() {
+        use crate::operation_scope::{BindingError, continuing::Error};
+        for error in [Error::Refused, Error::Binding(BindingError::Refused)] {
+            let Stop::Failed(failure) = Stop::from(EngineError::BeforeEffect(Box::new(error)))
+            else {
+                panic!("a refused source must end its job")
+            };
+            assert_eq!(failure.code, "access.denied");
+        }
+        let Stop::Failed(failure) = Stop::from(EngineError::BeforeEffect(Box::new(Error::Native(
+            EngineError::unreadable("temporarily unavailable"),
+        )))) else {
+            panic!("a system failure retains its retry classification")
+        };
+        assert_eq!(failure.code, INTERNAL);
     }
 
     #[test]

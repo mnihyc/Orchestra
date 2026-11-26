@@ -9,7 +9,7 @@ use orch_agent_contract::{
 };
 use orch_db::queries::{storage, thread_history, thread_history_cuts as cuts, threads};
 use orch_engine::commands::{Commands, CommandsError, Info, Outcome, Outgoing};
-use orch_link_contract::commands::{AgentReadSessionResult, RecordRef};
+use orch_link_contract::commands::{AgentReadSessionResult, Cmd, RecordRef};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::{Notify, Semaphore};
 
@@ -236,6 +236,24 @@ impl NativePeer {
 }
 
 impl Rig {
+    async fn assert_original_work(&self, actual: &Cmd, original: &Outgoing) {
+        let info = self
+            .world
+            .commands
+            .as_engine()
+            .status(original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            actual.work,
+            Cmd::work_budget(
+                orch_types::Time::new(info.issued_at),
+                original.deadline.unwrap()
+            )
+        );
+    }
+
     /// Both real wire shapes reach one declared peer. The wrapper retains the
     /// actual received body and copies only the requested native range; a new
     /// controller thread/segment is never mistaken for that native ordinal.
@@ -250,15 +268,12 @@ impl Rig {
     ) {
         let script = Arc::new(script);
         for kind in [CommandKind::SessionOpen, CommandKind::SessionOpenFenced] {
-            let (script, peer, ordered, refusals, machine) = (
+            let (script, peer, refusals) = (
                 script.clone(),
                 self.native.clone(),
-                self.world.ordered.clone(),
                 self.open_refusals.clone(),
-                self.world.machine_id,
             );
             self.world.machine.handler.on(kind, move |command| {
-                ordered.lock().unwrap().push((machine, command.clone()));
                 let open = match command {
                     Command::SessionOpen(open) => open,
                     Command::SessionOpenFenced(open) => &open.session,
@@ -363,6 +378,7 @@ impl Rig {
             });
         self.on_open(|open| {
             Ok(SessionOpenResult {
+                mcp: None,
                 native_session_ref: if matches!(open.mode, SessionMode::Resume | SessionMode::Adopt)
                 {
                     open.native_session_ref.clone().ok_or_else(|| {
@@ -503,7 +519,7 @@ impl Rig {
         assert_eq!(journal.cmd.id, saved.id);
         assert_eq!(journal.cmd.kind, CommandKind::SessionOpenFenced.as_str());
         assert!(journal.cmd.body == saved.body);
-        assert_eq!(Some(journal.cmd.deadline), saved.deadline);
+        self.assert_original_work(&journal.cmd, &saved).await;
         let body: orch_link_contract::continuations::SessionOpenFenced =
             serde_json::from_value(journal.cmd.body).unwrap();
         *body.session
@@ -722,7 +738,7 @@ async fn cancellation_after_real_native_success_retains_the_original_command_chi
         serde_json::from_value(entry.result().unwrap().outcome.clone().unwrap()).unwrap();
     assert_eq!(entry.cmd.id, saved.id);
     assert!(entry.cmd.body == saved.body);
-    assert_eq!(Some(entry.cmd.deadline), saved.deadline);
+    rig.assert_original_work(&entry.cmd, &saved).await;
     assert!(
         rig.job(job.id).await.plan.get("opened").is_none(),
         "pause is genuinely before prepared metadata publication"
@@ -1618,6 +1634,7 @@ async fn a_full_fork_of_a_side_contains_its_captured_parent_and_keeps_newer_side
         .await;
     rig.world.wait_turn(longer.turn_id, "running").await;
     let segment = rig.world.segment_of(side).await;
+    let opening = rig.world.opening_of(side).await;
     let stream = Stream::Session {
         thread_id: side,
         segment_id: segment,
@@ -1635,18 +1652,27 @@ async fn a_full_fork_of_a_side_contains_its_captured_parent_and_keeps_newer_side
     for reference in &references {
         rig.world
             .machine
-            .publish(&stream, &common::message_began(longer.turn_id, reference))
+            .publish_from(
+                Some(opening),
+                &stream,
+                &common::message_began(longer.turn_id, reference),
+            )
             .await;
     }
     for (reference, answer) in references.iter().zip(&answers) {
         rig.world
             .machine
-            .publish(&stream, &common::message_done(reference, answer))
+            .publish_from(
+                Some(opening),
+                &stream,
+                &common::message_done(reference, answer),
+            )
             .await;
     }
     rig.world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &common::turn_ended(longer.turn_id, TurnOutcome::Completed),
         )

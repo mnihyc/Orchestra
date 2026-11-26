@@ -18,7 +18,7 @@ use orch_link_contract::commands::{Cmd, CommandBody, EnvAttach, IndexMode, Seria
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_pki::enrollment::MachineIdentity;
 use orch_testkit::doubles::link::{BlobServer, Hub, MachineRecord, ShapedBlobs, TestPki};
-use orch_types::{Id, Json, Time, new_id};
+use orch_types::{Id, Json, new_id};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -90,7 +90,7 @@ impl Machine {
             loop {
                 let notice = tokio::select! { () = reports_stop.cancelled() => break, notice = notices.recv() => notice };
                 match notice {
-                    Some(Notice::Report(eph)) => {
+                    Some(Notice::Report { eph, .. }) => {
                         orch_api_core::realtime::ephemeral::forward_report(
                             &reports_app.db,
                             &Report {
@@ -152,8 +152,10 @@ impl Machine {
         let attach = Cmd::new(
             new_id(),
             &SerialKey::Environment(environment),
-            Time::new(app.clock.now() + chrono::Duration::minutes(5)),
+            std::time::Duration::from_millis(300_000),
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: Some(i64::from(generation)),
                 storage: None,
@@ -304,7 +306,7 @@ impl Machine {
         let cmd = Cmd::new(
             new_id(),
             &SerialKey::None,
-            Time::new(self.app.clock.now() + chrono::Duration::minutes(5)),
+            std::time::Duration::from_millis(300_000),
             body,
         )
         .unwrap();

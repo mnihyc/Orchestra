@@ -33,8 +33,13 @@ pub enum Notice {
     /// records it, stores the new cursor, and, if [`ResetNotice::resync`], has
     /// the machine's adapter report the session again.
     Reset(ResetNotice),
-    /// A measurement that is not kept, for whoever is watching.
-    Report(Eph),
+    /// A measurement from the session that sent it.
+    Report {
+        /// The authenticated originating session.
+        session_id: Id,
+        /// The transient report.
+        eph: Eph,
+    },
     /// The machine has a session.
     Online {
         /// The session.
@@ -66,7 +71,7 @@ impl Notice {
                 &notice.reason,
                 notice.resync,
             )),
-            Self::Report(eph) => serde_json::to_vec(eph),
+            Self::Report { eph, .. } => serde_json::to_vec(eph),
             Self::Online { session_id } | Self::Offline { session_id } => {
                 serde_json::to_vec(session_id)
             }
@@ -270,7 +275,7 @@ impl ControllerLink {
                 UpFrame::Eph(eph) => {
                     match state.receiver.on_eph(eph) {
                         Ok(eph) => {
-                            self.shared.send_notice(Notice::Report(eph));
+                            self.shared.send_notice(Notice::Report { session_id, eph });
                         }
                         Err(why) => {
                             tracing::warn!(machine = %self.shared.machine_id, why, "a report was not taken")
@@ -280,6 +285,10 @@ impl ControllerLink {
                 }
                 UpFrame::CmdAck(ack) => {
                     self.shared.issuer.on_cmd_ack(&ack);
+                    None
+                }
+                UpFrame::CmdSeen(seen) => {
+                    self.shared.issuer.on_cmd_seen(&seen);
                     None
                 }
                 UpFrame::CmdRes(result) => {
@@ -347,7 +356,7 @@ fn into_down(frame: orch_link_contract::frames::Frame) -> Result<DownFrame, ()> 
 mod observer_tests {
     use super::*;
     use orch_link_contract::commands::{Cmd, CmdCancel};
-    use orch_types::{Clock, ManualClock, Time, new_id};
+    use orch_types::{ManualClock, new_id};
 
     #[tokio::test]
     async fn actual_controller_and_command_issuer_share_their_exact_queue_observations() {
@@ -363,10 +372,17 @@ mod observer_tests {
             .processed();
         let id = new_id();
         let _ = controller.commands().issue(Cmd {
+            authority_until: None,
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
+            after: None,
+            deliver_by: None,
             id,
             kind: "machine.probe".into(),
             key: None,
-            deadline: Time::new(clock.now() + chrono::Duration::seconds(30)),
+            work: std::time::Duration::from_millis(30_000),
             body: serde_json::json!({}),
         });
         let first = out.down.recv().await.unwrap();

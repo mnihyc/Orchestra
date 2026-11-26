@@ -92,20 +92,30 @@ CREATE INDEX browser_sessions_open_idx ON browser_sessions USING btree (environm
 CREATE UNIQUE INDEX browser_sessions_profile_key ON browser_sessions USING btree (environment_id, lower(profile)) WHERE ((state <> 'closed'::text) AND (profile IS NOT NULL));
 
 CREATE TABLE commands (
+    session_offer jsonb,
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
     body jsonb NOT NULL,
     serial_key text,
+    content_transit boolean DEFAULT false NOT NULL,
+    after_command_id uuid,
+    start_adoption_until timestamp with time zone,
+    session_open_capture jsonb,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
+    work_started_at timestamp with time zone,
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
     deadline_at timestamp with time zone NOT NULL,
+    authority_until timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    tool_session jsonb,
+    actual_mcp jsonb,
     login_authority jsonb,
     authority_required boolean DEFAULT false NOT NULL,
     mcp_import_completion jsonb,
@@ -116,6 +126,17 @@ CREATE TABLE commands (
 CREATE INDEX commands_busy_detach_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'env.detach'::text) AND (state = 'failed'::text));
 
 CREATE INDEX commands_open_idx ON commands USING btree (machine_id) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
+CREATE INDEX commands_tool_answer_deadline_idx ON commands (deadline_at)
+    WHERE kind='orch.tool_result' AND state IN ('queued','sent');
+CREATE INDEX commands_prerequisite_wait_idx ON commands (after_command_id)
+    WHERE after_command_id IS NOT NULL AND state IN ('queued','sent','accepted');
+
+CREATE TABLE command_storage_gaps (
+    command_id uuid PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE,
+    sqlstate text NOT NULL,
+    recorded_at timestamp with time zone NOT NULL,
+    applied boolean NOT NULL DEFAULT false
+);
 CREATE INDEX commands_mcp_import_open_idx ON commands ((body->>'server_id'), id)
     WHERE kind='mcp.import' AND state IN ('queued','sent','accepted');
 
@@ -209,10 +230,13 @@ CREATE TABLE environments (
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     manifest_blob bytea,
     manifest_at timestamp with time zone,
+    manifest_source_facts jsonb,
     env_seq bigint DEFAULT 0 NOT NULL,
     unused_since timestamp with time zone,
     remove_at timestamp with time zone,
     attached_session timestamp with time zone,
+    attach_retry_at timestamp with time zone,
+    environment_preparation jsonb,
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -251,11 +275,14 @@ CREATE INDEX environment_mcp_membership_idx ON environments USING gin (((facts -
 
 CREATE INDEX environments_connected_idx ON environments USING btree (machine_id) WHERE ((placement = 'connected'::text) AND (deleted_at IS NULL));
 
+CREATE INDEX environments_attach_retry_idx ON environments USING btree (attach_retry_at, id) WHERE (placement = 'connected' AND status = 'failed' AND deleted_at IS NULL);
+
 CREATE INDEX environments_home_idx ON environments USING btree (home_node_id) WHERE (deleted_at IS NULL);
 
 CREATE INDEX environments_kept_idx ON environments USING btree (home_node_id, volumes_purge_at) WHERE (removal_phase = 'kept'::text);
 
 CREATE UNIQUE INDEX environments_owner_name_key ON environments USING btree (org_id, owner_id, lower(name)) WHERE (deleted_at IS NULL);
+CREATE INDEX environments_kept_name_trgm ON environments USING gin (name gin_trgm_ops) WHERE deleted_at IS NOT NULL AND purged_at IS NULL;
 
 CREATE INDEX environments_removal_due_idx ON environments USING btree (remove_at, id) WHERE ((deleted_at IS NULL) AND (remove_at IS NOT NULL));
 
@@ -292,6 +319,7 @@ ALTER TABLE snapshots ADD CONSTRAINT snapshots_environment_id_fkey FOREIGN KEY (
 CREATE TABLE hosts (
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
+    bundled_with_server boolean DEFAULT false NOT NULL,
     owner_id uuid,
     org_id uuid,
     home_id uuid,
@@ -303,9 +331,11 @@ CREATE TABLE hosts (
     drivers jsonb DEFAULT '{}'::jsonb NOT NULL,
     kept_images jsonb DEFAULT '{"epoch": 0, "images": []}'::jsonb NOT NULL,
     capacity jsonb DEFAULT '{}'::jsonb NOT NULL,
+    capacity_at timestamp with time zone,
     load jsonb DEFAULT '{}'::jsonb NOT NULL,
     load_at timestamp with time zone,
     storages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    mount_sizes jsonb DEFAULT '[]'::jsonb NOT NULL,
     schedulable boolean DEFAULT true NOT NULL,
     disabled boolean DEFAULT false NOT NULL,
     when_full text,
@@ -387,7 +417,82 @@ CREATE TABLE machines (
     CONSTRAINT machines_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id)
 );
 
-CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
+-- A machine cannot manufacture a person's execution decision through its reported policy.
+-- These factual receipts survive command cleanup and never grant an operation.
+CREATE TABLE machine_execution_confirmations (
+    id uuid PRIMARY KEY,
+    machine_id uuid NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+    subject jsonb NOT NULL,
+    confirmed_by uuid NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL
+);
+CREATE INDEX machine_execution_confirmations_machine_idx
+    ON machine_execution_confirmations(machine_id);
+
+-- The issuer's receipt bridges the interval before their browser can follow its new resource.
+CREATE INDEX enrollment_tokens_first_machine ON enrollment_tokens (machine_id)
+    WHERE machine_id IS NOT NULL AND again_machine_id IS NULL AND purpose IN ('machine','connected','host');
+
+CREATE FUNCTION orch_enrollment_connected() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify('orch_user', jsonb_build_object(
+        'users', jsonb_build_array(t.created_by),
+        'event', jsonb_build_object('what','enrollment','receipt',encode(t.token_hash,'hex'))
+    )::text)
+    FROM enrollment_tokens t
+    WHERE t.machine_id = NEW.id AND t.again_machine_id IS NULL AND t.used_at IS NOT NULL
+      AND t.purpose IN ('machine','connected','host');
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER enrollment_first_connection AFTER UPDATE OF online ON machines
+    FOR EACH ROW WHEN (NEW.online AND NOT OLD.online AND OLD.session_started_at IS NULL AND NEW.session_started_at IS NOT NULL)
+    EXECUTE FUNCTION orch_enrollment_connected();
+
+CREATE FUNCTION orch_machine_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  measurements constant text[] := ARRAY['hostname','os_version','cpus','memory_bytes','data_volume_bytes','rates','clock_offset_ms','data_directory'];
+  old_source_facts jsonb;
+  new_source_facts jsonb;
+BEGIN
+  -- An accepted role replacement may claim its revision before the native acknowledgement.
+  IF NEW.revision > OLD.revision
+     OR ROW(NEW.name,NEW.owner_id,NEW.home_id,NEW.home_overridden_at,NEW.org_id,
+            NEW.placement,NEW.host_id,NEW.status,NEW.deleted_at,NEW.lost_at,NEW.lost_by,
+            NULLIF(NEW.facts->'policy','null'::jsonb))
+        IS DISTINCT FROM
+        ROW(OLD.name,OLD.owner_id,OLD.home_id,OLD.home_overridden_at,OLD.org_id,
+            OLD.placement,OLD.host_id,OLD.status,OLD.deleted_at,OLD.lost_at,OLD.lost_by,
+            NULLIF(OLD.facts->'policy','null'::jsonb))
+     OR NOT (NEW.roles @> OLD.roles AND OLD.roles @> NEW.roles) THEN
+    NEW.revision := OLD.revision + 1;
+  ELSE
+    NEW.revision := OLD.revision;
+  END IF;
+  old_source_facts := CASE WHEN jsonb_typeof(OLD.facts)='object' THEN OLD.facts-measurements ELSE OLD.facts END;
+  new_source_facts := CASE WHEN jsonb_typeof(NEW.facts)='object' THEN NEW.facts-measurements ELSE NEW.facts END;
+  -- Gateway choice remains pinned; verified latency samples are observations of that choice.
+  IF jsonb_typeof(old_source_facts->'gateway')='object' THEN
+    old_source_facts := jsonb_set(old_source_facts,'{gateway}',
+      (old_source_facts->'gateway')-ARRAY['measured_at','measurements']);
+  END IF;
+  IF jsonb_typeof(new_source_facts->'gateway')='object' THEN
+    new_source_facts := jsonb_set(new_source_facts,'{gateway}',
+      (new_source_facts->'gateway')-ARRAY['measured_at','measurements']);
+  END IF;
+  -- Native commands pin the key while their short transaction decides and accepts its effect.
+  -- Identity, capabilities and policy upgrade against those pins. Inventory, probes and
+  -- heartbeats with an established attachment marker can still be reported.
+  IF (to_jsonb(NEW)-ARRAY['facts','updated_at','rate_up_bps','rate_down_bps','last_seen_at'])
+       IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['facts','updated_at','rate_up_bps','rate_down_bps','last_seen_at'])
+     OR old_source_facts IS DISTINCT FROM new_source_facts
+     OR (OLD.session_started_at IS NULL AND NEW.last_seen_at IS DISTINCT FROM OLD.last_seen_at) THEN
+    PERFORM id FROM machines WHERE id=OLD.id FOR UPDATE;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_machine_revision();
 
 CREATE TRIGGER agent_program_reports_write AFTER INSERT OR UPDATE OF facts, status, deleted_at ON machines FOR EACH ROW EXECUTE FUNCTION orch_project_program_reports();
 
@@ -546,6 +651,7 @@ CREATE TABLE mount_kept_data (
 CREATE INDEX mount_kept_data_mount_idx ON mount_kept_data USING btree (mount_id, machine_id);
 
 CREATE TABLE mount_locations (
+    membership_id uuid DEFAULT gen_random_uuid() NOT NULL UNIQUE,
     mount_id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
@@ -563,6 +669,9 @@ CREATE TABLE mount_locations (
     CONSTRAINT mount_locations_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
     CONSTRAINT mount_locations_mount_id_fkey FOREIGN KEY (mount_id) REFERENCES mounts(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER mount_location_membership BEFORE UPDATE ON mount_locations
+    FOR EACH ROW EXECUTE FUNCTION orch_mount_location_membership();
 
 CREATE TABLE mount_lost_locations (
     id uuid NOT NULL,
@@ -607,6 +716,8 @@ CREATE TABLE port_open_requests (
 CREATE UNIQUE INDEX port_open_requests_thread_idx ON port_open_requests USING btree (environment_id, thread_id, client_id) WHERE (thread_id IS NOT NULL);
 
 CREATE UNIQUE INDEX port_open_requests_user_idx ON port_open_requests USING btree (environment_id, user_id, client_id) WHERE (user_id IS NOT NULL);
+
+CREATE INDEX port_open_requests_opening_idx ON port_open_requests USING btree (opening_id, refused_until);
 
 CREATE TRIGGER port_open_requests_live AFTER INSERT OR DELETE OR UPDATE ON port_open_requests FOR EACH ROW EXECUTE FUNCTION machine_views_notify();
 
@@ -710,12 +821,22 @@ CREATE TABLE runtimes (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     lost_at timestamp with time zone,
     loss_missing boolean DEFAULT false NOT NULL,
+    native_incarnation uuid,
+    native_stop jsonb,
+    disabled_stop_command_id uuid REFERENCES commands(id) ON DELETE SET NULL,
+    native_control_revision bigint DEFAULT 0 NOT NULL,
+    native_control_intent uuid,
     resources_used jsonb,
     CONSTRAINT runtimes_check CHECK (((kind = 'provider'::text) = (provider_id IS NOT NULL))),
     CONSTRAINT runtimes_check1 CHECK (((kind = 'environment'::text) = (environment_id IS NOT NULL))),
     CONSTRAINT runtimes_kind_check CHECK ((kind = ANY (ARRAY['provider'::text, 'environment'::text]))),
     CONSTRAINT runtimes_network_required_check CHECK ((network_required = ANY (ARRAY['open'::text, 'restricted'::text]))),
     CONSTRAINT runtimes_state_check CHECK ((state = ANY (ARRAY['creating'::text, 'running'::text, 'stopping'::text, 'stopped'::text, 'failed'::text, 'retired'::text, 'removed'::text]))),
+    CONSTRAINT runtimes_native_stop_state_check CHECK (
+        native_stop IS NULL OR state = 'stopping' OR
+        (state = 'stopped' AND state_detail IS NOT DISTINCT FROM 'provider_forced_stop' AND native_stop->'forced' = 'true'::jsonb) IS TRUE OR (native_stop->'ready' = 'false'::jsonb) IS TRUE
+    ),
+    CONSTRAINT runtimes_native_control_revision_check CHECK (native_control_revision >= 0),
     CONSTRAINT runtimes_pkey PRIMARY KEY (id),
     CONSTRAINT runtimes_unit_name_key UNIQUE (unit_name),
     CONSTRAINT runtimes_environment_id_fkey FOREIGN KEY (environment_id) REFERENCES environments(id),
@@ -726,13 +847,306 @@ CREATE TABLE runtimes (
     CONSTRAINT runtimes_template_id_fkey FOREIGN KEY (template_id) REFERENCES env_templates(id)
 );
 
+CREATE INDEX runtimes_disabled_stop_idx ON runtimes(disabled_stop_command_id)
+    WHERE disabled_stop_command_id IS NOT NULL;
+
+-- Preparation retains its original without inventing a physical Stop. A completed
+-- or failed Stop cannot become the pending Stop of a later start.
+CREATE FUNCTION public.orch_runtime_stop_pending() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.state = 'stopped' AND NEW.state_detail = 'provider_forced_stop'
+     AND NEW.native_stop->'forced' = 'true'::jsonb THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.state <> 'stopping' AND NOT COALESCE(
+      NEW.native_stop->'ready' = 'false'::jsonb AND (
+        NEW.state IN ('creating', 'running') OR
+        (NEW.state IN ('stopped', 'failed') AND NEW.state = OLD.state)
+      ), false
+  ) THEN
+    NEW.native_stop := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER runtimes_pending_stop BEFORE UPDATE OF state ON runtimes
+    FOR EACH ROW EXECUTE FUNCTION public.orch_runtime_stop_pending();
+
+-- A later control or replacement no longer belongs to the original disable receipt.
+CREATE FUNCTION public.orch_forget_disabled_stop() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.disabled_stop_command_id := NULL;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER runtimes_forget_disabled_stop
+    BEFORE UPDATE OF state, host_id, native_incarnation, native_control_intent ON runtimes
+    FOR EACH ROW WHEN (OLD.disabled_stop_command_id IS NOT NULL AND
+      (NEW.state <> 'stopping' OR NEW.host_id IS DISTINCT FROM OLD.host_id
+       OR NEW.native_incarnation IS DISTINCT FROM OLD.native_incarnation
+       OR NEW.native_control_intent IS DISTINCT FROM OLD.native_control_intent))
+    EXECUTE FUNCTION public.orch_forget_disabled_stop();
+
+-- Native source identities are factual and never confer control of a runtime.
+CREATE TABLE runtime_incarnations (
+    id uuid PRIMARY KEY,
+    runtime_id uuid NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
+    host_id uuid NOT NULL REFERENCES hosts(id),
+    closed boolean DEFAULT false NOT NULL,
+    CONSTRAINT runtime_incarnations_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
+);
+
+CREATE INDEX runtime_incarnations_runtime_idx ON runtime_incarnations(runtime_id);
+
+ALTER TABLE runtimes ADD CONSTRAINT runtimes_native_incarnation_fkey
+    FOREIGN KEY (native_incarnation) REFERENCES runtime_incarnations(id) ON DELETE SET NULL;
+
+-- Original operation ownership and native ordering facts confer no permission.
+CREATE TABLE runtime_control_intents (
+    id uuid PRIMARY KEY,
+    runtime_id uuid NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
+    host_id uuid NOT NULL CHECK (host_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    machine_id uuid NOT NULL CHECK (machine_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    owner_job_id uuid CHECK (owner_job_id IS NULL OR owner_job_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    previous_intent uuid REFERENCES runtime_control_intents(id),
+    pending_incarnations uuid[] NOT NULL DEFAULT '{}'::uuid[]
+        CHECK (array_position(pending_incarnations, NULL) IS NULL
+            AND array_position(pending_incarnations, '00000000-0000-0000-0000-000000000000'::uuid) IS NULL),
+    source_incarnation uuid REFERENCES runtime_incarnations(id),
+    accepted_revision bigint NOT NULL CHECK (accepted_revision > 0),
+    CONSTRAINT runtime_control_intents_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    UNIQUE (runtime_id, accepted_revision)
+);
+
+CREATE INDEX runtime_control_intents_runtime_idx ON runtime_control_intents(runtime_id);
+CREATE UNIQUE INDEX runtime_control_intents_job_runtime_idx ON runtime_control_intents(owner_job_id,runtime_id)
+    WHERE owner_job_id IS NOT NULL;
+
+ALTER TABLE runtimes ADD CONSTRAINT runtimes_native_control_intent_fkey
+    FOREIGN KEY (native_control_intent) REFERENCES runtime_control_intents(id) ON DELETE SET NULL;
+
+CREATE TABLE runtime_control_phases (
+    id uuid PRIMARY KEY,
+    intent_id uuid NOT NULL REFERENCES runtime_control_intents(id) ON DELETE CASCADE,
+    revision bigint NOT NULL CHECK (revision > 0),
+    operands jsonb NOT NULL CHECK (jsonb_typeof(operands) = 'object'),
+    outcome jsonb CHECK (outcome IS NULL OR jsonb_typeof(outcome) = 'object'),
+    CONSTRAINT runtime_control_phases_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    UNIQUE (intent_id, revision)
+);
+
+CREATE INDEX runtime_control_phases_opening_idx ON runtime_control_phases((operands->>'opening'))
+    WHERE operands->>'kind' IN ('node.runtime.start','node.runtime.create');
+
+-- The registration is factual: changing a home or profile cannot inherit an old Stop.
+CREATE FUNCTION orch_runtime_registration(selected_runtime uuid) RETURNS jsonb
+    LANGUAGE sql STABLE AS $$
+    SELECT jsonb_build_object('runtime_generation',r.generation,'runtime_machine',r.machine_id,'resource',
+      CASE r.kind WHEN 'provider' THEN jsonb_build_object(
+        'kind','provider','id',p.id,'owner',p.owner_id,'home',p.home_id,'org',p.org_id,
+        'machine',p.machine_id,'profile',p.agent_id,'harness',p.harness_kind,'provider_kind',p.kind)
+      ELSE jsonb_build_object(
+        'kind','environment','id',e.id,'owner',e.owner_id,'home',e.home_node_id,'org',e.org_id,
+        'machine',e.machine_id,'placement',e.placement,'environment_generation',e.generation)
+      END)
+    FROM runtimes r LEFT JOIN providers p ON p.id=r.provider_id
+    LEFT JOIN environments e ON e.id=r.environment_id
+    WHERE r.id=selected_runtime AND (
+      (r.kind='provider' AND p.id IS NOT NULL AND p.deleted_at IS NULL) OR
+      (r.kind='environment' AND e.id IS NOT NULL AND e.deleted_at IS NULL));
+$$;
+
+CREATE FUNCTION orch_runtime_registration_matches(original jsonb, selected_runtime uuid, selected_control uuid)
+    RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+DECLARE
+  current_registration jsonb;
+  selected_resource jsonb;
+  fields text[];
+  field_name text;
+BEGIN
+  IF jsonb_typeof(original) IS DISTINCT FROM 'object'
+     OR NOT original ?& ARRAY['runtime_generation','runtime_machine','resource']
+     OR original - ARRAY['runtime_generation','runtime_machine','resource'] <> '{}'::jsonb
+     OR jsonb_typeof(original->'runtime_generation') IS DISTINCT FROM 'number'
+     OR jsonb_typeof(original->'resource') IS DISTINCT FROM 'object' THEN
+    RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+      MESSAGE='the original Stop registration is not valid';
+  END IF;
+  PERFORM (original->>'runtime_generation')::integer;
+  IF jsonb_typeof(original->'runtime_machine') NOT IN ('null','string') THEN
+    RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+      MESSAGE='the original Stop registration has an invalid runtime connector';
+  END IF;
+  IF original->>'runtime_machine' IS NOT NULL THEN
+    PERFORM (original->>'runtime_machine')::uuid;
+  END IF;
+  selected_resource := original->'resource';
+  CASE selected_resource->>'kind'
+    WHEN 'provider' THEN fields := ARRAY['kind','id','owner','home','org','machine','profile','harness','provider_kind'];
+    WHEN 'environment' THEN fields := ARRAY['kind','id','owner','home','org','machine','placement','environment_generation'];
+    ELSE RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+      MESSAGE='the original Stop registration has no resource kind';
+  END CASE;
+  IF NOT selected_resource ?& fields OR selected_resource - fields <> '{}'::jsonb THEN
+    RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+      MESSAGE='the original Stop registration is incomplete';
+  END IF;
+  FOREACH field_name IN ARRAY ARRAY['id','owner','home','org'] LOOP
+    IF jsonb_typeof(selected_resource->field_name) IS DISTINCT FROM 'string' THEN
+      RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+        MESSAGE='the original Stop registration has no resource identity';
+    END IF;
+    PERFORM (selected_resource->>field_name)::uuid;
+  END LOOP;
+  IF jsonb_typeof(selected_resource->'machine') NOT IN ('null','string') THEN
+    RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+      MESSAGE='the original Stop registration has an invalid machine';
+  END IF;
+  IF selected_resource->>'machine' IS NOT NULL THEN
+    PERFORM (selected_resource->>'machine')::uuid;
+  END IF;
+  IF selected_resource->>'kind'='provider' THEN
+    IF jsonb_typeof(selected_resource->'profile') NOT IN ('null','string')
+       OR jsonb_typeof(selected_resource->'harness') NOT IN ('null','string')
+       OR jsonb_typeof(selected_resource->'provider_kind') IS DISTINCT FROM 'string' THEN
+      RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+        MESSAGE='the original Stop registration has an invalid profile';
+    END IF;
+    IF selected_resource->>'profile' IS NOT NULL THEN
+      PERFORM (selected_resource->>'profile')::uuid;
+    END IF;
+  ELSE
+    IF jsonb_typeof(selected_resource->'placement') IS DISTINCT FROM 'string'
+       OR jsonb_typeof(selected_resource->'environment_generation') IS DISTINCT FROM 'number' THEN
+      RAISE check_violation USING CONSTRAINT='runtime_stop_registration',
+        MESSAGE='the original Stop registration has an invalid placement';
+    END IF;
+    PERFORM (selected_resource->>'environment_generation')::integer;
+  END IF;
+  current_registration := orch_runtime_registration(selected_runtime);
+  IF current_registration IS NULL THEN RETURN false; END IF;
+  IF original=current_registration THEN RETURN true; END IF;
+  IF ((original #- '{resource,machine}') - 'runtime_machine')
+       <> ((current_registration #- '{resource,machine}') - 'runtime_machine') THEN
+    RETURN false;
+  END IF;
+  IF original->'runtime_machine' IS DISTINCT FROM current_registration->'runtime_machine' THEN
+    IF current_registration->'runtime_machine' = 'null'::jsonb
+       OR (current_registration #> '{resource,machine}' IS DISTINCT FROM original #> '{resource,machine}'
+           AND current_registration #> '{resource,machine}' IS DISTINCT FROM current_registration->'runtime_machine') THEN
+      RETURN false;
+    END IF;
+    RETURN EXISTS(SELECT 1 FROM runtime_control_intents i JOIN runtimes r ON r.id=i.runtime_id
+      JOIN machines m ON m.id=r.machine_id AND m.runtime_id=r.id
+      WHERE i.id=selected_control AND r.id=selected_runtime AND cardinality(i.pending_incarnations)>0
+        AND m.id=(current_registration->>'runtime_machine')::uuid);
+  END IF;
+  IF current_registration #> '{resource,machine}' = 'null'::jsonb THEN
+    -- A forced Stop detaches its own provider connector before the host answers.
+    IF EXISTS (SELECT 1 FROM runtimes r WHERE r.id=selected_runtime AND r.kind='provider'
+         AND r.state='stopped' AND r.state_detail='provider_forced_stop'
+         AND r.native_control_intent=selected_control AND r.native_stop->'forced'='true'::jsonb
+         AND r.native_stop->'registration'=original AND r.native_stop #>> '{control,id}'=selected_control::text)
+    THEN RETURN true; END IF;
+    RETURN EXISTS(SELECT 1 FROM runtime_control_intents i JOIN runtime_incarnations n
+      ON n.id=i.source_incarnation AND n.runtime_id=i.runtime_id AND n.closed
+      WHERE i.id=selected_control AND i.runtime_id=selected_runtime);
+  END IF;
+  RETURN EXISTS(SELECT 1 FROM runtime_control_intents i JOIN runtimes r ON r.id=i.runtime_id
+    JOIN machines m ON m.id=r.machine_id AND m.runtime_id=r.id
+    WHERE i.id=selected_control AND r.id=selected_runtime AND cardinality(i.pending_incarnations)>0
+      AND m.id=(current_registration #>> '{resource,machine}')::uuid);
+END $$;
+
+-- This is an intrinsic serving fact, not an access rule or a credential continuation.
+CREATE FUNCTION orch_runtime_stop_withdraws(selected_runtime uuid, marker jsonb)
+    RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+DECLARE
+  original_control record;
+  current_unit record;
+  canonical jsonb;
+BEGIN
+  IF marker IS NULL THEN RETURN false; END IF;
+  IF jsonb_typeof(marker) IS DISTINCT FROM 'object'
+     OR marker #>> '{control,id}' IS NULL OR marker->>'revision' IS NULL
+     OR marker->'registration' IS NULL THEN
+    RAISE check_violation USING CONSTRAINT='runtime_native_stop',
+      MESSAGE='the original Stop has no complete serving target';
+  END IF;
+  SELECT id,runtime_id,host_id,machine_id,source_incarnation,pending_incarnations,
+         previous_intent,accepted_revision INTO original_control
+    FROM runtime_control_intents WHERE id=(marker #>> '{control,id}')::uuid;
+  IF NOT FOUND THEN
+    RAISE check_violation USING CONSTRAINT='runtime_original_control',
+      MESSAGE='the original Stop control is missing';
+  END IF;
+  canonical := jsonb_build_object('id',original_control.id,'runtime',original_control.runtime_id,
+    'host',original_control.host_id,'machine',original_control.machine_id,
+    'source',jsonb_build_object('incarnation',original_control.source_incarnation),
+    'pending',original_control.pending_incarnations,'previous',original_control.previous_intent,
+    'accepted_revision',original_control.accepted_revision);
+  IF marker->'control' IS DISTINCT FROM canonical OR original_control.runtime_id<>selected_runtime THEN
+    RAISE check_violation USING CONSTRAINT='runtime_original_control',
+      MESSAGE='the original Stop control changed';
+  END IF;
+  SELECT r.native_control_intent,r.native_control_revision,r.native_incarnation,r.host_id,
+         h.machine_id INTO current_unit FROM runtimes r JOIN hosts h ON h.id=r.host_id
+    WHERE r.id=selected_runtime;
+  IF NOT FOUND THEN RETURN false; END IF;
+  IF current_unit.native_control_intent IS DISTINCT FROM original_control.id
+     OR current_unit.host_id<>original_control.host_id
+     OR current_unit.machine_id<>original_control.machine_id
+     OR current_unit.native_control_revision<>(marker->>'revision')::bigint THEN
+    RETURN false;
+  END IF;
+  IF current_unit.native_incarnation IS DISTINCT FROM original_control.source_incarnation
+     AND NOT COALESCE(current_unit.native_incarnation=ANY(original_control.pending_incarnations),false) THEN
+    RETURN false;
+  END IF;
+  RETURN orch_runtime_registration_matches(marker->'registration',selected_runtime,original_control.id);
+END $$;
+
+CREATE INDEX runtimes_withdrawal_provider_idx ON runtimes(provider_id)
+    WHERE native_stop IS NOT NULL AND kind='provider' AND successor_of IS NULL
+      AND state NOT IN ('retired','removed');
+CREATE INDEX runtimes_withdrawal_environment_idx ON runtimes(environment_id)
+    WHERE native_stop IS NOT NULL AND kind='environment' AND successor_of IS NULL
+      AND state NOT IN ('retired','removed');
+
+CREATE VIEW runtime_withdrawals AS
+    SELECT r.id AS runtime_id,r.provider_id,NULL::uuid AS environment_id
+    FROM runtimes r WHERE r.native_stop IS NOT NULL AND r.kind='provider' AND r.successor_of IS NULL
+      AND r.state NOT IN ('retired','removed') AND orch_runtime_stop_withdraws(r.id,r.native_stop)
+    UNION ALL
+    SELECT r.id,NULL::uuid,r.environment_id
+    FROM runtimes r WHERE r.native_stop IS NOT NULL AND r.kind='environment' AND r.successor_of IS NULL
+      AND r.state NOT IN ('retired','removed') AND orch_runtime_stop_withdraws(r.id,r.native_stop);
+
 CREATE INDEX runtimes_custody_waiting_idx ON runtimes USING btree (host_id) INCLUDE (state, remove_at) WHERE ((lost_at IS NULL) AND (state <> 'removed'::text));
+
+-- Applied resource inputs outlive transient command and job history, while their unit is retained.
+CREATE TABLE runtime_resource_inputs (
+    runtime_id uuid PRIMARY KEY REFERENCES runtimes(id) ON DELETE CASCADE,
+    template_fingerprint text,
+    mount_fingerprints jsonb,
+    mount_command_at timestamp with time zone NOT NULL,
+    mount_command_id uuid NOT NULL,
+    recorded_at timestamp with time zone NOT NULL
+);
+
+CREATE INDEX runtime_resource_inputs_mounts_idx ON runtime_resource_inputs USING gin (mount_fingerprints);
 
 CREATE UNIQUE INDEX runtimes_env_key ON runtimes USING btree (environment_id) WHERE ((kind = 'environment'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
 
 CREATE INDEX runtimes_mount_host_idx ON runtimes USING btree (host_id, environment_id, machine_id) WHERE ((environment_id IS NOT NULL) AND (successor_of IS NULL) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])));
 
 CREATE UNIQUE INDEX runtimes_provider_key ON runtimes USING btree (provider_id) WHERE ((kind = 'provider'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
+
+ALTER TABLE providers ADD CONSTRAINT providers_connection_environment_fk FOREIGN KEY (connection_environment_id) REFERENCES environments(id);
+CREATE INDEX providers_connection_environment_idx ON providers(connection_environment_id) WHERE connection_environment_id IS NOT NULL AND deleted_at IS NULL;
 
 CREATE INDEX runtimes_resource_facts_idx ON runtimes USING gin (resources_used jsonb_path_ops);
 
@@ -778,7 +1192,7 @@ CREATE TABLE resource_tags (
     resource_id uuid NOT NULL,
     tag_id uuid NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (resource_kind,resource_id,tag_id),
-    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill'))
+    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool'))
 );
 CREATE INDEX resource_tags_tag_idx ON resource_tags(tag_id,resource_kind,resource_id);
 
@@ -797,3 +1211,76 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- Native openings are ordered independently from wall clocks and logical segment numbers.
+CREATE SEQUENCE native_session_openings AS bigint;
+
+-- One accepted writer owns a mount destination until publication or joined compensation.
+CREATE TABLE mount_copy_claims (
+    mount_id uuid NOT NULL REFERENCES mounts(id),
+    machine_id uuid NOT NULL REFERENCES machines(id),
+    job_id uuid NOT NULL REFERENCES jobs(id),
+    decision jsonb NOT NULL,
+    PRIMARY KEY(mount_id,machine_id)
+);
+CREATE INDEX mount_copy_claims_job ON mount_copy_claims(job_id,mount_id,machine_id);
+
+-- A new use and deletion of its definition share the mount row. A waiting deletion
+-- must review the new place, and a waiting setting write cannot restore a deleted use.
+CREATE FUNCTION orch_register_mount_uses() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    previous_map jsonb;
+    current_map jsonb;
+    mount_key uuid;
+BEGIN
+    IF TG_TABLE_NAME = 'settings' THEN
+        current_map := NEW.value;
+        IF TG_OP = 'UPDATE' AND OLD.key = 'env.mounts' THEN previous_map := OLD.value; END IF;
+    ELSE
+        current_map := NEW.config->'env.mounts';
+        IF TG_OP = 'UPDATE' THEN previous_map := OLD.config->'env.mounts'; END IF;
+    END IF;
+    IF jsonb_typeof(current_map) IS DISTINCT FROM 'object' OR current_map IS NOT DISTINCT FROM previous_map THEN
+        RETURN NEW;
+    END IF;
+    FOR mount_key IN
+        SELECT CASE WHEN pg_input_is_valid(key,'uuid') THEN key::uuid END
+        FROM jsonb_each(current_map)
+        WHERE value IN ('true'::jsonb,'"read_only"'::jsonb,'"private"'::jsonb)
+          AND COALESCE(previous_map->key,'null'::jsonb) NOT IN ('true'::jsonb,'"read_only"'::jsonb,'"private"'::jsonb)
+        ORDER BY 1
+    LOOP
+        -- Writing a new row version makes a concurrent repeatable-read reviewer retry.
+        -- Enabling a place leaves the definition's editing revision unchanged.
+        UPDATE mounts SET revision=revision WHERE id=mount_key AND deleted_at IS NULL;
+        IF NOT FOUND AND EXISTS (SELECT 1 FROM mounts WHERE id=mount_key AND deleted_at IS NOT NULL) THEN
+            RAISE EXCEPTION 'the mount has been deleted'
+                USING ERRCODE='23514', TABLE=TG_TABLE_NAME, CONSTRAINT='mount_use_requires_live_mount';
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER mount_use_at_place AFTER INSERT OR UPDATE OF key,value ON settings
+    FOR EACH ROW WHEN (NEW.key='env.mounts') EXECUTE FUNCTION orch_register_mount_uses();
+CREATE TRIGGER mount_use_in_environment AFTER INSERT OR UPDATE OF config ON environments
+    FOR EACH ROW WHEN (NEW.config ? 'env.mounts') EXECUTE FUNCTION orch_register_mount_uses();
+
+CREATE INDEX browser_sessions_live_page_idx ON browser_sessions (environment_id,id DESC) WHERE state<>'closed';
+CREATE INDEX browser_sessions_closed_page_idx ON browser_sessions (environment_id,id DESC) WHERE state='closed';
+CREATE INDEX display_sessions_live_page_idx ON display_sessions (environment_id,id DESC) WHERE state<>'closed';
+CREATE INDEX display_sessions_closed_page_idx ON display_sessions (environment_id,id DESC) WHERE state='closed';
+-- One native source transfer per current environment, independent of browser upload sessions.
+CREATE TABLE environment_file_transfers (
+    environment_id uuid PRIMARY KEY REFERENCES environments(id) ON DELETE CASCADE,
+    machine_id uuid NOT NULL,
+    generation bigint NOT NULL,
+    hash bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('transferring', 'interrupted', 'expired')),
+    observed_at timestamp with time zone NOT NULL,
+    last_piece_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    idle_retention_secs bigint,
+    retention_default boolean
+);
+CREATE INDEX environment_file_transfers_content_idx ON environment_file_transfers(machine_id,hash);

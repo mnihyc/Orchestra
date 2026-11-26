@@ -85,6 +85,9 @@ async fn setup(world: &World) -> (Id, Caller, HttpOrigin, FileMkdirInput, Outgoi
         .unwrap();
     let input = FileMkdirInput::new(&env, world.machine_id, None, "native-created".into());
     let outgoing = Outgoing {
+        content_transit: false,
+        native_target: None,
+        after: None,
         id: new_id(),
         machine: world.machine_id,
         key: input.serial(),
@@ -92,6 +95,8 @@ async fn setup(world: &World) -> (Id, Caller, HttpOrigin, FileMkdirInput, Outgoi
         body: json!(input.command()),
         deadline: Some(Time::new(world.clock.now() + chrono::Duration::minutes(2))),
         authority: None,
+        input_facts: None,
+        session_offer: None,
     };
     tx.commit().await.unwrap();
     (token, caller, http, input, outgoing)
@@ -108,6 +113,8 @@ async fn check(
         .current_issue_callers(
             &mut tx,
             &NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

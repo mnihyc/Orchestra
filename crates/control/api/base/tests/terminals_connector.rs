@@ -61,7 +61,7 @@ use orch_pki::certificates::ServiceName;
 use orch_pki::enrollment::{MemoryLedger, TokenGrant, TokenPurpose, issue_token};
 use orch_pki::verification::{TlsIdentity, pinned_server_config, plain_server_config};
 use orch_testkit::doubles::link::{Hub, MachineRecord, TestPki};
-use orch_types::{Clock, Id, SystemClock, new_id};
+use orch_types::{Clock, Id, SystemClock, Time, new_id};
 use places::{admin, make_org};
 use resources::name_person;
 use serde_json::json;
@@ -404,7 +404,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -518,7 +518,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -559,10 +559,17 @@ impl Commands for LinkCommands {
             check().map_err(CommandsError::BeforeEffect)?;
         }
         let handle = link.commands().issue(Cmd {
+            authority_until: None,
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
+            after: command.after,
+            deliver_by: Cmd::delivery_deadline(command.kind.as_str(), deadline),
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline,
+            work: Cmd::work_budget(Time::new(now), deadline),
             body: command.body,
         });
         lock(&self.sent).insert(command.id, Sent { handle, at: now });
@@ -573,6 +580,8 @@ impl Commands for LinkCommands {
         Ok(lock(&self.sent).get(&id).map(|sent| {
             let progress = sent.handle.progress();
             Info {
+                work_started_at: None,
+                completed_at: None,
                 stage: stage_of(&progress),
                 issued_at: sent.at,
                 outcome: outcome_of(&progress),
@@ -646,6 +655,7 @@ impl Plant {
         let link = Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
             .expect("a link without gateways can be made");
         let app: App = Arc::new(AppState {
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             builtin_sources: old.builtin_sources.clone(),
             db: db.clone(),
@@ -820,6 +830,8 @@ impl Plant {
     /// Attaches the environment to the connector, as the step that does so in the system does.
     async fn attach_environment(&self) {
         let body = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

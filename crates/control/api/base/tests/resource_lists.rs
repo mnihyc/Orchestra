@@ -487,7 +487,7 @@ async fn the_drivers_are_the_ones_the_hosts_report_counted_by_host_and_described
 
 fn api_body(name: &str, home: Id) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: name.to_owned(),
         home_id: home,
         access: Some(NewResourceAccess::OnlyMe),
@@ -573,6 +573,7 @@ async fn the_settings_of_a_provider_are_what_its_home_resolves_with_its_own_valu
         .call(ProviderUpdate, &[&provider])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,

@@ -1,5 +1,6 @@
 /** Primary selection and connector measurements never become a browser-selected route. */
 import { screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it } from 'vitest';
 import { MachineGatewayCard } from '@/features/gateways/MachineGateway';
 import { i18n } from '@/i18n';
@@ -7,6 +8,14 @@ import { show } from '../support';
 import { catalogue, connector, look, modes, restore } from './fixtures';
 
 afterEach(restore);
+it('finds a gateway beyond the first measurements page without expanding the whole catalogue',async()=>{
+  const gateways=Array.from({length:1000},(_,index)=>({...catalogue.gateways[0]!,id:`gateway-${index}`,label:`Gateway ${index}`,region:'Region'}));
+  const user=userEvent.setup();
+  show(<MachineGatewayCard status={connector} gateways={gateways}/>);
+  expect(screen.queryByText('Gateway 999',{exact:true})).not.toBeInTheDocument();
+  await user.type(screen.getByRole('searchbox',{name:i18n.t('regionalGateways.findGateway')}),'Gateway 999');
+  expect(await screen.findByText('Gateway 999',{exact:true})).toBeVisible();
+});
 it.each(modes)('shows reported Automatic latencies in $locale/$theme at $width', async (mode) => {
   await look(mode);
   show(<MachineGatewayCard status={connector} gateways={catalogue.gateways} />);
