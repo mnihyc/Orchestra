@@ -78,6 +78,14 @@ impl Engine {
             )
             .await?
             {
+                let cancellation =
+                    serde_json::to_value(orch_api_contract::threads::InputCancellation {
+                        cause: orch_api_contract::threads::InputCancellationCause::AccessChanged,
+                        at,
+                        by: None,
+                    })?;
+                orch_db::queries::threads::record_input_cancellation(unit.conn, id, &cancellation)
+                    .await?;
                 result.inputs += 1;
                 unit.wake(thread);
             }
