@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** What one person holds here, and through what.
  *
  * It is how "why can Chen not open a terminal?" is answered without reading rows: pick a person and the
@@ -15,7 +16,6 @@ import { type AccessTarget, effectiveQuery } from '@/api/access';
 import type { AccessThrough, EffectiveAccess } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
-import { Combobox } from '@/ui/Combobox';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -103,13 +103,13 @@ export function ViewAs({ target, open, onClose }: { target: AccessTarget; open: 
       footer={<Button onClick={onClose}>{t('common.close')}</Button>}
     >
       <div className="flex flex-col gap-4 py-2">
-        <Combobox
+        <CandidatePicker candidates={candidates}
           label={t('access.viewAs.person')}
           placeholder={t('access.viewAs.placeholder')}
           query={query}
           displayValue={selectedUser?.id === chosen ? selectedUser.display_name : undefined}
           onQueryChange={(next) => { setQuery(next); setChosen(null); }}
-          minChars={2}
+          minChars={0}
           loading={candidates.loading}
           empty={t('access.candidates.none')}
           groups={candidates.groups}

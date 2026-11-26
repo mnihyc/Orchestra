@@ -62,6 +62,7 @@ enum Who {
 
 #[derive(Clone)]
 struct Active {
+    machine_reach: bool,
     app: crate::state::App,
     who: Who,
     environment: Id,
@@ -427,6 +428,7 @@ impl PortRuntime {
         }
         let now = Time::new(usage.ctx.app.clock.now());
         let mut credential_deadline = None;
+        let mut machine_reach = false;
         let (tx, env, caller, revision, audience) = if usage.by_link {
             let mut tx = usage.ctx.app.db.begin().await?;
             let env = crate::routes::ports::environment(&mut tx, usage.environment).await?;
@@ -516,10 +518,17 @@ impl PortRuntime {
                     "the original port credential expired",
                 ));
             }
+            machine_reach = usage.opening.is_none()
+                && usage.transport == PortTransport::Tcp
+                && orch_engine::ports::named_listeners(&mut tx, &principal, &env)
+                    .await
+                    .map_err(ApiError::internal)?
+                    .contains(&usage.port);
             credential_deadline = Some((principal.caller().clone(), deadline));
             (tx, env, PortCaller::Person { user }, revision, audience)
         };
         let claims = orch_link_contract::ports::PortTicketClaims {
+            machine_reach,
             environment_id: env.id,
             generation: usage.generation,
             port: usage.port,
@@ -571,6 +580,7 @@ impl PortRuntime {
                 )
             })?;
         let active = Active {
+            machine_reach,
             app: usage.ctx.app.clone(),
             who: if usage.by_link {
                 Who::Link
@@ -688,6 +698,17 @@ impl PortRuntime {
                 active.opening,
             )
             .await?;
+            if active.machine_reach
+                && !orch_engine::ports::named_listeners(&mut tx, &principal, &env)
+                    .await
+                    .map_err(ApiError::internal)?
+                    .contains(&active.port)
+            {
+                return Err(ApiError::new(
+                    ErrorCode::PortsNotAllowed,
+                    "machine listener access has ended",
+                ));
+            }
             tx.commit().await.map_err(orch_db::DbError::from)?;
             if !ticket_origin::deadline_allows(
                 principal.caller(),
@@ -833,6 +854,7 @@ impl PortRuntime {
         opening: Option<Id>,
         caller: PortCaller,
         origin: Option<TicketOrigin>,
+        machine_reach: bool,
         revision: i64,
         outside: SocketAddr,
         id: Id,
@@ -849,6 +871,7 @@ impl PortRuntime {
             None
         };
         let claims = orch_link_contract::ports::PortTicketClaims {
+            machine_reach,
             environment_id: env.id,
             generation: i64::from(env.generation),
             port,
@@ -884,6 +907,7 @@ impl PortRuntime {
                 )
             })?;
         let active = Active {
+            machine_reach,
             app: app.clone(),
             who: origin.map_or(Who::Link, |origin| {
                 Who::Credential(origin, "EnvironmentPortEnter")

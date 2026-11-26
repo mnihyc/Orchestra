@@ -4,12 +4,17 @@
  * drawn, and with all four off the inline section stays hidden; an explicitly opened view explains that choice. The counts are the rows already read: a count that
  * reaches more pages says so with a plus, and nothing counts a row the reader may not see.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useParams } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 
 import { documentLinksQuery, referencesQuery } from '@/api/links';
+import { LinkSourceState } from '@/features/links/sourceState';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
 import { listState } from '@/features/links/listState';
 import { GraphTab } from '@/features/links/GraphTab';
 import { ReferencedBy } from '@/features/links/ReferencedBy';
@@ -56,18 +61,26 @@ function Count({ rows, more }: { rows: number | undefined; more: boolean }) {
   return more ? <Badge>{`${rows}+`}</Badge> : <Badge count={rows} />;
 }
 
-export function LinksPanel({ documentId, seq, enabled = true, explainHidden = false }: { documentId: string; seq: number; enabled?: boolean; explainHidden?: boolean }) {
+export function LinksPanel(props: { documentId: string; seq: number; enabled?: boolean; explainHidden?: boolean }) {
+  const { scope } = useCollectionSearch(`document-links:${props.documentId}`);
+  return <LinkSourceState key={scope}><LinksPanelForReader {...props} /></LinkSourceState>;
+}
+
+function LinksPanelForReader({ documentId, seq, enabled = true, explainHidden = false }: { documentId: string; seq: number; enabled?: boolean; explainHidden?: boolean }) {
   const { t } = useTranslation();
   const tabs = useQuery({ ...documentLinksQuery(documentId), enabled });
   const shown: readonly LinksTab[] = tabs.data?.shown ?? [];
-  const incoming = useInfiniteQuery({ ...referencesQuery(documentId, 'in'), enabled: enabled && shown.includes('referenced_by') });
-  const outgoing = useInfiniteQuery({ ...referencesQuery(documentId, 'out'), enabled: enabled && shown.includes('references') });
+  const inSearch = useCollectionSearch(`links-in:${documentId}`), outSearch = useCollectionSearch(`links-out:${documentId}`);
+  const inSource = referencesQuery(documentId, 'in', inSearch.q), outSource = referencesQuery(documentId, 'out', outSearch.q);
+  const incoming = useInfiniteQuery({ ...inSource, enabled: enabled && shown.includes('referenced_by') });
+  const outgoing = useInfiniteQuery({ ...outSource, enabled: enabled && shown.includes('references') });
+  usePickerCursorRestart(incoming, inSource.queryKey); usePickerCursorRestart(outgoing, outSource.queryKey);
   // The tab last chosen on this device is where a new visit begins; a choice made now holds even where none can be kept.
   const [stored, remember] = useViewChoice<string>('links', 'tab', 'referenced_by');
   const [picked, setPicked] = useState<string | null>(null);
   const [configuring, setConfiguring] = useState(false);
   const chosen = picked ?? stored;
-  const choose = (tab: string) => { setPicked(tab); remember(tab); };
+  const choose = carryDeviceChoice((tab: string) => { setPicked(tab); remember(tab); }, remember);
   if (!enabled) return null;
   if (tabs.isPending) return <SkeletonRows read={tabs} rows={LOADING_ROWS} />;
   if (tabs.isError) return <ErrorAlert error={tabs.error} action={<Button size="sm" onClick={() => void tabs.refetch()}>{t('common.tryAgain')}</Button>} />;
@@ -92,8 +105,8 @@ export function LinksPanel({ documentId, seq, enabled = true, explainHidden = fa
   };
   const panel = (tab: LinksTab) => {
     switch (tab) {
-      case 'referenced_by': return <ReferencedBy documentId={documentId} list={listState(incoming)} />;
-      case 'references': return <References list={listState(outgoing)} />;
+      case 'referenced_by': return <><CollectionSearch name={t('links.tabs.referenced_by')} {...inSearch} /><ReferencedBy documentId={documentId} filtered={inSearch.q !== ''} list={listState(incoming)} /></>;
+      case 'references': return <><CollectionSearch name={t('links.tabs.references')} {...outSearch} /><References filtered={outSearch.q !== ''} list={listState(outgoing)} /></>;
       case 'related': return <RelatedTab documentId={documentId} seq={seq} enabled={enabled} />;
       case 'graph': return <GraphTab documentId={documentId} enabled={enabled} />;
     }
