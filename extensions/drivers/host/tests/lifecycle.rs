@@ -35,6 +35,7 @@ fn connector(dir: &std::path::Path) -> std::path::PathBuf {
 fn config(dir: &std::path::Path) -> HostConfig {
     HostConfig {
         base: dir.join("host"),
+        units: dir.join("units"),
         connector: connector(dir),
         tools: dir.join("tools"),
         storages: vec![
@@ -77,6 +78,40 @@ async fn ready(path: &std::path::Path) {
     })
     .await
     .expect("the connector did not write its launch facts");
+}
+
+#[tokio::test]
+async fn a_fresh_birth_never_reuses_or_rewrites_an_existing_host_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let mut request = spec(dir.path(), &current_user());
+    let driver = HostDriver::open(config.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap();
+    let unit = driver.create(&request).await.unwrap();
+    let record = config
+        .base
+        .join("units")
+        .join(format!("{}.json", unit.name));
+    let before = std::fs::read(&record).unwrap();
+    request
+        .labels
+        .insert("orch.birth".into(), new_id().to_string());
+    request.gateway_url = "wss://replacement.example.invalid".into();
+    assert!(matches!(
+        driver.create(&request).await,
+        Err(DriverError::InvalidSpec(_))
+    ));
+    assert_eq!(
+        std::fs::read(&record).unwrap(),
+        before,
+        "the prior unit and its launch files stay unchanged"
+    );
+    assert_eq!(
+        driver.inspect(&unit).await.unwrap().state,
+        UnitStateKind::Stopped
+    );
+    driver.remove(&unit).await.unwrap();
 }
 
 #[tokio::test]
@@ -202,6 +237,143 @@ async fn a_host_node_that_is_already_root_can_launch_an_unprivileged_account_wit
         user.uid.as_raw()
     );
     driver.remove(&unit).await.unwrap();
+}
+
+/// Every directory above `owned` (the unit's own directory or volume), up to `top`, which stands for the
+/// directory that holds the node's data directory, can be passed through by another account.
+fn others_reach(owned: &std::path::Path, top: &std::path::Path) {
+    for above in owned
+        .ancestors()
+        .skip(1)
+        .take_while(|above| above.starts_with(top))
+    {
+        let mode = std::fs::metadata(above).unwrap().permissions().mode();
+        assert_ne!(
+            mode & 0o001,
+            0,
+            "{} keeps another account out of {}",
+            above.display(),
+            owned.display()
+        );
+    }
+}
+
+/// What a unit's account owns and nobody else reads: a directory of its own, private to it.
+fn private_to_the_unit(owned: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(owned).unwrap();
+    assert_eq!(
+        metadata.mode() & 0o777,
+        0o700,
+        "{} is the unit's alone",
+        owned.display()
+    );
+    assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+}
+
+#[tokio::test]
+async fn a_units_connector_and_files_are_reached_under_its_own_account_while_the_nodes_data_directory_stays_private()
+ {
+    // The node's own layout: its data directory is private (0700) and holds the host driver's records and the
+    // verified tool cache with the connector; the units directory is beside it, as /var/lib holds both.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let data = dir.path().join("orch-node");
+    let build = data.join("tools/orch-connector/0.1.3");
+    std::fs::create_dir_all(&build).unwrap();
+    let program = build.join("orch-connector");
+    std::fs::write(&program, b"#!/bin/sh\nset -eu\nprintf '%s\\n' \"$0\" \"$ORCH_CA_FILE\" \"$ORCH_ENROLL_FILE\" \"$ORCH_DATA_DIR\" \"$ORCH_TOOLS_DIR\" \"$ORCH_WORKSPACE_DIR\" \"$ORCH_HOME_DIR\" \"$ORCH_MOUNTS_FILE\" > \"$ORCH_WORKSPACE_DIR/paths\"\nsleep 600\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("0.1.3", data.join("tools/orch-connector/current")).unwrap();
+    let harness = data.join("tools/codex/0.167.2/bin");
+    std::fs::create_dir_all(&harness).unwrap();
+    std::fs::write(harness.join("codex"), b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(
+        harness.join("codex"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let units = dir.path().join("orch-node-units");
+    let config = HostConfig {
+        base: data.join("host"),
+        units: units.clone(),
+        connector: data.join("tools/orch-connector/current/orch-connector"),
+        tools: data.join("tools"),
+        storages: Vec::new(),
+        prefer_scopes: false,
+    };
+    let mut spec = spec(dir.path(), &current_user());
+    for volume in spec.volumes.values_mut() {
+        volume.storage = None;
+    }
+    spec.tools = vec![orch_driver_contract::runtime::ToolRef {
+        name: "codex".into(),
+        version: "0.167.2".into(),
+    }];
+    let driver = HostDriver::open(config, Arc::new(SystemClock))
+        .await
+        .unwrap();
+    let unit = driver.create(&spec).await.unwrap();
+    driver.start(&unit).await.unwrap();
+    let workspace = units
+        .join("volumes")
+        .join(&spec.volumes[&VolumeRole::Workspace].name);
+    ready(&workspace.join("paths")).await;
+    let given: Vec<std::path::PathBuf> = std::fs::read_to_string(workspace.join("paths"))
+        .unwrap()
+        .lines()
+        .map(std::path::PathBuf::from)
+        .collect();
+    assert_eq!(given.len(), 8, "{given:?}");
+    let own = units.join(&unit.name);
+    for path in &given {
+        assert!(
+            !path.starts_with(&data),
+            "{} is inside the node's private data directory",
+            path.display()
+        );
+        let owned = if path.starts_with(&own) {
+            own.clone()
+        } else {
+            assert!(
+                path.starts_with(units.join("volumes")),
+                "{} is neither the unit's own nor one of its volumes",
+                path.display()
+            );
+            let volume = path.strip_prefix(units.join("volumes")).unwrap();
+            units
+                .join("volumes")
+                .join(volume.components().next().unwrap())
+        };
+        private_to_the_unit(&owned);
+        others_reach(&owned, dir.path());
+    }
+    assert_eq!(
+        given[0],
+        own.join("orch-connector"),
+        "the connector it runs is its own"
+    );
+    assert!(
+        given[4].join("codex/bin/codex").is_file(),
+        "its harness build is in its own tools"
+    );
+    assert_eq!(
+        std::fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+        0o700,
+        "the node's data directory stays private"
+    );
+    assert_eq!(
+        std::fs::metadata(&units).unwrap().permissions().mode() & 0o777,
+        0o711,
+        "other accounts pass through the units directory but cannot list it"
+    );
+    driver.remove(&unit).await.unwrap();
+    assert!(!own.exists(), "the unit's own directory goes with the unit");
+    assert!(
+        workspace.is_dir(),
+        "its volumes stay until they are removed"
+    );
 }
 
 #[tokio::test]

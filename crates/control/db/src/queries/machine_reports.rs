@@ -6,17 +6,20 @@ use orch_types::{Id, Json};
 
 /// Whether a machine owns a stream without considering a particular report's identifiers.
 pub async fn owns(conn: &mut Conn, machine: Id, stream: &Stream) -> Result<bool, DbError> {
-    if !active(conn, machine).await? {
+    if !active(conn, machine, true).await? {
         return Ok(false);
     }
     owns_stream(conn, machine, stream).await
 }
 
-async fn active(conn: &mut Conn, machine: Id) -> Result<bool, DbError> {
-    // The batch holds the machine's row until it commits, without a shared barrier: a revocation
-    // waits for the batch, or the batch waits for the revocation and then sees it, and is refused.
+async fn active(conn: &mut Conn, machine: Id, serialize_reports: bool) -> Result<bool, DbError> {
+    // Serialize report writers without taking the row lock that native commands use to
+    // fence policy changes. Hardware measurements can still commit beside those commands.
+    if serialize_reports {
+        crate::queries::chats::lock_named(conn, &format!("machine.report:{machine}")).await?;
+    }
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR SHARE",
+        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR KEY SHARE",
     )
     .bind(machine)
     .fetch_optional(&mut *conn)
@@ -82,7 +85,13 @@ pub async fn accepts(
 ) -> Result<bool, DbError> {
     // A move successor can report before it owns the environment, but revocation/deletion
     // is final for this batch and must not fall through to that narrow move exception.
-    if !active(conn, machine).await? {
+    // A load-only batch updates the host at its sample time and advances the node cursor.
+    // It never upgrades the machine pin. Batches that can also change machine facts
+    // still take the writer lock before pinning the machine.
+    let host_load = matches!(stream, Stream::Node)
+        && !reports.is_empty()
+        && reports.iter().all(|(kind, _)| *kind == "node.load");
+    if !active(conn, machine, !host_load).await? {
         return Ok(false);
     }
     let owns = owns_stream(conn, machine, stream).await?;
@@ -91,6 +100,37 @@ pub async fn accepts(
     // are mostly one turn's, and each of them asked again in its transaction (C-turns).
     let mut turns_found: Vec<Id> = Vec::new();
     for (kind, body) in reports.iter().copied() {
+        if let Stream::Provider { provider_id } = *stream
+            && matches!(kind, "lease.usage" | "lease.denied")
+        {
+            let Some(lease) = id(body, "lease_id") else {
+                return Ok(false);
+            };
+            // A public call has its own native command in place of a turn lease. Its original
+            // machine may deliver the usage after the response ends or the provider moves.
+            let relay_model = match kind {
+                "lease.usage" => body.get("model").and_then(Json::as_str),
+                _ => None,
+            };
+            if !sqlx::query_scalar::<_, bool>(
+                "SELECT ($3 AND EXISTS(SELECT 1 FROM leases WHERE id=$1 AND provider_id=$2))
+                 OR EXISTS(SELECT 1 FROM provider_relay_calls r JOIN commands c ON c.id=r.id
+                     WHERE r.id=$1 AND r.provider_id=$2 AND r.machine_id=$4 AND r.model_name=$5
+                     AND c.machine_id=r.machine_id AND c.kind='provider.relay' AND c.body=r.command_body)",
+            )
+            .bind(lease)
+            .bind(provider_id)
+            .bind(owns)
+            .bind(machine)
+            .bind(relay_model)
+            .fetch_one(&mut *conn)
+            .await?
+            {
+                return Ok(false);
+            }
+            accepted = true;
+            continue;
+        }
         if !owns {
             if let Stream::Env { environment_id } = *stream
                 && requested_move_report(conn, machine, environment_id, kind, body).await?
@@ -117,21 +157,6 @@ pub async fn accepts(
                     return Ok(false);
                 }
                 turns_found.push(turn);
-            }
-            Stream::Provider { provider_id } if matches!(kind, "lease.usage" | "lease.denied") => {
-                let Some(lease) = id(body, "lease_id") else {
-                    return Ok(false);
-                };
-                if !sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM leases WHERE id = $1 AND provider_id = $2)",
-                )
-                .bind(lease)
-                .bind(provider_id)
-                .fetch_one(&mut *conn)
-                .await?
-                {
-                    return Ok(false);
-                }
             }
             Stream::Env { environment_id } if kind == "browser.state" => {
                 let Some(browser) = id(body, "browser_id") else {
@@ -199,6 +224,25 @@ fn id(body: &Json, key: &str) -> Option<Id> {
     body.get(key)?.as_str()?.parse().ok()
 }
 
+/// Whether `machine` is the unit that enrolled for the environment's current runtime while the
+/// environment's own row does not name it yet. What such a unit reports is held until the row names
+/// it: it is not another machine's report, and nothing is refused or counted for it.
+pub async fn awaits_attachment(
+    conn: &mut Conn,
+    machine: Id,
+    environment: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runtimes r JOIN environments e ON e.id = r.environment_id
+         WHERE r.environment_id = $1 AND r.machine_id = $2 AND r.successor_of IS NULL
+         AND r.state IN ('creating','running') AND e.machine_id IS DISTINCT FROM $2)",
+    )
+    .bind(environment)
+    .bind(machine)
+    .fetch_one(conn)
+    .await?)
+}
+
 /// Whether the machine is the registered node of this runtime's host.
 pub async fn owns_runtime(conn: &mut Conn, machine: Id, runtime: Id) -> Result<bool, DbError> {
     Ok(sqlx::query_scalar(
@@ -223,6 +267,27 @@ pub async fn owns_host_job(conn: &mut Conn, machine: Id, job: Id) -> Result<bool
     )
     .bind(job)
     .bind(machine)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// A standalone file report names the exact current native command; machine presence alone is insufficient.
+pub async fn owns_command_job(
+    conn: &mut Conn,
+    machine: Id,
+    job: Id,
+    command: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM jobs j JOIN commands c ON c.id=$3
+        WHERE j.id=$1 AND c.machine_id=$2 AND c.state IN ('sent','accepted','succeeded')
+        AND j.plan#>>'{active_command,id}'=$3::uuid::text
+        AND j.plan#>>'{active_command,machine}'=$2::uuid::text
+        AND (c.body#>>'{work,job_id}'=$1::uuid::text OR c.body->>'job_id'=$1::uuid::text))",
+    )
+    .bind(job)
+    .bind(machine)
+    .bind(command)
     .fetch_one(conn)
     .await?)
 }
@@ -283,6 +348,186 @@ mod tests {
     use orch_testkit::{clock, database::TestDb};
     use orch_types::new_id;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn host_load_can_be_recorded_while_the_machine_is_reporting_its_facts() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let machine = resources::testing::insert_machine(&mut conn, "host", "connected")
+            .await
+            .unwrap();
+        let host = new_id();
+        sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Host')")
+            .bind(host)
+            .bind(machine)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let mut facts = test.pool.begin().await.unwrap();
+        assert!(
+            accepts(
+                &mut facts,
+                machine,
+                &Stream::Machine,
+                &[("machine.facts", &json!({"hostname":"Host"}))]
+            )
+            .await
+            .unwrap()
+        );
+        let mut load = test.pool.begin().await.unwrap();
+        let sample = json!({"running": 1});
+        let batch = [("node.load", &sample)];
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            assert!(
+                accepts(&mut load, machine, &Stream::Node, &batch)
+                    .await
+                    .unwrap()
+            );
+            resources::hosting::record_node_load(&mut load, host, &sample, clock::start())
+                .await
+                .unwrap();
+            load.commit().await.unwrap();
+        })
+        .await
+        .expect("the machine facts transaction can still be open");
+        let recorded: Json = sqlx::query_scalar("SELECT load FROM hosts WHERE id=$1")
+            .bind(host)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(recorded, sample);
+        facts.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_streams_finish_their_reports_without_upgrading_shared_machine_locks() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let machine = resources::testing::insert_machine(&mut conn, "host", "connected")
+            .await
+            .unwrap();
+        let host = new_id();
+        sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Host')")
+            .bind(host)
+            .bind(machine)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let mut first = test.pool.begin().await.unwrap();
+        let mut second = test.pool.begin().await.unwrap();
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *first)
+            .await
+            .unwrap();
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *second)
+            .await
+            .unwrap();
+        let facts = json!({"hostname":"Host"});
+        let reports = [("machine.facts", &facts)];
+        assert!(
+            accepts(&mut first, machine, &Stream::Machine, &reports)
+                .await
+                .unwrap()
+        );
+        // Commands and sessions only need a key-share lock for their machine reference.
+        let referenced: Id =
+            sqlx::query_scalar("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE NOWAIT")
+                .bind(machine)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(referenced, machine);
+        let mut admission = Box::pin(accepts(&mut second, machine, &Stream::Node, &[]));
+        // The existing database concurrency cases allow ten seconds for scheduling, and poll at
+        // ten milliseconds. The exact blocker proves serialization; elapsed time proves nothing.
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool =
+                    sqlx::query_scalar("SELECT pg_blocking_pids($1) @> ARRAY[$2]::integer[]")
+                        .bind(second_pid)
+                        .bind(first_pid)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        tokio::select! {
+            result = &mut admission => panic!("a second writer was admitted before the first report committed: {result:?}"),
+            result = observed => result.expect("the second report must wait on the first machine writer"),
+        }
+        resources::set_machine_facts(
+            &mut first,
+            machine,
+            &facts,
+            (None, None),
+            0.25,
+            clock::start(),
+        )
+        .await
+        .unwrap();
+        first.commit().await.unwrap();
+        assert!(admission.await.unwrap());
+        resources::mounts::record_sizes(&mut second, host, &json!([]))
+            .await
+            .unwrap();
+        second.commit().await.unwrap();
+        assert_eq!(
+            resources::machine(&mut conn, machine)
+                .await
+                .unwrap()
+                .unwrap()
+                .facts["hostname"],
+            "Host"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_machine_report_keeps_the_mount_sizes_reported_by_its_host() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let machine = resources::testing::insert_machine(&mut conn, "host", "connected")
+            .await
+            .unwrap();
+        let host = new_id();
+        sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Host')")
+            .bind(host)
+            .bind(machine)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let sizes = json!([{"mount_id":new_id(),"kind":"path","source":"/srv/work","bytes":123}]);
+        resources::mounts::record_sizes(&mut conn, host, &sizes)
+            .await
+            .unwrap();
+        resources::set_machine_facts(
+            &mut conn,
+            machine,
+            &json!({"hostname":"Host"}),
+            (None, None),
+            0.25,
+            clock::start(),
+        )
+        .await
+        .unwrap();
+        let snapshot = resources::mounts::on_machine(&mut conn, machine)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.sizes, sizes);
+        assert_eq!(
+            resources::machine(&mut conn, machine)
+                .await
+                .unwrap()
+                .unwrap()
+                .facts,
+            json!({"hostname":"Host"})
+        );
+    }
 
     #[tokio::test]
     async fn an_active_source_can_report_while_offline_but_revocation_and_deletion_end_its_admission()

@@ -1,0 +1,5 @@
+# n41-defaults: the whole web suite on the head that says before the act when Default host cannot work and why an
+# environment could not start (translation keys and every project's types, the repository lint, every vitest case)
+web typecheck
+web lint
+web test

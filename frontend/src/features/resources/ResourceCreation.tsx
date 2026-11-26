@@ -20,6 +20,7 @@ const MakeEnvironmentDialog = lazy(() => import('./environments/MakeEnvironment'
 const NewTemplateDialog = lazy(() => import('./templates/NewTemplate').then((module) => ({ default: module.NewTemplateDialog })));
 const EditMcp = lazy(() => import('./mcp/Edit').then((module) => ({ default: module.EditMcp })));
 const EditMount = lazy(() => import('./mounts/Edit').then((module) => ({ default: module.EditMount })));
+const PoolDialog = lazy(() => import('./pools/PoolDialog').then((module) => ({ default: module.PoolDialog })));
 const AddSkill = lazy(() => import('./skills/SkillDialog').then((module) => ({ default: module.AddSkill })));
 
 export type CreationKind = ResourceKind;
@@ -33,6 +34,7 @@ function ResourceCreationDialog({ kind, onClose, onCreated }: { kind: CreationKi
           : kind === 'templates' ? <NewTemplateDialog onClose={onClose} />
             : kind === 'mcp' ? <EditMcp onClose={onClose} onCreated={onCreated === undefined ? undefined : (server) => onCreated(server.id)} />
               : kind === 'mounts' ? <EditMount onClose={onClose} onCreated={onCreated === undefined ? undefined : (mount) => onCreated(mount.id)} />
+                : kind === 'pools' ? <PoolDialog onClose={onClose} onCreated={onCreated} />
                 : kind === 'skills' ? <AddSkill onClose={onClose} onCreated={onCreated === undefined ? undefined : (skill) => onCreated(skill.id)} />
                   : <MakeEnvironmentDialog onClose={onClose} />}</Suspense></DialogBoundary>;
 }
