@@ -20,7 +20,7 @@ import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { show as render } from './support';
 
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   useNavigate: () => vi.fn(),
   useLocation: () => ({ pathname: '/search', search: {}, searchStr: '', hash: '' }),
   useMatches: () => '/search/',
@@ -48,8 +48,8 @@ describe('a button says what pressing it does', () => {
 
   it('keeps transient export progress and failures plain beside a named signed navigation act', () => {
     useWatched.setState({ items: [
-      { job: 'running', place: 'Web', state: 'running', percent: 42, phase: 'writing', exportId: null, error: null },
-      { job: 'failed', place: 'Shop', state: 'failed', percent: 0, phase: '', exportId: null, error: null },
+      { job: 'running', place: 'Web', state: 'running', percent: 42, phase: 'writing', exportId: null, error: null, omitted: null },
+      { job: 'failed', place: 'Shop', state: 'failed', percent: 0, phase: '', exportId: null, error: null, omitted: null },
     ] });
     try {
       render(<ExportStatus />);
@@ -57,6 +57,15 @@ describe('a button says what pressing it does', () => {
       expect(screen.getByText('Export failed').closest('button')).toBeNull();
       expect(screen.getByRole('button', { name: 'Your exports' }).querySelector('[data-action-icon="yourExports"]')).toBeInTheDocument();
     } finally { useWatched.setState({ items: [] }); }
+  });
+  for (const locale of ['en', 'zh-CN'] as const) it(`names the actual omissions when an archive becomes ready in ${locale}`, async () => {
+    await setLocale(locale);
+    const partial = { job: 'partial', place: 'Work', state: 'ready' as const, percent: 100, phase: '', exportId: 'archive', error: null, omitted: 2 };
+    useWatched.setState({ items: [partial] });
+    try {
+      render(<ExportStatus />);
+      expect(screen.getByText(locale === 'en' ? 'Partial export of Work · 2 omitted' : 'Work 的部分导出 · 省略 2 项')).toBeVisible();
+    } finally { useWatched.setState({ items: [] }); await setLocale('en'); }
   });
   it('never treats a state name as an act and gives privacy directions explicit verbs in both languages', async () => {
     for (const locale of ['en', 'zh-CN'] as const) {
