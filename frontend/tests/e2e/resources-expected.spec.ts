@@ -609,7 +609,7 @@ test('standalone resource hints stay available and template fields share one gui
 
   await walk('register-agent', async (has) => {
     await registeredPart(page, 'Agent profiles');
-    await page.getByRole('button', { name: 'Register a profile…' }).click();
+    await page.getByRole('button', { name: 'Register an agent profile…' }).click();
     await expect(page.getByRole('dialog', { name: /Register an agent profile/ })).toBeVisible();
     await has('home');
     // A program picker opens on focus; cancel the owning form rather than only dismissing that picker.

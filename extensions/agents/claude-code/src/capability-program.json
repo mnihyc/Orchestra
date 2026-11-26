@@ -133,6 +133,28 @@
           ],
           "default_mode": "native"
         },
+        "ask": {
+          "enabled": true,
+          "modes": ["native"],
+          "default_mode": "native",
+          "delegated_mode": "native",
+          "structured_output": true,
+          "execution": [{"input": "ask.step", "result": "ask.reply", "confined_tools": true, "read_tools": true}],
+          "delegation_label": {"en": "Claude Code", "zh-CN": "Claude Code"}
+        },
+        "summary": {
+          "enabled": true,
+          "modes": ["native"],
+          "default_mode": "native",
+          "delegated_mode": "native",
+          "execution": [
+            { "input": "summary.request", "result": "summary.result", "confined_tools": true }
+          ],
+          "delegation_label": {
+            "en": "Claude Code",
+            "zh-CN": "Claude Code"
+          }
+        },
         "image_input": {
           "enabled": true,
           "modes": [

@@ -4,6 +4,7 @@
  * are. An answer that signs somebody in is taken as the session of this page here, so that no screen
  * can forget to.
  */
+import { expectSignInLanding } from '@/api/landingOpening';
 import { QueryObserver, queryOptions } from '@tanstack/react-query';
 
 import { accepted, api, client, done, ok, repeatable } from '@/api/client';
@@ -24,17 +25,19 @@ import type {
   SetupCreateBody,
 } from '@/generated/api-types';
 
-/**
- * How long what the system says of itself counts as fresh. It changes when an administrator changes
- * it, which is seldom, and a page that is open for a day should still learn of a new banner.
- */
-const META_FRESH_FOR_MS = 5 * 60_000;
-
 /** The fewest characters a password has. The server holds the rule; this is so the form can say it first. */
 export const PASSWORD_MIN_CHARS = 10;
 
 /** What a username looks like: 3 to 32 of lower-case letters, digits, hyphen and underscore, beginning with a letter or a digit. */
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9_-]{2,31}$/;
+
+/** The header that carries the token of a human check, on the requests the system asks one of. */
+export const HUMAN_CHECK_HEADER = 'X-Human-Check';
+
+/** The headers of a request that carries the token of a human check, if it has one. */
+function checked(token: string | null | undefined, more: Record<string, string> = {}): { headers: Record<string, string> } {
+  return { headers: token === null || token === undefined || token === '' ? more : { ...more, [HUMAN_CHECK_HEADER]: token } };
+}
 
 export const metaKey = ['meta'] as const;
 export const meKey = ['me'] as const;
@@ -50,7 +53,6 @@ export async function fetchMeta(signal?: AbortSignal): Promise<Meta> {
 export const metaQuery = queryOptions({
   queryKey: metaKey,
   queryFn: ({ signal }): Promise<Meta> => fetchMeta(signal),
-  staleTime: META_FRESH_FOR_MS,
 });
 
 /** A newly signed-in caller needs a fresh permission fact after any previous reader's flight. */
@@ -91,7 +93,6 @@ export async function refreshMetaForSignIn(): Promise<void> {
 export const meQuery = queryOptions({
   queryKey: meKey,
   queryFn: ({ signal }): Promise<Me> => ok(api.GET('/me', { signal })),
-  staleTime: META_FRESH_FOR_MS,
 });
 
 /** The same native session projections, including caller-specific Meta, in one read. */
@@ -130,32 +131,35 @@ export async function setUp(body: SetupCreateBody, key = newActKey()): Promise<S
 }
 
 /** Signs in with one proof, or with two for somebody who has a second step. */
-export async function signIn(body: AuthLoginBody): Promise<AuthResult> {
-  return adopt(await ok(api.POST('/auth/login', { body })));
+export async function signIn(body: AuthLoginBody, humanCheck?: string | null): Promise<AuthResult> {
+  const result = await ok(api.POST('/auth/login', { body, ...checked(humanCheck) }));
+  const onward = new URLSearchParams(location.search).get('redirect');
+  if (/^\/login\/?$/.test(location.pathname) && (onward === null || onward === '/')) expectSignInLanding(result.user.id);
+  return adopt(result);
 }
 
 /**
  * Asks for a code by mail: with the name alone as a way in, with the password as a second step. The
  * answer is the same whatever the name, so nothing is learnt from it.
  */
-export function askEmailCode(body: AuthEmailCodeSendBody): Promise<void> {
-  return done(api.POST('/auth/email-code', { body }));
+export function askEmailCode(body: AuthEmailCodeSendBody, humanCheck?: string | null): Promise<void> {
+  return done(api.POST('/auth/email-code', { body, ...checked(humanCheck) }));
 }
 
 /** How a registration ended: signed in, or waiting for the address to be confirmed. */
 export type Registered = { signedIn: true; result: AuthResult; accepted: InvitationAcceptReply | null } | { signedIn: false; alreadyCreated?: boolean };
 
 /** Registers a person. Where addresses are confirmed first, nobody is signed in yet. */
-export async function register(body: AuthRegisterBody & { accepted_terms_hash?: string }, key = newActKey()): Promise<Registered> {
-  const reply = await accepted(api.POST('/auth/register', { body, ...repeatable(key) }));
+export async function register(body: AuthRegisterBody & { accepted_terms_hash?: string }, key = newActKey(), humanCheck?: string | null): Promise<Registered> {
+  const reply = await accepted(api.POST('/auth/register', { body, ...checked(humanCheck, repeatable(key).headers) }));
   if ('sign_in_required' in reply && signInRequired(reply.sign_in_required)) return { signedIn: false, alreadyCreated: true };
   if ('access_token' in reply) return { signedIn: true, result: adopt(reply), accepted: reply.accepted_invitation ?? null };
   return { signedIn: false };
 }
 
 /** Asks for a link to set a new password. The answer is the same whatever the address. */
-export function askRecovery(email: string): Promise<void> {
-  return done(api.POST('/auth/recovery', { body: { email } }));
+export function askRecovery(email: string, humanCheck?: string | null): Promise<void> {
+  return done(api.POST('/auth/recovery', { body: { email }, ...checked(humanCheck) }));
 }
 
 /** Checks a reset link without consuming it; discard its cached result when the card closes. */
@@ -166,7 +170,6 @@ export const recoveryQuery = (token: string) => queryOptions({
     return true;
   },
   retry: false,
-  staleTime: 0,
   gcTime: 0,
 });
 
@@ -187,8 +190,8 @@ export async function confirmEmail(token: string): Promise<boolean> {
 }
 
 /** Asks for the confirmation link to be mailed again. The answer is the same whatever the name. */
-export function resendConfirmation(login: string): Promise<void> {
-  return done(api.POST('/auth/verify-email/resend', { body: { login } }));
+export function resendConfirmation(login: string, humanCheck?: string | null): Promise<void> {
+  return done(api.POST('/auth/verify-email/resend', { body: { login }, ...checked(humanCheck) }));
 }
 
 /** Ends this browser's session. */

@@ -22,13 +22,18 @@ import { useDecision } from '@/features/approvals/Decision';
 import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { approvalTitle, ApprovalSubjectScope } from '@/features/approvals/Card';
+import { ApprovalDeliveryFacts, approvalDeliveryFragment } from '@/features/approvals/DeliveryFacts';
 import { approvalAtItem, approvalOutcome } from '@/features/approvals/current';
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 import { AnswersForm, decisionOfOption, ElicitationForm, type HarnessApproval, OptionButtons, optionWords, planDecision, RequestBody } from '@/features/approvals/Harness';
 import { PlanAnswer } from '@/features/approvals/PlanAnswer';
-import { useTimelineContext } from '@/features/timeline/context';
+import { useConversationTurn, useTimelineContext } from '@/features/timeline/context';
 import { ItemFrame } from '@/features/timeline/ItemActions';
 import { useThreadPart, useThreadView } from '@/realtime/stores/thread';
+import { useShallow } from 'zustand/react/shallow';
+import { useAgentSwitch } from '@/features/thread/agentSwitch';
+import { approvalStream, subagentOf, subagentTask } from '@/features/timeline/subagents';
+import { linkButtonClasses } from '@/ui/link';
 import { actionName } from '@/ui/actions';
 import { Button } from '@/ui/Button';
 import { cx } from '@/ui/cx';
@@ -61,10 +66,35 @@ function decidedWhat(approval: Approval, t: TFunction): string {
   }
 }
 
-function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostTo: Approval | null; children?: React.ReactNode }) {
+/** The sub-agent that asks, where it is one and this is not its own conversation: its kind and task, and its step, which opens it. */
+function useApprovalAsker(item: ApprovalItem): { id: string; words: string } | null {
+  const { t } = useTranslation();
+  const { threadId, conversation } = useTimelineContext();
+  const [id, name] = useThreadPart(threadId, useShallow((view) => {
+    const stream = approvalStream(view, item);
+    const agent = stream === null || conversation?.stream === stream ? null : subagentOf(view, stream);
+    const tool = agent?.payload.tool;
+    if (agent === null || agent === undefined || tool?.kind !== 'subagent') return [null, null] as const;
+    const role = tool.role === null || tool.role.trim() === '' ? null : tool.role.trim();
+    return [agent.id, [role, subagentTask(tool)].filter((part) => part !== null).join(' · ')] as const;
+  }));
+  if (id === null || name === null) return null;
+  return { id, words: t('approvals.askedBy', { agent: name === '' ? t('timeline.step.subagentUnnamed') : name }) };
+}
+
+/** Who asks, as a link into its own conversation where the screen can show it there. */
+function AskerLink({ asker }: { asker: { id: string; words: string } }) {
+  const switchTo = useAgentSwitch();
+  return switchTo === null ? <span data-approval-asker>{asker.words}</span>
+    : <button type="button" data-approval-asker onClick={() => switchTo(asker.id)} className={cx(linkButtonClasses, 'focus-inset text-xs')}>{asker.words}</button>;
+}
+
+function DecidedLine({ approval, turnId, lostTo, asker, children }: { approval: Approval; turnId: string | null; lostTo: Approval | null; asker: { id: string; words: string } | null; children?: React.ReactNode }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const what = decidedWhat(approval, t);
+  const turn = useConversationTurn(turnId);
+  const what = approval.state === 'cancelled' && turn?.error?.code === 'turn_lost'
+    ? t('inbox.actions.approvalCancelled') : decidedWhat(approval, t);
   const Icon = ['approved', 'answered'].includes(approvalOutcome(approval)) ? ShieldCheck : approval.state === 'pending' ? ShieldQuestionMark : ShieldX;
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-3 py-2">
@@ -77,9 +107,12 @@ function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostT
         {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
         <Icon className={['approved', 'answered'].includes(approvalOutcome(approval)) ? 'text-success' : 'text-text-subtle'} aria-hidden />
         <span className="flex min-w-0 flex-1 flex-wrap gap-x-3 gap-y-1">
-          <span className="font-medium wrap-anywhere text-text">{approvalTitle(approval,t)}</span><span>{what}
+          {/* Decided, it is a step: its title keeps to two lines (a long command whole when it is opened, and on hover). */}
+          <span data-overflow-text={approvalTitle(approval,t)} className="line-clamp-2 font-medium wrap-anywhere text-text">{approvalTitle(approval,t)}</span><span>{what}
           {approval.decided_automatically ? ` ${t('approvals.automatically')}` : approval.decided_by !== null ? ` ${t('approvals.by', { name: approval.decided_by.display_name })}` : ''}
           </span>{approval.decided_at !== null && <TimeOfDay at={approval.decided_at} />}
+          {approvalDeliveryFragment(approval,t) !== null && <span>{approvalDeliveryFragment(approval,t)}</span>}
+          {asker !== null && <span data-approval-asker>{asker.words}</span>}
         </span>
       </button>
       {lostTo !== null && (
@@ -87,7 +120,7 @@ function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostT
           {t('approvals.alreadyAnswered', { name: lostTo.decided_by?.display_name ?? t('approvals.someoneElse') })}
         </p>
       )}
-      {open && children}
+      {open && <>{children}<ApprovalDeliveryFacts approval={approval} /></>}
     </div>
   );
 }
@@ -105,7 +138,7 @@ function QuestionAnswers({ approval }: { approval: HarnessApproval }) {
   })}</dl>;
 }
 
-function HarnessPending({ approval, itemId, threadId, onLost }: { approval: HarnessApproval; itemId: string; threadId: string; onLost: (approval: Approval) => void }) {
+function HarnessPending({ approval, itemId, threadId, onLost, asker }: { approval: HarnessApproval; itemId: string; threadId: string; onLost: (approval: Approval) => void; asker: { id: string; words: string } | null }) {
   const { t } = useTranslation();
   const { live } = useTimelineContext();
   const owner = useThreadPart(threadId, (view) => view.thread?.owner ?? null);
@@ -125,8 +158,9 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
         <ShieldQuestionMark className="mt-0.5 text-warning" aria-hidden />
         <div className="flex min-w-0 flex-1 flex-col">
           <h3 className="text-base font-semibold text-text">{approval.title}</h3>
-          <p className="text-xs text-text-subtle">
-            {t('approvals.requested')} <RelativeTime at={approval.created_at} />
+          <p className="flex flex-wrap items-baseline gap-x-2 text-xs text-text-subtle">
+            <span>{t('approvals.requested')} <RelativeTime at={approval.created_at} /></span>
+            {asker !== null && <AskerLink asker={asker} />}
           </p>
         </div>
       </header>
@@ -260,6 +294,7 @@ export function ApprovalCard({ item, pinned = false }: { item: ApprovalItem; pin
 
   // A confirmed local decision wins over an older pending item until its live replacement arrives.
   const approval = approvalAtItem(item, query.data);
+  const asker = useApprovalAsker(item);
   // The timeline keeps its history anchor, while only the pinned instance owns a waiting form.
   if (pinApprovals === true && !pinned && item.status === 'pending' && (approval === undefined || approval.state === 'pending')) {
     return <ItemFrame item={item} label={t('timeline.approval.menu')}><Button size="sm" variant="ghost" onClick={(event) => {
@@ -286,7 +321,7 @@ export function ApprovalCard({ item, pinned = false }: { item: ApprovalItem; pin
   } else if (approval.state === 'pending' && item.status === 'pending') {
     body =
       approval.kind === 'harness' ? (
-        <HarnessPending approval={approval} itemId={item.id} threadId={threadId} onLost={setLostTo} />
+        <HarnessPending approval={approval} itemId={item.id} threadId={threadId} onLost={setLostTo} asker={asker} />
       ) : approval.kind === 'capability' ? (
         <CapabilityPending approval={approval} itemId={item.id} onLost={setLostTo} />
       ) : (
@@ -296,7 +331,7 @@ export function ApprovalCard({ item, pinned = false }: { item: ApprovalItem; pin
       );
   } else {
     body = (
-      <DecidedLine approval={approval} lostTo={lostTo}>
+      <DecidedLine approval={approval} turnId={item.turn_id} lostTo={lostTo} asker={asker}>
         {approval.kind === 'harness' && (approval.request.request_kind === 'user_input' ? <QuestionAnswers approval={approval} /> : <RequestBody request={approval.request} />)}
       </DecidedLine>
     );
