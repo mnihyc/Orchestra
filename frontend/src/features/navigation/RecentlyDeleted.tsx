@@ -1,13 +1,13 @@
-/** What was deleted under a node, by whom and until when it can be restored.
+/** The trash of a node: what was deleted under it, by whom and until when it can be restored.
  *
- * Opened from the menu of an org, a project or a topic for whoever manages it: each thing that was
- * deleted directly under it and has not been purged yet, who deleted it and when, until when it can be
- * brought back, and the button that does. What comes back comes back archived, with everything that
- * was under it, and the notice that says so offers to bring it back to use at once.
+ * Opened from the menu of an org, a project or a topic for whoever manages it, and from Show on the line a deletion
+ * leaves: each thing that was deleted directly under it and has not been purged yet, who deleted it and when, until when
+ * it can be brought back, and Restore, which brings it back at once. What comes back comes back archived, with
+ * everything that was under it, and the notice that says so offers to bring it back to use at once.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Eye, History, RotateCcw } from 'lucide-react';
-import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { deletedQuery, nodeQuery, restoreNode, unarchiveNode } from '@/api/nodes';
@@ -43,12 +43,9 @@ function DeletedRow({ entry, place }: { entry: KeptNode; place: PlaceRef }) {
   // A project deleted from inside a project was a folder.
   const Icon = PLACE_ICONS[entry.kind === 'project' && place.kind === 'project' ? 'folder' : entry.kind];
   const name = entry.node.name ?? '';
-  const [confirming, setConfirming] = useState(false);
-
   const restore = useMutation({
     mutationFn: () => restoreNode(entry.node.id),
     onSuccess: (node) => {
-      setConfirming(false);
       toast({
         tone: 'success',
         title: t('places.deleted.restored', { name }),
@@ -80,13 +77,14 @@ function DeletedRow({ entry, place }: { entry: KeptNode; place: PlaceRef }) {
             {entry.children > 0 && ` · ${t('places.deleted.holds', { count: entry.children })}`}
           </span>
         </div>
+        {/* The place's list of deleted children has no guard per row: whoever reads it manages the place, which restoring
+            and inspecting them take; a row that says no keeps its no, and the server checks each act. */}
         <div className="col-start-2 flex flex-wrap gap-2 sm:col-start-3">
-          {entry.can_inspect === true && <Button size="sm" asChild><a href={inspectionHref(entry.kind, entry.node.id)}><Eye aria-hidden />{t('trace.inspect')}</a></Button>}
-          {entry.can_restore === true && <Button size="sm" icon={<RotateCcw aria-hidden />} pending={restore.isPending} onClick={() => setConfirming(true)}>{t('trace.restore')}</Button>}
+          {entry.can_inspect !== false && <Button size="sm" asChild><PathLink href={inspectionHref(entry.kind, entry.node.id)}><Eye aria-hidden />{t('trace.inspect')}</PathLink></Button>}
+          {entry.can_restore !== false && <Button size="sm" icon={<RotateCcw aria-hidden />} pending={restore.isPending} onClick={() => restore.mutate()}>{t('trace.restore')}</Button>}
         </div>
       </div>
       {restore.error !== null && <ErrorAlert error={restore.error} />}
-      {confirming && <Dialog open title={t('trace.restoreTitle')} description={t('trace.returnsArchived')} dismissible={!restore.isPending} onOpenChange={(open) => !open && !restore.isPending && setConfirming(false)} footer={<><Button onClick={() => setConfirming(false)} disabled={restore.isPending}>{t('common.cancel')}</Button><Button variant="primary" icon={<RotateCcw aria-hidden />} pending={restore.isPending} onClick={() => restore.mutate()}>{t('trace.bringBack')}</Button></>}><p className="py-3 font-medium wrap-anywhere">{name}</p><p className="text-sm">{t('places.deleted.until', { time: formatDateTime(entry.purge_at, format) })}</p>{restore.error !== null && <ErrorAlert error={restore.error} />}</Dialog>}
       <span className="sr-only">{place.name}</span>
     </li>
   );

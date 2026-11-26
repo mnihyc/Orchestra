@@ -40,6 +40,7 @@ while IFS= read -r line; do
       case "$line" in
         *KILLED*) printf '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}},"api_message_id":"m1"}\n'; kill -9 $$ ;;
         *IDLEEXIT*) printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"fine","usage":{"input_tokens":1,"output_tokens":1}}\n'; sleep 0.2; echo 'idle server final diagnostic' >&2; exit 7 ;;
+        *IDLEBARRIER*) printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"fine","usage":{"input_tokens":1,"output_tokens":1}}\n'; while [ ! -f "$0.release" ]; do sleep 0.01; done; exit 7 ;;
         *GONE*) printf '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I was saying"}]}}\n'; exit 0 ;;
         *HALFSILENT*) printf '{"type":"assistant","mess'; exec sleep 100000 ;;
         *HALF*) printf '{"type":"assistant","message":{"id":"m1","cont'; exit 3 ;;
@@ -75,6 +76,7 @@ fn programs() -> &'static (tempfile::TempDir, Vec<(&'static str, PathBuf)>) {
             "trying",
             "idle-unexpected",
             "idle-planned",
+            "physical-incarnation",
         ] {
             programs.push((name, write(&directory, name, STAND_IN)));
         }
@@ -111,6 +113,61 @@ async fn rig(name: &str, config: serde_json::Value) -> Rig {
     rig.start(config, std::collections::BTreeMap::new()).await;
     rig.open().await;
     rig
+}
+
+#[tokio::test]
+async fn an_idle_process_keeps_its_own_opening_when_a_new_session_spec_is_already_installed() {
+    use orch_agent_contract::session::SessionMode;
+    let mut rig = Rig::standing_in(&program("physical-incarnation")).await;
+    rig.start(json!({}), std::collections::BTreeMap::new())
+        .await;
+    let first = rig.spec(SessionMode::New, None);
+    let original = first.opening_id;
+    let opened = rig.open_with(first).await;
+    let first_turn = rig.turn("IDLEBARRIER");
+    rig.adapter.start_turn(first_turn).await.unwrap();
+    rig.until(|event| matches!(event, SessionEvent::TurnCompleted(_)), 30)
+        .await;
+    let next = rig.spec(SessionMode::Resume, Some(&opened.native_session_ref));
+    let replacement = next.opening_id;
+    assert_ne!(replacement, original);
+    rig.adapter.open_session(next).await.unwrap();
+    std::fs::write(
+        format!("{}.release", program("physical-incarnation").display()),
+        b"release",
+    )
+    .unwrap();
+    let events = rig
+        .until(|event| matches!(event, SessionEvent::SessionLost(_)), 30)
+        .await;
+    let lost = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::SessionLost(lost) => Some(lost),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        lost.opening_id, original,
+        "the old process never borrows the newly installed session spec's identity"
+    );
+    let next_turn = rig.turn("GONE");
+    rig.adapter.start_turn(next_turn).await.unwrap();
+    let events = rig
+        .until(|event| matches!(event, SessionEvent::SessionLost(_)), 30)
+        .await;
+    let lost = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::SessionLost(lost) => Some(lost),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        lost.opening_id, replacement,
+        "the next real process owns the replacement opening"
+    );
+    rig.adapter.stop().await.unwrap();
 }
 
 /// What the turn ended with: the events up to its end and its error.

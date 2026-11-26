@@ -277,7 +277,7 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
       observer.observe(document, { childList: true, subtree: true });
     },
     { key: `orch.${fixtureId(1, 1)}.tree.${ACME.org}`, open: seeded.open, wanted, documents,
-      selector: '[role="tree"][aria-label="Orgs, projects, topics and threads"]' },
+      selector: '[role="tree"][aria-label="Organizations, projects, topics and threads"]' },
   );
   interface NativeRead { method: string; path: string; status: number; readable: boolean; bootstrap?: unknown }
   // Observe completion in the consuming document: Chromium can lose CDP's completion/body
@@ -291,6 +291,16 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
       const path = new URL(address, location.href).pathname;
       const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
       const sent = send(input, init);
+      // A page's document asks for its session and shell in one request: each of its lines is the read it answers.
+      if (path === '/api/v1/auth/session/open') {
+        void sent.then((reply) => reply.clone().text().then((text) => {
+          for (const line of text.split('\n').filter(Boolean)) {
+            const part = JSON.parse(line) as { session?: unknown; read?: number; status?: string; data?: unknown };
+            if ('session' in part) observed.__treeNativeReads.push({ method: 'POST', path: '/api/v1/auth/session', status: reply.status, readable: part.session !== null });
+            else if (part.read === 0) observed.__treeNativeReads.push({ method: 'GET', path: '/api/v1/me/bootstrap', status: part.status === 'ready' ? 200 : 500, readable: part.status === 'ready', bootstrap: part.data });
+          }
+        })).catch(() => observed.__treeNativeReads.push({ method, path, status: 0, readable: false }));
+      }
       if (path === '/api/v1/me/bootstrap' || path === '/api/v1/auth/session' || path === treePath) {
         void sent.then((reply) => {
           void reply.clone().arrayBuffer().then((bytes) => {
@@ -325,7 +335,7 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
   await Promise.all([page.goto(`/project/${ACME.shop}`).then(async () => {
     // A closed or refused navigation view cannot produce the required tree response.
     // Report that visible fixture failure without spending the native read's whole deadline.
-    await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads', exact: true })).toBeVisible();
+    await expect(page.getByRole('tree', { name: 'Organizations, projects, topics and threads', exact: true })).toBeVisible();
   }), opened]);
   await page.waitForFunction(() => typeof (window as unknown as { __tree?: { lastRow: number | null } }).__tree?.lastRow === 'number', undefined, { timeout: WAIT_MS * slow });
   // The documents of every open place have come, and no place still says that its documents are on their way.

@@ -14,7 +14,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeGet;
 use orch_api_contract::settings::{NodeSettingList, NodeSettingSet, NodeSettingSetBody};
 use orch_api_contract::share::{PersonalSkillsPolicy, ThreadSharedGet, ThreadSharedGetReply};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_settings::Target;
 use orch_types::{Id, new_id};
@@ -131,6 +131,7 @@ async fn a_thread_viewer_reads_personal_policy_without_manage_or_private_ancesto
         .call(NodeSettingSet, &[&s.tree.project.base.id, &KEY])
         .token(&viewer.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -173,11 +174,12 @@ async fn a_scoped_knowledge_read_never_borrows_ancestor_names_from_its_account()
     }]}))
     .unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.ada.id(),
             name: "Narrow knowledge read",
             token_hash: &token_hash(&token),
@@ -218,6 +220,7 @@ async fn knowledge_policy_metadata_adds_no_thread_write_scope_or_policy_lock() {
         .call(NodeSettingSet, &[&thread, &KEY])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
@@ -233,6 +236,7 @@ async fn knowledge_policy_metadata_adds_no_thread_write_scope_or_policy_lock() {
         .call(NodeSettingSet, &[&s.tree.project.base.id, &KEY])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: Some(true),
             expected_revision: None,
