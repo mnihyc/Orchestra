@@ -14,7 +14,7 @@ use orch_api_contract::admin::{
     AdminRuntimeListQuery,
 };
 use orch_api_contract::common::ErrorCode;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_db::queries::resources::access_fixtures as fixtures;
 use orch_types::{Id, Json, new_id};
@@ -23,11 +23,12 @@ use support::World;
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native administrative selection",
             token_hash: &token_hash(&secret),
@@ -178,7 +179,7 @@ async fn administrative_hosts_keep_the_fleet_shape_and_bound_its_real_home_and_p
             .send_bytes()
             .await,
     );
-    assert_eq!(ordinary.as_array().unwrap().len(), 2);
+    assert_eq!(ordinary["items"].as_array().unwrap().len(), 2);
     let mut host_only = rule("host", host, "AdminHostList", "read");
     host_only["resources"] = json!(["host"]);
     let scoped = key(&world, c.root.id(), vec![host_only]).await;
@@ -190,13 +191,20 @@ async fn administrative_hosts_keep_the_fleet_shape_and_bound_its_real_home_and_p
             .send_bytes()
             .await,
     );
-    assert_eq!(result.as_array().unwrap().len(), 1);
-    assert_eq!(result[0]["id"], json!(host));
-    assert_eq!(result[0]["name"], "Selected fleet");
-    assert_ne!(result[0]["machine"]["id"], json!(other));
-    assert!(result[0]["full"].is_null() && result[0]["software_update"].is_null());
-    assert!(result[0]["home"]["name"].is_null());
-    assert!(!result[0]["address"].as_str().unwrap().contains("acme"));
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["id"], json!(host));
+    assert_eq!(result["items"][0]["name"], "Selected fleet");
+    assert_ne!(result["items"][0]["machine"]["id"], json!(other));
+    assert!(
+        result["items"][0]["full"].is_null() && result["items"][0]["software_update"].is_null()
+    );
+    assert!(result["items"][0]["home"]["name"].is_null());
+    assert!(
+        !result["items"][0]["address"]
+            .as_str()
+            .unwrap()
+            .contains("acme")
+    );
     let with_names = key(
         &world,
         c.root.id(),
@@ -214,8 +222,13 @@ async fn administrative_hosts_keep_the_fleet_shape_and_bound_its_real_home_and_p
             .send_bytes()
             .await,
     );
-    assert_eq!(named[0]["machine"], result[0]["machine"]);
-    assert!(named[0]["address"].as_str().unwrap().contains("acme"));
+    assert_eq!(named["items"][0]["machine"], result["items"][0]["machine"]);
+    assert!(
+        named["items"][0]["address"]
+            .as_str()
+            .unwrap()
+            .contains("acme")
+    );
     sqlx::query("UPDATE users SET is_system_admin=false WHERE id=$1")
         .bind(c.root.id())
         .execute(&world.db.pool)
@@ -260,7 +273,7 @@ async fn administrative_runtime_manage_resolves_the_stored_unit_and_its_native_r
             .send_bytes()
             .await,
     );
-    assert_eq!(ordinary.as_array().unwrap().len(), 2);
+    assert_eq!(ordinary["items"].as_array().unwrap().len(), 2);
     let scoped = key(
         &world,
         c.root.id(),
@@ -280,10 +293,10 @@ async fn administrative_runtime_manage_resolves_the_stored_unit_and_its_native_r
             .send_bytes()
             .await,
     );
-    assert_eq!(result.as_array().unwrap().len(), 1);
-    assert_eq!(result[0]["id"], json!(selected));
-    assert_eq!(result[0]["environment"]["id"], json!(env));
-    assert_eq!(result[0]["template"]["id"], json!(template));
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["id"], json!(selected));
+    assert_eq!(result["items"][0]["environment"]["id"], json!(env));
+    assert_eq!(result["items"][0]["template"]["id"], json!(template));
     let surrogate = key(
         &world,
         c.root.id(),
@@ -303,7 +316,11 @@ async fn administrative_runtime_manage_resolves_the_stored_unit_and_its_native_r
             .send_bytes()
             .await,
     );
-    assert_eq!(result, json!([]), "a runtime UUID is never a unit identity");
+    assert_eq!(
+        result["items"],
+        json!([]),
+        "a runtime UUID is never a unit identity"
+    );
 }
 #[tokio::test]
 async fn administrative_build_usage_selects_actual_units_before_aggregating_native_frozen_builds() {

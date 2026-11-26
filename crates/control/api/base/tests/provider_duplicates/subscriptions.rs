@@ -16,6 +16,7 @@ async fn a_machine_bound_subscription_copy_keeps_native_profile_use_but_never_it
         agent_harnesses: vec![orch_link_contract::policy::PolicyHarness {
             kind: "fake".into(),
             path: "/test/fake".into(),
+            confirmation: None,
         }],
         environment_roots: vec!["/native".into()],
         ..Default::default()
@@ -38,7 +39,11 @@ async fn a_machine_bound_subscription_copy_keeps_native_profile_use_but_never_it
             name: "Native signed-in account".into(),
             home_id: s.company.acme,
             agent_id: profile,
-            runtime_machine_id: Some(machine),
+            runtime_location: Some(
+                orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                    machine_id: machine,
+                },
+            ),
             key_machine_id: None,
             access: Some(NewResourceAccess::OnlyMe),
             arrangements: None,
@@ -160,7 +165,7 @@ async fn subscription_copy_honors_destination_home_locks_without_reusing_an_exis
                 name: "Copy home policy account".into(),
                 home_id: s.company.acme,
                 agent_id: profile,
-                runtime_machine_id: None,
+                runtime_location: None,
                 key_machine_id: None,
                 access: None,
                 arrangements: None,

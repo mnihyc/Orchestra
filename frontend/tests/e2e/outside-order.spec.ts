@@ -10,8 +10,8 @@ test('the org, department, project and topic each show their applicable headed l
   // The settings frame owns the page title; the body no longer repeats it as h2.
   for (const path of ['/org/acme/settings/channels', '/org/acme.research/settings/channels']) {
     await page.goto(path);
-    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true, level: 1 })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true })).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: 'Email and channels', exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Email and channels', exact: true })).toHaveCount(1);
     await expect(page.getByRole('heading', { name: 'To people', exact: true, level: 3 })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'To a room or a system', exact: true, level: 3 })).toBeVisible();
   }
