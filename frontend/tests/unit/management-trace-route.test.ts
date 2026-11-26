@@ -1,8 +1,9 @@
 /** The actual Management route keeps Audit URL filters until each section applies its own schema. */
-import { InfiniteQueryObserver, QueryClient } from '@tanstack/react-query';
+import { InfiniteQueryObserver, type QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientApi from '@/api/client';
 import { trailQuery, wireFilters } from '@/api/trace';
+import { LiveQueryClient } from '@/api/query';
 import { readSearch, withSearch } from '@/features/admin/search';
 import { AUDIT_KINDS, traceHref, traceSearch } from '@/features/trace/params';
 import type { AuditEntryPage } from '@/generated/api-types';
@@ -31,7 +32,7 @@ const reload = (search: Record<string, unknown>) => fromUrl('/admin/audit?' + ne
 let cache: QueryClient;
 beforeEach(() => {
   calls.read.mockReset();
-  cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache = new LiveQueryClient({ defaultOptions: { queries: { retry: false } } });
   calls.read.mockResolvedValue({ data: { items: [], next_cursor: null }, response: new Response(null, { status: 200 }) });
 });
 afterEach(() => { cache.clear(); });
@@ -74,7 +75,11 @@ it('sends preserved filters on every system page and keeps direct-only, other ac
     trailQuery(system, { ...filters, actor: '01950000-0000-7000-8000-000000000002' }).queryKey,
     trailQuery({ type: 'node', id: 'place', name: 'Place', kind: 'org', orgId: 'place', access: undefined }, filters).queryKey];
   expect(new Set(keys.map((key) => JSON.stringify(key))).size).toBe(4);
-  expect(options.staleTime).toBe(0); expect(options.gcTime).toBe(0);
+  const native = observer.getCurrentQuery(), policy = observer.options.staleTime;
+  expect(typeof policy === 'function' ? policy(native) : policy).toBe(0);
+  expect(native.options.gcTime).toBe(0);
+  // An explicit positive override must remain visible to this check, rather than being hidden by the table.
+  expect(cache.defaultQueryOptions({ ...options, staleTime: 1_000 }).staleTime).toBe(1_000);
 });
 
 it('keeps every other Management page on its existing narrow runtime and form rules', () => {

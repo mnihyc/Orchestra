@@ -77,6 +77,8 @@ async fn report_the_incremental_processor_cost_of_idle_measurement_watches() {
     let environment = new_id();
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

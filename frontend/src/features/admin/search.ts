@@ -39,6 +39,7 @@ export interface AdminSearch {
   /** Opaque continuations keep each visible list bounded. */
   programCursor?: string;
   buildCursor?: string;
+  buildQ?: string;
 }
 
 const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined);
@@ -73,6 +74,8 @@ export function readSearch(raw: Record<string, unknown>): AdminSearch {
   const program = text(raw.program);
   if (program !== undefined) {
     found.program = program;
+    const buildQ=text(raw.buildQ);
+    if(buildQ!==undefined)found.buildQ=buildQ;
     const buildCursor = text(raw.buildCursor);
     if (buildCursor !== undefined) found.buildCursor = buildCursor;
     if (raw.programTab === 'builds' || raw.programTab === 'capabilities' || raw.programTab === 'settings') found.programTab = raw.programTab;

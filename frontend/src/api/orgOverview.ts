@@ -1,11 +1,12 @@
 /** The initial overview owns native query pages; explicit controls keep their native readers. */
-import { CancelledError, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { supersededRead } from '@/api/reads';
+import { queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { api, client, ok } from '@/api/client';
 import { outsideStatusQuery } from '@/api/away';
 import { firstStepsKey } from '@/api/firstSteps';
 import { activityQuery, childrenQuery, listedPage, nodeKey, orgBySlugKey } from '@/api/nodes';
 import { outsideOpeningsQuery } from '@/api/ports';
-import { namesQuery, NAME_LIMIT_MAX } from '@/api/search';
+import { namesQuery, NAME_OVERVIEW_COUNT } from '@/api/search';
 import { usageQuery, type UsageParams } from '@/api/usage';
 import { scheduledReads } from '@/api/readScheduler';
 import type { Node, OrgOverview } from '@/generated/api-types';
@@ -25,7 +26,7 @@ export function hydrateOverview(cache: QueryClient, key: QueryKey, data: OrgOver
   put(nodeKey(org.id), org);
   put(orgBySlugKey(org.address), org);
   put(childrenQuery(org.id, 'exclude', params.participating).queryKey, { pages: [listedPage(data.children)], pageParams: [null] });
-  put(namesQuery({ q: '', kinds: ['thread'], orgId: org.org_id, limit: NAME_LIMIT_MAX }).queryKey, data.recent);
+  put(namesQuery({ q: '', kinds: ['thread'], orgId: org.org_id, limit: NAME_OVERVIEW_COUNT }).queryKey, data.recent);
   section(firstStepsKey(org.id), data.first_steps);
   section(outsideStatusQuery(org.id).queryKey, data.outside_status);
   section(usageQuery(params.usage).queryKey, data.usage);
@@ -42,7 +43,7 @@ export const orgOverviewQuery = (id: string, params: OverviewParams) => queryOpt
       participating: params.participating, from: params.usage.from, to: params.usage.to,
       usage_by: params.usage.breakdowns[1] ?? 'model',
     } } }));
-    if (!current() || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
+    if (!current() || reader !== client.session.getState().readerVersion) throw supersededRead();
     if (reply.mode !== 'overview') throw new Error('The native overview returned a different selection');
     const data = reply.data;
     hydrateOverview(cache, orgOverviewKey(id, params), data, params);
@@ -62,7 +63,7 @@ export function resolveLandingPlaces(cache: QueryClient, rootId: string, ids: re
     const reply = await ok(api.GET('/orgs/{id}/overview', { params: { path: { id: rootId }, query: {
       resolve_ids: selected.join(','), participating: null, from: null, to: null, usage_by: null,
     } } }));
-    if (!current() || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
+    if (!current() || reader !== client.session.getState().readerVersion) throw supersededRead();
     if (reply.mode !== 'places') throw new Error('The native place selector returned a different selection');
     const keys: QueryKey[] = [];
     for (const node of reply.nodes) {

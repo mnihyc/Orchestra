@@ -2,7 +2,7 @@ import { unjudgedProvenance } from '../doubles/resource-grouping';
 import { TestRouter } from './TestRouter';
 import type * as RouterModule from '@tanstack/react-router';
 /** A machine's mount locations retain scope, reported sizes, permission cuts, guarded edits and drafts. */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { infiniteQueryOptions, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -14,12 +14,22 @@ import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { show } from './support';
 
-const { read, add, remove } = vi.hoisted(() => ({
+const { read, add, remove, copy } = vi.hoisted(() => ({
   read: vi.fn<(machine: string) => Promise<MachineMounts>>(),
   add: vi.fn<(mount: string, machine: string, body: MountLocationSetBody) => Promise<Mount>>(),
   remove: vi.fn<(mount: string, machine: string, confirm?: string) => Promise<void>>(),
+  copy: vi.fn(),
 }));
+vi.mock('@/features/resources/mounts/Copy', () => ({ CopyMountDataLoader: (props: {mountId: string; sourceMachine?: string}) => { copy(props); return null; } }));
 vi.mock('@/api/resource-tools', () => ({
+  machineMountsPageQuery: (machine: string, collection: string, q: string, mountId?: string) => infiniteQueryOptions({
+    queryKey: ['mounts', 'machine', machine, collection, mountId, 'pages', q], initialPageParam: null as string | null,
+    queryFn: async () => {
+      const data = await read(machine);
+      return { ...data, locations: data.locations.filter(row => collection === 'environments' ? row.mount.id === mountId : q === '' || row.mount.name.includes(q)),
+        available: data.available.filter(row => q === '' || row.mount.name.includes(q)) };
+    }, getNextPageParam: (last) => last.next_cursor,
+  }),
   machineMountsQuery: (machine: string) => ({ queryKey: ['mounts', 'machine', machine], queryFn: () => read(machine) }),
   setMountLocation: add, removeMountLocation: remove,
 }));
@@ -30,11 +40,11 @@ vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<t
 const saved: Mount = { ...unjudgedProvenance(), id: 'new', name: 'new-data', address: 'team.new-data', description: '', org_id: 'org', home: null,
   owner: null, target: '/mnt/new', read_only: true, enabled: true, default_fate: 'as_is', locations: [], kept: [], revision: 1, access: { permissions: ['mount.manage'], administers: false, participating: true, admin_only: [], through: [] } };
 function projection(): MachineMounts {
-  return { grouping: [], locations: [
-    { mount: { id: 'data', name: 'data', address: 'team.data' }, target: '/mnt/data', kind: 'path', source: '/srv/data', storage: null, data_kind: null, size_bytes: 1024,
+  return { next_cursor: null, grouping: [], locations: [
+    { environments_next_cursor: null, mount: { id: 'data', name: 'data', address: 'team.data' }, target: '/mnt/data', kind: 'path', source: '/srv/data', storage: null, data_kind: null, size_bytes: 1024,
       environments: [{ id: 'environment', name: 'Workspace', status: 'running' }], can_remove: true },
-    { mount: { id: 'volume', name: 'empty-volume', address: 'team.empty-volume' }, target: '/mnt/cache', kind: 'volume', source: 'owned-volume', storage: 'fast', data_kind: null, size_bytes: 0, environments: [], can_remove: true },
-    { mount: { id: 'readable', name: 'readable-data', address: 'team.readable' }, target: '/mnt/readable', kind: 'path', source: null, storage: null, data_kind: null, size_bytes: null, environments: [], can_remove: false },
+    { environments_next_cursor: null, mount: { id: 'volume', name: 'empty-volume', address: 'team.empty-volume' }, target: '/mnt/cache', kind: 'volume', source: 'owned-volume', storage: 'fast', data_kind: null, size_bytes: 0, environments: [], can_remove: true },
+    { environments_next_cursor: null, mount: { id: 'readable', name: 'readable-data', address: 'team.readable' }, target: '/mnt/readable', kind: 'path', source: null, storage: null, data_kind: null, size_bytes: null, environments: [], can_remove: false },
   ], available: [{ mount: { id: 'new', name: 'new-data', address: 'team.new-data' }, path: true, default_storage: true, storages: ['fast'] }] };
 }
 beforeEach(() => { vi.clearAllMocks(); read.mockResolvedValue(projection()); add.mockResolvedValue(saved); remove.mockResolvedValue(undefined); });
@@ -92,7 +102,9 @@ describe('Mounts here', () => {
   it('requires the exact mount name before removing a volume from this machine', async () => {
     const user = userEvent.setup();
     show(<MountsHere machine="node" name="Build host" />);
-    await user.click(await screen.findByRole('button', { name: i18n.t('resourceDetails.mount.here.remove', { name: 'empty-volume' }) }));
+    const row = await screen.findByRole('row', { name: /empty-volume/ });
+    await user.click(within(row).getByRole('button', { name: i18n.t('operation.actions') }));
+    await user.click(await screen.findByRole('menuitem', { name: i18n.t('resourceDetails.mount.here.remove', { name: 'empty-volume' }) }));
     const dialog = screen.getByRole('dialog', { name: i18n.t('resourceDetails.mount.removeLocation') });
     expect(within(dialog).getByText(/Build host/)).toBeVisible();
     const erase = within(dialog).getByRole('button', { name: i18n.t('resourceDetails.remove') });
@@ -100,6 +112,17 @@ describe('Mounts here', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Mount name to confirm' }), 'empty-volume');
     await user.click(erase);
     await waitFor(() => expect(remove).toHaveBeenCalledWith('volume', 'node', 'empty-volume'));
+  });
+
+  it('opens the shared data copy with this machines source instead of duplicating its definition', async () => {
+    const user = userEvent.setup();
+    show(<MountsHere machine="node" name="Build host" />);
+    const row = await screen.findByRole('row', { name: /empty-volume/ });
+    await user.click(within(row).getByRole('button', { name: i18n.t('operation.actions') }));
+    await user.click(await screen.findByRole('menuitem', { name: i18n.t('mountCopy.copy') }));
+    await waitFor(() => expect(copy).toHaveBeenCalledWith(expect.objectContaining({ mountId: 'volume', sourceMachine: 'node' })));
+    expect(add).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it('keeps a failed location draft and discards it when the machine changes', async () => {
