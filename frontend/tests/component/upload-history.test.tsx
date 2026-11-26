@@ -9,12 +9,13 @@ import userEvent from '@testing-library/user-event';
 import { uploadHistoryQuery } from '@/api/access';
 import { i18n, setLocale } from '@/i18n';
 
-const fixture = vi.hoisted(() => ({ read: vi.fn<(cursor: string | null) => Promise<HistoryLinePage>>() }));
+const fixture = vi.hoisted(() => ({ read: vi.fn<(cursor: string | null,q?:string) => Promise<HistoryLinePage>>() }));
 vi.mock('@/api/access', async (load) => {
   const actual = await load<typeof AccessApi>();
-  return { ...actual, uploadHistoryQuery: vi.fn((environment: string, line: string, cursor: string | null) => ({
-    ...actual.uploadHistoryQuery(environment, line, cursor), queryFn: () => fixture.read(cursor),
-  })) };
+  return { ...actual, uploadHistoryQuery: vi.fn<typeof AccessApi.uploadHistoryQuery>((environment,line,cursor,q) => {
+    const words=q??'';
+    return {...actual.uploadHistoryQuery(environment,line,cursor,words),queryFn:()=>fixture.read(cursor,words)};
+  }) };
 });
 
 vi.mock('@/features/people/NamedChip', () => ({ TypedChip: ({ reference }: { reference: { path: string } }) => <a href="#file">{reference.path.split('/').at(-1)}</a> }));
@@ -63,10 +64,22 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   show(<UploadHistory line={{...line,upload:{...line.upload!,files:files.slice(0,2),file_count:1000,files_paged:true}}}/>);
   expect(screen.queryByRole('link',{name:'notes.txt'})).not.toBeInTheDocument();
   await user.click(screen.getByRole('button',{name:t('uploads.history.more',{number:'998'})}));
-  await waitFor(()=>expect(uploadHistoryQuery).toHaveBeenCalledWith('workspace','history',null));
+  await waitFor(()=>expect(uploadHistoryQuery).toHaveBeenCalledWith('workspace','history',null,''));
   await user.click(await screen.findByRole('button',{name:t('ui.pagination.more')}));
   expect(await screen.findByRole('link',{name:'notes.txt'})).toBeVisible();
-  expect(uploadHistoryQuery).toHaveBeenLastCalledWith('workspace','history','next-files');
+  expect(uploadHistoryQuery).toHaveBeenLastCalledWith('workspace','history','next-files','');
   await user.click(screen.getByRole('button',{name:t('uploads.history.first')}));
-  await waitFor(()=>expect(uploadHistoryQuery).toHaveBeenLastCalledWith('workspace','history',null));
+  await waitFor(()=>expect(uploadHistoryQuery).toHaveBeenLastCalledWith('workspace','history',null,''));
+});
+
+it('finds a filename beyond the upload preview through its native source and resets that file continuation',async()=>{
+  vi.spyOn(HTMLElement.prototype,'offsetHeight','get').mockReturnValue(288);
+  const files=line.upload!.files;
+  fixture.read.mockImplementation((_cursor,q)=>Promise.resolve({items:[{...line,upload:{...line.upload!,files:q?files.slice(2):files.slice(0,2)}}],next_cursor:q?null:'next-files'}));
+  const user=userEvent.setup();show(<UploadHistory line={{...line,upload:{...line.upload!,files:files.slice(0,2),file_count:1000,files_paged:true}}}/>);
+  await user.click(screen.getByRole('button',{name:i18n.t('uploads.history.more',{number:'998'})}));
+  await user.type(await screen.findByRole('searchbox'),'notes');
+  await waitFor(()=>expect(fixture.read).toHaveBeenLastCalledWith(null,'notes'));
+  expect(await screen.findByRole('link',{name:'notes.txt'})).toBeVisible();
+  expect(screen.getByRole('button',{name:'Bo'})).toBeVisible();
 });

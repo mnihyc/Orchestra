@@ -335,6 +335,7 @@ async fn authentication() {
         FileStates::new(ObjectStore::open(&fixture.path().join("kept"), &workspace).unwrap());
     let source_url = format!("https://localhost:{port}/source.git");
     let request = GitPrepare {
+        work: None,
         environment_id: new_id(),
         job_id: new_id(),
         directory: "attempt".into(),
@@ -344,9 +345,20 @@ async fn authentication() {
         credential: Some(Secret::Ref(new_id())),
     };
     let secret = serde_json::json!({"username":"source","password":SOURCE_PASSWORD}).to_string();
-    let ready = git_actions::prepare(&tool, &files, &states, &request, 1, false, Some(&secret))
-        .await
-        .unwrap();
+    let transfer = Arc::new(orch_envhost::snapshot::ProgressLog::new());
+    let ready = orch_envhost::snapshot::with_transfer_progress(
+        transfer.clone(),
+        git_actions::prepare(&tool, &files, &states, &request, 1, false, Some(&secret)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        transfer
+            .reports()
+            .iter()
+            .any(|report| report.bytes_done > 0 && report.files_done > 0),
+        "a real HTTPS clone reports its received bytes and objects"
+    );
     assert_eq!(ready.branch.as_deref(), Some("work"));
     assert_eq!(
         std::fs::read(workspace.join("attempt/code")).unwrap(),

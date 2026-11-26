@@ -57,7 +57,7 @@ export function useLinkSharing(context: LinkContext, parts: LinkParts, visible =
   const queryKey = ['link-sharing', owner, settled, context.extraAgents?.map((agent) => agent.id)] as const;
   const hasRefs = refs.length > 0;
   const preview = useQuery({ queryKey, enabled: visible && hasRefs && settled === refsKey && user !== null,
-    queryFn: ({ signal }) => previewLinkPlan(context, refs, parts, keyFor, signal), retry: false, staleTime: 0 });
+    queryFn: ({ signal }) => previewLinkPlan(context, refs, parts, keyFor, signal), retry: false });
   const place = preview.data?.placeId ?? context.placeId;
   const personal = useQuery({ ...meStateQuery, enabled: visible && hasRefs });
   const policy = useQuery({ ...settingsQuery(place), enabled: visible && hasRefs && place !== '' });
