@@ -87,22 +87,25 @@ impl native::Selected for RetainedRows {
     ) -> BoxFuture<'a, ApiResult<(RetainedPage, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let node = ctx.id("id")?;
-            let limit = usize::try_from(
-                query
-                    .limit
-                    .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT)
-                    .clamp(1, orch_api_contract::common::MAX_LIMIT),
-            )
-            .map_err(ApiError::internal)?;
-            let mut after = query
-                .cursor
-                .as_deref()
-                .map(|cursor| {
-                    cursor.parse::<Id>().map_err(|_| {
-                        super::super::invalid("cursor", "is not a cursor of this list")
-                    })
-                })
-                .transpose()?;
+            let page_query = orch_api_contract::common::CollectionQuery {
+                q: query.q.clone(),
+                limit: query.limit,
+                cursor: query.cursor.clone(),
+            };
+            let source = format!(
+                "kept-environments:{}:{node}:{}",
+                ctx.user()?.id(),
+                query.under.unwrap_or(false)
+            );
+            let limit = usize::try_from(crate::collection::limit(&page_query)?)
+                .map_err(ApiError::internal)?;
+            let mut after = crate::collection::after::<Id>(&page_query, &source)?;
+            let patterns = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""))
+                .like_patterns();
+            let named = orch_db::queries::search::matching_sql("e.name", "$5");
+            let candidates_sql = format!(
+                "SELECT e.id FROM environments e JOIN nodes n ON n.id=e.home_node_id WHERE e.deleted_at IS NOT NULL AND e.purged_at IS NULL AND e.removal_phase IN ('kept','restoring','purging') AND (e.home_node_id=$1 OR ($2 AND $1=ANY(n.path))) AND ($3::uuid IS NULL OR e.id>$3) AND ({named}) ORDER BY e.id LIMIT $4"
+            );
             let raw =
                 authorization::load_principal(conn, caller.clone(), ctx.app.clock.time()).await?;
             let raw = crate::sign_in::second_step::hold(conn, ctx.user()?, raw).await?;
@@ -111,9 +114,17 @@ impl native::Selected for RetainedRows {
             let mut selected = Vec::new();
             let mut selected_targets = Vec::new();
             loop {
-                let candidates:Vec<Id>=sqlx::query_scalar("SELECT e.id FROM environments e JOIN nodes n ON n.id=e.home_node_id WHERE e.deleted_at IS NOT NULL AND e.purged_at IS NULL AND e.removal_phase IN ('kept','restoring','purging') AND (e.home_node_id=$1 OR ($2 AND $1=ANY(n.path))) AND ($3::uuid IS NULL OR e.id>$3) ORDER BY e.id LIMIT $4")
-                    .bind(node).bind(query.under.unwrap_or(false)).bind(after)
-                    .bind(i64::from(orch_api_contract::common::MAX_LIMIT)).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+                let candidates: Vec<Id> =
+                    sqlx::query_scalar(sqlx::AssertSqlSafe(candidates_sql.clone()))
+                        .persistent(false)
+                        .bind(node)
+                        .bind(query.under.unwrap_or(false))
+                        .bind(after)
+                        .bind(i64::from(orch_api_contract::common::MAX_LIMIT))
+                        .bind(&patterns)
+                        .fetch_all(&mut *conn)
+                        .await
+                        .map_err(DbError::from)?;
                 if candidates.is_empty() {
                     break;
                 }
@@ -203,9 +214,14 @@ impl native::Selected for RetainedRows {
             }
             selected.truncate(limit);
             selected_targets.truncate(limit);
-            let next_cursor = more
-                .then(|| selected.last().map(|row| row.id.to_string()))
-                .flatten();
+            let next_cursor = if more {
+                selected
+                    .last()
+                    .map(|row| crate::collection::cursor(&page_query, &source, row.id))
+                    .transpose()?
+            } else {
+                None
+            };
             if !modern {
                 return Ok((
                     RetainedPage {

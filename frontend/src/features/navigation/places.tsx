@@ -13,7 +13,7 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import type { LucideIcon } from 'lucide-react';
 import { type ComponentProps, type ReactNode, useMemo } from 'react';
 
-import type { Favorite, Node, NodeKind, NodeRef, TopicStatus, TreeNode, UserRef } from '@/generated/api-types';
+import type { Node, NodeKind, NodeRef, Shortcut, TopicStatus, TreeNode, UserRef } from '@/generated/api-types';
 import { type OrgTree, pathTo, useTreeStore } from '@/realtime/stores/tree';
 import { useNameTrees } from '@/features/navigation/placeLabels';
 
@@ -69,8 +69,13 @@ export function placeOfRef(ref: NodeRef, parent: Pick<NodeRef, 'id' | 'kind'> | 
   return { id: ref.id, kind: ref.kind, name: ref.name, parentId: parent?.id ?? null, archived: false, status: null, folder: ref.kind === 'project' && parent?.kind === 'project' };
 }
 
-export function placeOfFavorite(favorite: Favorite): PlaceRef | null {
-  return placeOfRef(favorite.node, favorite.path.at(-1) ?? null);
+/** The place or thread a shortcut points to, while it opens for its reader. */
+export function placeOfFavorite(favorite: Shortcut): PlaceRef | null {
+  const { kind, id } = favorite.target;
+  const item = favorite.item;
+  if (favorite.state !== 'open' || item === null || item === undefined) return null;
+  if (kind !== 'org' && kind !== 'project' && kind !== 'topic' && kind !== 'thread') return null;
+  return placeOfRef({ id, kind, name: item.name ?? null, redacted: item.name === null || item.name === undefined }, item.path.at(-1) ?? null);
 }
 
 /** The word a text uses for what a place is: a project that lies in a project is a folder. */

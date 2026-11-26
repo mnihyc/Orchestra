@@ -85,7 +85,7 @@ async fn bootstrap_account_state_cannot_lend_personal_list_or_other_operation_re
         native
             .favorites
             .iter()
-            .any(|favorite| favorite.node.id == room.project)
+            .any(|favorite| favorite.target.id == room.project)
     );
     assert!(native.read_states.iter().any(|row| row.thread_id == thread));
     assert!(
@@ -195,9 +195,9 @@ async fn bootstrap_favorite_names_and_chat_state_keep_their_native_independent_s
     );
     assert_eq!(body["orgs"], json!([]));
     assert_eq!(body["favorites"].as_array().unwrap().len(), 1);
-    assert_eq!(body["favorites"][0]["node"]["name"], "Web");
-    assert!(body["favorites"][0]["path"][0]["name"].is_null());
-    assert_eq!(body["favorites"][0]["path"][0]["redacted"], true);
+    assert_eq!(body["favorites"][0]["item"]["name"], "Web");
+    assert!(body["favorites"][0]["item"]["path"][0]["name"].is_null());
+    assert_eq!(body["favorites"][0]["item"]["path"][0]["redacted"], true);
     assert_eq!(body["read_states"].as_array().unwrap().len(), 1);
     assert_eq!(body["read_states"][0]["thread_id"], json!(thread));
     assert_eq!(body["read_states"][0]["last_read_seq"], 17);
@@ -452,7 +452,7 @@ async fn bootstrap_serializes_a_current_key_identity_without_replaying_the_devic
     .await;
     let next_token = token.clone();
     let mut blocker = world.db.pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE favorites IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE shortcuts IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
         .await
         .unwrap();
@@ -471,7 +471,7 @@ async fn bootstrap_serializes_a_current_key_identity_without_replaying_the_devic
     let reading = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if request.is_finished() { return None; }
-            let blocked: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM favorites%' LIMIT 1").bind(pid).fetch_optional(&world.db.pool).await.unwrap();
+            let blocked: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM shortcuts%' LIMIT 1").bind(pid).fetch_optional(&world.db.pool).await.unwrap();
             if blocked.is_some() { return blocked; } tokio::task::yield_now().await;
         }
     }).await.ok().flatten();
@@ -658,10 +658,10 @@ async fn bootstrap_favorite_publication_cannot_borrow_another_favorites_old_path
         .as_array()
         .unwrap()
         .iter()
-        .find(|favorite| favorite["node"]["id"] == json!(moving))
+        .find(|favorite| favorite["target"]["id"] == json!(moving))
         .unwrap();
     assert!(
-        original["path"]
+        original["item"]["path"]
             .as_array()
             .unwrap()
             .iter()
@@ -698,17 +698,20 @@ async fn bootstrap_favorite_publication_cannot_borrow_another_favorites_old_path
     let path = &native
         .favorites
         .iter()
-        .find(|favorite| favorite.node.id == moving)
+        .find(|favorite| favorite.target.id == moving)
+        .unwrap()
+        .item
+        .as_ref()
         .unwrap()
         .path;
     assert!(path.iter().any(|node| node.id == right));
     assert!(path.iter().all(|node| node.id != left));
-    assert!(
-        native
-            .favorites
-            .iter()
-            .any(|favorite| favorite.path.iter().any(|node| node.id == left))
-    );
+    assert!(native.favorites.iter().any(|favorite| {
+        favorite
+            .item
+            .as_ref()
+            .is_some_and(|item| item.path.iter().any(|node| node.id == left))
+    }));
     blocker.commit().await.unwrap();
     let reply = tokio::time::timeout(std::time::Duration::from_secs(30), request)
         .await

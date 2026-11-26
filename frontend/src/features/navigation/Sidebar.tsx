@@ -20,11 +20,12 @@
  * where it begins, and opening and closing its rows. Nothing in it folds or moves by itself: going
  * somewhere opens the way to the row once, and a reader who closes it again finds it closed.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { ArrowUp, ChevronsDownUp, Ellipsis, Focus, FolderOpen, ListTree, Locate, MessagesSquare } from 'lucide-react';
 import type { TFunction } from 'i18next';
-import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type DragEvent, Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 import { useStore } from 'zustand';
@@ -72,7 +73,9 @@ import { ArrangementSwitch, RecentOrderSelect } from './ArrangementSwitch';
 import { navigationFilter, type NavigationArrangement, type RecentOrder } from './recent';
 import { RecentList } from './RecentList';
 import { useTreeReveal } from './showInTree';
-import { useTreeDocsOf, loadMoreDocs } from '@/features/navigation/treeDocs';
+import { useTreeDocsOf, loadMoreDocs, useTreeShortcutsOf } from '@/features/navigation/treeDocs';
+import { DRAGGED_SHORTCUT, ShortcutContextMenu, ShortcutLink, ShortcutMenuButton, useShortcutDrop } from '@/features/navigation/shortcuts';
+import type { Shortcut as ShortcutRecord } from '@/api/shortcuts';
 import {
   type Below,
   belowOf,
@@ -87,6 +90,7 @@ import {
   type Needs as SectionNeeds,
   needsOf,
   placesWithDocs,
+  placesWithShortcuts,
   stopsInOrder,
   type TreeView,
 } from '@/features/navigation/treeRows';
@@ -97,7 +101,8 @@ import { i18n } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { readViewChoice, writeViewChoice, useViewChoice } from '@/lib/viewChoices';
 import { holds } from '@/lib/permissions';
-import { reloadOrgTree, useOrgTreeFeed } from '@/realtime/live';
+import { useNavigationReadsReady } from '@/shell/useThreadOpeningPaint';
+import { reloadOrgTree, useOrgTreeFeed, useScopedTreeBranches, loadMoreTree } from '@/realtime/live';
 import { useChatStates } from '@/realtime/stores/chat';
 import { pathTo, useOrgTree } from '@/realtime/stores/tree';
 import { useActionKeys, useKeyAction } from '@/shell/keys';
@@ -159,13 +164,17 @@ function Needs({ needs }: { needs: SectionNeeds }) {
   );
 }
 
-/** One place the person starred or opened lately: its icon, its name, and the place it lies in, quietly. */
-function ShortcutRow({ place, color, where, needs }: { place: PlaceRef; color: number | null; where: RowPlaceValue | null; needs: SectionNeeds }) {
+/** One place the person starred or opened lately: its icon, its name, and the place it lies in, quietly. A starred one is dragged as the shortcut it is. */
+function ShortcutRow({ place, color, where, needs, shortcut }: { place: PlaceRef; color: number | null; where: RowPlaceValue | null; needs: SectionNeeds; shortcut?: ShortcutRecord }) {
   const { t } = useTranslation();
   const kind = kindWord(place);
+  const carry = shortcut === undefined ? undefined : (event: DragEvent) => {
+    event.dataTransfer.setData(DRAGGED_SHORTCUT, JSON.stringify({ id: shortcut.id, name: place.name, from: null }));
+    event.dataTransfer.effectAllowed = 'move';
+  };
   return (
     <NodeContextMenu place={place}>
-      <div className={cx(ROW, QUIET)} data-shortcut>
+      <div className={cx(ROW, QUIET)} data-shortcut onDragStart={carry}>
         <PlaceLink place={place} className={ROW_LINK} data-row-name-place={where !== null || undefined}>
           <span className="flex size-4 shrink-0 items-center justify-center">
             <NodeIcon kind={kind} color={color} done={place.status === 'done'} />
@@ -182,6 +191,22 @@ function ShortcutRow({ place, color, where, needs }: { place: PlaceRef; color: n
         </span>
       </div>
     </NodeContextMenu>
+  );
+}
+
+/** One of the person's own shortcuts that is no place: a document or a chat, or one whose target no longer opens for them. */
+function StarredRow({ shortcut, where }: { shortcut: ShortcutRecord; where: RowPlaceValue | null }) {
+  return (
+    <ShortcutContextMenu shortcut={shortcut}>
+      <div className={cx(ROW, QUIET)} data-shortcut>
+        <ShortcutLink shortcut={shortcut} arrow={false} className={ROW_LINK} named={where !== null}>
+          <RowPlace value={where} />
+        </ShortcutLink>
+        <span className={ROW_BUTTONS}>
+          <ShortcutMenuButton shortcut={shortcut} skipTab />
+        </span>
+      </div>
+    </ShortcutContextMenu>
   );
 }
 
@@ -278,6 +303,9 @@ interface Shortcut {
   where: RowPlaceValue | null;
 }
 
+/** A row of Starred: a place or a thread the person keeps there, or any other thing their own shortcut points to. */
+type Starred = (Shortcut & { shortcut: ShortcutRecord }) | { shortcut: ShortcutRecord; where: RowPlaceValue | null };
+
 /** The address of a document's page and of a thread's, in the address of the screen in view. */
 const DOCUMENT_ADDRESS = /^\/doc\/([^/]+)\/?$/;
 const THREAD_ADDRESS = /^\/thread\/([^/]+)\/?$/;
@@ -329,14 +357,16 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   const person = useQuery(meQuery).data;
   const ownOrgs = railOrgs(orgs.data ?? [], person);
   const selected = useSelectedOrg((state) => state.orgId);
-  const heading = useCurrentHeading();
+  const heading = useCurrentHeading(true, ({ nodeId, path }) => ({ nodeId, path }));
   const preferences = useSidebarPreferences();
   const participationCopy = useParticipationCopy();
   // A small screen has no rail: there the head of Navigation is the way to another org. Beside a rail it is the org in view,
   // whatever the width of the cell the bar stands in.
   const screen = useViewportShape();
   const { show } = preferences;
-  const shown = useViewShown();
+  const visible = useViewShown();
+  const navigationReady = useNavigationReadsReady();
+  const shown = visible && navigationReady;
   const [arrangedAs, chooseArrangement] = useViewChoice<string>('navigation', 'arrangement', 'tree', orgId ?? undefined);
   const [orderedBy, chooseRecentOrder] = useViewChoice<string>('navigation', 'recentOrder', 'opened', orgId ?? undefined);
   const arrangement: NavigationArrangement = arrangedAs === 'recent' ? 'recent' : 'tree';
@@ -361,7 +391,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
     if (orgId !== null && orgId !== selected) selectOrg(userId, orgId);
   }, [orgId, selected, userId]);
 
-  useOrgTreeFeed(shown ? orgId : null);
+  useOrgTreeFeed(shown ? orgId : null,treeOrder.revision);
   useAttentionFeed(shown ? orgId : null);
   const tree = useOrgTree(orgId);
   const attention = useAttention(orgId);
@@ -391,7 +421,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   const keptOpen = useMemo(() => (orgId === null ? null : readOpen(userId, orgId)), [orgId, userId]);
   const expanded = useMemo<ReadonlySet<string>>(() => {
     if (opened !== null && opened.orgId === orgId) return opened.ids;
-    return keptOpen ?? new Set(tree.loaded ? firstExpanded(tree) : []);
+    return keptOpen ?? new Set(tree.loaded?(tree.initialOpen===undefined?firstExpanded(tree):tree.initialOpen??[]):[]);
   }, [opened, orgId, keptOpen, tree]);
   const setExpanded = useCallback(
     (next: ReadonlySet<string>) => {
@@ -506,6 +536,18 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
 
   // What the reader typed to narrow the tree by a name.
   const [filter, setFilter] = useState('');
+  // The opening already names the readable parents of the addressed thread.
+  const addressBranches: string[] = [];
+  const path = heading?.path;
+  if (shown && currentThread !== null && currentThread === currentId && orgId !== null && !tree.nodes.has(currentThread)
+      && path?.[0]?.id === orgId && path.at(-1)?.id === currentId) {
+    for (const ancestor of path.slice(0, -1)) {
+      if (ancestor.redacted || !readViewChoice<boolean>(userId, 'navigation', 'treeExpanded', true, `${orgId}:${ancestor.id}`)) break;
+      if (ancestor.id !== orgId) addressBranches.push(ancestor.id);
+    }
+  }
+  useScopedTreeBranches(shown?orgId:null,expanded,currentId??currentThread,filter,addressBranches);
+
   const filterField = useRef<HTMLInputElement>(null);
   // Once the rows are drawn again, the tree's own row takes the keyboard.
   const toFirstRow = () => requestAnimationFrame(() => bar.current?.querySelector<HTMLElement>('[role="treeitem"][tabindex="0"]')?.focus());
@@ -515,6 +557,11 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   const docs = useTreeDocsOf(
     useMemo(() => (showsDocs && rootId !== null ? placesWithDocs(tree, rootId, expanded, show.threads) : ''), [showsDocs, tree, rootId, expanded, show.threads]),
   );
+  // The shortcuts kept in the places that are open: they stand in the tree whatever kinds of thing it shows.
+  const showsShortcuts = shown && arrangement === 'tree' && !projectsFolded;
+  const shortcuts = useTreeShortcutsOf(
+    useMemo(() => (showsShortcuts && rootId !== null ? placesWithShortcuts(tree, rootId, expanded) : ''), [showsShortcuts, tree, rootId, expanded]),
+  );
   const view = useMemo<TreeView>(
     () => ({
       showArchived: showArchived.value,
@@ -523,6 +570,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
       keep,
       attention,
       docs: show.documents ? docs : null,
+      shortcuts,
       threads: show.threads,
       chats,
       chatRows: show.chats,
@@ -533,7 +581,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
       filter,
       order: sortedBy,
     }),
-    [showArchived.value, preferences.hideDone, preferences.participating, keep, attention, show.documents, show.threads, show.chats, docs, chats, groups, outside, filter, sortedBy],
+    [showArchived.value, preferences.hideDone, preferences.participating, keep, attention, show.documents, show.threads, show.chats, docs, shortcuts, chats, groups, outside, filter, sortedBy],
   );
 
   const beginNode = beginning === null ? undefined : tree.nodes.get(beginning);
@@ -541,6 +589,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
     rootId !== null &&
     (outside !== null ||
       (show.documents && (tree.nodes.get(rootId)?.docs ?? 0) > 0) ||
+      (tree.nodes.get(rootId)?.shortcuts ?? 0) > 0 ||
       (show.chats && (groups.length > 0 || (tree.nodes.get(rootId)?.chat.seq ?? 0) > 0)) ||
       [...tree.nodes.values()].some((node) => node.parent_id === rootId && !node.deleted && (showArchived.value || !node.archived) && (show.threads || node.kind !== 'thread')));
   const rootPlace = current === null ? null : placeOfNode(current);
@@ -550,24 +599,35 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   // ---------------------------------------------------------------- starred and recent
 
   const favorites = useFavorites();
-  const starred = useMemo<Shortcut[]>(
+  // What the person keeps in their own list and lies in this org, also what no longer opens for them there, until it is
+  // restored or they remove it.
+  const starred = useMemo<Starred[]>(
     () =>
-      favorites
-        .filter((favorite) => (favorite.path[0]?.id ?? favorite.node.id) === orgId && favorite.node.name !== null)
-        .map((favorite) => ({
-          place: {
-            id: favorite.node.id,
-            kind: favorite.node.kind,
-            name: favorite.node.name ?? '',
-            parentId: favorite.path.at(-1)?.id ?? null,
-            archived: false,
-            status: tree.nodes.get(favorite.node.id)?.topic?.status ?? null,
-            folder: favorite.node.kind === 'project' && favorite.path.at(-1)?.kind === 'project',
-          },
-          where: nearestPlace({ id: favorite.node.id, path: favorite.path, place_label: null }),
-        })),
+      favorites.flatMap((favorite): Starred[] => {
+        const item = favorite.item;
+        if ((favorite.org_id ?? item?.org_id ?? item?.path[0]?.id ?? orgId) !== orgId) return [];
+        if (favorite.state !== 'open' || item === null || item === undefined) return [{ shortcut: favorite, where: null }];
+        const kind = favorite.target.kind;
+        if ((kind === 'org' || kind === 'project' || kind === 'topic' || kind === 'thread') && item.name !== null && item.name !== undefined) {
+          return [{
+            shortcut: favorite,
+            place: {
+              id: favorite.target.id,
+              kind,
+              name: item.name,
+              parentId: item.path.at(-1)?.id ?? null,
+              archived: false,
+              status: tree.nodes.get(favorite.target.id)?.topic?.status ?? null,
+              folder: kind === 'project' && item.path.at(-1)?.kind === 'project',
+            },
+            where: nearestPlace({ id: favorite.target.id, path: item.path, place_label: null }),
+          }];
+        }
+        return [{ shortcut: favorite, where: item.path.length === 0 ? null : nearestPlace({ id: favorite.target.id, path: item.path, place_label: null }) }];
+      }),
     [favorites, orgId, tree.nodes],
   );
+  const starredDrop = useShortcutDrop({ id: null, name: t('navigation.starred') });
 
   const names = useQuery({ ...recentsOfOrgQuery(orgId ?? ''), enabled: shown && arrangement === 'tree' && orgId !== null && !preferences.isFolded('recent') });
   const seen = useSeenHere();
@@ -623,7 +683,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   );
   const starredFolded = preferences.isFolded('starred');
   const recentFolded = preferences.isFolded('recent');
-  const starredNeeds = useMemo(() => (starredFolded ? needsIn(starred.map((entry) => entry.place.id)) : NO_NEEDS), [starredFolded, needsIn, starred]);
+  const starredNeeds = useMemo(() => (starredFolded ? needsIn(starred.flatMap((entry) => ('place' in entry ? [entry.place.id] : []))) : NO_NEEDS), [starredFolded, needsIn, starred]);
   const recentNeeds = useMemo(() => (recentFolded ? needsIn(recent.flatMap((entry) => ('place' in entry ? [entry.place.id] : []))) : NO_NEEDS), [recentFolded, needsIn, recent]);
   const projectsNeeds = useMemo(() => {
     if (!projectsFolded || rootId === null) return NO_NEEDS;
@@ -649,7 +709,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
           acts.push(() => markThreadRead(id, seq).then((read) => attentionWriter.read(id, read)));
         }
         const chat = chatStanding(node.chat, chats);
-        if (chat.unread || chat.mentions > 0) readChat(node.chat.id, Math.max(node.chat.seq, chats.latest.get(node.chat.id)?.seq ?? 0));
+        if (node.chat.seq !== null && (chat.unread || chat.mentions > 0)) readChat(node.chat.id, Math.max(node.chat.seq, chats.latest.get(node.chat.id)?.seq ?? 0));
         pending.push(...(below().get(node.id) ?? []));
       }
       void allDone(acts).then((done) => {
@@ -926,11 +986,17 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
         )}
 
         {starred.length > 0 && (
-          <Section title={t('navigation.starred')} folded={starredFolded} onFoldedChange={(folded) => setFolded('starred', folded)} needs={starredNeeds}>
-            {starred.map(({ place, where }) => (
-              <ShortcutRow key={place.id} place={place} color={tree.nodes.get(place.id)?.color ?? null} where={where} needs={needsIn([place.id])} />
-            ))}
-          </Section>
+          <div onDragOver={starredDrop.onDragOver} onDrop={starredDrop.onDrop} data-starred>
+            <Section title={t('navigation.starred')} folded={starredFolded} onFoldedChange={(folded) => setFolded('starred', folded)} needs={starredNeeds}>
+              {starred.map((entry) =>
+                'place' in entry ? (
+                  <ShortcutRow key={entry.shortcut.id} place={entry.place} color={tree.nodes.get(entry.place.id)?.color ?? entry.shortcut.item?.color ?? null} where={entry.where} needs={needsIn([entry.place.id])} shortcut={entry.shortcut} />
+                ) : (
+                  <StarredRow key={entry.shortcut.id} shortcut={entry.shortcut} where={entry.where} />
+                ),
+              )}
+            </Section>
+          </div>
         )}
 
         {arrangement === 'tree' && <Section title={t('navigation.recent')} toggleLabel={t('navigation.recentShortcuts')} folded={recentFolded} onFoldedChange={(folded) => setFolded('recent', folded)} needs={recentNeeds}
@@ -956,7 +1022,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
           path={beginning === null ? undefined : <Beginning way={beginningWay} onBegin={begin} onUp={up} />}
           action={
               <span className="flex shrink-0 items-center">
-                <ArrangementSwitch value={arrangement} onChange={(value) => { chooseArrangement(value); if (projectsFolded) setFolded('projects', false); }} />
+                <ArrangementSwitch value={arrangement} onChange={carryDeviceChoice((value: NavigationArrangement) => { chooseArrangement(value); if (projectsFolded) setFolded('projects', false); }, chooseArrangement)} />
                 {makeIn !== null && current !== null && <NodeMakeButton place={makeIn} node={beginning === null ? current : undefined} />}
                 <Menu
                   label={t('navigation.view.label')}
@@ -990,6 +1056,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
               <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />
             ) : hasRows ? (
               <NodeTree
+                orgId={orgId}
                 tree={tree}
                 rootId={rootId}
                 view={view}
@@ -1008,6 +1075,10 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
               <EmptyState compact icon={<FolderOpen aria-hidden />} title={t(beginning === null ? 'navigation.noProjects' : 'navigation.begins.empty')} />
             )}
           </div>
+          {orgId!==null && <Pagination hasMore={tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.cursor!==null && tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.cursor!==undefined}
+            loading={tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.pending===true}
+            error={tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.error}
+            onMore={()=>loadMoreTree(orgId,filter.trim()===''?orgId:`search:${filter.trim()}`)} />}
           {show.chats && <Pagination hasMore={mine.hasNextPage} loading={mine.isFetchingNextPage} error={mine.error} onMore={() => void mine.fetchNextPage()} />}
           {tree.loaded && tree.error !== null && orgId !== null && <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />}
           </>}
