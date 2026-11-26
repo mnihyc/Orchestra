@@ -202,12 +202,24 @@ async fn views_of_with_principal(
 }
 
 /// Lists the destinations of a node.
-pub async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Destination>> {
+pub async fn list(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<Destination>> {
     let node = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     destined_node(&mut conn, &ctx, node).await?;
     let found = pages::destinations_of(&mut conn, node).await?;
-    views_of(&mut conn, &ctx, &found).await
+    let rows = views_of(&mut conn, &ctx, &found).await?;
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("destinations:{node}"),
+        rows,
+        |row| (row.created_at, row.id),
+        |row| format!("{} {}", row.name, row.channel),
+        false,
+    )
 }
 
 /// Sets up a destination at a node, which is an org at any level, a project
@@ -263,7 +275,7 @@ pub async fn create(
     .await
     .map_err(|fault| save_fault(Some(&descriptor), fault))?;
     let unreached = match &checked.saved {
-        Saved::Refused(error) => return Err(refused(error)),
+        Saved::Refused(error) => return Err(refused(&descriptor, error)),
         Saved::KeptWithError(error) => Some(error.message.clone()),
         Saved::Kept(_) => None,
     };

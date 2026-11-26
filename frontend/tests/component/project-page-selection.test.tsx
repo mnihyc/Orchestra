@@ -1,9 +1,10 @@
-/** Page selection lives in the table header; its reviewed results survive clearing the selection. */
-import { screen, waitFor, within } from '@testing-library/react';
+/** Page selection lives in the table header; a status change is written at once, its Undo is in the notice and only rows that did not succeed open their results. */
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { changeTopicStatus } from '@/api/day100';
+import { TopicList } from '@/features/project/TopicList';
 import { Topics } from '@/features/project/Topics';
 import type { Project, Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -24,14 +25,14 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), topic
   queryFn: () => Promise.resolve({ items: topics, next_cursor: null }),
 }) }));
 vi.mock('@/api/day100', async (original) => ({ ...await original<object>(), changeTopicStatus: vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useIsPending: () => false, NodeMenuButton: () => null }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useIsPending: () => false, NodeMenuButton: () => null }));
 vi.mock('@/features/topic/TopicMenu', () => ({ TopicMenu: () => null, TopicMenuEntries: () => null }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),
   PlaceLink: ({ place, children, className }: { place: { id: string }; children: ReactNode; className?: string }) => <a href={`/topic/${place.id}`} className={className}>{children}</a>,
 }));
 const appearance = useAppearance.getState();
 beforeEach(() => { vi.clearAllMocks(); });
-afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { vi.restoreAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`selects one loaded page with a mixed state, then clears only that page (${locale}/${theme})`, async () => {
@@ -55,7 +56,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(changeTopicStatus).not.toHaveBeenCalled();
   });
 
-  it(`keeps confirmed results and guarded Undo open after the selected rows clear (${locale}/${theme})`, async () => {
+  it(`marks the selection done at once and undoes it from the notice (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     vi.mocked(changeTopicStatus).mockImplementation((id, status) => {
       const before = topics.find((topic) => topic.id === id);
@@ -66,19 +67,56 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const user = userEvent.setup();
     await user.click(await screen.findByRole('checkbox', { name: i18n.t('day100.batch.selectPage') }));
     await user.click(screen.getByRole('button', { name: i18n.t('places.menu.markDone') }));
-    const review = screen.getByRole('dialog', { name: i18n.t('day100.batch.review', { count: 2 }) });
-    expect(within(review).getAllByRole('button', { name: i18n.t('common.close') })).toHaveLength(1);
-    await user.click(within(review).getByRole('button', { name: i18n.t('day100.batch.markDone', { count: 2 }) }));
-    const results = await screen.findByRole('dialog', { name: i18n.t('day100.batch.results', { count: 2 }) });
     await waitFor(() => expect(changeTopicStatus).toHaveBeenCalledTimes(2));
-    for (const topic of topics) {
-      expect(changeTopicStatus).toHaveBeenCalledWith(topic.id, 'done', topic.revision);
-      expect(within(results).getByText(topic.name, { exact: true })).toBeVisible();
-    }
-    expect(within(results).getByRole('button', { name: i18n.t('day100.batch.undo') })).toBeEnabled();
-    expect(within(results).getAllByRole('button', { name: i18n.t('common.close') })).toHaveLength(1);
-    await user.click(within(results).getByRole('button', { name: i18n.t('common.close') }));
+    for (const topic of topics) expect(changeTopicStatus).toHaveBeenCalledWith(topic.id, 'done', topic.revision);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    const marked = await screen.findByText(i18n.t('day100.batch.markedDone', { count: 2 }));
+    expect(marked).toBeVisible();
     expect(screen.queryByRole('region', { name: i18n.t('day100.batch.selection') })).not.toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: i18n.t('day100.batch.selectPage') })).not.toBeChecked();
+    // Notices outlive a case (an earlier case's "1 topic marked done" keeps its Undo): this notice's own Undo is used.
+    await user.click(within(marked.closest('li')!).getByRole('button', { name: i18n.t('day100.batch.undo') }));
+    await waitFor(() => expect(changeTopicStatus).toHaveBeenCalledTimes(4));
+    for (const topic of topics) expect(changeTopicStatus).toHaveBeenCalledWith(topic.id, 'open', topic.revision + 1);
+  });
+
+  it(`opens the results only for a row that did not succeed (${locale}/${theme})`, async () => {
+    await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+    vi.mocked(changeTopicStatus).mockImplementation((id, status) => {
+      const before = topics.find((topic) => topic.id === id);
+      if (before === undefined || id === 'two') return Promise.reject(new Error('the topic changed meanwhile'));
+      return Promise.resolve({ ...before, status, revision: before.revision + 1 });
+    });
+    show(<Topics project={project} search={{ view: 'list' }} onSearch={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('checkbox', { name: i18n.t('day100.batch.selectPage') }));
+    await user.click(screen.getByRole('button', { name: i18n.t('places.menu.markDone') }));
+    const results = await screen.findByRole('dialog', { name: i18n.t('day100.batch.results', { count: 2 }) });
+    expect(within(results).getByText(topics[1]!.name, { exact: true })).toBeVisible();
+    expect(within(results).getAllByText(i18n.t('day100.batch.states.succeeded'))).toHaveLength(1);
+    await user.click(within(results).getAllByRole('button', { name: i18n.t('common.close') })[0]!);
+    expect(await screen.findByText(i18n.t('day100.batch.markedDone', { count: 1 }))).toBeInTheDocument();
   });
 }
+
+
+it('keeps selection while a long topic list scrolls to its final loaded row', () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  const rows = Array.from({ length: 1_200 }, (_, index) => makeTopic('long-' + String(index), 'Topic ' + String(index)));
+  function List() {
+    const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+    return <><output aria-label="Selected count">{selected.size}</output><TopicList topics={rows} selection={{ selected, toggle: (id, on) => setSelected((before) => {
+      const next = new Set(before); if (on) next.add(id); else next.delete(id); return next;
+    }) }} /></>;
+  }
+  show(<List />);
+  const table = screen.getByRole('table', { name: i18n.t('places.topics.title') });
+  expect(table).toHaveAttribute('aria-rowcount', '1201');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  fireEvent.click(within(table).getByRole('checkbox', { name: i18n.t('day100.batch.selectRow', { name: 'Topic 0' }) }));
+  expect(screen.getByLabelText('Selected count')).toHaveTextContent('1');
+  fireEvent.scroll(screen.getByRole('region', { name: i18n.t('places.topics.title') }), { target: { scrollTop: 1_197 * 72 } });
+  expect(within(table).getByText('Topic 1199')).toBeVisible();
+  expect(screen.getByLabelText('Selected count')).toHaveTextContent('1');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+});
