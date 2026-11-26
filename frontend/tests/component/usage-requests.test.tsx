@@ -29,8 +29,8 @@ vi.mock('@/ui/Table', async (importOriginal) => {
   } };
 });
 vi.mock('@/api/usage', () => ({ fetchEventsPage: (_params: unknown, cursor: string) => { fake.cursors.push(cursor); return Promise.resolve({ items: fake.older, next_cursor: null }); }, eventsQuery: () => ({ queryKey: ['request-log-test'], queryFn: () => { fake.reads += 1; return Promise.resolve({ items: fake.rows, next_cursor: null }); }, initialPageParam: null, getNextPageParam: () => null }) }));
-vi.mock('@/api/nodes',()=>({orgsQuery:{queryKey:['orgs'],queryFn:()=>Promise.resolve([])}}));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: (feed: string, listener: { onFrame: (frame: FeedFrame) => void }) => { fake.feeds.push(feed); fake.receive = listener.onFrame; return { unsubscribe: () => { fake.receive = undefined; } }; } } }));
+vi.mock('@/api/nodes',async (loadOriginal) => ({ ...await loadOriginal<object>(),orgsQuery:{queryKey:['orgs'],queryFn:()=>Promise.resolve([])}}));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: (feed: string, listener: { onFrame: (frame: FeedFrame) => void }) => { fake.feeds.push(feed); fake.receive = listener.onFrame; return { unsubscribe: () => { fake.receive = undefined; } }; } } }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ params, search, children }: { params: { threadId: string }; search: { turn: number }; children: ReactNode }) => <a href={`/thread/${params.threadId}?turn=${search.turn}`}>{children}</a> }));
 
 beforeEach(() => { fake.feeds.length = 0; fake.reads = 0; fake.narrow = false; fake.rows = [requestRow()]; fake.older = []; fake.cursors = []; fake.receive = undefined; });
@@ -64,13 +64,13 @@ it('locates every outcome in the complete catalogue without loading rows or appl
 
 for(const language of ['en','zh-CN'] as const)for(const theme of ['light','dark'] as const)it(`keeps request facts separate and translates demo and choice names in ${language}/${theme}`,async()=>{
   await setLocale(language);useAppearance.setState({locale:language,theme});document.documentElement.dataset.theme=theme;fake.narrow=true;
-  const named = { harness: { kind: 'fake', name: 'Example agent', names: { 'zh-CN': '示例代理' } } };
+  const named = { harness: { kind: 'fake', name: 'Example agent', names: { 'zh-CN': '示例智能体' } } };
   fake.rows=[{ ...requestRow({model:'private_route',model_display:'Mock Large',harness_kind:'fake',effort:'high',tier:'fast',timing:timingFixture({outcome:{state:'told',value:'provider_busy'},error_message:'Please retry this request.',vendor_words:'Please retry this request.'})}), ...named }];
   show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={()=>undefined}/>);
   const table=await screen.findByRole('table',{name:i18n.t('usagePerf.requestsView')});
   expect(await within(table).findByText(i18n.t('composer.model.exampleLarge'))).toBeVisible();
   for(const label of ['usage.chip.provider','usage.chip.agent','usage.chip.effort','usage.chip.tier','usagePerf.tokensInOut','usagePerf.requestFirstToken','usagePerf.requestSpeed','usagePerf.wholeTime'] as const)expect(within(table).getByText(i18n.t(label))).toBeVisible();
-  expect(within(table).getByText(language === 'zh-CN' ? '示例代理' : 'Example agent')).toBeVisible();
+  expect(within(table).getByText(language === 'zh-CN' ? '示例智能体' : 'Example agent')).toBeVisible();
   expect(within(table).getByText(i18n.t('choiceCatalog.effort.high.name'))).toBeVisible();
   expect(within(table).getAllByText('Please retry this request.')).toHaveLength(1);
   expect(table).not.toHaveTextContent(/private_route|Mock Large|mock-large|provider_busy| · |\bfake\b/);

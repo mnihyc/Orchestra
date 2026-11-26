@@ -12,15 +12,20 @@ import { environmentKey } from '@/api/environments';
 import type * as ToolsApi from '@/api/resource-tools';
 import { mcpKey } from '@/api/resource-tools';
 import { AgentScreen, type AgentTab } from '@/features/resources/agents/Profile';
+import { useChangeHost } from '@/features/change/target';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { HostScreen, type HostTab } from '@/features/resources/hosts/Host';
+import { HostLink } from '@/features/resources/hosts/HostList';
 import { Machine, type MachineTab } from '@/features/resources/machines/Machine';
 import { TemplateScreen, type TemplateTab } from '@/features/resources/templates/Template';
 import { McpScreen } from '@/features/resources/mcp/Preset';
 import { MountScreen } from '@/features/resources/mounts/Mount';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import type { Environment, EnvironmentSandboxReadiness } from '@/generated/api-types';
+import { formatBytes } from '@/lib/format';
+import type { CleanupPlan, CleanupStart, Environment, EnvironmentSandboxReadiness, Job } from '@/generated/api-types';
+import { ApiError } from '@/api/client';
+import { mountKey } from '@/api/resource-tools';
 import { detailAgent, detailEnvironment, detailHost, detailMachine, detailMcp, detailMount, detailSchema, detailTemplate } from './resource-detail-fixtures';
 import { show } from './support';
 
@@ -28,7 +33,8 @@ type Kind = 'agent' | 'machine' | 'environment' | 'host' | 'template' | 'mcp' | 
 const kinds: readonly Kind[] = ['agent', 'machine', 'environment', 'host', 'template', 'mcp', 'mount'];
 const creationKinds = { agent: 'agents', machine: 'machines', environment: 'environments', host: 'hosts', template: 'templates', mcp: 'mcp', mount: 'mounts' } as const;
 const records = { agent: detailAgent, machine: detailMachine, environment: detailEnvironment, host: detailHost, template: detailTemplate, mcp: detailMcp, mount: detailMount };
-const calls = vi.hoisted(() => ({ read: vi.fn(), hidden: vi.fn(), uses: vi.fn<() => Promise<{ scopes: []; environments: []; hidden: number }>>() }));
+const calls = vi.hoisted(() => ({ read: vi.fn(), hidden: vi.fn(), uses: vi.fn<() => Promise<{ scopes: []; environments: []; hidden: number }>>(),
+  deletePlan: vi.fn<(id: string) => Promise<CleanupPlan>>(), deleteMount: vi.fn<(id: string, body: CleanupStart) => Promise<Job>>(), readJob: vi.fn<(id: string) => Promise<Job>>() }));
 function read<K extends keyof typeof records>(kind: K) { calls.read(kind); return Promise.resolve(records[kind]); }
 vi.mock('@/api/resources', async (load) => {
   const actual = await load<typeof ResourcesApi>();
@@ -53,12 +59,15 @@ vi.mock('@/api/resource-tools', async (load) => {
     mcpQuery: (id: string) => ({ queryKey: actual.mcpKey(id), queryFn: () => read('mcp'), staleTime: Infinity }),
     mountQuery: (id: string) => ({ queryKey: actual.mountKey(id), queryFn: () => read('mount'), staleTime: Infinity }),
     mountUsesQuery: (id: string) => ({ queryKey: ['detail-mount-uses', id], queryFn: calls.uses, staleTime: Infinity }),
+    planMountDeletion: (id: string) => calls.deletePlan(id),
+    deleteMount: (id: string, body: CleanupStart) => calls.deleteMount(id, body),
   };
 });
+vi.mock('@/api/exports', async (load) => ({ ...await load<object>(), readJob: (id: string) => calls.readJob(id) }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, to, params, className }: { children: ReactNode; to: string; params?: Record<string, string>; className?: string }) => <a className={className} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
@@ -103,6 +112,31 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
 
+for (const locale of ['en','zh-CN'] as const) it(`marks the protected server host on its page and list name without guessing from its name (${locale})`,async()=>{
+  await setLocale(locale);
+  const bundled={...detailHost,bundled_with_server:true,name:'Renamed host'};
+  const view=draw(<HostScreen hostId={bundled.id} tab="overview" onTab={vi.fn()}/>,bundled);
+  expect(await screen.findByText(i18n.t('hosts.serverHost.label'))).toBeVisible();
+  view.unmount();
+  const listed=show(<HostLink host={bundled}/>);
+  expect(screen.getByText(i18n.t('hosts.serverHost.label'))).toBeVisible();
+  listed.unmount();
+  show(<HostLink host={{...detailHost,name:'Bundled node',bundled_with_server:false}}/>);
+  expect(screen.queryByText(i18n.t('hosts.serverHost.label'))).not.toBeInTheDocument();
+});
+
+for(const locale of ['en','zh-CN'] as const) it(`names the idle reconnect beside automatic certificate renewal only for a valid identity (${locale})`,async()=>{
+  await setLocale(locale);
+  const renewal=locale==='en'?'Automatic · reconnects when idle':'自动续期 · 空闲时重新连接';
+  const view=draw(<Machine machineId={detailMachine.id} tab="certificate" onTab={vi.fn()} />);
+  expect(await screen.findByText(renewal)).toBeVisible();
+  expect(screen.getByText(i18n.t('machines.certificate.ends'))).toBeVisible();
+  act(()=>{view.client.setQueryData(machineKey(detailMachine.id),{...detailMachine,status:'revoked'});});
+  await waitFor(()=>expect(screen.queryByText(renewal)).not.toBeInTheDocument());
+  const certificate=screen.getByLabelText(i18n.t('machines.certificate.title'),{selector:'dl'});
+  expect(within(certificate).getByText(i18n.t('machines.certificate.revoked'))).toBeVisible();
+});
+
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -127,6 +161,35 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   });
 }
 
+it('keeps a mount deletion on its progress and result when the deleted mount disappears behind it', async () => {
+  const at = '2026-11-21T20:56:07Z';
+  const job = (state: Job['state']): Job => ({ id: 'delete-mount', kind: 'mount_delete', state, node_id: null, environment_id: null, provider_id: null, batch_id: null,
+    created_at: at, created_by: null, started_at: at, finished_at: state === 'running' ? null : at, error: null, log: null,
+    progress: { phase: 'remove', percent: state === 'running' ? 50 : 100, phases: [], files_done: 0, files_total: null, bytes_done: 0, bytes_total: null, eta_seconds: null, rate_bps: null, message: null },
+    result: { cleanup: [] } });
+  calls.deletePlan.mockResolvedValue({ id: 'mount-plan', expires_at: at, confirmation_name: detailMount.name, people: [], other_people: 0, notify: false, items: [] });
+  calls.deleteMount.mockResolvedValue(job('running'));
+  calls.readJob.mockResolvedValue(job('succeeded'));
+  const user = userEvent.setup(), view = draw(<Scene kind="mount" />);
+  await screen.findByRole('heading', { name: detailMount.name, level: 1 });
+  await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: detailMount.name }) }));
+  await user.click(await screen.findByRole('menuitem', { name: i18n.t('resourceDetails.remove') }));
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('resourceDetails.removeTitle', { name: detailMount.name }) });
+  await user.click(within(dialog).getByRole('button', { name: i18n.t('resourceDetails.remove') }));
+  await waitFor(() => expect(calls.deleteMount).toHaveBeenCalledOnce());
+  // The live connection then tells the page that the mount is gone, as it does once the deletion is accepted.
+  act(() => {
+    view.client.getQueryCache().find({ queryKey: mountKey(detailMount.id), exact: true })?.setState({ data: undefined, status: 'error', fetchStatus: 'idle',
+      error: new ApiError({ type: 'orch:error:not_found', code: 'not_found', title: '', detail: '', status: 404, request_id: '' }, null) });
+  });
+  expect((await screen.findAllByText(i18n.t('source.job.succeeded'), { exact: true }))[0]).toBeVisible();
+  await act(async () => { await new Promise((settled) => setTimeout(settled, 50)); });
+  expect(document.querySelector('[data-change-view]')).toHaveAttribute('data-change-view', 'done');
+  expect(calls.deletePlan).toHaveBeenCalledOnce();
+  expect(screen.queryByText(i18n.t('errors.not_found'), { exact: false })).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
 it('opens mount Uses only when chosen and keeps the server visibility cut', async () => {
   const user = userEvent.setup(); draw(<Scene kind="mount" />); await screen.findByRole('heading', { name: detailMount.name });
   expect(calls.uses).not.toHaveBeenCalled();
@@ -148,8 +211,8 @@ for (const locale of ['en', 'zh-CN'] as const) it.each(['missing', 'partial', 'z
   const value = term?.parentElement?.querySelector('dd');
   if (!(value instanceof HTMLElement)) throw new Error('The machine link has no fact value');
   const expected = state === 'missing' ? '–' : state === 'partial'
-    ? i18n.t('machines.overview.linkPartial', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '0 bit/s', down: '–' })
-    : i18n.t('machines.overview.linkValue', { trip: state === 'zero' ? '0' : '200', up: state === 'zero' ? '0 bit/s' : '8 kbit/s', down: state === 'zero' ? '0 bit/s' : '16 kbit/s' });
+    ? i18n.t('machines.overview.linkValue', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '0 bit/s', down: '–' })
+    : i18n.t('machines.overview.linkValue', { trip: i18n.t('machines.overview.linkTrip', {value:state === 'zero' ? '0' : '200'}), up: state === 'zero' ? '0 bit/s' : '8 kbit/s', down: state === 'zero' ? '0 bit/s' : '16 kbit/s' });
   expect(value).toHaveTextContent(expected);
   if (state === 'missing') {
     expect(value.textContent).toBe('–');
@@ -175,6 +238,28 @@ it('keeps an environment terminal address inside Tools and does not mount its MC
   await screen.findByRole('heading', { name: detailEnvironment.name });
   expect(screen.getByRole('tab', { name: i18n.t('resourceDetails.layout.tools') })).toHaveAttribute('aria-selected', 'true');
   expect(await screen.findByText('door-reader')).toBeVisible(); expect(calls.hidden).toHaveBeenCalledExactlyOnceWith('door-reader');
+});
+
+it('shows an environment operation once and opens its current job from the header', async () => {
+  const user = userEvent.setup();
+  const view = draw(<EnvironmentScreen environmentId={detailEnvironment.id} tab="overview" onTab={vi.fn()} />);
+  const heading = await screen.findByRole('heading', { name: detailEnvironment.name, level: 1 });
+  const header = within(heading.closest('header')!);
+  const progress = i18n.t('change.banner.progress');
+  const job = { id: 'move-workspace', kind: 'environment_move', state: 'running', phase: 'transfer', percent: 40 } as const;
+  act(() => { view.client.setQueryData<Environment>(environmentKey(detailEnvironment.id), { ...detailEnvironment, job }); });
+  expect(await screen.findByText(i18n.t('environments.status.moving'), { exact: true })).toBeVisible();
+  try {
+    await user.click(header.getByRole('button', { name: progress }));
+    expect(useChangeHost.getState().current).toMatchObject({
+      target: { kind: 'environment', id: detailEnvironment.id }, options: { kind: 'progress', job: job.id },
+    });
+  } finally {
+    useChangeHost.setState({ current: null, open: false });
+  }
+  act(() => { view.client.setQueryData(environmentKey(detailEnvironment.id), detailEnvironment); });
+  expect(await header.findByText(i18n.t('environments.status.running'), { exact: true })).toBeVisible();
+  expect(header.queryByRole('button', { name: progress })).toBeNull();
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
@@ -250,12 +335,12 @@ it('shows readable parameter defaults with the native Defaults destination and b
 
 it.each(['en', 'zh-CN'] as const)('uses the declared program name and translated parameter words in %s', async (locale) => {
   await setLocale(locale);
-  const english = 'How much of a conversation Example agent keeps, in tokens';
-  const chinese = '示例代理保留的对话长度，以词元计';
+  const english = 'How much of a thread Example agent keeps, in tokens';
+  const chinese = '示例智能体保留的对话长度，以词元计';
   records.agent = { ...detailAgent, descriptor: {
     harness: { name: 'Example agent', status: 'supported', version: '1.0.0' },
     parameters: [{ key: 'context', type: 'integer', title: 'Context', description: english, default: { from_model: 'default_context' } }],
-    text: { 'zh-CN': { 'harness.name': '示例代理', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
+    text: { 'zh-CN': { 'harness.name': '示例智能体', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
   } };
   draw(<AgentScreen agentId={detailAgent.id} tab="parameters" onTab={vi.fn()} />);
   const description = await screen.findByText(locale === 'en' ? english : chinese);
@@ -331,4 +416,39 @@ it.each(['en', 'zh-CN'] as const)('keeps the machine Access address reachable in
   expect(view.container.querySelector('[data-resource-section="access"]')).toBeVisible();
   expect(calls.read).toHaveBeenCalledExactlyOnceWith('machine');
   expect(calls.hidden).not.toHaveBeenCalled();
+});
+
+for(const locale of ['en','zh-CN'] as const) {
+  it(`shows measured host load and free storage before declared needs (${locale})`,async()=>{
+    await setLocale(locale);
+    const host={...detailHost,capacity:{cpu_millis:6000,memory_mb:1344,disk_gb:66},declared:{cpu_millis:2000,memory_mb:2048,disk_gb:0},
+      usage:{cpu_percent_milli:12500,memory_used_mb:617,observed_at:'2026-11-13T18:38:00Z'},
+      storages:[{name:'Root',default:true,capacity_gb:66,free_gb:54,private_views:false}]};
+    draw(<HostScreen hostId={host.id} tab="overview" onTab={vi.fn()}/>,host);
+    const facts=await screen.findByLabelText(i18n.t('hosts.overview.about'),{selector:'dl'});
+    expect(facts).toHaveTextContent(i18n.t('placeRoom.cpu',{count:5.9,n:'5.9'}));
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredMemory',{used:formatBytes(617*1024*1024,locale),free:formatBytes(727*1024*1024,locale),capacity:formatBytes(1344*1024*1024,locale)}));
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredStorage',{name:'Root',free:i18n.t('resources.amount.disk',{size:54}),capacity:i18n.t('resources.amount.disk',{size:66})}));
+    expect(facts).not.toHaveTextContent(i18n.t('hosts.capacity.declared',{declared:formatBytes(2048*1024*1024,locale),capacity:formatBytes(1344*1024*1024,locale)}));
+    expect(screen.queryByLabelText(i18n.t('hosts.capacity.title'))).not.toBeInTheDocument();
+  });
+  it(`keeps unreported host load unknown instead of substituting declared needs (${locale})`,async()=>{
+    await setLocale(locale);
+    const host={...detailHost,usage:null,storages:[]};
+    draw(<HostScreen hostId={host.id} tab="overview" onTab={vi.fn()}/>,host);
+    const facts=await screen.findByLabelText(i18n.t('hosts.overview.about'),{selector:'dl'});
+    for(const key of ['cpu','memory','disk']) {
+      const term=[...facts.querySelectorAll('dt')].find((row)=>row.textContent===`${i18n.t(`hosts.capacity.${key}`)}:`);
+      expect(term?.nextElementSibling).toHaveTextContent(key === 'cpu' ? i18n.t('placeRoom.cpuUnknown') : '–');
+    }
+  });
+}
+
+it('opens machine Storage from the machine read even when the viewer cannot list its mounts', async () => {
+  records.machine = { ...detailMachine, facts: { ...detailMachine.facts as object, storages: [{ name: 'Workspace SSD', capacity_gb: 50, free_gb: 12 }] } };
+  const view = draw(<Machine machineId={detailMachine.id} tab="storage" onTab={vi.fn()} />);
+  expect(await screen.findByText('Workspace SSD')).toBeVisible();
+  expect(view.container.querySelector('#machine-storages')).toBeVisible();
+  expect(calls.read).toHaveBeenCalledExactlyOnceWith('machine');
+  expect(view.container.querySelector('[data-resource-section="mounts"]')).not.toBeInTheDocument();
 });
