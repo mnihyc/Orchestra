@@ -248,7 +248,9 @@ impl Route {
             Self::Compact
         } else if method == Method::POST && ends("/responses") {
             Self::Responses
-        } else if method == Method::POST && ends("/messages/count_tokens") {
+        } else if method == Method::POST
+            && (ends("/messages/count_tokens") || ends("/responses/input_tokens"))
+        {
             Self::CountTokens
         } else if method == Method::POST && ends("/messages") {
             Self::Messages
@@ -984,6 +986,11 @@ mod tests {
             (Method::POST, "/v1/responses", Route::Responses),
             (Method::POST, "/responses", Route::Responses),
             (Method::POST, "/openai/v1/responses/compact", Route::Compact),
+            (
+                Method::POST,
+                "/openai/v1/responses/input_tokens",
+                Route::CountTokens,
+            ),
             (Method::POST, "/v1/messages", Route::Messages),
             (Method::POST, "/v1/chat/completions", Route::Chat),
             (Method::POST, "/chat/completions", Route::Chat),

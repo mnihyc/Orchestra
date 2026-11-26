@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/combobox-room.spec.ts tests/e2e/floating-layers.spec.ts tests/e2e/floating-late.spec.ts tests/e2e/thread-start.spec.ts --project=chromium

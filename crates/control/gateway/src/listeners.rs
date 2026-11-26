@@ -370,7 +370,7 @@ fn upgrade(
         return problem(
             StatusCode::BAD_REQUEST,
             "request.invalid",
-            "the subprotocol orch-link.v1 is required",
+            &format!("the subprotocol {protocol} is required"),
         );
     }
     if kind == Kind::Pinned && tls.client_certificate.is_none() {

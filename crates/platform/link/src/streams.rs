@@ -22,6 +22,7 @@ use orch_link_contract::streams::{
     Ack, Answer, Eph, Ev, Evb, EvbEntry, Inbox, Nak, Outbox, Reset, ResetReason, Resume, Stream,
     is_diagnostic,
 };
+use orch_link_contract::version::Limits;
 use orch_types::{Json, Seq, Time};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
@@ -51,17 +52,37 @@ pub enum PublishError {
         /// The stream.
         stream: String,
     },
-    /// One event is larger than a frame may be.
-    #[error("an event of {bytes} bytes is larger than a frame of {max}")]
+    /// One event is larger than a message may be: it travels in parts when it is
+    /// larger than a frame, and not at all beyond what the session carries.
+    #[error(
+        "an event of {bytes} bytes is larger than the {max} bytes a message may have (`max_message_bytes` in the `[link]` section of the settings)"
+    )]
     TooLarge {
         /// Its size as it would be written.
         bytes: usize,
-        /// The most a frame may have.
+        /// The most a message may have.
         max: usize,
     },
+    /// The event has no wire representation.
+    #[error("the native event could not be encoded")]
+    Encoding,
     /// The spool failed.
     #[error("{0}")]
     Spool(#[from] SpoolError),
+}
+
+impl PublishError {
+    /// The producer should finish this record with a refusal.
+    #[must_use]
+    pub const fn is_permanent_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::RoleMissing(..)
+                | Self::WrongStream { .. }
+                | Self::Encoding
+                | Self::Spool(SpoolError::TooLarge { .. })
+        )
+    }
 }
 
 /// How a stream stands, for whoever feeds it.
@@ -80,6 +101,8 @@ pub struct Pressure {
 
 #[derive(Debug)]
 struct StreamState {
+    /// An uncertain torn tail may need a notice even if it had no assigned number yet.
+    damage_notice: Option<Seq>,
     outbox: Outbox,
     /// The number of the next event to put on the wire. Behind the last
     /// number given, it is a resend in progress.
@@ -94,6 +117,9 @@ struct StreamState {
     /// When something last happened to this stream that moves it on: an
     /// acknowledgement, a request to send again, or a frame being sent.
     last_progress: Instant,
+    /// The number of an event that the session in hand cannot carry, at which
+    /// the stream waits until what is before it is acknowledged.
+    held_at: Option<Seq>,
 }
 
 /// The machine's side of its streams.
@@ -103,11 +129,14 @@ pub struct StreamSender {
     streams: HashMap<String, StreamState>,
     roles: Vec<Role>,
     connected: bool,
-    max_frame_bytes: usize,
+    /// What the session in hand carries: the largest frame, which events are
+    /// batched to fit, and the largest message, which an event may be.
+    limits: Limits,
 }
 
 fn entry_of(numbered: &Numbered) -> EvbEntry {
     EvbEntry {
+        native_opening_id: numbered.event.native_opening_id,
         seq: numbered.seq,
         at: numbered.event.at,
         kind: numbered.event.kind.clone(),
@@ -150,18 +179,11 @@ impl StreamSender {
             streams: HashMap::new(),
             roles,
             connected: false,
-            max_frame_bytes: orch_link_contract::version::MAX_FRAME_BYTES as usize,
+            limits: Limits::default(),
         };
         for stream in sender.spool.streams() {
             let state = sender.state_from_spool(&stream, now);
             sender.streams.insert(stream.clone(), state);
-        }
-        for stream in &recovery.damaged {
-            if let Some(state) = sender.streams.get_mut(stream) {
-                // What was damaged may have been sent: the system is told that
-                // events may be gone, and resyncs.
-                state.reset_owed = Some((state.outbox.oldest(), ResetReason::SpoolLost));
-            }
         }
         (sender, recovery)
     }
@@ -170,11 +192,13 @@ impl StreamSender {
         let next = self.spool.sent_through(stream) + 1;
         let outbox = Outbox::restored(next, self.spool.oldest(stream));
         StreamState {
+            damage_notice: self.spool.damage_floor(stream),
             next_to_wire: outbox.oldest(),
             unacknowledged_bytes: 0,
             reset_owed: None,
             reset_sent: false,
             last_progress: now,
+            held_at: None,
             outbox,
         }
     }
@@ -182,12 +206,14 @@ impl StreamSender {
     fn state(&mut self, stream: &str, now: Instant) -> &mut StreamState {
         if !self.streams.contains_key(stream) {
             let state = StreamState {
+                damage_notice: None,
                 outbox: Outbox::new(),
                 next_to_wire: 1,
                 unacknowledged_bytes: 0,
                 reset_owed: None,
                 reset_sent: false,
                 last_progress: now,
+                held_at: None,
             };
             self.streams.insert(stream.to_owned(), state);
         }
@@ -213,6 +239,19 @@ impl StreamSender {
         body: Json,
         now: Instant,
     ) -> Result<Vec<Frame>, PublishError> {
+        self.publish_from(None, stream, at, kind, body, now)
+    }
+
+    /// Publishes the producer captured before queueing without changing stream numbering.
+    pub fn publish_from(
+        &mut self,
+        native_opening_id: Option<orch_types::Id>,
+        stream: &Stream,
+        at: Time,
+        kind: &str,
+        body: Json,
+        now: Instant,
+    ) -> Result<Vec<Frame>, PublishError> {
         if let Some(role) = stream.family().source()
             && !self.roles.contains(&role)
         {
@@ -220,6 +259,7 @@ impl StreamSender {
         }
         let name = stream.to_string();
         let event = SpoolEvent {
+            native_opening_id,
             at,
             kind: kind.to_owned(),
             body,
@@ -232,6 +272,7 @@ impl StreamSender {
             body.insert("n".to_owned(), Json::from(Seq::MAX));
         }
         let framed = serde_json::to_string(&EvbEntry {
+            native_opening_id,
             seq: Seq::MAX,
             at,
             kind: event.kind.clone(),
@@ -239,10 +280,10 @@ impl StreamSender {
         })
         .map_or(usize::MAX, |text| text.len());
         let bytes = Evb::frame_bytes(&name, &[framed]);
-        if bytes > self.max_frame_bytes {
+        if bytes > self.limits.message_bytes() {
             return Err(PublishError::TooLarge {
                 bytes,
-                max: self.max_frame_bytes,
+                max: self.limits.message_bytes(),
             });
         }
         self.state(&name, now);
@@ -256,30 +297,25 @@ impl StreamSender {
         Ok(())
     }
 
-    /// Notes what a full spool gave up, and returns the frames that tell the
-    /// system when it is reachable.
-    fn after_relief(&mut self, relief: Vec<Relief>, now: Instant) -> Vec<Frame> {
-        for step in relief {
-            if let Relief::OldestEvents {
-                stream,
-                numbered_through,
-                reason,
-                ..
-            } = step
-            {
-                let oldest = self.spool.oldest(&stream);
-                let state = self.state(&stream, now);
-                if let Some(through) = numbered_through {
-                    state.outbox.dropped(through, reason);
-                } else {
-                    // Events that never had a number: the stream goes on from the
-                    // number the next will take.
-                    state.outbox = Outbox::restored(state.outbox.next(), state.outbox.next());
-                }
-                state.reset_owed = Some((oldest.max(state.outbox.oldest()), reason));
-                state.reset_sent = false;
-                state.next_to_wire = state.next_to_wire.max(oldest);
-            }
+    /// Lossy diagnostics that cannot fit still expose their capture-number gap.
+    pub fn discard_diagnostic(
+        &mut self,
+        stream: &Stream,
+        event: &SpoolEvent,
+        now: Instant,
+    ) -> Result<Vec<Frame>, SpoolError> {
+        self.spool.discard_diagnostic(&stream.to_string(), event)?;
+        Ok(self.after_relief(vec![Relief::Diagnostics { events: 1 }], now))
+    }
+
+    /// Diagnostic loss is counted separately and never resets authoritative stream numbering.
+    fn after_relief(&mut self, relief: Vec<Relief>, _now: Instant) -> Vec<Frame> {
+        for Relief::Diagnostics { events } in relief {
+            metrics::counter!("orch_link_diagnostics_dropped_total").increment(events as u64);
+            tracing::warn!(
+                events,
+                "waiting diagnostic frames were discarded; capture numbers retain their gaps"
+            );
         }
         self.owed_resets()
     }
@@ -309,11 +345,11 @@ impl StreamSender {
     pub fn on_ready(
         &mut self,
         cursors: &BTreeMap<String, Seq>,
-        max_frame_bytes: usize,
+        limits: Limits,
         now: Instant,
     ) -> Result<Vec<Frame>, SpoolError> {
         self.connected = true;
-        self.max_frame_bytes = max_frame_bytes;
+        self.limits = limits;
         let mut frames = Vec::new();
         let names: BTreeSet<String> = self
             .streams
@@ -329,12 +365,23 @@ impl StreamSender {
                 (resume, state.outbox.acknowledged())
             };
             // A lost spool must advance its durable delivery allocator along with the outbox.
-            self.spool.resume_after(&name, acknowledged)?;
-            self.spool.acknowledge(&name, acknowledged)?;
+            // A reset's local floor can cross missing positions; only the peer's actual
+            // durable cursor releases retained bytes and damage evidence.
+            let server_ack = cursor.unwrap_or(0).min(acknowledged);
+            self.spool.resume_after(&name, server_ack)?;
+            self.spool.acknowledge(&name, server_ack)?;
             self.recount_unacknowledged(&name)?;
             let state = self.state(&name, now);
+            if state
+                .damage_notice
+                .is_some_and(|from| cursor.is_some_and(|cursor| cursor >= from))
+            {
+                state.damage_notice = None;
+            }
             state.last_progress = now;
             state.reset_sent = false;
+            // The limits of this session may carry what the last one could not.
+            state.held_at = None;
             match resume {
                 Resume::Send { from } => {
                     state.next_to_wire = from;
@@ -350,6 +397,9 @@ impl StreamSender {
                 Resume::Reset { from, reason } => {
                     state.next_to_wire = from;
                     state.reset_owed = Some((from, reason));
+                    if state.damage_notice.is_some_and(|floor| from >= floor) {
+                        state.damage_notice = None;
+                    }
                 }
             }
             if let Some((from, reason)) = state.reset_owed {
@@ -388,6 +438,10 @@ impl StreamSender {
         let through = state.outbox.on_ack(ack.seq);
         state.last_progress = now;
         state.next_to_wire = state.next_to_wire.max(through + 1);
+        state.held_at = state.held_at.filter(|held| *held > through);
+        if state.damage_notice.is_some_and(|from| through >= from) {
+            state.damage_notice = None;
+        }
         if state.reset_owed.is_some_and(|(owed, _)| through >= owed) {
             state.reset_owed = None;
         }
@@ -418,7 +472,10 @@ impl StreamSender {
                 }));
             }
         }
-        self.spool.acknowledge(&nak.stream, acknowledged)?;
+        self.spool.acknowledge(
+            &nak.stream,
+            acknowledged.min(nak.expected.saturating_sub(1).max(0)),
+        )?;
         self.recount_unacknowledged(&nak.stream)?;
         Ok(frames)
     }
@@ -428,7 +485,9 @@ impl StreamSender {
     pub fn on_stall(&mut self, after: Duration, now: Instant) {
         for (stream, state) in &mut self.streams {
             let outstanding = state.outbox.acknowledged() < self.spool.sent_through(stream);
-            let all_on_the_wire = state.next_to_wire > self.spool.sent_through(stream);
+            // A stream held at an event it cannot carry has sent everything before it.
+            let all_on_the_wire = state.next_to_wire > self.spool.sent_through(stream)
+                || state.held_at.is_some_and(|held| state.next_to_wire >= held);
             if outstanding && all_on_the_wire && now.duration_since(state.last_progress) >= after {
                 state.next_to_wire = state.outbox.acknowledged() + 1;
                 state.last_progress = now;
@@ -470,14 +529,25 @@ impl StreamSender {
     /// nothing else waits anywhere, a few diagnostics. Does nothing while no
     /// session is up.
     pub fn pump(&mut self, frame_bytes: usize, now: Instant) -> Result<Vec<Frame>, SpoolError> {
-        if !self.connected {
-            return Ok(Vec::new());
-        }
-        let frame_bytes = frame_bytes.min(self.max_frame_bytes);
         let mut frames = Vec::new();
+        self.pump_into(frame_bytes, now, &mut frames)?;
+        Ok(frames)
+    }
+
+    /// Keeps earlier whole batches available if a later stream hits an I/O fault.
+    pub fn pump_into(
+        &mut self,
+        frame_bytes: usize,
+        now: Instant,
+        frames: &mut Vec<Frame>,
+    ) -> Result<(), SpoolError> {
+        if !self.connected {
+            return Ok(());
+        }
+        let frame_bytes = frame_bytes.min(self.limits.frame_bytes());
         let names: Vec<String> = self.streams.keys().cloned().collect();
         for name in &names {
-            self.pump_stream(name, frame_bytes, now, &mut frames)?;
+            self.pump_stream(name, frame_bytes, now, frames)?;
         }
         if frames.is_empty() && !self.anything_waits() {
             let mut promoted = false;
@@ -490,11 +560,11 @@ impl StreamSender {
             }
             if promoted {
                 for name in &names {
-                    self.pump_stream(name, frame_bytes, now, &mut frames)?;
+                    self.pump_stream(name, frame_bytes, now, frames)?;
                 }
             }
         }
-        Ok(frames)
+        Ok(())
     }
 
     fn anything_waits(&self) -> bool {
@@ -516,6 +586,39 @@ impl StreamSender {
             // What was numbered and not put on the wire yet, or must go again.
             let sent_through = self.spool.sent_through(name);
             let next_to_wire = self.streams.get(name).map_or(1, |state| state.next_to_wire);
+            let next = self
+                .spool
+                .next_available(name, next_to_wire)
+                .unwrap_or_else(|| self.spool.next_sequence(name));
+            let uncertain_tail =
+                self.streams.get(name).is_some_and(|state| {
+                    state.damage_notice.is_some_and(|from| from <= next_to_wire)
+                }) && self.spool.next_available(name, next_to_wire).is_none();
+            if next > next_to_wire || uncertain_tail {
+                let Some(state) = self.streams.get(name) else {
+                    return Ok(());
+                };
+                // A reset must not pass a complete prefix that the peer has yet to commit.
+                if state.outbox.acknowledged() < next_to_wire.saturating_sub(1) {
+                    return Ok(());
+                }
+                let next = next.max(next_to_wire);
+                self.spool.advance_gap(name, next)?;
+                let after = self.spool.sent_through(name).saturating_add(1);
+                let state = self.state(name, now);
+                state.outbox = Outbox::restored(after, next);
+                state.next_to_wire = next;
+                state.damage_notice = None;
+                state.reset_owed = Some((next, ResetReason::SpoolLost));
+                state.reset_sent = true;
+                self.recount_unacknowledged(name)?;
+                frames.push(Frame::Reset(Reset {
+                    stream: name.into(),
+                    from: next,
+                    reason: ResetReason::SpoolLost,
+                }));
+                return Ok(());
+            }
             let mut batch: Vec<Numbered> = Vec::new();
             if next_to_wire <= sent_through {
                 batch = self.spool.read(name, next_to_wire, READ_BATCH)?;
@@ -552,19 +655,28 @@ impl StreamSender {
                 .iter()
                 .map(|entry| serde_json::to_string(entry).map_or(usize::MAX, |text| text.len()))
                 .collect();
+            // An event larger than a message of this session may be was spooled under a larger limit than the
+            // session states: no frame of it can be sent. What is before it goes.
+            let message_bytes = self.limits.message_bytes();
+            let unsendable = sizes
+                .iter()
+                .position(|size| Evb::frame_bytes(name, &[*size]) > message_bytes);
+            let sendable = unsendable.unwrap_or(entries.len());
             let mut placed = 0;
-            while placed < entries.len() {
-                let fit = Evb::fitting(name, &sizes[placed..], frame_bytes.max(1));
+            while placed < sendable {
+                let fit = Evb::fitting(name, &sizes[placed..sendable], frame_bytes.max(1));
                 // A single event is always sent, even in a frame larger than
-                // the one a thin link prefers: it cannot be cut.
+                // the one a thin link prefers, or than a frame may be: it is not
+                // cut here, and the link carries it in parts.
                 let fit = if fit == 0 {
-                    Evb::fitting(name, &sizes[placed..], self.max_frame_bytes).max(1)
+                    Evb::fitting(name, &sizes[placed..sendable], self.limits.frame_bytes()).max(1)
                 } else {
                     fit
                 };
                 let slice = &entries[placed..placed + fit];
                 frames.push(if let [only] = slice {
                     Frame::Ev(Ev {
+                        native_opening_id: only.native_opening_id,
                         stream: name.to_owned(),
                         seq: only.seq,
                         at: only.at,
@@ -579,6 +691,31 @@ impl StreamSender {
                 });
                 placed += fit;
             }
+            if let Some(at) = unsendable {
+                // The stream waits at it until everything before it is acknowledged, so that nothing
+                // before it is lost with it; then it is the oldest the system has not taken, and it is
+                // given up. Nothing after it goes before, so the system finds no hole.
+                let seq = entries[at].seq;
+                let oldest_unacknowledged = self
+                    .streams
+                    .get(name)
+                    .is_some_and(|state| state.outbox.acknowledged() + 1 == seq);
+                if let Some(state) = self.streams.get_mut(name) {
+                    state.next_to_wire = seq;
+                    state.held_at = Some(seq);
+                    // Only frames that were sent are progress: a stream that waits must be sent again once
+                    // the stall time has passed.
+                    if placed > 0 {
+                        state.last_progress = now;
+                    }
+                }
+                if oldest_unacknowledged {
+                    self.give_up(name, seq, sizes[at], now)?;
+                    frames.extend(self.owed_resets());
+                    continue;
+                }
+                return Ok(());
+            }
             if let Some(state) = self.streams.get_mut(name) {
                 state.next_to_wire = batch.last().map_or(state.next_to_wire, |last| last.seq + 1);
                 state.last_progress = now;
@@ -586,9 +723,47 @@ impl StreamSender {
         }
     }
 
+    /// Gives up an event that the session in hand cannot carry, which is the oldest the system has not
+    /// acknowledged: the spool lets it go, and the system is told with a reset that the stream goes on after
+    /// it, so that it asks for what the event reported from where that is kept. It is said here and counted
+    /// by the machine, and the system counts the reset.
+    fn give_up(
+        &mut self,
+        name: &str,
+        seq: Seq,
+        bytes: usize,
+        now: Instant,
+    ) -> Result<(), SpoolError> {
+        let max = self.limits.message_bytes();
+        tracing::error!(
+            stream = name,
+            seq,
+            bytes,
+            max,
+            "an event is larger than a message of this session may be, and is given up; raise \
+             `max_message_bytes` in the `[link]` section of the settings to carry events of this size"
+        );
+        metrics::counter!("orch_link_events_given_up_total").increment(1);
+        self.spool.acknowledge(name, seq)?;
+        let oldest = self.spool.oldest(name);
+        let reason = ResetReason::TooLarge;
+        let state = self.state(name, now);
+        state.outbox.dropped(seq, reason);
+        state.reset_owed = Some((oldest.max(state.outbox.oldest()), reason));
+        state.reset_sent = false;
+        state.next_to_wire = state.next_to_wire.max(seq + 1);
+        state.held_at = None;
+        self.recount_unacknowledged(name)
+    }
+
     /// Files to force to disk; the caller does it where blocking is fine.
-    pub fn sync_handles(&mut self) -> Result<Vec<std::fs::File>, SpoolError> {
+    pub fn sync_handles(&mut self) -> Result<crate::spool::SyncBatch, SpoolError> {
         self.spool.flush_for_sync()
+    }
+
+    /// Marks exactly the append revisions whose forcing succeeded.
+    pub fn complete_sync(&mut self, batch: &crate::spool::SyncBatch) {
+        self.spool.complete_sync(batch);
     }
 
     /// Whether something was spooled since the last sync.
@@ -621,6 +796,8 @@ impl StreamSender {
 /// One event that is to be applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveredEvent {
+    /// The original physical producer from the durable wire record.
+    pub native_opening_id: Option<orch_types::Id>,
     /// Its number in its stream.
     pub seq: Seq,
     /// When it happened.
@@ -642,6 +819,31 @@ pub struct Delivery {
     /// The cursor to store with them.
     pub last_seq: Seq,
     plan: orch_link_contract::streams::Plan,
+}
+
+impl Delivery {
+    /// A view for isolating one failed event's effects; only the original delivery is acknowledged.
+    #[must_use]
+    pub fn isolated(&self, event: &DeliveredEvent) -> Self {
+        Self {
+            stream: self.stream,
+            events: vec![event.clone()],
+            last_seq: event.seq,
+            plan: self.plan.clone(),
+        }
+    }
+
+    /// A view that applies only `events` of this delivery (none of them empty, all of them its own); the original
+    /// delivery is acknowledged and its cursor stored, with the reports left out refused.
+    #[must_use]
+    pub fn only(&self, events: Vec<DeliveredEvent>) -> Self {
+        Self {
+            stream: self.stream,
+            events,
+            last_seq: self.last_seq,
+            plan: self.plan.clone(),
+        }
+    }
 }
 
 /// What the system does with a frame of events.
@@ -754,6 +956,7 @@ impl StreamReceiver {
         self.take(
             &name,
             vec![EvbEntry {
+                native_opening_id: ev.native_opening_id,
                 seq: ev.seq,
                 at: ev.at,
                 kind: ev.kind,
@@ -791,6 +994,7 @@ impl StreamReceiver {
             .iter()
             .filter_map(|place| entries.get(*place))
             .map(|entry| DeliveredEvent {
+                native_opening_id: entry.native_opening_id,
                 seq: entry.seq,
                 at: entry.at,
                 kind: entry.kind.clone(),
@@ -945,6 +1149,7 @@ mod receiver_tests {
             stream: stream.to_string(),
             events: numbers
                 .map(|seq| EvbEntry {
+                    native_opening_id: None,
                     seq,
                     at: Time::new(chrono::Utc::now()),
                     kind: "session.title".to_owned(),

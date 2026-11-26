@@ -82,7 +82,10 @@ impl World {
     pub fn surroundings(&self) -> Surroundings {
         Surroundings {
             system_name: "Acme Orch".to_owned(),
-            public_url: "https://orch.example".to_owned(),
+            address_seed: orch_api_contract::public_addresses::PublicAddresses {
+                public_url: "https://orch.example".to_owned(),
+                alternate_urls: Vec::new(),
+            },
         }
     }
 

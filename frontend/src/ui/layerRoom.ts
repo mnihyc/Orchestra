@@ -9,7 +9,7 @@
  */
 import { type CSSProperties, type RefObject, useCallback, useLayoutEffect, useRef, useState } from 'react';
 
-import { FLOATING_MIN_HEIGHT, FLOATING_MIN_ROWS, layerRoom } from '@/ui/floating';
+import { FLOATING_MIN_HEIGHT, FLOATING_MIN_ROWS, layerRise, layerRoom } from '@/ui/floating';
 
 export interface LayerPlace {
   side: 'top' | 'bottom' | 'left' | 'right';
@@ -68,12 +68,20 @@ function measureLayer(layer: HTMLElement, parts: Parts, rows: number, minimum: n
   return { natural, least: Math.min(natural, Math.ceil(Math.max(0, natural - mean * parts.rows) + Math.min(parts.rows, rows) * mean)) };
 }
 
+/** The nearest part of the page that scrolls `field` up and down (a dialog's body): one whose content is taller than its view. */
+function scrollingArea(field: HTMLElement): HTMLElement | null {
+  for (let part = field.parentElement; part !== null && part !== document.body && part !== document.documentElement; part = part.parentElement) {
+    if (part.scrollHeight > part.clientHeight + 1 && ['auto', 'scroll', 'overlay'].includes(getComputedStyle(part).overflowY)) return part;
+  }
+  return null;
+}
+
 /** The `style` a layer takes from its place: the height it may not pass. */
 export function placeStyle(place: LayerPlace): CSSProperties | undefined {
   return place.height === undefined ? undefined : { '--floating-height': `${place.height}px` } as CSSProperties;
 }
 
-export function useLayerRoom({ shown, anchor, side = 'bottom', watch, gap, rows = FLOATING_MIN_ROWS, minimum = FLOATING_MIN_HEIGHT }: {
+export function useLayerRoom({ shown, anchor, side = 'bottom', watch, gap, rows = FLOATING_MIN_ROWS, minimum = FLOATING_MIN_HEIGHT, rise = false }: {
   /** The layer is open and not hidden behind a prompt. */
   shown: boolean;
   /** What opened it. */
@@ -88,6 +96,12 @@ export function useLayerRoom({ shown, anchor, side = 'bottom', watch, gap, rows 
   rows?: number;
   /** The least of a layer of no rows (a card), in CSS pixels. */
   minimum?: number;
+  /**
+   * What opened it is a field whose list opens below it: where that list would not show there the rows it promises, the
+   * field first rises in the area that scrolls it (`layerRise`), when the list opens or its rows arrive; never while the
+   * person scrolls or the window changes, and never under a list that stands above it.
+   */
+  rise?: boolean;
 }): { place: LayerPlace; attach: (node: HTMLElement | null) => void } {
   const [place, setPlace] = useState<LayerPlace>({ side, height: undefined });
   const [layer, setLayer] = useState<HTMLElement | null>(null);
@@ -110,52 +124,65 @@ export function useLayerRoom({ shown, anchor, side = 'bottom', watch, gap, rows 
     if (!shown || !above) { stood.current = null; open.current = null; return; }
     const field = anchor.current;
     if (layer === null || field === null) return;
-    let live = true, pending = 0, parts: Parts | null = null, seen = '', width = -1;
-    const decide = () => {
+    // `arrival`: a decision asked for by what the layer holds (its opening, rows that arrive), which alone may raise the field.
+    let live = true, pending = 0, arrival = false, parts: Parts | null = null, seen = '', width = -1;
+    const decide = (arrived: boolean) => {
       pending = 0;
       if (!live) return;
       parts ??= findParts(layer);
       const size = measureLayer(layer, parts, rows, minimum);
       const viewport = viewportBox();
       if (size === null || !(viewport.bottom > viewport.top)) return;
-      const box = field.getBoundingClientRect();
+      let box = field.getBoundingClientRect();
+      const read = (at: DOMRect) => `${size.natural} ${size.least} ${at.top} ${at.bottom} ${viewport.top} ${viewport.bottom}`;
       // Nothing it reads has changed since the last decision: the same answer, which is not asked for again.
-      const reading = `${size.natural} ${size.least} ${box.top} ${box.bottom} ${viewport.top} ${viewport.bottom}`;
-      if (reading === seen) return;
-      seen = reading;
-      const room = layerRoom({ anchor: box, viewport, ...size, ...(stood.current === null ? {} : { now: stood.current }), prefer: side === 'top' ? 'above' : 'below', gap });
+      if (read(box) === seen) return;
+      if (rise && arrived && side === 'bottom' && parts.rows > 0 && stood.current !== 'above') {
+        const area = scrollingArea(field);
+        if (area !== null) {
+          const view = area.getBoundingClientRect().top + area.clientTop;
+          const by = layerRise({ anchor: box, viewport, area: { top: view, scroll: area.scrollHeight - area.clientHeight - area.scrollTop }, least: size.least, gap });
+          if (by > 0) { area.scrollTop += by; box = field.getBoundingClientRect(); }
+        }
+      }
+      seen = read(box);
+      const room = layerRoom({ anchor: box, viewport, ...size, ...(stood.current === null ? {} : { now: stood.current }), prefer: side === 'top' ? 'above' : 'below', list: parts.rows > 0, gap });
       stood.current = room.above ? 'above' : 'below';
       const height = Math.floor(room.height);
       const next: LayerPlace = { side: room.above ? 'top' : 'bottom', height: height > 0 ? height : undefined };
       setPlace((was) => was.side === next.side && was.height === next.height ? was : next);
     };
-    const later = () => { if (live && pending === 0) pending = requestAnimationFrame(decide); };
+    const later = (arrived = false) => {
+      arrival ||= arrived;
+      if (live && pending === 0) pending = requestAnimationFrame(() => { const asked = arrival; arrival = false; decide(asked); });
+    };
     // What it holds changes (rows arrive, a card's body is replaced): its parts are found again, at the next decision.
-    const reparts = () => { parts = null; later(); };
+    const reparts = () => { parts = null; later(true); };
     // A layer held to its height does not change size when its content grows: what arrives in it is seen as it is added.
     const arrivals = typeof MutationObserver === 'undefined' ? null : new MutationObserver(reparts);
     arrivals?.observe(layer, { childList: true, subtree: true, characterData: true });
     // What opened it, and the layer itself: its width changes how its rows wrap.
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver((entries) => {
       const now = entries.find((entry) => entry.target === layer)?.contentRect.width;
-      if (now !== undefined && now !== width) { width = now; parts = null; }
-      later();
+      // A new width wraps its rows anew: as good as new content.
+      if (now !== undefined && now !== width) { width = now; parts = null; later(true); } else later();
     });
     observer?.observe(field);
     observer?.observe(layer);
     // The page moving under the layer (a dialog scrolled, a window resized) changes the room on each side of what opened it.
     const moved = (event: Event) => { if (!(event.target instanceof Node) || !layer.contains(event.target)) later(); };
-    window.addEventListener('resize', later);
-    window.visualViewport?.addEventListener('resize', later);
-    window.visualViewport?.addEventListener('scroll', later);
+    const changed = () => later();
+    window.addEventListener('resize', changed);
+    window.visualViewport?.addEventListener('resize', changed);
+    window.visualViewport?.addEventListener('scroll', changed);
     document.addEventListener('scroll', moved, { capture: true, passive: true });
     // An image or a frame that arrives changes the size of what is held without changing what it is made of.
     layer.addEventListener('load', reparts, true);
     // The decision that precedes the first frame of the layer: a layer drawn once as it was first made would be seen cut.
-    decide();
+    decide(true);
     open.current = {
       // After a render that changed what the layer holds, again before the frame is drawn; a render that did not asks for nothing.
-      arrived: () => { if (arrivals !== null && arrivals.takeRecords().length === 0) return; parts = null; decide(); },
+      arrived: () => { if (arrivals !== null && arrivals.takeRecords().length === 0) return; parts = null; decide(true); },
     };
     return () => {
       live = false;
@@ -164,12 +191,12 @@ export function useLayerRoom({ shown, anchor, side = 'bottom', watch, gap, rows 
       observer?.disconnect();
       arrivals?.disconnect();
       layer.removeEventListener('load', reparts, true);
-      window.removeEventListener('resize', later);
-      window.visualViewport?.removeEventListener('resize', later);
-      window.visualViewport?.removeEventListener('scroll', later);
+      window.removeEventListener('resize', changed);
+      window.visualViewport?.removeEventListener('resize', changed);
+      window.visualViewport?.removeEventListener('scroll', changed);
       document.removeEventListener('scroll', moved, { capture: true });
     };
-  }, [shown, above, layer, side, rows, minimum, gap, anchor]);
+  }, [shown, above, layer, side, rows, minimum, gap, anchor, rise]);
 
   // A render of the caller may have replaced what the layer holds: this is where it is asked whether it did.
   useLayoutEffect(() => { open.current?.arrived(); }, [watch]);

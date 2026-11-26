@@ -48,11 +48,14 @@ export const FLOATING_MIN_HEIGHT = 128;
  * The side and the height of a floating layer above or below what opened it, for the content it has now. One rule for
  * every layer that opens that way (Combobox, Menu, Select, Popover and the cards).
  *
- * It opens on the side that holds all of it, the side it prefers first (below, for a list; above where its caller says
- * so); when neither side does, on the larger one. Once it stands somewhere it stays there, whatever its content does,
+ * A list opens on the side it prefers (below, unless its caller says otherwise) whenever that side shows the rows it
+ * promises, and scrolls there, as VS Code's lists do: it does not climb over what stands above its field because the
+ * other side would hold it whole. Otherwise, and for a card, which has no rows to scroll to, it opens on the side that
+ * holds all of it, the side it prefers first; when neither side does, on the larger one. Once it stands somewhere it stays there, whatever its content does,
  * while that side still shows `least` of it (the rows it promises and the controls around them); it changes sides only
  * when that side no longer does and the other has more room, so a list that loads, narrows or widens does not move
- * under a person who is choosing, and does not stay a sliver with a whole screen's room on the other side.
+ * under a person who is choosing, and does not stay a sliver with a whole screen's room on the other side. A field's list
+ * may first have its field rise in the area that scrolls it, to show those rows below it (`layerRise`).
  */
 export function layerRoom(input: {
   anchor: { top: number; bottom: number };
@@ -63,8 +66,10 @@ export function layerRoom(input: {
   least: number;
   /** The side it stands on now, once it has stood anywhere. */
   now?: 'above' | 'below';
-  /** The side it opens on when all of it fits on both. */
+  /** The side it opens on when all of it fits on both, and the side a list opens on while it shows `least` there. */
   prefer?: 'above' | 'below';
+  /** It is a list, whose rows scroll: one that shows `least` of itself on the side it prefers opens there. */
+  list?: boolean;
   gap: number;
 }): { above: boolean; height: number } {
   const { up, down } = roomAround(input.anchor, input.viewport, input.gap);
@@ -72,10 +77,37 @@ export function layerRoom(input: {
     const have = input.now === 'above' ? up : down, other = input.now === 'above' ? down : up;
     if (have >= Math.min(input.least, input.natural) || have >= other) return { above: input.now === 'above', height: have };
   }
+  if (input.list === true) {
+    const preferred = input.prefer ?? 'below', have = preferred === 'above' ? up : down;
+    if (have >= Math.min(input.least, input.natural)) return { above: preferred === 'above', height: have };
+  }
   const above = (input.prefer ?? 'below') === 'above'
     ? input.natural <= up || up > down
     : input.natural > down && (input.natural <= up || up > down);
   return { above, height: above ? up : down };
+}
+
+/**
+ * How far a field rises inside the area that scrolls it (a dialog's body) when the list it opens below would not show
+ * there the rows it promises: just as far as gives them, as a phone's browser brings a field up before it lists under it,
+ * instead of the list climbing over what stands above the field (the dialog's title, its other fields). Never further
+ * than the area still scrolls, never past the top of the area's view; and not at all where even that would not give the
+ * rows, so a field moves only where its list then opens below it. Otherwise the list stands where `layerRoom` puts it.
+ */
+export function layerRise(input: {
+  anchor: { top: number; bottom: number };
+  viewport: { top: number; bottom: number };
+  /** The top of the scrolling area's view on the screen, and how far down the area still scrolls. */
+  area: { top: number; scroll: number };
+  /** What the list promises to show of itself: `least`, as `layerRoom` takes it. */
+  least: number;
+  gap: number;
+}): number {
+  const { down } = roomAround(input.anchor, input.viewport, input.gap);
+  const need = Math.ceil(input.least - down);
+  if (need <= 0) return 0;
+  const most = Math.min(input.area.scroll, input.anchor.top - Math.max(input.area.top, input.viewport.top));
+  return need <= most ? need : 0;
 }
 
 
