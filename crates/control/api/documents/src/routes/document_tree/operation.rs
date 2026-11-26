@@ -356,13 +356,14 @@ impl effects::Effect for Operations {
             .await;
             result(conn, checked).await?;
             // The complete typed closure is admitted before namespace/audience/history/file material.
+            let settings = options(ctx, conn).await?;
             let native = domain::complete_operation_in(
                 conn,
                 domain::Actor::Person(&principal),
                 selected,
                 decoded.as_ref().map(confirmation::Decoded::as_confirmation),
                 principal.now(),
-                options(ctx),
+                settings,
             )
             .await;
             let native = result(conn, native).await?;
@@ -417,12 +418,13 @@ impl effects::ApplyOwned for Operations {
                 .map_err(|_| ApiError::internal("the native operation is still in use"))?;
             let contexts = native.context_items();
             let deadline = before.deadline();
+            let settings = options(ctx, &mut tx).await?;
             let written = domain::apply_operation_in(
                 &mut tx,
                 domain::Actor::Person(principal),
                 native,
                 principal.now(),
-                options(ctx),
+                settings,
                 move || {
                     before
                         .check()
@@ -612,7 +614,7 @@ impl reply::Projection for Operations {
             )
             .await;
             let tree = result(conn, tree).await?;
-            if metadata::available_entries(conn, &tree.entries, options(ctx))
+            if metadata::available_entries(ctx, conn, &tree.entries)
                 .await?
                 .len()
                 != subject.rows.len()

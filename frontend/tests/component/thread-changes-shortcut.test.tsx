@@ -11,7 +11,7 @@ import { ACME, RUNS_ON } from '../doubles/fixtures';
 import { show } from './support';
 
 const wire = vi.hoisted(() => ({ open: vi.fn(), navigate: vi.fn() }));
-vi.mock('@/features/inspector/reviewTarget', () => ({ openThreadChanges: wire.open }));
+vi.mock('@/features/inspector/reviewTarget', async (loadOriginal) => ({ ...await loadOriginal<object>(), openThreadChanges: wire.open }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), useNavigate: () => wire.navigate }));
 const before = useWorkbench.getState();
 afterEach(() => { cleanup(); useWorkbench.setState(before); vi.clearAllMocks(); });
