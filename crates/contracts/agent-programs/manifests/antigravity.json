@@ -1,0 +1,35 @@
+{
+  "manifest_version": 1,
+  "kind": "antigravity",
+  "names": {
+    "en": "Google Antigravity",
+    "zh-CN": "Google Antigravity"
+  },
+  "vendor": {
+    "name": "Google",
+    "home_page": "https://antigravity.google/docs/ide/extensions/acp/"
+  },
+  "protocol": "acp",
+  "launch": {
+    "programs": [
+      "agy"
+    ],
+    "args": [
+      "acp",
+      "--process-per-session",
+      "--disable-telemetry"
+    ]
+  },
+  "placement": {
+    "colocated": true,
+    "home": "connector",
+    "needs_binary": true
+  },
+  "checks": {
+    "conformance": [
+      {
+        "name": "startup"
+      }
+    ]
+  }
+}

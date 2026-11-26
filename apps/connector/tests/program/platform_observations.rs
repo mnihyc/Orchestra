@@ -334,11 +334,30 @@ async fn enrolled(
     Ok((identity, controller))
 }
 
-fn scripted_program(directory: &Path) -> Result<Vec<String>> {
+fn scripted_program(
+    directory: &Path,
+    python: &str,
+    session: Option<(Id, Id)>,
+) -> Result<Vec<String>> {
     let descriptor = json!({"kind":"platform-observed","adapter_version":1,
         "harness":{"name":"Platform observed","version":"1.0.0","supported_range":">=1.0.0","status":"supported"},
-        "arrangements":[{"type":"together"}],"approval_modes":["on_request"],"sandbox_modes":["open"]});
+        "arrangements":[{"type":"together"}],"approval_modes":["on_request"],"sandbox_modes":["open","read_only"]});
     let mut responses = json!({"describe":{"result":descriptor},"agent.start":{"result":{"harness_version":"1.0.0","descriptor":descriptor}},"agent.stop":{"result":{}}});
+    if let Some((thread, segment)) = session {
+        responses["session.open"] = json!({
+            "events":[{"event":"session.opened","params":{
+                "opening_id":{"$params":"opening_id"}, "thread_id":thread, "segment_id":segment,
+                "native_session_ref":"local-session", "resumed":false}}],
+            "result":{"native_session_ref":"local-session","resumed":false,"import_report":null}
+        });
+        responses["turn.start"] = json!({
+            "events":[{"event":"turn.started","params":{
+                "thread_id":thread,"segment_id":segment,"turn_id":{"$params":"turn_id"},"native_turn_ref":"local-turn"}}],
+            "result":{},
+            "events_after":[{"event":"turn.completed","params":{
+                "thread_id":thread,"segment_id":segment,"turn_id":{"$params":"turn_id"},"status":"completed"}}]
+        });
+    }
     // Required transport methods are declared by the same conformance program used by the process tests.
     let mut methods: Vec<_> =
         orch_plugin_contract::negotiation::methods(orch_plugin_contract::PluginKind::Adapter)
@@ -363,8 +382,7 @@ fn scripted_program(directory: &Path) -> Result<Vec<String>> {
         )?,
     )?;
     Ok(vec![
-        std::env::var("ORCH_PLATFORM_PYTHON")
-            .context("the native Python executable is required")?,
+        python.to_owned(),
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/platform/plugin/tests/support/scripted_plugin.py")
             .display()
@@ -392,11 +410,18 @@ async fn observe(report: &mut Json) -> Result<()> {
     let registered = issue(
         &controller,
         &SerialKey::Machine,
-        &MachineProgramsCommand::Register(MachineProgramRegistration {
-            kind: MachineProgramKind::Agent,
-            name: "platform-observed".into(),
-            command: scripted_program(directory.path())?,
-        }),
+        &native_program_request(MachineProgramsCommand::Register(
+            MachineProgramRegistration {
+                kind: MachineProgramKind::Agent,
+                name: "platform-observed".into(),
+                command: scripted_program(
+                    directory.path(),
+                    &std::env::var("ORCH_PLATFORM_PYTHON")
+                        .context("the native Python executable is required")?,
+                    None,
+                )?,
+            },
+        )),
     )
     .await?;
     ensure!(
@@ -547,4 +572,249 @@ async fn observe_candidate_platform() {
     }
     std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     result.expect("a native platform observation failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connected_machine_completes_a_turn_with_its_own_registered_agent_program() -> Result<()>
+{
+    use orch_link_contract::commands::{SessionOpen, TurnStart};
+    use orch_link_contract::streams::Stream;
+
+    let data = tempfile::tempdir()?;
+    let work = tempfile::tempdir()?;
+    let workspace = work.path().canonicalize()?;
+    let (system, port) = start_system().await;
+    let enrolled = program(data.path())
+        .args([
+            "enroll",
+            "--url",
+            &format!("https://127.0.0.1:{port}"),
+            "--token",
+            &system.token(),
+            "--name",
+            "Lab agent",
+            "--roles",
+            "agent",
+        ])
+        .output()
+        .await?;
+    ensure!(enrolled.status.success(), "the connector could not enroll");
+    let mut share = program(data.path());
+    share.args(["env", "add-root"]).arg(&workspace);
+    succeeds(share).await;
+    let mut delegate = program(data.path());
+    delegate.args(["policy", "delegate", "agent.programs"]);
+    succeeds(delegate).await;
+    let mut child = program(data.path())
+        .arg("run")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let (machine, controller) = system
+        .enrolled
+        .lock()
+        .unwrap()
+        .clone()
+        .context("the new machine was not registered")?;
+    wait(|| system.hub.session_of(machine).is_some()).await?;
+    let (thread, segment, provider, agent) = (new_id(), new_id(), new_id(), new_id());
+    let python = std::env::var("ORCH_PLATFORM_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let registered = issue(
+        &controller,
+        &SerialKey::Machine,
+        &native_program_request(MachineProgramsCommand::Register(
+            MachineProgramRegistration {
+                kind: MachineProgramKind::Agent,
+                name: "platform-observed".into(),
+                command: scripted_program(data.path(), &python, Some((thread, segment)))?,
+            },
+        )),
+    )
+    .await?;
+    ensure!(
+        registered["programs"]["entries"]
+            .as_array()
+            .context("missing program registry")?
+            .iter()
+            .any(|entry| entry["name"] == "platform-observed" && entry["ready"] == true),
+        "the connector must report its registered program ready"
+    );
+    let start: AgentStart = serde_json::from_value(
+        json!({"provider_id":provider,"agent_id":agent,"harness_kind":"platform-observed","profile":{"config":{},"env":{}},"home":null}),
+    )?;
+    issue(
+        &controller,
+        &SerialKey::Harness {
+            provider_id: provider,
+            agent_id: agent,
+        },
+        &start,
+    )
+    .await?;
+    let open: SessionOpen = serde_json::from_value(json!({
+        "agent_id":agent, "thread_id":thread, "segment_id":segment, "mode":"new", "workspace_root":workspace,
+        "directory":workspace, "cwd":workspace, "instruction_root_marker":false,"mounts":[],
+        "model":"test-model","params":{},"approval_mode":"on_request","sandbox_mode":"read_only",
+        "instructions":"","arrangement":"together","provider":{"path":"native","provider_id":provider},
+        "exec":{"executor":null,"environment_id":new_id(),"generation":1},"mcp":[],"orch_tools":[],"raw_events":false
+    }))?;
+    issue(&controller, &SerialKey::Thread(thread), &open).await?;
+    let turn_id = new_id();
+    let turn: TurnStart = serde_json::from_value(
+        json!({"thread_id":thread,"turn_id":turn_id,"text":"reply","images":[],"model":"test-model","params":{},"approval_mode":"on_request","sandbox_mode":"read_only"}),
+    )?;
+    issue(&controller, &SerialKey::Thread(thread), &turn).await?;
+    let stream = Stream::Session {
+        thread_id: thread,
+        segment_id: segment,
+    }
+    .to_string();
+    ensure!(
+        controller
+            .wait_until(WITHIN, |c| c
+                .applied(&stream)
+                .iter()
+                .any(|event| event.kind == "turn.completed"
+                    && event.body["turn_id"] == json!(turn_id)))
+            .await,
+        "the registered native agent must complete the same turn"
+    );
+    child.kill().await?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_reviews_its_native_build_before_it_serves_a_shared_directory() -> Result<()> {
+    use orch_link_contract::commands::{
+        EnvAttach, FsList, IndexMode, MachinePolicySet, MachineProbe,
+    };
+    let data = tempfile::tempdir()?;
+    let work = tempfile::tempdir()?;
+    let workspace = work.path().canonicalize()?;
+    std::fs::write(workspace.join("shared-note"), b"original")?;
+    let (system, port) = start_system().await;
+    let ok = program(data.path())
+        .args([
+            "enroll",
+            "--url",
+            &format!("https://127.0.0.1:{port}"),
+            "--token",
+            &system.token(),
+            "--roles",
+            "environment",
+        ])
+        .output()
+        .await?;
+    ensure!(
+        ok.status.success(),
+        "environment connector enrollment failed"
+    );
+    let mut share = program(data.path());
+    share.args(["env", "add-root"]).arg(&workspace);
+    succeeds(share).await;
+    let mut delegate = program(data.path());
+    delegate.args(["policy", "delegate", "exec.platform"]);
+    succeeds(delegate).await;
+    let mut child = program(data.path())
+        .arg("run")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let (machine, controller) = system
+        .enrolled
+        .lock()
+        .unwrap()
+        .clone()
+        .context("machine missing after enrollment")?;
+    wait(|| system.hub.session_of(machine).is_some()).await?;
+    let facts = issue(&controller, &SerialKey::Machine, &MachineProbe {}).await?;
+    let build = &facts["runtime_platform"];
+    ensure!(
+        build["os"] == std::env::consts::OS && build["arch"] == std::env::consts::ARCH,
+        "the connector must observe its own platform"
+    );
+    let id = new_id();
+    let key = SerialKey::Environment(id);
+    let attach = EnvAttach {
+        workspace: Default::default(),
+        resources: None,
+        data_generation: None,
+        storage: None,
+        data_sources: None,
+        environment_id: id,
+        workspace_root: Some(workspace.to_string_lossy().into_owned()),
+        ignore: Vec::new(),
+        index: IndexMode::Live,
+        mounts: Some(Vec::new()),
+        variables: BTreeMap::new(),
+        secrets: BTreeMap::new(),
+    };
+    let list = FsList {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        prefix: None,
+        environment_id: id,
+        mount: None,
+        path: String::new(),
+        watch_id: None,
+        watch_instance: None,
+        page: None,
+    };
+    ensure!(
+        issue(&controller, &key, &attach).await.is_err(),
+        "an unreviewed runtime must refuse attachment"
+    );
+    let update = |value| MachinePolicySet {
+        values: BTreeMap::from([("exec.platform".to_owned(), value)]),
+    };
+    let stamp = json!({"by":new_id(),"at":Time::new(chrono::Utc::now())});
+    issue(
+        &controller,
+        &SerialKey::Machine,
+        &update(json!({"state":"approved","build":build,"confirmation":stamp})),
+    )
+    .await?;
+    issue(&controller, &key, &attach).await?;
+    let listed = issue(&controller, &key, &list).await?;
+    ensure!(
+        listed["entries"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["name"] == "shared-note")),
+        "a reviewed directory must serve its actual file"
+    );
+    let repeated = json!({"by":new_id(),"at":Time::new(chrono::Utc::now())});
+    issue(
+        &controller,
+        &SerialKey::Machine,
+        &update(json!({"state":"approved","build":build,"confirmation":repeated})),
+    )
+    .await?;
+    ensure!(
+        issue(&controller, &key, &list).await.is_ok(),
+        "another review of the same build must preserve its live directory"
+    );
+    issue(
+        &controller,
+        &SerialKey::Machine,
+        &update(json!({"state":"off"})),
+    )
+    .await?;
+    ensure!(
+        issue(&controller, &key, &list).await.is_err(),
+        "revocation must close the old file entrance before acknowledgment"
+    );
+    ensure!(
+        std::fs::read(workspace.join("shared-note"))? == b"original",
+        "revocation must preserve directory data"
+    );
+    child.kill().await?;
+    Ok(())
 }

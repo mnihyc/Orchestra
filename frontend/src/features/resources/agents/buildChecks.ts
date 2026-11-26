@@ -71,6 +71,21 @@ export function caseUnavailable(result: BuildCase): boolean {
   return !result.passed || unsupportedReason(result) !== null;
 }
 
+/**
+ * The cases of the program's present manifest that the build's stored check has not run, by their titles: not failed and not
+ * unverified, but pending. Empty without a catalogue to say which cases there are, and for a build that was never checked.
+ */
+export function pendingCases(build: HarnessBuild, catalogue: unknown, locale: string): string[] {
+  if (build.check === undefined || build.check === null || typeof catalogue !== 'object' || catalogue === null || !('cases' in catalogue)) return [];
+  const entries = (catalogue as Record<string, unknown>).cases;
+  if (!Array.isArray(entries)) return [];
+  const ran = new Set(build.check.cases.map((result) => result.name));
+  return entries.flatMap((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null || !('name' in entry) || typeof entry.name !== 'string' || ran.has(entry.name)) return [];
+    return [('title' in entry ? localizedText(entry.title, locale) : null) ?? entry.name];
+  });
+}
+
 /** Feature protocol identifiers remain data even when an external adapter adds a new one. */
 export function featureName(feature: string, t: TFunction, catalogue?: unknown, locale = 'en'): string {
   if (catalogue !== undefined && catalogue !== null) return catalogueTitle(catalogue, 'features', feature, locale) ?? t('programVersions.disabledFeatures.other');
@@ -107,4 +122,17 @@ export function featureFallback(build: HarnessBuild, feature: string, t: TFuncti
   }
   if (feature === 'import_neutral' && carry === 'handoff') return t('programVersions.fallback.handoffWithoutNative');
   return null;
+}
+
+const NO_CHECK_HOST = /^no host of (\S+) (\S+) outside a personal home is online to check it on/u;
+const SYSTEMS: readonly HarnessBuild['os'][] = ['linux', 'macos', 'windows'];
+
+/** A check that found no build host online says what to bring online, the same on every check surface. */
+export function checkErrorWords(error: string, t: TFunction): string {
+  const missing = NO_CHECK_HOST.exec(error);
+  const os = SYSTEMS.find((system) => system === missing?.[1]);
+  if (os !== undefined && missing?.[2] !== undefined) {
+    return t('programVersions.checkNeedsHost', { os: t(`admin.harnesses.systems.${os}`), arch: missing[2] });
+  }
+  return error;
 }

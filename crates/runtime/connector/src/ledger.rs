@@ -43,14 +43,24 @@ pub enum LedgerError {
 /// A session that is open in a harness process.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostedSession {
+    /// The accepted physical opening whose reports this record can produce.
+    pub opening_id: Id,
     /// The thread.
     pub thread_id: Id,
     /// The stretch of the thread it serves.
     pub segment_id: Id,
     /// The harness's id for it.
     pub native_session_ref: String,
+    /// Recorded workspace context keeps recovered file identities relative to their original directory.
+    pub directory: String,
+    /// Recorded process working directory.
+    pub cwd: String,
+    /// Captured native output allowance of this exact session.
+    pub output_capture_bytes: u64,
     /// The turn that was running when the record was last written.
     pub running_turn: Option<Id>,
+    /// Exact native identity observed for that admitted turn; absent before native acceptance.
+    pub native_turn_ref: Option<String>,
 }
 
 /// A harness process the connector started.
@@ -231,24 +241,89 @@ impl Ledger {
         self.write(&record);
     }
 
-    /// Records which turn of a session runs, or that none does.
-    pub fn turn_running(&self, thread_id: Id, turn: Option<Id>) {
+    /// A delayed close removes only its original physical opening.
+    pub fn session_closed_if(&self, thread_id: Id, opening_id: Id) {
+        let mut record = self.record();
+        let mut changed = false;
+        for harness in &mut record.harnesses {
+            let previous = harness.sessions.len();
+            harness
+                .sessions
+                .retain(|open| open.thread_id != thread_id || open.opening_id != opening_id);
+            changed |= previous != harness.sessions.len();
+        }
+        if changed {
+            self.write(&record);
+        }
+    }
+
+    /// Records the turn of only the physical opening that produced this observation.
+    pub fn turn_running(&self, thread_id: Id, opening_id: Id, turn: Option<Id>) {
         let mut record = self.record();
         let mut changed = false;
         for session in record
             .harnesses
             .iter_mut()
             .flat_map(|harness| harness.sessions.iter_mut())
-            .filter(|session| session.thread_id == thread_id)
+            .filter(|session| session.thread_id == thread_id && session.opening_id == opening_id)
         {
             if session.running_turn != turn {
                 session.running_turn = turn;
+                session.native_turn_ref = None;
                 changed = true;
             }
         }
         if changed {
             self.write(&record);
         }
+    }
+
+    /// A delayed turn report changes only the matching opening and its original running turn.
+    pub fn turn_running_if(
+        &self,
+        thread_id: Id,
+        opening_id: Id,
+        expected: Option<Id>,
+        next: Option<Id>,
+    ) {
+        let mut record = self.record();
+        let mut changed = false;
+        for session in record
+            .harnesses
+            .iter_mut()
+            .flat_map(|harness| harness.sessions.iter_mut())
+            .filter(|session| {
+                session.thread_id == thread_id
+                    && session.opening_id == opening_id
+                    && session.running_turn == expected
+            })
+        {
+            session.running_turn = next;
+            session.native_turn_ref = None;
+            changed = true;
+        }
+        if changed {
+            self.write(&record);
+        }
+    }
+
+    /// Captures the native acceptance identity before publishing the corresponding event.
+    pub fn turn_native(&self, thread: Id, opening: Id, turn: Id, native: &str) {
+        let mut record = self.record();
+        for session in record
+            .harnesses
+            .iter_mut()
+            .flat_map(|harness| &mut harness.sessions)
+            .filter(|session| {
+                session.thread_id == thread
+                    && session.opening_id == opening
+                    && session.running_turn.is_none_or(|held| held == turn)
+            })
+        {
+            session.running_turn = Some(turn);
+            session.native_turn_ref = Some(native.to_owned());
+        }
+        self.write(&record);
     }
 
     /// The calls of Orch's tools kept after their answer did not come in time.
@@ -318,10 +393,15 @@ mod tests {
 
     fn session(thread: Id) -> HostedSession {
         HostedSession {
+            opening_id: orch_types::new_id(),
             thread_id: thread,
             segment_id: new_id(),
             native_session_ref: "fake_1".into(),
+            directory: "/workspace".into(),
+            cwd: "/workspace".into(),
+            output_capture_bytes: 67_108_864,
             running_turn: None,
+            native_turn_ref: None,
         }
     }
 
@@ -332,8 +412,10 @@ mod tests {
         {
             let ledger = Ledger::open(dir.path()).unwrap();
             ledger.harness_started(&start(provider, agent), Some("/data/harness/p/a".into()));
-            ledger.session_opened(provider, agent, session(thread));
-            ledger.turn_running(thread, Some(turn));
+            let opened = session(thread);
+            let opening = opened.opening_id;
+            ledger.session_opened(provider, agent, opened);
+            ledger.turn_native(thread, opening, turn, "native-accepted-turn");
         }
         let again = Ledger::open(dir.path()).unwrap();
         let hosted = again.hosted();
@@ -341,6 +423,59 @@ mod tests {
         assert_eq!(hosted[0].home.as_deref(), Some("/data/harness/p/a"));
         assert_eq!(hosted[0].sessions[0].thread_id, thread);
         assert_eq!(hosted[0].sessions[0].running_turn, Some(turn));
+        assert_eq!(
+            hosted[0].sessions[0].native_turn_ref.as_deref(),
+            Some("native-accepted-turn")
+        );
+    }
+
+    #[test]
+    fn an_old_harness_turn_report_keeps_another_physical_openings_retained_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(dir.path()).unwrap();
+        let (first, next, agent, thread, old_turn, new_turn) =
+            (new_id(), new_id(), new_id(), new_id(), new_id(), new_id());
+        ledger.harness_started(&start(first, agent), None);
+        ledger.harness_started(&start(next, agent), None);
+        let original = session(thread);
+        let opening = original.opening_id;
+        ledger.session_opened(first, agent, original);
+        let mut replacement = session(thread);
+        replacement.running_turn = Some(new_turn);
+        ledger.session_opened(next, agent, replacement);
+        ledger.turn_running(thread, opening, Some(old_turn));
+        let retained = Ledger::open(dir.path()).unwrap().hosted();
+        assert_eq!(
+            retained
+                .iter()
+                .find(|harness| harness.start.provider_id == next)
+                .unwrap()
+                .sessions[0]
+                .running_turn,
+            Some(new_turn)
+        );
+        assert_eq!(
+            retained
+                .iter()
+                .find(|harness| harness.start.provider_id == first)
+                .unwrap()
+                .sessions[0]
+                .running_turn,
+            Some(old_turn)
+        );
+        ledger.session_closed_if(thread, opening);
+        ledger.turn_running(thread, opening, Some(old_turn));
+        assert_eq!(
+            Ledger::open(dir.path())
+                .unwrap()
+                .hosted()
+                .iter()
+                .find(|harness| harness.start.provider_id == next)
+                .unwrap()
+                .sessions[0]
+                .running_turn,
+            Some(new_turn)
+        );
     }
 
     #[test]

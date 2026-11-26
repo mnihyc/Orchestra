@@ -33,7 +33,7 @@ pub const HEARTBEAT_SECS: u32 = 25;
 /// and some, which is hundreds of round trips even of a slow link.
 pub const SILENCE_SECS: u32 = 60;
 /// The most bytes of one frame from a client. No frame a client sends
-/// carries more than a token or a feed's name.
+/// carries a token, a feed name, or one fragment of a metadata selector.
 pub const MAX_CLIENT_FRAME_BYTES: usize = 16 * 1024;
 /// The most subscriptions one connection holds: more than any screen
 /// shows at once, and a bound on what a tab can make a server watch.

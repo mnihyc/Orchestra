@@ -1,0 +1,2 @@
+test -p orch-engine --test trace_retention -- a_failed_purge_keeps_its_frozen_references_deadline_and_retry_phase_and_cannot_be_restored
+test -p orch-engine --test trace_retention -- an_irreversible_early_purge_retry_keeps_the_original_person_request_origin_and_actual_purge_day

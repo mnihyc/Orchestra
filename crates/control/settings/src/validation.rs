@@ -37,7 +37,9 @@ pub fn check_value(key: &str, scope: Scope, value: &Json) -> Result<&'static Set
 #[must_use]
 pub fn listed(def: &SettingDef, scope: Scope) -> bool {
     match scope {
-        Scope::System | Scope::Environment | Scope::Provider | Scope::Host => def.set_at(scope),
+        Scope::System | Scope::Environment | Scope::Provider | Scope::Host | Scope::Pool => {
+            def.set_at(scope)
+        }
         Scope::Org | Scope::Project | Scope::Topic | Scope::Thread => {
             let depth = SourceScope::from(scope).depth();
             def.scopes.iter().any(|other| {
@@ -117,7 +119,10 @@ pub fn need_for_node(
                 node,
             },
         },
-        Writer::OnTheEnvironment | Writer::OnTheProvider | Writer::OnTheHost => return None,
+        Writer::OnTheEnvironment
+        | Writer::OnTheProvider
+        | Writer::OnTheHost
+        | Writer::OnThePool => return None,
     })
 }
 
@@ -161,7 +166,8 @@ pub fn need_to_lock(scope: Scope, node: Option<Id>) -> Option<Need> {
         Writer::OnTheThreadsEnvironment
         | Writer::OnTheEnvironment
         | Writer::OnTheProvider
-        | Writer::OnTheHost => {
+        | Writer::OnTheHost
+        | Writer::OnThePool => {
             return None;
         }
     })

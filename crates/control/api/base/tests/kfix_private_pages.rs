@@ -86,6 +86,7 @@ async fn inspect(desk: &Desk, object: &str, id: Id, user: Id, token: &str, view:
         .call(PermissionPeopleList, &[&object, &id])
         .token(token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: "admins".to_owned(),
             limit: None,
             cursor: None,
@@ -225,6 +226,7 @@ async fn private_page_inspection_through_administration_is_never_a_tokens_whatev
                 .call(PermissionPeopleList, &[&object, &id])
                 .token(token)
                 .query(&PermissionPeopleListQuery {
+                    q: None,
                     holder: "admins".to_owned(),
                     limit: None,
                     cursor: None,
