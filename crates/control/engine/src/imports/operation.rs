@@ -143,8 +143,10 @@ impl Request {
             user_id: Option<Id>,
             node_id: Option<Id>,
             job_id: Option<Id>,
+            #[sqlx(try_from = "orch_db::storage::ExactJson")]
             request: Json,
             request_hash: String,
+            #[sqlx(try_from = "orch_db::storage::OptionalJson")]
             origin: Option<Json>,
             kind: String,
             created_by: Option<Id>,

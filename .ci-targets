@@ -1,0 +1,4 @@
+# the whole web suite on the head with the composer gone line: translation keys and every project's types, the repository lint, every vitest case
+web typecheck
+web lint
+web test

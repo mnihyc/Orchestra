@@ -310,6 +310,11 @@ async fn a_channel_of_an_org_reaches_a_private_address_only_where_the_list_names
             panic!("{refused}: loopback is private");
         };
         assert_eq!(error.code, "address_not_allowed");
+        assert_eq!(
+            error.field.as_deref(),
+            Some("host"),
+            "{refused}: the form says it at the server"
+        );
         let result = notifier
             .deliver(delivery(
                 "0199abcd-1234-7000-8000-000000000600",
