@@ -1,0 +1,1 @@
+test -p orch-api-core --test everything_scale -- simultaneous::restoring_the_team_members_session simultaneous::a_resources_list_is_one_prepared_statement_whose_plan_its_connection_keeps simultaneous::a_team_members_first_home_opening_is_traced_from_a_fresh_server simultaneous::a_team_members_home_opening_on_one_thread --nocapture --test-threads=1

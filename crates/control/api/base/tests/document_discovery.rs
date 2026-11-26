@@ -511,7 +511,7 @@ async fn admin_only_name_visibility_never_invents_participation_or_an_ordinary_s
 }
 
 #[tokio::test]
-async fn merged_pages_preserve_node_json_and_accept_the_existing_node_cursor() -> TestResult {
+async fn shared_pages_keep_node_json_and_search_each_kind_before_paging() -> TestResult {
     reader_diagnostics::trace("shared_mixed_node_cursor", async {
     let desk = Desk::new().await;
     let reader = desk.stranger("mixed-reader").await;
@@ -534,13 +534,12 @@ async fn merged_pages_preserve_node_json_and_accept_the_existing_node_cursor() -
     assert_eq!(raw["items"][0]["kind"],"topic");
     assert_eq!(raw["items"][0]["id"],topic.to_string());
     let cursor = first.next_cursor.ok_or("the folder is still beyond the scanned node")?;
-    let parts:Vec<_> = cursor.split('|').collect();
-    assert_eq!(parts.len(),4);
-    assert_eq!(parts[2],"node");
-    let legacy = format!("{}|{}|{}",parts[0],parts[1],parts[3]);
     let next = shared_page(&desk,&reader,Some(cursor),1).await;
-    let compatible = shared_page(&desk,&reader,Some(legacy),1).await;
-    assert_eq!(compatible,next);
+    let named = desk.world.app.call(SharedList, &[]).token(&reader.token)
+        .query(&orch_api_contract::nodes::SharedListQuery { q: Some("Shared research".into()), kind: Some(orch_api_contract::nodes::SharedListKind::DocumentContainer), limit: Some(1), cursor: None })
+        .send().await.ok();
+    assert!(matches!(named.items.as_slice(),[SharedListItem::DocumentContainer {folder,..}] if folder.id==id));
+    assert!(named.next_cursor.is_none());
     assert!(matches!(next.items.as_slice(),[SharedListItem::DocumentContainer {folder,..}] if folder.id==id));
     assert!(!next.partial && next.next_cursor.is_none());
     Ok(())

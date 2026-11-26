@@ -1,6 +1,8 @@
 //! Environment services and the policy of their hosting machine, resolved without placement assumptions.
 
+use super::read_facts::{with_opening, with_snapshot};
 use crate::{Conn, DbError};
+use orch_access_contract::permissions::Placement;
 use orch_types::{Id, Json};
 
 /// The policy member of one machine report; null alone means no policy was reported.
@@ -22,6 +24,21 @@ pub struct EnvironmentMachine {
 }
 
 impl EnvironmentMachine {
+    fn from_report(
+        machine_id: Option<Id>,
+        descriptor: Option<Json>,
+        policy: Option<Json>,
+        runtime: Option<&str>,
+    ) -> Self {
+        Self {
+            machine_id,
+            descriptor: descriptor.map(|declared| {
+                orch_driver_contract::isolation::effective_json(&declared, runtime)
+            }),
+            policy,
+        }
+    }
+
     /// Unreported confinement never counts as isolation.
     #[must_use]
     pub fn confinement(&self) -> &str {
@@ -66,15 +83,79 @@ pub fn environment_delegated(policy: Option<&Json>) -> bool {
         })
 }
 
+fn machine_profile(machine: Option<&EnvironmentMachine>) -> Placement {
+    if machine.is_some_and(|machine| {
+        machine.makes_units() || environment_delegated(machine.policy.as_ref())
+    }) {
+        Placement::Managed
+    } else {
+        Placement::Connected
+    }
+}
+
+/// A connected directory without a runtime is served by its registered machine. Only a
+/// directory with a possible current runtime needs the full host and generation selection.
+async fn opening_profile(conn: &mut Conn, id: Id) -> Result<Option<Placement>, DbError> {
+    type Directory = (
+        bool,
+        bool,
+        Option<Id>,
+        Option<Json>,
+        Option<Json>,
+        Option<String>,
+    );
+    let row: Option<Directory> = sqlx::query_as(
+        "SELECT e.placement='managed' OR e.template_id IS NOT NULL,
+                EXISTS (SELECT 1 FROM runtimes r WHERE r.environment_id=e.id
+                        AND r.state NOT IN ('retired','removed') AND r.successor_of IS NULL),
+                e.machine_id, m.facts -> 'environment_descriptor', m.facts -> 'policy',
+                e.config ->> 'env.runtime'
+           FROM environments e LEFT JOIN machines m ON m.id=e.machine_id WHERE e.id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((unit, has_runtime, machine_id, descriptor, policy, runtime)) = row else {
+        return Ok(None);
+    };
+    let placement = if unit {
+        Placement::Managed
+    } else if has_runtime {
+        machine_profile(of(conn, id).await?.as_ref())
+    } else {
+        let machine =
+            EnvironmentMachine::from_report(machine_id, descriptor, policy, runtime.as_deref());
+        let placement = machine_profile(Some(&machine));
+        let _ = with_snapshot(conn, |last| last.machine = Some((id, machine)));
+        placement
+    };
+    let _ = with_snapshot(conn, |last| last.profile = Some((id, placement)));
+    Ok(Some(placement))
+}
+
 /// Permission columns for a frame's environments, from one batch of their physical machine facts.
 /// Actual placement is retained elsewhere: only the defaults profile changes for a handed-over directory.
 pub async fn access_profiles(
     conn: &mut Conn,
     environments: &[Id],
-) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
-    use orch_access_contract::permissions::Placement;
+) -> Result<Vec<(Id, Placement)>, DbError> {
     if environments.is_empty() {
         return Ok(Vec::new());
+    }
+    if let [id] = environments
+        && let Some(row) =
+            with_snapshot(conn, |last| last.profile.filter(|(known, _)| known == id)).flatten()
+    {
+        return Ok(vec![row]);
+    }
+    if let [id] = environments
+        && with_opening(conn, |_| ()).is_some()
+    {
+        return Ok(opening_profile(conn, *id)
+            .await?
+            .map(|profile| (*id, profile))
+            .into_iter()
+            .collect());
     }
     let units: Vec<(Id, bool)> = sqlx::query_as(
         "SELECT id, placement='managed' OR template_id IS NOT NULL FROM environments WHERE id=ANY($1)",
@@ -88,30 +169,23 @@ pub async fn access_profiles(
     } else {
         of_many(conn, &directories).await?.into_iter().collect()
     };
-    Ok(units
+    let profiles: Vec<_> = units
         .into_iter()
         .map(|(id, unit)| {
-            let reported = facts.get(&id);
-            let controlled = unit
-                || reported.is_some_and(|facts| {
-                    facts
-                        .descriptor
-                        .as_ref()
-                        .and_then(|descriptor| descriptor.get("lifecycle"))
-                        .and_then(Json::as_str)
-                        == Some("unit")
-                        || environment_delegated(facts.policy.as_ref())
-                });
             (
                 id,
-                if controlled {
+                if unit {
                     Placement::Managed
                 } else {
-                    Placement::Connected
+                    machine_profile(facts.get(&id))
                 },
             )
         })
-        .collect())
+        .collect();
+    if let [profile] = profiles.as_slice() {
+        let _ = with_snapshot(conn, |last| last.profile = Some(*profile));
+    }
+    Ok(profiles)
 }
 
 /// Current environment services; a unit connector never substitutes its policy for its host's.
@@ -130,13 +204,24 @@ pub async fn of_many(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {
+    if let [id] = environments
+        && let Some(row) = with_snapshot(conn, |last| {
+            last.machine
+                .as_ref()
+                .filter(|(known, _)| known == id)
+                .cloned()
+        })
+        .flatten()
+    {
+        return Ok(vec![row]);
+    }
     type ReportRow = (Id, Option<Id>, Option<Json>, Option<Json>, Option<String>);
     let rows:Vec<ReportRow> = sqlx::query_as(
         "SELECT e.id,CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END AS machine_id,
                 CASE WHEN r.id IS NOT NULL THEN jsonb_build_object('lifecycle','unit') || COALESCE(h.drivers -> r.driver,'{}'::jsonb)
                      WHEN e.template_id IS NULL THEN m.facts -> 'environment_descriptor'
                      ELSE jsonb_build_object('lifecycle','unit') ||
-                         CASE WHEN h.id IS NOT NULL THEN h.drivers -> t.driver ELSE offered.descriptor END END AS descriptor,
+                         COALESCE(CASE WHEN h.id IS NOT NULL THEN h.drivers -> t.driver ELSE offered.descriptor END,'{}'::jsonb) END AS descriptor,
                 m.facts -> 'policy' AS policy,
                 COALESCE((SELECT c.body #>> '{spec,runtime}' FROM commands c WHERE r.id IS NOT NULL AND c.kind = 'node.runtime.create'
                            AND c.body ->> 'runtime_id' = r.id::text AND c.state IN ('queued','sent','accepted','succeeded')
@@ -149,7 +234,7 @@ pub async fn of_many(
                  AND NOT (e.status='moving' AND e.machine_id IS NOT NULL AND r.generation>e.generation)
                ORDER BY r.created_at DESC LIMIT 1) r ON true
            LEFT JOIN nodes home ON home.id=e.home_node_id
-           LEFT JOIN LATERAL (SELECT s.value #>> '{}' AS host_id,s.locked FROM settings s
+           LEFT JOIN LATERAL (SELECT CASE WHEN s.value->>'type'='single' AND s.value#>>'{resource,kind}'='host' THEN s.value#>>'{resource,id}' END AS host_id,s.locked FROM settings s
                WHERE s.key='env.host_id' AND (s.node_id IS NULL OR s.node_id=ANY(home.path))
                ORDER BY s.locked DESC,
                    CASE WHEN s.locked THEN COALESCE(array_position(home.path,s.node_id),0) END ASC,
@@ -159,7 +244,7 @@ pub async fn of_many(
            LEFT JOIN LATERAL (SELECT target.* FROM hosts target
                WHERE CASE WHEN r.id IS NOT NULL THEN target.id=r.host_id ELSE
                    target.id::text=COALESCE(planned.host_id,CASE WHEN scoped.locked THEN scoped.host_id
-                        WHEN e.config ? 'env.host_id' THEN e.config->>'env.host_id' ELSE scoped.host_id END) END
+                        WHEN e.config ? 'env.host_id' THEN CASE WHEN e.config->'env.host_id'->>'type'='single' AND e.config#>>'{env.host_id,resource,kind}'='host' THEN e.config#>>'{env.host_id,resource,id}' END ELSE scoped.host_id END) END
                ORDER BY target.schedulable DESC,target.id LIMIT 1) h ON true
            LEFT JOIN LATERAL (SELECT target.drivers -> t.driver AS descriptor FROM hosts target
                WHERE r.id IS NULL AND e.template_id IS NOT NULL AND h.id IS NULL
@@ -167,27 +252,20 @@ pub async fn of_many(
                ORDER BY target.schedulable DESC,target.id LIMIT 1) offered ON true
            LEFT JOIN machines m ON m.id=CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END
           WHERE e.id=ANY($1)",
-    ).bind(environments).fetch_all(conn).await?;
-    Ok(rows
+    ).bind(environments).fetch_all(&mut *conn).await?;
+    let machines: Vec<_> = rows
         .into_iter()
         .map(|(id, machine_id, descriptor, policy, runtime)| {
             (
                 id,
-                EnvironmentMachine {
-                    machine_id,
-                    // What the driver declares, laid over by the runtime the unit is made under (or will be): what
-                    // holds for this environment, not for the driver as a whole.
-                    descriptor: descriptor.map(|declared| {
-                        orch_driver_contract::isolation::effective_json(
-                            &declared,
-                            runtime.as_deref(),
-                        )
-                    }),
-                    policy,
-                },
+                EnvironmentMachine::from_report(machine_id, descriptor, policy, runtime.as_deref()),
             )
         })
-        .collect())
+        .collect();
+    if let [machine] = machines.as_slice() {
+        let _ = with_snapshot(conn, |last| last.machine = Some(machine.clone()));
+    }
+    Ok(machines)
 }
 
 /// The host that is the facade of the physical machine `machine`, if it is one.
@@ -445,7 +523,17 @@ pub async fn ownership_sources(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, String, Id)>, DbError> {
-    Ok(sqlx::query_as(
+    use super::read_facts::with_opening;
+    if environments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let [id] = environments
+        && let Some(rows) =
+            with_opening(conn, |facts| facts.ownership_sources.get(id).cloned()).flatten()
+    {
+        return Ok(rows);
+    }
+    let rows: Vec<(Id, String, Id)> = sqlx::query_as(
         "SELECT e.id,CASE WHEN h.id IS NULL THEN 'machine' ELSE 'host' END,COALESCE(h.id,m.id)
          FROM environments e JOIN machines m ON m.id=e.machine_id
          LEFT JOIN hosts h ON h.machine_id=m.id
@@ -454,6 +542,12 @@ pub async fn ownership_sources(
            AND m.deleted_at IS NULL AND m.status='active'",
     )
     .bind(environments)
-    .fetch_all(conn)
-    .await?)
+    .fetch_all(&mut *conn)
+    .await?;
+    if let [id] = environments {
+        let _ = with_opening(conn, |facts| {
+            facts.ownership_sources.insert(*id, rows.clone())
+        });
+    }
+    Ok(rows)
 }

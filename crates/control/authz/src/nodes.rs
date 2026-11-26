@@ -147,13 +147,14 @@ async fn decide(
     if !caller.reaches(site.path.as_deref()) {
         return Ok(Decision::Refused(Refusal::of(first, object, Vec::new())));
     }
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
         permissions,
+        &[],
     )
     .await?;
     let mut through: Vec<Through> = Vec::new();
@@ -174,13 +175,14 @@ async fn decide(
         }
         let graph = frame.graph().clone();
         let everything = every_permission([site.kind]);
-        let frame = Frame::load(
+        let frame = Frame::load_with_participation(
             conn,
             principal,
             policy,
             graph,
             std::slice::from_ref(&site),
             &everything,
+            &[],
         )
         .await?;
         let refusal = missing::refusal(conn, &frame, &site, required, &lacking).await?;
@@ -219,11 +221,7 @@ pub struct Listed {
 fn listed_for(frame: &Frame<'_>, site: &Site, name: PermissionName, act: Act) -> Option<Listed> {
     let kind = site.kind.node()?;
     let permission = name.on(site.kind)?;
-    let principal = frame.principal();
-    if principal.suspension().applies(&site.orgs)
-        || !principal.caller().reaches(site.path.as_deref())
-        || !holds_for_act(frame, site, permission, act)
-    {
+    if !may_list(frame, site, permission, act) {
         return None;
     }
     Some(Listed {
@@ -235,6 +233,45 @@ fn listed_for(frame: &Frame<'_>, site: &Site, name: PermissionName, act: Act) ->
         restricted: frame.restricted(site),
         archived: site.is_archived(),
     })
+}
+
+fn may_list(frame: &Frame<'_>, site: &Site, permission: Permission, act: Act) -> bool {
+    let principal = frame.principal();
+    !principal.suspension().applies(&site.orgs)
+        && principal.caller().reaches(site.path.as_deref())
+        && holds_for_act(frame, site, permission, act)
+}
+
+/// Names for tree navigation. True means the page is readable, false that only its access can be managed.
+/// Navigation applies the same listing rules as the full row without reading participation for a name.
+pub async fn tree_names(
+    conn: &mut Conn,
+    principal: &Principal,
+    graph: &Graph,
+    ids: &[Id],
+) -> Result<std::collections::HashMap<Id, (String, bool)>, Error> {
+    let sites: Vec<_> = ids.iter().filter_map(|id| graph.site_of(*id)).collect();
+    let mut permissions = permissions_for(&sites, PermissionName::OfNode(NodePermission::View));
+    permissions.push(Permission::AccessManage);
+    let frame = Frame::load_with_participation(
+        conn,
+        principal,
+        Policy::default(),
+        graph.clone(),
+        &sites,
+        &permissions,
+        &[],
+    )
+    .await?;
+    Ok(sites
+        .iter()
+        .filter_map(|site| {
+            let view = NodePermission::View.on(site.kind.node()?)?;
+            let readable = may_list(&frame, site, view, Act::Use);
+            (readable || may_list(&frame, site, Permission::AccessManage, Act::Use))
+                .then(|| (site.id, (site.name.clone(), readable)))
+        })
+        .collect())
 }
 
 fn permissions_for(sites: &[Site], name: PermissionName) -> Vec<Permission> {
@@ -276,7 +313,9 @@ pub async fn holding(
         }
     }
     let wanted = permissions_for(&sites, name);
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &wanted).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &wanted, &sites)
+            .await?;
     Ok(sites
         .iter()
         .filter_map(|site| listed_for(&frame, site, name, act))
@@ -341,7 +380,9 @@ pub async fn children(
         let mut sites = sites;
         sites.sort_by_key(|site| site.id);
         let wanted = permissions_for(&sites, name);
-        let frame = Frame::load(conn, principal, policy, graph, &sites, &wanted).await?;
+        let frame =
+            Frame::load_with_participation(conn, principal, policy, graph, &sites, &wanted, &sites)
+                .await?;
         items.extend(
             sites
                 .iter()
@@ -400,7 +441,9 @@ pub async fn ancestors(
         .filter_map(|ancestor| graph.site_of(ancestor.id))
         .collect();
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &everything, &[])
+            .await?;
     Ok(sites
         .iter()
         .map(|site| {
@@ -470,7 +513,9 @@ pub async fn effective_many(
         return Ok(Vec::new());
     }
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &everything, &[])
+            .await?;
     Ok(sites
         .iter()
         .map(|site| Effective {
@@ -501,13 +546,14 @@ pub async fn is_restricted(
         .and_then(|kind| NodePermission::View.on(kind))
         .into_iter()
         .collect::<Vec<_>>();
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
         &view,
+        &[],
     )
     .await?;
     Ok(frame.restricted(&site))
@@ -539,7 +585,8 @@ pub async fn restricted_below(
             views.push(view);
         }
     }
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &views).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &views, &[]).await?;
     Ok(sites
         .iter()
         .filter(|site| frame.restricted_below(site, place))

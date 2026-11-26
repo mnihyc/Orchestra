@@ -8,6 +8,7 @@ import { api, client } from '@/api/client';
 import type { AdminMode } from '@/generated/api-types';
 import { useTreeStore } from '@/realtime/stores/tree';
 import { useThreadStore } from '@/realtime/stores/thread';
+import { useDocumentStore } from '@/realtime/stores/document';
 import { useCurrentHeading } from '@/shell/screen';
 import { mainContent } from '@/shell/areas';
 import { adminExitPlan, ordinaryDestination, useAdminExitNotice, type AdminExitPlan, type ExitPlace } from './adminExit';
@@ -30,7 +31,7 @@ export function useAdminExit(): boolean {
   const router = useRouter();
   const href = useRouterState({ select: (state) => state.location.href });
   const person = useStore(client.session, (state) => state.userId);
-  const heading = useCurrentHeading();
+  const heading = useCurrentHeading(true, ({ nodeId, target, path }) => ({ nodeId, targetId: target?.id, kind: target?.kind, path }));
   const kept = useRef<{ person: string | null; ordinary?: string; plan?: AdminExitPlan }>({ person: null });
   const [pendingAt, setPendingAt] = useState<string | null>(null);
   const opening = `${person ?? ''}:${href}`;
@@ -45,7 +46,10 @@ export function useAdminExit(): boolean {
 
   useEffect(() => {
     if (kept.current.person !== person) kept.current = { person };
-    let wasOn = cache.getQueryData<AdminMode>(adminModeKey)?.as_admin;
+    const queries = cache.getQueryCache();
+    const modeHash = cache.defaultQueryOptions({ queryKey: adminModeKey }).queryHash;
+    const readMode = () => queries.get<AdminMode>(modeHash)?.state.data?.as_admin;
+    let wasOn = readMode();
     let controller: AbortController | null = null;
     const capture = () => {
       const plan = adminExitPlan(cache, href, kept.current.ordinary);
@@ -74,21 +78,34 @@ export function useAdminExit(): boolean {
       }).catch(() => undefined).finally(() => { if (!active.signal.aborted) { controller = null; setPendingAt(null); } });
     };
     capture();
-    const observe = () => {
-      const mode = cache.getQueryData<AdminMode>(adminModeKey)?.as_admin;
+    const stopCache = queries.subscribe((event) => {
+      // Reconnecting observers changes neither the native mode nor the permission evidence.
+      if (event.type !== 'updated' && event.type !== 'added' && event.type !== 'removed') return;
+      if (event.query.queryHash !== modeHash && wasOn !== true) return;
+      const mode = readMode();
       if (mode === undefined) return;
       if (wasOn === true && !mode) { wasOn = false; leave(); }
       else { wasOn = mode; if (mode) capture(); }
-    };
+    });
     const offAct = client.onAct((act) => {
       if (act.method !== 'PUT' || act.path !== '/me/admin-mode' || typeof act.answer !== 'object' || act.answer === null || !('as_admin' in act.answer) || typeof act.answer.as_admin !== 'boolean') return;
       if (act.answer.as_admin) { wasOn = true; capture(); }
       else if (wasOn === true) { wasOn = false; leave(); }
     });
-    const stopCache = cache.getQueryCache().subscribe(observe);
     const stopTree = useTreeStore.subscribe(() => { if (wasOn === true) capture(); });
-    const stopThreads = useThreadStore.subscribe(() => { if (wasOn === true) capture(); });
-    return () => { offAct(); stopCache(); stopTree(); stopThreads(); controller?.abort(); };
+    const stopThreads = useThreadStore.subscribe((next, previous) => {
+      if (wasOn !== true) return;
+      if (next.byThread.size !== previous.byThread.size) { capture(); return; }
+      for (const [key, view] of next.byThread) {
+        if (previous.byThread.get(key)?.thread !== view.thread) { capture(); return; }
+      }
+    });
+    const stopDocuments = useDocumentStore.subscribe((next, previous) => {
+      const place = kept.current.plan?.current;
+      if (wasOn && place?.kind === 'doc' && place.id !== undefined
+        && next.byId.get(place.id)?.document !== previous.byId.get(place.id)?.document) capture();
+    });
+    return () => { offAct(); stopCache(); stopTree(); stopThreads(); stopDocuments(); controller?.abort(); };
   }, [cache, router, href, person, opening]);
 
   // A committed destination has its own normal view; a transient check never alters a saved layout.
