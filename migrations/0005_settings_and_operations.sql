@@ -43,7 +43,7 @@ CREATE TABLE installation_records (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT installation_records_key_check CHECK ((key = ANY (ARRAY['release_check'::text, 'database_backup'::text]))),
+    CONSTRAINT installation_records_key_check CHECK ((key = ANY (ARRAY['release_check'::text, 'database_backup'::text, 'server_update_job'::text]))),
     CONSTRAINT installation_records_pkey PRIMARY KEY (key)
 );
 
@@ -73,7 +73,7 @@ CREATE TABLE jobs (
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT jobs_kind_check CHECK (((kind = ANY (ARRAY['import'::text, 'snapshot'::text, 'thread_fork'::text, 'environment_move'::text, 'environment_recreate'::text, 'environment_restart'::text, 'mcp_restart'::text, 'environment_provision'::text, 'environment_remove'::text, 'environment_restore'::text, 'environment_purge'::text, 'thread_background_end'::text, 'provider_provision'::text, 'provider_recreate'::text, 'capability_change'::text, 'kept_images_sweep'::text, 'delivery'::text, 'export'::text, 'workspace_prepare'::text, 'git_commit'::text, 'git_push'::text, 'workspace_restore'::text, 'thread_continuation'::text, 'measurement'::text, 'document_notices'::text])) OR (kind = ANY ('{mcp_offering,host_delete}'::text[])) OR (kind = ANY ('{storage_cleanup,resource_quiesce}'::text[])))),
+    CONSTRAINT jobs_kind_check CHECK (((kind = ANY (ARRAY['import'::text, 'snapshot'::text, 'thread_fork'::text, 'environment_move'::text, 'environment_recreate'::text, 'environment_restart'::text, 'mcp_restart'::text, 'server_update'::text, 'mount_copy'::text, 'environment_provision'::text, 'environment_remove'::text, 'environment_restore'::text, 'environment_purge'::text, 'thread_background_end'::text, 'provider_provision'::text, 'provider_recreate'::text, 'capability_change'::text, 'kept_images_sweep'::text, 'delivery'::text, 'export'::text, 'workspace_prepare'::text, 'git_commit'::text, 'git_push'::text, 'workspace_restore'::text, 'thread_continuation'::text, 'measurement'::text, 'document_notices'::text])) OR (kind = ANY ('{mcp_offering,host_delete}'::text[])) OR (kind = ANY ('{storage_cleanup,resource_quiesce}'::text[])))),
     CONSTRAINT jobs_state_check CHECK (((state = ANY (ARRAY['queued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])) OR (state = ANY ('{lost}'::text[])))),
     CONSTRAINT jobs_pkey PRIMARY KEY (id),
     CONSTRAINT jobs_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id),
@@ -82,9 +82,14 @@ CREATE TABLE jobs (
 
 CREATE INDEX jobs_active_command_idx ON jobs USING btree ((((plan -> 'active_command'::text) ->> 'id'::text))) WHERE (state = ANY (ARRAY['queued'::text, 'running'::text]));
 
+-- A command's owners, whatever their state, by the commands their plans name (`job_command_references`).
+CREATE INDEX jobs_command_references_idx ON jobs USING gin (job_command_references(plan));
+
 CREATE INDEX jobs_active_environment_idx ON jobs USING btree (environment_id) WHERE ((environment_id IS NOT NULL) AND (state = ANY (ARRAY['queued'::text, 'running'::text])));
 
 CREATE INDEX jobs_batch_idx ON jobs USING btree (batch_id) WHERE (batch_id IS NOT NULL);
+
+CREATE INDEX jobs_scratch_environment_idx ON jobs ((plan ->> 'scratch_cleanup')) WHERE kind = 'thread_fork' AND plan ? 'scratch_cleanup' AND NOT (plan ? 'committed');
 
 CREATE UNIQUE INDEX jobs_cleanup_plan_idx ON jobs USING btree (((((plan -> 'recipe'::text) -> 'plan'::text) ->> 'id'::text))) WHERE (kind = 'storage_cleanup'::text);
 
@@ -103,6 +108,10 @@ CREATE UNIQUE INDEX jobs_host_delete_open_idx ON jobs USING btree (((plan #>> '{
 CREATE INDEX jobs_host_facts_idx ON jobs USING btree (((plan ->> 'host'::text))) WHERE (state = ANY (ARRAY['queued'::text, 'running'::text]));
 
 CREATE INDEX jobs_measurement_data_idx ON jobs USING btree (((plan ->> 'measurement_key'::text)), created_at DESC) WHERE (kind = 'measurement'::text);
+
+CREATE INDEX jobs_mount_copy_owner_idx ON jobs USING btree (created_by, ((plan ->> 'mount_id'::text)), created_at DESC, id DESC) WHERE (kind = 'mount_copy'::text);
+
+CREATE UNIQUE INDEX jobs_mount_copy_open_target_idx ON jobs USING btree (((plan ->> 'mount_id'::text)), ((plan ->> 'target_machine_id'::text))) WHERE ((kind = 'mount_copy'::text) AND (state = ANY (ARRAY['queued'::text, 'running'::text])));
 
 CREATE INDEX jobs_notification_operation_idx ON jobs USING btree (((plan ->> 'notification_operation'::text))) WHERE (plan ? 'notification_operation'::text);
 
@@ -159,7 +168,7 @@ CREATE TABLE preflights (
     plan jsonb NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT preflights_kind_check CHECK (((kind = ANY (ARRAY['thread_fork'::text, 'fork_batch'::text, 'chat_duplicate'::text, 'chat_move_out'::text, 'environment_move'::text, 'move_batch'::text, 'environment_update'::text, 'provider_update'::text, 'update_batch'::text, 'workspace_restore'::text, 'thread_move'::text, 'port_opening'::text, 'node_delete'::text, 'node_archive'::text, 'node_move'::text, 'outside_removal'::text])) OR (kind = ANY ('{loss,recover_batch,host_delete}'::text[])) OR (kind = ANY ('{storage_cleanup}'::text[])))),
+    CONSTRAINT preflights_kind_check CHECK (((kind = ANY (ARRAY['thread_fork'::text, 'mount_copy'::text, 'fork_batch'::text, 'chat_duplicate'::text, 'chat_move_out'::text, 'environment_move'::text, 'move_batch'::text, 'environment_update'::text, 'provider_update'::text, 'update_batch'::text, 'workspace_restore'::text, 'thread_move'::text, 'ask_move_out'::text, 'port_opening'::text, 'node_delete'::text, 'node_archive'::text, 'node_move'::text, 'outside_removal'::text, 'resource_stop'::text])) OR (kind = ANY ('{loss,recover_batch,host_delete}'::text[])) OR (kind = ANY ('{storage_cleanup}'::text[])))),
     CONSTRAINT preflights_pkey PRIMARY KEY (id),
     CONSTRAINT preflights_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id),
     CONSTRAINT preflights_node_id_fkey FOREIGN KEY (node_id) REFERENCES nodes(id)

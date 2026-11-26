@@ -344,12 +344,13 @@ impl effects::ApplyOwned for Folders {
                 .ok_or_else(|| ApiError::internal("the native folder plan was already consumed"))?;
             let prepared = Arc::try_unwrap(prepared)
                 .map_err(|_| ApiError::internal("the native folder plan is still in use"))?;
+            let settings = options(ctx, &mut tx).await?;
             let applied = domain::apply_folder_creation_in(
                 &mut tx,
                 domain::Actor::Person(principal),
                 prepared,
                 principal.now(),
-                options(ctx),
+                settings,
                 move || before.check(),
             )
             .await?;

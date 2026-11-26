@@ -15,9 +15,20 @@ pub(crate) struct AccountFacts {
     pub(super) memberships: Memberships,
     pub(super) member_of: Vec<Id>,
     pub(super) holder_deadline: Option<Time>,
+    holder_stamp: access::kept::Stamp,
 }
 
 impl AccountFacts {
+    /// Only its actual holder interval permits ordinary facts to be asked at another time.
+    pub(crate) fn at(&self, now: Time) -> Option<Self> {
+        if !self.holder_stamp.covers(now.get()) {
+            return None;
+        }
+        let mut current = self.clone();
+        current.now = now;
+        Some(current)
+    }
+
     /// A fixed dependency's ordinary account, with no browser mode or credential authority.
     pub(crate) async fn current(conn: &mut Conn, user: Id, now: Time) -> Result<Self, Error> {
         Self::for_caller(conn, user, now, false).await
@@ -31,14 +42,17 @@ impl AccountFacts {
         now: Time,
         native_reach: bool,
     ) -> Result<Self, Error> {
-        let facts = access::principal(conn, user)
+        if let Some(facts) = crate::read_facts::account(conn, user, native_reach, now) {
+            return Ok(facts);
+        }
+        let facts = access::account_memberships(conn, user)
             .await?
             .ok_or(Error::NoSuchUser(user))?;
-        let memberships = Memberships::load(conn, user).await?;
+        let memberships = Memberships::from_rows(facts.memberships.0);
         let sets =
             kept::holder_sets(conn, user, now, facts.is_system_admin && native_reach).await?;
         let member_of = memberships.member_of();
-        Ok(Self {
+        let facts = Self {
             user,
             now,
             suspension: Suspension::new(facts.status == "suspended", facts.suspended_in),
@@ -48,7 +62,10 @@ impl AccountFacts {
             memberships,
             member_of,
             holder_deadline: sets.stamp.until().map(Time::new),
-        })
+            holder_stamp: sets.stamp.clone(),
+        };
+        crate::read_facts::remember_account(conn, user, native_reach, &facts);
+        Ok(facts)
     }
 }
 
@@ -68,6 +85,9 @@ pub(crate) trait FrameSubject: Clone + Send + Sync {
     fn permits(&self, permission: Permission) -> bool;
     fn reaches(&self, path: Option<&[Id]>) -> bool;
     fn subtree(&self) -> Option<Id>;
+    fn system_defaults(&self) -> bool {
+        false
+    }
     fn ordinary<'a>(
         &'a self,
         conn: &'a mut Conn,
@@ -101,6 +121,9 @@ pub(crate) trait FrameSubject: Clone + Send + Sync {
 }
 
 impl FrameSubject for Principal {
+    fn system_defaults(&self) -> bool {
+        crate::system_administration::system_defaults(self)
+    }
     fn user(&self) -> Id {
         Principal::user(self)
     }

@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const server = vi.hoisted(() => ({ registry: vi.fn<() => Promise<SettingDef[]>>() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(),
   registryQuery: { queryKey: ['settings-registry'], queryFn: server.registry },
 }));
@@ -39,13 +39,13 @@ it.each(['en', 'zh-CN'] as const)('edits the served writable value once in its r
   expect(screen.getAllByRole('switch')).toHaveLength(1);
   await user.click(field);
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: true, expectedRevision: 2 }));
-  expect(screen.getByRole('switch', { name: def.title })).toBeChecked();
+  await waitFor(() => expect(screen.getByRole('switch', { name: def.title })).toBeChecked());
 });
 
-it('keeps a declared apply constraint once in the same row', async () => {
-  show(<SettingsTable settings={[row]} label="Runtime" target={target} place={place} effectFor={() => 'Next start'} />);
+it('shows the editable setting without a generic application time', async () => {
+  show(<SettingsTable settings={[row]} label="Runtime" target={target} place={place} />);
   await screen.findByRole('switch', { name: def.title });
-  expect(screen.getAllByText('Next start')).toHaveLength(1);
+  expect(screen.queryByText('Next start')).not.toBeInTheDocument();
 });
 
 it('makes a missing definition recoverable without presenting a raw key as a name or pretending access was refused', async () => {

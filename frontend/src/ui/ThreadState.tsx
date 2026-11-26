@@ -10,9 +10,8 @@ import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { useServerNow } from '@/lib/serverClock';
 import { formatRelative, formatSpan, useNow, useRunningClock, type TimeContext } from '@/lib/time';
-import { useTreeNode, useTreeStore } from '@/realtime/stores/tree';
-import { useThreadPart } from '@/realtime/stores/thread';
-import { containedThreadStates, currentThreadDisplay } from '@/lib/threadDisplay';
+import { useTreeStore } from '@/realtime/stores/tree';
+import { containedThreadStates } from '@/lib/threadDisplay';
 export { THREAD_URGENCY, isThreadUrgency } from '@/lib/threadDisplay';
 import { StateChip, StateIcon, type StateIconProps } from '@/ui/StateChip';
 import { Tooltip } from '@/ui/Tooltip';
@@ -77,12 +76,13 @@ function UnreportedThreadState({ className }: { className?: string | undefined }
 }
 
 /** The small state record carried with a thread's existing heading and tab name. */
-export interface ThreadIconFacts { id: string; display: ThreadDisplay }
+export interface ThreadIconFacts { id: string; display: ThreadDisplay; rootId?:string }
 
 /** A cached row keeps its identity until its state facts arrive. */
-export function threadIconFacts(thread: { id: string; display?: ThreadDisplay | null | undefined } | null | undefined): ThreadIconFacts | undefined {
+export function threadIconFacts(thread: { id: string; org_id?:string; path?:readonly {id:string}[]; display?: ThreadDisplay | null | undefined } | null | undefined): ThreadIconFacts | undefined {
   if (!thread?.display) return undefined;
-  return { id: thread.id, display: thread.display };
+  const rootId=thread.org_id??thread.path?.[0]?.id;
+  return { id: thread.id, display: thread.display,...(rootId===undefined?{}:{rootId}) };
 }
 
 type Props = Omit<StateIconProps, 'state'> & { display: ThreadDisplay | null | undefined };
@@ -101,14 +101,6 @@ export function ThreadStateChip({ display, className }: Pick<Props, 'display' | 
   const label = useThreadStateLabel(display);
   if (display === null || display === undefined) return <UnreportedThreadState className={className} />;
   return <StateChip state={display.state} {...(label === undefined ? {} : { label })} {...(className === undefined ? {} : { className })} />;
-}
-
-/** A visible tab reads already held live facts even while its content reader is paused. */
-export function LiveThreadStateIcon({ display, threadId, className, glyphRef }: Props & { threadId?: string | undefined }) {
-  const row = useTreeNode(threadId);
-  const cached = useThreadPart(threadId ?? '', (view) => view.closed === null ? view.thread?.display : null);
-  const latest = cached === null ? undefined : currentThreadDisplay(cached, currentThreadDisplay(row?.thread?.display, display ?? undefined));
-  return <ThreadStateIcon display={latest ?? null} className={className} glyphRef={glyphRef} />;
 }
 
 /** Cached, unopened tabs already have a tree state and need no reader of their own. */

@@ -86,7 +86,7 @@ test('the dialog, with the way that is not allowed, the new environment and the 
   await expect(placing).toBeDisabled();
   await expect(placing).toHaveAccessibleDescription(/You may not make an environment here/);
   await placing.hover();
-  await expect(page.getByRole('tooltip').filter({ hasText: 'You may not make an environment here' })).toBeVisible();
+  await expect(page.getByRole('tooltip').filter({ hasText: 'You may not make an environment here. Ask whoever manages this place.' })).toBeVisible();
   await page.mouse.move(0, 0);
   // A disabled option takes no keyboard focus; the same reason heads the disclosure that says how to ask, which the keyboard opens and which is audited open.
   const asking = startDialog(page).locator('summary').filter({ hasText: /^You may not make an environment here$/ });

@@ -9,10 +9,10 @@ import { Ellipsis, Pin, X } from 'lucide-react';
 import { type HTMLAttributes, type ReactNode, type Ref, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { ContextMenu } from '@/ui/ContextMenu';
+import { ContextEntries, ContextMenu } from '@/ui/ContextMenu';
 import { cx } from '@/ui/cx';
-import { Menu, type MenuEntry } from '@/ui/Menu';
-import { Tooltip } from '@/ui/Tooltip';
+import { DropdownEntries, Menu, type MenuEntry } from '@/ui/Menu';
+import { ControlLabel } from '@/ui/Tooltip';
 
 export interface ViewTabProps {
   /** The id of the tab element; its panel names it. */
@@ -38,7 +38,7 @@ export interface ViewTabProps {
   dropBefore?: boolean;
   /** The tab is being carried: it is drawn faint where it came from. */
   carried?: boolean;
-  menu: readonly MenuEntry[];
+  menu: readonly MenuEntry[] | (() => readonly MenuEntry[]);
   onSelect: () => void;
   onClose: () => void;
   /** A surviving tab when closing this tab removes its entire group. */
@@ -47,6 +47,11 @@ export interface ViewTabProps {
   /** What makes the tab a handle: the ref and the attributes of whatever moves it. */
   handleRef?: Ref<HTMLDivElement>;
   handleProps?: HTMLAttributes<HTMLDivElement>;
+}
+
+function OpenTabEntries({ read, context = false }: { read: () => readonly MenuEntry[]; context?: boolean }) {
+  const entries = read();
+  return context ? <ContextEntries entries={entries} /> : <DropdownEntries entries={entries} />;
 }
 
 export function ViewTab({
@@ -84,16 +89,18 @@ export function ViewTab({
     if (destination?.isConnected) { event.preventDefault(); destination.focus(); }
   };
   const said = about === undefined ? title : `${title} · ${about}`;
+  const entries = typeof menu === 'function' ? [] : menu;
   // A narrow tab keeps its title and moves its close mark to the menu.
   const marks = !compact && (closable || unsaved || kept || pinned);
   return (
     // The menu belongs to the whole tab: a right click anywhere on it opens it, and so do the menu
     // key and Shift+F10 while the tab has the keyboard.
-    <ContextMenu entries={menu} label={t('workbench.tab.menu', { title })} onOpenChange={rememberMenuStrip} onCloseAutoFocus={restoreMenuFocus}>
+    <ContextMenu entries={entries} content={typeof menu === 'function' ? <OpenTabEntries read={menu} context /> : undefined}
+      label={t('workbench.tab.menu', { title })} onOpenChange={rememberMenuStrip} onCloseAutoFocus={restoreMenuFocus}>
       <div
         role="presentation"
         className={cx(
-          'group/tab relative flex snap-start snap-always h-(--tab-strip-height) min-w-0 max-w-full shrink-0 items-stretch border-r border-border',
+          'group/tab relative flex snap-start snap-always h-(--tab-strip-height) min-w-0 max-w-[min(16rem,100%)] shrink-0 items-stretch border-r border-border',
           active ? 'bg-bg text-text' : 'text-text-muted hover:bg-bg-muted hover:text-text',
           carried && 'opacity-50',
         )}
@@ -101,13 +108,13 @@ export function ViewTab({
         {dropBefore && (
           <span aria-hidden className="absolute inset-y-1 -left-px z-(--layer-sticky) w-0.5 rounded-full bg-accent" />
         )}
-        <Tooltip content={compact ? said : about} side="bottom">
+        <ControlLabel content={said} side="bottom">
           <div
             role="tab"
             id={id}
             aria-selected={active}
             aria-controls={panelId}
-            aria-haspopup={menu.length === 0 ? undefined : 'menu'}
+            aria-haspopup={typeof menu === 'function' || entries.length > 0 ? 'menu' : undefined}
             aria-label={unsaved ? t('workbench.tab.unsaved', { title }) : undefined}
             tabIndex={tabbable ? 0 : -1}
             {...handleProps}
@@ -143,7 +150,7 @@ export function ViewTab({
               <span aria-hidden className="absolute top-2 right-1 size-1 rounded-full bg-text-muted" />
             )}
           </div>
-        </Tooltip>
+        </ControlLabel>
         {/*
           The marks of a tab share one place: the cross takes it when the pointer is on the tab. They
           are for the pointer alone. A strip of tabs holds tabs and nothing else for a screen reader,
@@ -177,7 +184,8 @@ export function ViewTab({
           </span>
         )}
         {active && <span aria-hidden className="absolute inset-x-0 top-0 h-0.5 bg-accent" />}
-        {!compact && <Menu label={t('workbench.tab.menu', { title })} entries={menu} onOpenChange={rememberMenuStrip} onCloseAutoFocus={restoreMenuFocus} trigger={<button type="button" tabIndex={-1} aria-hidden aria-label={t('workbench.tab.menu', { title })}
+        {!compact && <Menu label={t('workbench.tab.menu', { title })} entries={entries} content={typeof menu === 'function' ? <OpenTabEntries read={menu} /> : undefined}
+          onOpenChange={rememberMenuStrip} onCloseAutoFocus={restoreMenuFocus} trigger={<button type="button" tabIndex={-1} aria-hidden aria-label={t('workbench.tab.menu', { title })}
           className={cx('flex w-5 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-bg-muted hover:text-text', !active && 'opacity-0 group-hover/tab:opacity-100 group-focus-within/tab:opacity-100')}><Ellipsis className="size-4" aria-hidden /></button>} />}
       </div>
     </ContextMenu>
