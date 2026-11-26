@@ -107,11 +107,12 @@ async fn pending(world: &World, repository: bool) -> Pending {
         world.clock.now(),
         &principal,
         &Request {
+            identity: None,
             owner: world.ada,
             name: Some("Temporary source"),
             home: world.topic,
             template: Some(template),
-            host: Some(Some(host.id)),
+            host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
             config: &json!({"env.lifetime":"thread"}),
         },
     )

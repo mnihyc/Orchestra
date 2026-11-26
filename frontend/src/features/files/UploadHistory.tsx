@@ -6,6 +6,9 @@ import { uploadHistoryQuery } from '@/api/access';
 
 import { TypedChip } from '@/features/people/NamedChip';
 import type { HistoryLine } from '@/generated/api-types';
+import { matchesCollectionWords, useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { EmptyState } from '@/ui/EmptyState';
 import { useAppearance } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { UserChip } from '@/ui/UserChip';
@@ -48,13 +51,19 @@ export function UploadHistory({ line }: { line: HistoryLine }) {
 function UploadFiles({ line }: { line: HistoryLine }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const search=useCollectionSearch('upload-files:'+line.id);
+  const [position,setPosition]=useState<{q:string;cursor:string|null}>({q:search.q,cursor:null});
+  if(position.q!==search.q)setPosition({q:search.q,cursor:null});
+  const cursor=position.q===search.q?position.cursor:null;
+  const setCursor=(cursor:string|null)=>setPosition({q:search.q,cursor});
   const upload = line.upload;
-  const query = useQuery({ ...uploadHistoryQuery(upload?.environment_id ?? '', line.id, cursor), enabled: upload?.files_paged === true });
+  const query = useQuery({ ...uploadHistoryQuery(upload?.environment_id ?? '', line.id, cursor,search.q), enabled: upload?.files_paged === true });
   if (upload === undefined || upload === null) return null;
-  const files = upload.files_paged ? (query.data?.items.flatMap((item) => item.upload?.files ?? []) ?? []) : upload.files;
+  const files = upload.files_paged ? (query.data?.items.flatMap((item) => item.upload?.files ?? []) ?? []) : upload.files.filter((file)=>matchesCollectionWords(search.q,`${file.name} ${file.path??''}`));
   const more = query.data?.next_cursor ?? null;
   return <div className="flex flex-col gap-2" style={{ height: 'min(18rem, max(0px, calc(var(--radix-popover-content-available-height) - 2rem)))' }}>
+    <CollectionSearch name={t('uploads.history.files')} {...search}/>
+    {files.length===0 && !query.isPending && query.error===null && <EmptyState compact title={t('ui.collection.none')}/>}
     {upload.files_paged && query.isPending ? <SkeletonRows read={query} rows={3} /> : <VirtualList className="min-h-0 flex-1 overflow-y-auto" count={files.length} startAtEnd={false} follow={false} label={t('uploads.history.files')}
       keyOf={(index) => `${index}-${files[index]?.path ?? files[index]?.name ?? ''}`} estimate={() => ESTIMATED_FILE_ROW_PX}
       render={(index) => { const file = files[index]; return file === undefined ? null : <div className="flex min-w-0 items-center gap-2 py-1 text-sm">
@@ -63,7 +72,7 @@ function UploadFiles({ line }: { line: HistoryLine }) {
       </div>; }} />}
     {upload.files_paged && <div className="flex flex-wrap items-center gap-2">
       {cursor !== null && <Button size="sm" variant="ghost" onClick={() => setCursor(null)}>{t('uploads.history.first')}</Button>}
-      <Pagination hasMore={more !== null} loading={query.isFetching} error={query.error} onMore={() => {
+      <Pagination hasMore={more !== null && search.text.trim()===search.q} loading={query.isFetching} error={query.error} onMore={() => {
         if (query.isError) void query.refetch(); else if (more !== null) setCursor(more);
       }} />
     </div>}

@@ -47,23 +47,72 @@ async fn main() {
     let socket = PathBuf::from(args.next().unwrap());
     let id: Id = args.next().unwrap().parse().unwrap();
     let generation = args.next().map(|n| n.parse().unwrap()).unwrap_or(1);
+    let desktop = args.next().as_deref() == Some("desktop");
     let root = socket.parent().unwrap().to_path_buf();
     let workspace = root.join("workspace");
     let home = root.join("home");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(workspace.join("file.txt"), "workspace file").unwrap();
-    let mut settings = HostSettings::managed(
-        root.join("state"),
-        ManagedPlaces {
-            workspace_root: workspace,
-            home: Some(home),
-            mounts_file: None,
-            tools_dir: None,
-            mounts_enforced: false,
-        },
-        ScopeKind::All,
-    );
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let _desktop_session = if desktop {
+        let mut child = tokio::process::Command::new("Xvnc")
+            .args([
+                ":99",
+                "-geometry",
+                "720x480",
+                "-depth",
+                "24",
+                "-rfbport",
+                "0",
+                "-localhost",
+                "-nolisten",
+                "tcp",
+                "-ac",
+                "-SecurityTypes",
+                "None",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while tokio::net::UnixStream::connect("/tmp/.X11-unix/X99")
+                .await
+                .is_err()
+            {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "the fixture desktop exited"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        Some(child)
+    } else {
+        None
+    };
+    let mut settings = if desktop {
+        let mut settings = HostSettings::connected(root.join("state"), vec![workspace.clone()]);
+        settings.gates.vnc = true;
+        settings
+    } else {
+        HostSettings::managed(
+            root.join("state"),
+            ManagedPlaces {
+                workspace_root: workspace,
+                home: Some(home),
+                mounts_file: None,
+                tools_dir: None,
+                mounts_enforced: false,
+            },
+            ScopeKind::All,
+        )
+    };
     settings.generation = generation;
     let (reports, mut receiver) = Reports::channel(128);
     tokio::spawn(async move { while receiver.recv().await.is_some() {} });
@@ -76,12 +125,14 @@ async fn main() {
     );
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,
             data_sources: None,
             environment_id: id,
-            workspace_root: None,
+            workspace_root: desktop.then_some(workspace_path),
             ignore: Vec::new(),
             index: IndexMode::Full,
             mounts: None,
@@ -149,6 +200,16 @@ async fn main() {
                 };
                 stream
                     .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                return;
+            }
+            if value["fixture_desktop_live"].as_bool() == Some(true) {
+                let live = tokio::net::UnixStream::connect("/tmp/.X11-unix/X99")
+                    .await
+                    .is_ok();
+                stream
+                    .write_all(format!("{}\n", json!({"ok":live})).as_bytes())
                     .await
                     .unwrap();
                 return;
@@ -403,22 +464,26 @@ async fn main() {
                     .map_err(|error| {
                         orch_envhost::browsers::BrowserError::Failed(error.to_string())
                     }),
-                Command::DisplayAdopt(body) => host
-                    .environment(body.environment_id)
-                    .unwrap()
-                    .displays()
-                    .adopt(
-                        body.display_id,
-                        &body.endpoint,
-                        value["password"]
-                            .as_str()
-                            .map(|password| password.as_bytes().to_vec()),
-                    )
-                    .await
-                    .map(CommandResult::DisplayAdopt)
-                    .map_err(|error| {
-                        orch_envhost::browsers::BrowserError::Failed(error.to_string())
-                    }),
+                Command::DisplayAdopt(body) => {
+                    let environment = host.environment(body.environment_id).unwrap();
+                    match &body.target {
+                        orch_link_contract::display::DisplayTarget::Endpoint(endpoint) => {
+                            environment
+                                .displays()
+                                .adopt(
+                                    body.display_id,
+                                    endpoint,
+                                    value["password"].as_str().map(|p| p.as_bytes().to_vec()),
+                                )
+                                .await
+                        }
+                        orch_link_contract::display::DisplayTarget::Desktop => {
+                            environment.displays().share_desktop(body.display_id).await
+                        }
+                    }
+                }
+                .map(CommandResult::DisplayAdopt)
+                .map_err(|error| orch_envhost::browsers::BrowserError::Failed(error.to_string())),
                 Command::DisplayClose(body) => {
                     host.environment(id)
                         .unwrap()
