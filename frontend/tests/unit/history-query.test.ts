@@ -2,6 +2,8 @@
 import { InfiniteQueryObserver, QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientApi from '@/api/client';
+import { client } from '@/api/client';
+import { AUDIT_KINDS } from '@/features/trace/params';
 import { historyQuery, PEOPLE_PAGE } from '@/api/access';
 import { covers } from '@/api/acts';
 import type { HistoryLinePage } from '@/generated/api-types';
@@ -38,15 +40,16 @@ it('sends the exact actor and unchanged depth/limit on the initial page and nati
 it('isolates actor, unfiltered, depth and target histories while leaving the optional existing caller unfiltered', async () => {
   calls.read.mockImplementation((_path, { params }) => Promise.resolve(answer(JSON.stringify(params))));
   const queries = [historyQuery(target, 'summary', actor), historyQuery(target, 'summary', other), historyQuery(target, 'summary'),
-    historyQuery(target, 'every', actor), historyQuery({ ...target, id: other }, 'summary', actor)];
+    historyQuery(target, 'every', actor), historyQuery({ ...target, id: other }, 'summary', actor),
+    historyQuery(target,'summary',actor,AUDIT_KINDS[0],'older'),historyQuery(target,'summary',actor,AUDIT_KINDS[0],'other')];
   for (const query of queries) await cache.infiniteQuery(query);
   expect(new Set(queries.map((query) => JSON.stringify(query.queryKey))).size).toBe(queries.length);
-  expect(queries.map((query) => cache.getQueryData(query.queryKey))).toHaveLength(5);
-  expect(new Set(queries.map((query) => JSON.stringify(cache.getQueryData(query.queryKey)))).size).toBe(5);
+  expect(queries.map((query) => cache.getQueryData(query.queryKey))).toHaveLength(queries.length);
+  expect(new Set(queries.map((query) => JSON.stringify(cache.getQueryData(query.queryKey)))).size).toBe(queries.length);
   const unfiltered = historyQuery({ kind: 'provider', id: other });
   await cache.infiniteQuery(unfiltered);
   expect(calls.read.mock.calls.at(-1)?.[1].params).toEqual({ path: { object: 'providers', id: other }, query: { limit: PEOPLE_PAGE, depth: 'every' } });
-  expect(unfiltered.queryKey).toEqual(['page-history', 'providers', other, 'every', null]);
+  expect(unfiltered.queryKey).toEqual(['page-history', 'providers', other, 'every', null,null,'',client.session.getState().userId,client.session.getState().readerVersion]);
 });
 
 it('keeps existing page-history prefix and target invalidation applicable to all actor variants', () => {

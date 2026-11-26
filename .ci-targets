@@ -1,0 +1,4 @@
+# The composer line and the approval card on the newest head
+web typecheck
+web lint
+web test -- tests/component/composer-sandbox-shortfall.test.tsx tests/component/approval-options-note.test.tsx tests/component/composer-approval-mode.test.tsx tests/component/machine-program-version-blocked.test.tsx tests/component/approval-rules-state.test.tsx tests/component/thread-approval-keyboard.test.tsx tests/component/sandbox-readiness.test.tsx tests/component/composer-controls.test.tsx tests/component/viewer-composer.test.tsx
