@@ -27,6 +27,8 @@ import { TrustAnswers, TrustQuestion } from '@/features/resources/environments/H
 import type { AttachmentIssue, ContentPart, Delivery, ThreadInput, RequestDecisionStatus } from '@/generated/api-types';
 import { discard, noteSteerRefusal, resend, steerRefusedFor, useComposerStore, type SendingInput } from '@/features/composer/Draft';
 import { heldInputWords } from '@/features/composer/heldInputWords';
+import { DeliveryResolutionFacts } from '@/features/composer/DeliveryResolutionFacts';
+import { QueueEligibilityFacts } from '@/features/composer/QueueEligibilityFacts';
 import { afterDropping, afterMoving, editableWords, nowDelivery, queuePreview, withEditedWords } from '@/features/composer/queue';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
@@ -224,6 +226,9 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
   const { role: _role, 'aria-pressed': _pressed, 'aria-roledescription': _description, ...dragAttributes } = attributes;
   const changedContent = withEditedWords(input.content, words);
   const held = heldInputWords(input, thread, t);
+  const heldAuthority = input.state_detail === 'owner_lacks_access'
+    || input.author === null && input.run_as === null && ['cap_reached', 'second_step_required', 'model_use_required'].includes(input.state_detail ?? '')
+    ? thread?.owner ?? null : null;
   // Somebody who may drive the thread runs a message that waits for the model on their own access; the server
   // asks for their own use of the model and answers with what is missing when they have none.
   const [decided,setDecided]=useState<{approvalId:string|null;status:RequestDecisionStatus}|null>(null);
@@ -355,7 +360,8 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
           </div>
         )}
       {!mayExecute && <span className="text-xs text-text-muted">{t(`composer.queue.delivery.${input.delivery}`)}</span>}
-      {held !== null && <div className="flex items-center gap-1"><p className="min-w-0 text-xs text-text-muted">{held}</p>{input.state_detail === 'model_use_required' && <Hint id="held-model" popover />}</div>}
+      {input.source === 'announcement' && <DeliveryResolutionFacts resolution={input.delivery_resolution} threadId={threadId} />}
+      {held !== null && <div className="flex flex-wrap items-center gap-1"><p className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted">{heldAuthority !== null && heldAuthority.id !== input.author?.id && <UserChip user={heldAuthority} size={24} className="max-w-full" />}<span className="min-w-0 wrap-anywhere">{held}</span></p>{input.state_detail === 'model_use_required' && <Hint id="held-model" popover />}</div>}
       {decision!==null?<DecisionStatus source={decision}/>:runsOn !== null && <p className="flex items-center gap-1 text-sm text-text-muted">{t('agentIdentity.runsAs')}<UserChip user={runsOn} size={24}/></p>}
       {runnable && (
         <span>
@@ -488,7 +494,7 @@ export function QueueTray({ threadId, queued, sending, readOnly = false }: { thr
         onDragCancel: () => t('composer.queue.dragCancelled'),
       } }}>
     <section ref={tray} aria-label={t('composer.queue.title', { count: total })} className="flex flex-col gap-1 rounded-lg border border-border bg-bg-subtle px-2 py-1" data-queue data-queue-dragging={carrying?.id}>
-      <div className="flex items-center gap-1">
+      <div className="flex flex-wrap items-center gap-1">
       <button
         type="button"
         aria-expanded={shown}
@@ -499,6 +505,7 @@ export function QueueTray({ threadId, queued, sending, readOnly = false }: { thr
         {t('composer.queue.title', { count: total })}
       </button>
       <TaskGuideLink guide="message-queue" heading={QUEUE_HELP.heading} />
+      <QueueEligibilityFacts threadId={threadId} />
       </div>
       {!readOnly && <><QueueHold threadId={threadId} /><WorkspaceTrustNotice threadId={threadId} /></>}
       {shown && (

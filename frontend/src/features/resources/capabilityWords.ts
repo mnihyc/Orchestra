@@ -31,3 +31,14 @@ export function capabilityConsequence(line: string, t: TFunction = i18n.t): stri
   }
   return line;
 }
+
+
+/** Public shipped aliases supplement stored name search in the same locale as the visible table. */
+export function capabilitySearchAliases(query:string,t:TFunction=i18n.t):string[] {
+  const terms=Array.from(query.toLocaleLowerCase().matchAll(/"([^"]+)"|(\S+)/gu),(match)=>match[1]??match[2]??'').filter(Boolean);
+  if(terms.length===0)return [];
+  return Object.keys(SHIPPED).filter((key)=>{
+    const text=`${t(`capabilityWords.${key}.name`)} ${t(`capabilityWords.${key}.description`)}`.toLocaleLowerCase();
+    return terms.every((term)=>text.includes(term));
+  });
+}

@@ -1,0 +1,4 @@
+test -p orch-envhost --lib -- directory_identity_cases
+test -p orch-connector-core --lib
+test -p orch-connector --bin orch-connector -- composition::tests
+test -p orch-connector --test program -- platform_observations::a_machine_reviews_its_native_build_before_it_serves_a_shared_directory

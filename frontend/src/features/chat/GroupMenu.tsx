@@ -37,6 +37,7 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { refreshChat } from '@/realtime/stores/chat';
+import { useShortcutActs } from '@/features/navigation/shortcuts';
 
 type Which = 'people' | 'add' | 'rename' | 'leave' | null;
 
@@ -117,6 +118,7 @@ function GroupMenuForReader({ chat, me, onLeft }: GroupMenuProps) {
   };
 
   const guestsAllowed = true;
+  const shortcuts = useShortcutActs({ kind: 'chat', id: chat.id, name: chat.name ?? t('chat.title.groupUnnamed') });
   return (
     <>
       <Menu
@@ -131,6 +133,7 @@ function GroupMenuForReader({ chat, me, onLeft }: GroupMenuProps) {
                 { id: 'rename', label: t('chat.group.rename'), icon: <Pencil aria-hidden />, onSelect: () => { setName(chat.name ?? ''); setWhich('rename'); } },
               ]
             : []),
+          ...shortcuts,
           { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'), onSelect: () => void copyText(linkTo({ kind: 'chat', id: chat.id }), t('common.linkCopied')) },
           ...groupHomeMoveEntries(t, chat),
           ...exporting,
