@@ -122,6 +122,8 @@ pub struct Site {
     pub generation: i32,
     /// Where it stands.
     pub status: String,
+    /// Whether an accepted Stop withdraws this environment's current registration.
+    pub stopping: bool,
     /// Whether shells may be opened in it: its own switch.
     pub terminal: bool,
     /// The machine it is on.
@@ -138,7 +140,7 @@ pub struct Site {
 /// The environment `id` with the machine it is on, not deleted.
 pub async fn site(conn: &mut Conn, id: Id) -> Result<Option<Site>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT e.id, e.org_id, e.home_node_id, e.placement, e.workspace_root, e.generation, e.status, COALESCE(e.terminal,true) AS terminal,
+        "SELECT e.id, e.org_id, e.home_node_id, e.placement, e.workspace_root, e.generation, e.status, EXISTS(SELECT 1 FROM runtime_withdrawals w WHERE w.environment_id=e.id) AS stopping, COALESCE(e.terminal,true) AS terminal,
                 e.machine_id, m.online AS machine_online,
                 COALESCE(hm.facts,m.facts) -> 'policy' -> 'environment.terminal' AS machine_allows_terminal, e.deleted_at
            FROM environments e LEFT JOIN machines m ON m.id = e.machine_id

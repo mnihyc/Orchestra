@@ -700,22 +700,74 @@ pub fn __api_run_actual_display_rechecks_revoked_ticket_after_native_version_wai
 // These two byte-framing regressions reuse the actual HTTP ticket/native gate fixture
 // above. The bounded Tokio byte stream makes the accepted prefix observable without
 // a new protocol or claims of desktop rendering; original wire6 covers the real tunnel.
+struct ByteCapacity {
+    room: usize,
+    reader_closed: bool,
+    wake: Option<std::task::Waker>,
+}
 struct ObservedWriter {
     inner: tokio::io::DuplexStream,
-    pending: Option<oneshot::Sender<()>>,
+    capacity: Arc<Mutex<ByteCapacity>>,
+    pending: std::collections::VecDeque<oneshot::Sender<()>>,
 }
-
+struct ObservedReader {
+    inner: tokio::io::DuplexStream,
+    capacity: Arc<Mutex<ByteCapacity>>,
+}
+fn observed_duplex(bytes: usize) -> (ObservedWriter, ObservedReader) {
+    let (writing, reading) = tokio::io::duplex(bytes);
+    let capacity = Arc::new(Mutex::new(ByteCapacity {
+        room: bytes,
+        reader_closed: false,
+        wake: None,
+    }));
+    (
+        ObservedWriter {
+            inner: writing,
+            capacity: capacity.clone(),
+            pending: std::collections::VecDeque::new(),
+        },
+        ObservedReader {
+            inner: reading,
+            capacity,
+        },
+    )
+}
+impl crate::realtime::publication::ReadyWrite for ObservedWriter {
+    fn poll_write_ready(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let capacity = self.capacity.clone();
+        let mut state = capacity.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.reader_closed {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reader ended",
+            )));
+        }
+        if state.room == 0 {
+            state.wake = Some(cx.waker().clone());
+            if let Some(pending) = self.pending.pop_front() {
+                let _ = pending.send(());
+            }
+            return std::task::Poll::Pending;
+        }
+        state.wake = None;
+        std::task::Poll::Ready(Ok(()))
+    }
+}
 impl tokio::io::AsyncWrite for ObservedWriter {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         bytes: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
+        let capacity = self.capacity.clone();
+        let mut state = capacity.lock().unwrap_or_else(PoisonError::into_inner);
         let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, bytes);
-        if result.is_pending()
-            && let Some(pending) = self.pending.take()
-        {
-            let _ = pending.send(());
+        if let std::task::Poll::Ready(Ok(taken)) = &result {
+            state.room -= *taken;
         }
         result
     }
@@ -730,6 +782,37 @@ impl tokio::io::AsyncWrite for ObservedWriter {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+impl tokio::io::AsyncRead for ObservedReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let capacity = self.capacity.clone();
+        let mut state = capacity.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = bytes.filled().len();
+        let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, bytes);
+        let taken = bytes.filled().len() - before;
+        state.room += taken;
+        let wake = (taken > 0).then(|| state.wake.take()).flatten();
+        drop(state);
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+        result
+    }
+}
+impl Drop for ObservedReader {
+    fn drop(&mut self) {
+        let mut state = self.capacity.lock().unwrap_or_else(PoisonError::into_inner);
+        state.reader_closed = true;
+        let wake = state.wake.take();
+        drop(state);
+        if let Some(wake) = wake {
+            wake.wake();
+        }
     }
 }
 
@@ -762,11 +845,16 @@ async fn an_actual_started_rfb_message_completes_only_its_own_tail_after_manage_
     let mut current = actual_input_factory(&wire, id, &key).await?;
     let message = displays_support::key(66, true);
     // One byte is exactly the physical start boundary, not a production buffer/timer.
-    let (mut writing, mut reading) = tokio::io::duplex(1);
+    let (mut writing, mut reading) = observed_duplex(1);
+    let mut changes = crate::realtime::publication::WriteWatch::new(
+        wire.app.realtime.inner.epoch.subscribe(),
+        WAIT,
+    );
     let send = crate::realtime::publication::write_message(
         &mut writing,
         &message,
         wire.app.clock.as_ref(),
+        &mut changes,
         &mut current,
     );
     let receive = async {
@@ -806,6 +894,7 @@ async fn an_actual_started_rfb_message_completes_only_its_own_tail_after_manage_
         &mut writing,
         &next,
         wire.app.clock.as_ref(),
+        &mut changes,
         &mut current,
     )
     .await?;
@@ -858,17 +947,18 @@ async fn an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_real_pendi
     let prefix = displays_support::key(66, true);
     let message = displays_support::key(67, true);
     // Exactly one existing parser message fills the test byte-stream capacity.
-    let (writing, mut reading) = tokio::io::duplex(prefix.len());
+    let (mut writing, mut reading) = observed_duplex(prefix.len());
+    let mut changes = crate::realtime::publication::WriteWatch::new(
+        wire.app.realtime.inner.epoch.subscribe(),
+        WAIT,
+    );
     let (pending, reached) = oneshot::channel();
-    let mut writing = ObservedWriter {
-        inner: writing,
-        pending: None,
-    };
     assert!(matches!(
         crate::realtime::publication::write_message(
             &mut writing,
             &prefix,
             wire.app.clock.as_ref(),
+            &mut changes,
             &mut current
         )
         .with_subscriber(trace.recorder())
@@ -876,11 +966,12 @@ async fn an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_real_pendi
         Some(Ok(()))
     ));
     trace.mark("prefix accepted; queue second native parser message");
-    writing.pending = Some(pending);
+    writing.pending.push_back(pending);
     let send = crate::realtime::publication::write_message(
         &mut writing,
         &message,
         wire.app.clock.as_ref(),
+        &mut changes,
         &mut current,
     )
     .with_subscriber(trace.recorder());
@@ -932,6 +1023,307 @@ pub fn __api_run_an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_re
     ::std::boxed::Box::pin(
         self::an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_real_pending(),
     )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn a_spurious_writer_wake_never_starts_rfb_authorization_before_actual_buffer_room() -> Proof
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let wire = Wire::new(Surface::Display).await?;
+    let id = wire.make().await?;
+    let key = tickets::legacy(&wire.scene.rig.world, wire.scene.cai.id()).await?;
+    let token = wire.mint(id, &key, true).await?;
+    let mut positive =
+        displays_support::Screen::connect_at(wire.address, &wire.path(id, &token)).await;
+    positive.send(&displays_support::key(65, true)).await;
+    positive.picture_without_clipboard().await;
+    assert_eq!(
+        wire.native.key_count(id),
+        1,
+        "actual native control positive"
+    );
+    positive.close().await;
+    let mut current = actual_input_factory(&wire, id, &key).await?;
+    let checks = Arc::new(AtomicUsize::new(0));
+    let counting = checks.clone();
+    let mut prepare = move || {
+        counting.fetch_add(1, Ordering::SeqCst);
+        current()
+    };
+    let prefix = displays_support::key(66, true);
+    let message = displays_support::key(67, true);
+    let (mut writing, mut reading) = observed_duplex(prefix.len());
+    let (_scope_changes, scope_epoch) = tokio::sync::watch::channel(0_i64);
+    let mut changes = crate::realtime::publication::WriteWatch::new(scope_epoch, WAIT);
+    assert!(matches!(
+        crate::realtime::publication::write_message(
+            &mut writing,
+            &prefix,
+            wire.app.clock.as_ref(),
+            &mut changes,
+            &mut prepare,
+        )
+        .await?,
+        Some(Ok(()))
+    ));
+    let (pending, reached) = oneshot::channel();
+    let (still_full, observed_full) = oneshot::channel();
+    writing.pending.extend([pending, still_full]);
+    let capacity = writing.capacity.clone();
+    let send = crate::realtime::publication::write_message(
+        &mut writing,
+        &message,
+        wire.app.clock.as_ref(),
+        &mut changes,
+        &mut prepare,
+    );
+    let release = async {
+        tokio::time::timeout(WAIT, reached).await??;
+        let wake = capacity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wake
+            .take()
+            .ok_or("the full existing buffer registered no wake")?;
+        wake.wake();
+        tokio::time::timeout(WAIT, observed_full).await??;
+        assert_eq!(
+            checks.load(Ordering::SeqCst),
+            1,
+            "a spurious native wake cannot begin authorization while the byte buffer is still full"
+        );
+        tickets::current_scope(
+            &wire.scene.rig.world,
+            key.id,
+            tickets::rules(
+                "DisplayTicketCreate.control",
+                wire.scene.on.environment,
+                false,
+            ),
+        )
+        .await?;
+        let mut accepted = vec![0; prefix.len()];
+        reading.read_exact(&mut accepted).await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(accepted)
+    };
+    let (sent, accepted) =
+        tokio::time::timeout(WAIT, async { tokio::join!(send, release) }).await?;
+    assert!(
+        sent?.is_none(),
+        "the actual current check follows the native capacity wait"
+    );
+    assert_eq!(accepted?, prefix);
+    writing.shutdown().await?;
+    let mut extra = Vec::new();
+    reading.read_to_end(&mut extra).await?;
+    wire.finish().await;
+    assert!(
+        extra.is_empty(),
+        "no next native message follows Manage loss"
+    );
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_spurious_writer_wake_never_starts_rfb_authorization_before_actual_buffer_room()
+-> ::futures::future::LocalBoxFuture<'static, crate::session_ticket_support::Proof> {
+    ::std::boxed::Box::pin(
+        self::a_spurious_writer_wake_never_starts_rfb_authorization_before_actual_buffer_room(),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn ending_manage_drops_the_next_rfb_message_while_the_existing_native_buffer_stays_full()
+-> Proof {
+    let wire = Wire::new(Surface::Display).await?;
+    let id = wire.make().await?;
+    let key = tickets::legacy(&wire.scene.rig.world, wire.scene.cai.id()).await?;
+    let token = wire.mint(id, &key, true).await?;
+    let mut positive =
+        displays_support::Screen::connect_at(wire.address, &wire.path(id, &token)).await;
+    positive.send(&displays_support::key(65, true)).await;
+    positive.picture_without_clipboard().await;
+    assert_eq!(
+        wire.native.key_count(id),
+        1,
+        "actual native control positive"
+    );
+    positive.close().await;
+    let mut current = actual_input_factory(&wire, id, &key).await?;
+    let prefix = displays_support::key(66, true);
+    let message = displays_support::key(67, true);
+    let (mut writing, mut reading) = observed_duplex(prefix.len());
+    let capacity = writing.capacity.clone();
+    let mut changes = crate::realtime::publication::WriteWatch::new(
+        wire.app.realtime.inner.epoch.subscribe(),
+        WAIT,
+    );
+    assert!(matches!(
+        crate::realtime::publication::write_message(
+            &mut writing,
+            &prefix,
+            wire.app.clock.as_ref(),
+            &mut changes,
+            &mut current,
+        )
+        .await?,
+        Some(Ok(()))
+    ));
+    let (pending, reached) = oneshot::channel();
+    writing.pending.push_back(pending);
+    let send = crate::realtime::publication::write_message(
+        &mut writing,
+        &message,
+        wire.app.clock.as_ref(),
+        &mut changes,
+        &mut current,
+    );
+    let revoke = async {
+        tokio::time::timeout(WAIT, reached).await??;
+        tickets::current_scope(
+            &wire.scene.rig.world,
+            key.id,
+            tickets::rules(
+                "DisplayTicketCreate.control",
+                wire.scene.on.environment,
+                false,
+            ),
+        )
+        .await?;
+        wire.app
+            .realtime
+            .inner
+            .epoch
+            .send_modify(|epoch| *epoch += 1);
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    };
+    let (sent, changed) = tokio::time::timeout(WAIT, async { tokio::join!(send, revoke) }).await?;
+    changed?;
+    assert!(
+        sent?.is_none(),
+        "permission loss ends zero-byte work without waiting for native capacity"
+    );
+    assert_eq!(
+        capacity.lock().unwrap_or_else(PoisonError::into_inner).room,
+        0
+    );
+    let mut accepted = vec![0; prefix.len()];
+    reading.read_exact(&mut accepted).await?;
+    assert_eq!(accepted, prefix);
+    writing.shutdown().await?;
+    let mut extra = Vec::new();
+    reading.read_to_end(&mut extra).await?;
+    wire.finish().await;
+    assert!(extra.is_empty());
+    Ok(())
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_ending_manage_drops_the_next_rfb_message_while_the_existing_native_buffer_stays_full()
+-> ::futures::future::LocalBoxFuture<'static, crate::session_ticket_support::Proof> {
+    ::std::boxed::Box::pin(
+        self::ending_manage_drops_the_next_rfb_message_while_the_existing_native_buffer_stays_full(
+        ),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown() -> Proof {
+    for ending in ["expiry", "view", "stop"] {
+        let wire = Wire::new(Surface::Display).await?;
+        let id = wire.make().await?;
+        let key = tickets::legacy(&wire.scene.rig.world, wire.scene.cai.id()).await?;
+        let mut current = actual_input_factory(&wire, id, &key).await?;
+        let prefix = displays_support::key(66, true);
+        let message = displays_support::key(67, true);
+        let (mut writing, mut reading) = observed_duplex(prefix.len());
+        let (pending, reached) = oneshot::channel();
+        let mut changes = crate::realtime::publication::WriteWatch::new(
+            wire.app.realtime.inner.epoch.subscribe(),
+            WAIT,
+        );
+        assert!(matches!(
+            crate::realtime::publication::write_message(
+                &mut writing,
+                &prefix,
+                wire.app.clock.as_ref(),
+                &mut changes,
+                &mut current
+            )
+            .await?,
+            Some(Ok(()))
+        ));
+        writing.pending.push_back(pending);
+        let token = wire.mint(id, &key, true).await?;
+        let probe = wire.mint(id, &key, true).await?;
+        let send = crate::realtime::displays::ticket_input_write_fixture(
+            wire.app.clone(),
+            id,
+            &token,
+            &mut writing,
+            &message,
+        );
+        let end = async {
+            tokio::time::timeout(browsers_support::WAIT, reached).await??;
+            match ending {
+                "expiry" => {
+                    sqlx::query("UPDATE api_tokens SET expires_at=$2 WHERE id=$1")
+                        .bind(key.id)
+                        .bind(wire.app.clock.now() - chrono::Duration::seconds(1))
+                        .execute(&wire.scene.rig.world.db.pool)
+                        .await?;
+                }
+                "view" => {
+                    tickets::current_scope(
+                        &wire.scene.rig.world,
+                        key.id,
+                        tickets::rules(
+                            "DisplayTicketCreate.view",
+                            wire.scene.on.environment,
+                            false,
+                        ),
+                    )
+                    .await?;
+                    assert_eq!(
+                        crate::realtime::displays::ticket_scope_probe(&wire.app, id, &probe)
+                            .await?,
+                        Some((false, false)),
+                        "the original control ticket cannot borrow a different operation's Read"
+                    );
+                }
+                _ => wire.app.realtime.inner.stop.cancel(),
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        let (sent, ended) =
+            tokio::time::timeout(browsers_support::WAIT, async { tokio::join!(send, end) })
+                .await
+                .map_err(|_| {
+                    format!("{ending} did not close a write while native capacity stayed blocked")
+                })?;
+        ended?;
+        assert!(
+            matches!(sent?, None | Some(Err(_))),
+            "{ending} accepted no byte of the blocked message"
+        );
+        writing.shutdown().await?;
+        let mut accepted = Vec::new();
+        reading.read_to_end(&mut accepted).await?;
+        assert_eq!(
+            accepted, prefix,
+            "only the earlier accepted message reached native input"
+        );
+        wire.finish().await;
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown()
+-> ::futures::future::LocalBoxFuture<'static, crate::session_ticket_support::Proof> {
+    Box::pin(a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown())
 }
 
 #[path = "../../tests/browsers_support/screen.rs"]

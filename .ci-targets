@@ -1,0 +1,11 @@
+test -p orch-engine --lib -- error::tests
+test -p orch-engine --test provider_on_key
+test -p orch-engine --test background_wake
+test -p orch-engine --test background_wake_native
+test -p orch-engine --test background_stop
+test -p orch-engine --test turns
+test -p orch-engine --test failures
+test -p orch-engine --test cache_cleanup -- transport
+test -p orch-api-core --lib -- two_forwarded_turns
+test -p orch-adapter-claude-code --lib -- config::tests
+test -p orch-adapter-claude-code --test process_faults
