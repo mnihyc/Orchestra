@@ -88,6 +88,54 @@ async fn a_sign_in_on_a_page_asks_for_a_text_and_is_answered() {
 }
 
 #[tokio::test]
+async fn a_harness_signed_in_is_still_signed_in_after_its_connector_restarts_and_one_signed_out_stays_out()
+ {
+    let mut p = ProviderRig::new().await;
+    p.start_harness().await;
+    start(&p, "fake_ask", json!(null)).await;
+    p.wait_provider_event("provider.login", 2).await;
+    let answer: ProviderLoginInput = serde_json::from_value(json!({
+        "provider_id": p.rig.provider, "agent_id": p.rig.agent, "values": { "answer": "the text the page showed" }
+    }))
+    .unwrap();
+    p.rig.succeed(&key(&p), &answer).await;
+    p.wait_provider_event("provider.login", 3).await;
+    let refresh: orch_link_contract::commands::ProviderRefresh =
+        serde_json::from_value(json!({ "provider_id": p.rig.provider })).unwrap();
+    let provider = SerialKey::Provider(p.rig.provider);
+    let state = p.rig.succeed(&provider, &refresh).await;
+    assert_eq!(state["status"], "ready", "{state}");
+
+    // The connector restarts, as it does for a change of its policy, and the harness is started again.
+    p.rig.kill().await;
+    p.rig.start().await;
+    p.start_harness().await;
+    let state = p.rig.succeed(&provider, &refresh).await;
+    assert_eq!(
+        state["status"], "ready",
+        "the sign-in is there after the restart: {state}"
+    );
+
+    p.rig
+        .succeed(
+            &key(&p),
+            &ProviderLogout {
+                provider_id: p.rig.provider,
+                agent_id: p.rig.agent,
+            },
+        )
+        .await;
+    p.rig.kill().await;
+    p.rig.start().await;
+    p.start_harness().await;
+    let state = p.rig.succeed(&provider, &refresh).await;
+    assert_eq!(
+        state["status"], "needs_setup",
+        "a sign-out is kept as well: {state}"
+    );
+}
+
+#[tokio::test]
 async fn a_sign_in_the_person_gives_up_is_cancelled_and_the_harness_signed_out_says_so() {
     let p = ProviderRig::new().await;
     p.start_harness().await;
@@ -168,10 +216,38 @@ async fn a_secret_given_to_a_sign_in_is_sealed_on_its_way_and_in_no_event_after(
         .map(|event| event.body.to_string())
         .collect();
     assert!(!told.contains(secret), "the secret is in an event: {told}");
+    // The harness keeps its own sign-in in its home, as every harness keeps its login, readable by its
+    // account alone; the connector writes the secret in clear nowhere.
+    let home = p
+        .rig
+        .connector
+        .as_ref()
+        .unwrap()
+        .hosting()
+        .unwrap()
+        .process(p.rig.provider, p.rig.agent)
+        .unwrap()
+        .home_fact()
+        .path
+        .map(|home| std::fs::canonicalize(home).unwrap())
+        .expect("the harness has a home the connector made");
+    let held = common::model::files_holding(p.rig.data.path(), secret);
     assert!(
-        common::model::files_holding(p.rig.data.path(), secret).is_empty(),
-        "the secret is in a file in clear"
+        held.iter()
+            .all(|file| std::fs::canonicalize(file).unwrap().starts_with(&home)),
+        "the secret is in a file in clear outside the harness's home: {held:?}"
     );
+    #[cfg(unix)]
+    for file in &held {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(file).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "{} is readable by other accounts",
+            file.display()
+        );
+    }
 }
 
 #[tokio::test]
