@@ -194,7 +194,7 @@ export class Chats implements Part {
         createdBy: this.world.places.metaOf(row.id).owner,
         createdAt: this.world.places.metaOf(row.id).createdAt,
         seq: 0,
-        lastMessageSeq: row.chat.seq,
+        lastMessageSeq: row.chat.seq ?? 0,
         lastMessageAt: null,
         messages: [],
         sent: new Map(),
@@ -422,6 +422,13 @@ export class Chats implements Part {
     return { items: slice, next_cursor: from + limit < items.length ? String(from + limit) : null };
   }
 
+  private directoryPage(items: Chat[], query: URLSearchParams) {
+    const ids = query.has('ids') ? new Set((query.get('ids') ?? '').split(',')) : null;
+    const words = (query.get('q') ?? '').trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+    return this.page(items.filter((chat) => (ids === null || ids.has(chat.id)) && words.every((word) =>
+      [chat.name ?? '', chat.node?.redacted === false ? chat.node.name ?? '' : '', ...(chat.members ?? []).flatMap((user) => [user.display_name, user.username])].join(' ').toLocaleLowerCase().includes(word))), query);
+  }
+
   private recent(a: Rec, b: Rec): number {
     return (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt);
   }
@@ -437,7 +444,7 @@ export class Chats implements Part {
     const people = [...this.records.values()].filter((rec) => rec.orgId === orgId && rec.kind !== 'node');
     if (scope === 'mine') {
       const mine = people.filter((rec) => rec.members.includes(username) && this.stateOf(username, rec.id)?.hidden !== true);
-      return this.page(mine.sort((a, b) => this.recent(a, b)).map((rec) => this.view(person, rec)), query);
+      return this.directoryPage(mine.sort((a, b) => this.recent(a, b)).map((rec) => this.view(person, rec)), query);
     }
     if (!member) throw new Refusal(403, 'authz.denied', 'directs.view is required', { required: 'directs.view', requestable: false, override: false, missing: [] });
     if (scope === 'others') {
@@ -446,13 +453,13 @@ export class Chats implements Part {
         throw new Refusal(403, 'authz.denied', 'directs.view is required', { required: 'directs.view', requestable: false, override: false, missing: [] });
       }
       const others = people.filter((rec) => !rec.members.includes(username) && this.inspectableOf(rec, of, orgId));
-      return this.page(others.sort((a, b) => this.recent(a, b)).map((rec) => this.view(person, rec)), query);
+      return this.directoryPage(others.sort((a, b) => this.recent(a, b)).map((rec) => this.view(person, rec)), query);
     }
     // The chats of nodes that have messages and that the caller reads.
     const nodes = [...this.world.trees.get(orgId)?.nodes.values() ?? []]
       .map((row) => this.rec(row.chat.id))
-      .filter((rec) => rec.messages.length > 0 && this.standing(person, rec).reads);
-    return this.page(nodes.sort((a, b) => this.recent(a, b)).map((rec) => this.view(person, rec)), query);
+      .filter((rec) => (query.get('include_empty') === 'true' || rec.messages.length > 0) && this.standing(person, rec).reads);
+    return this.directoryPage(nodes.sort((a, b) => this.recent(a, b)).map((rec) => this.view(person, rec)), query);
   }
 
   /** Whether the people of a direct or group chat are all members of the org `of` (the root org: all of them, guests too). */

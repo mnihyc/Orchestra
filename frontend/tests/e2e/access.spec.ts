@@ -88,7 +88,7 @@ test('where the server says whom a change reaches, the dialog names them before 
   await share(page);
   await dialog(page).getByRole('button', { name: 'Make private', exact: true }).click();
   const confirm = page.getByRole('alertdialog', { name: 'Make “Fix login” private?' });
-  await expect(confirm).toContainText('Only you and the people named here. It stops following Web.');
+  await expect(confirm).toContainText('Only you and the people added here can access it. It stops following Web.');
   await expect(confirm.getByText(/people lose access/)).toBeVisible();
   await expect(confirm).toContainText('Grace Hopper');
   await confirm.getByRole('button', { name: 'Make private Fix login', exact: true }).click();
@@ -269,7 +269,7 @@ test('somebody from outside the org is named by whoever may, with who they are m
   await expect(page.getByRole('option', { name: /Zoe Outsider/ })).toContainText('Outside');
   await page.getByRole('option', { name: /Zoe Outsider/ }).click();
   await onlyHere(page);
-  await expect(dialog(page).getByText('Zoe Outsider · @zoe is not in this org and gets access to Fix login only.')).toBeVisible();
+  await expect(dialog(page).getByText('Zoe Outsider · @zoe : not in this organization, so they get access to Fix login only.')).toBeVisible();
   await dialog(page).getByRole('button', { name: 'Add', exact: true }).click();
   await expect(line(page, 'Can view')).toContainText('Outside');
 
@@ -367,7 +367,8 @@ test('a current refusal never offers an administrator a self-grant, including wh
 
 /** Opens Share from the thread's own header. */
 async function shareThread(page: Page): Promise<void> {
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
 }
 
 /** Resource access moved into Settings; its own Share action still opens the same permission page. */
