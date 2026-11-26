@@ -22,11 +22,14 @@ import type { DocumentRef } from '@/api/documents';
 import { matches as matchesQuery } from '@/features/finder/ranking';
 import { participatingTree } from '@/features/access/participation';
 import { type Attention, isUnread, NO_ATTENTION } from '@/features/navigation/attention';
-import type { DocsByNode } from '@/features/navigation/treeDocs';
+import type { DocsByNode, ShortcutsByNode } from '@/features/navigation/treeDocs';
+import type { Shortcut } from '@/api/shortcuts';
 import type { TreeOrder } from '@/features/navigation/treeOrder';
 import type { Chat } from '@/api/chat-contract';
 import type { ChatState, HiddenItem, TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
+import { nativeOrder } from './nativeOrder';
+import { hasFoldedChildren, visibleTreeFold } from '@/lib/treeFold';
 import type { WorkState } from '@/ui/StateChip';
 import { THREAD_URGENCY, isThreadUrgency, threadDisplayState } from '@/ui/ThreadState';
 import type { TreeRow } from '@/ui/Tree';
@@ -54,7 +57,12 @@ export type NavItem =
   /** A document written beside a place. */
   | { type: 'doc'; doc: DocumentRef; nodeId: string }
   /** The line under a place's documents: that they are on their way, could not be read, or are more than were read. */
+  | { type:'children'; nodeId:string; state:'loading'|'failed'|'more'|'loadingMore' }
   | { type: 'docs'; nodeId: string; state: 'loading' | 'failed' | 'more' | 'loadingMore' }
+  /** A shortcut kept in a place: a pointer to a document, a chat, a thread or a place, which opens its target. */
+  | { type: 'shortcut'; shortcut: Shortcut; nodeId: string }
+  /** The line under a place's shortcuts: that they are on their way, could not be read, or are more than were read. */
+  | { type: 'shortcuts'; nodeId: string; state: 'loading' | 'failed' | 'more' | 'loadingMore' }
   /** The chat of a place or a thread, as a row of its own. `quiet`: the reader does not follow it. */
   | { type: 'chat'; node: TreeNode; unread: boolean; mentions: number; quiet: boolean }
   /** The one row the org's group chats stand under: how many there are, and what they carry while it is closed. */
@@ -72,6 +80,10 @@ const KIND_ORDER: Record<TreeNode['kind'], number> = { org: 0, project: 1, topic
 export const docRowId = (documentId: string) => `doc:${documentId}`;
 /** The id of the line under the documents of a node. */
 const docsRowId = (nodeId: string) => `docs:${nodeId}`;
+/** The id of the row of a shortcut, which is no node. */
+export const shortcutRowId = (shortcutId: string) => `shortcut:${shortcutId}`;
+/** The id of the line under the shortcuts of a place. */
+const shortcutsRowId = (nodeId: string) => `shortcuts:${nodeId}`;
 /** The id of the row of a place's chat. */
 export const chatRowId = (nodeId: string) => `chat:${nodeId}`;
 /** The id of the row the org's group chats stand under, which opens and closes like a place. */
@@ -107,6 +119,8 @@ export interface TreeView {
   attention?: Attention;
   /** The documents beside the places that are open, by place; `null` where documents do not stand in the tree. */
   docs?: DocsByNode | null;
+  /** The shortcuts kept in the places that are open, by place; `null` where shortcuts do not stand in the tree. */
+  shortcuts?: ShortcutsByNode | null;
   /** Whether threads stand in the tree; without them it is the map of places alone. Left out, they do. */
   threads?: boolean;
   /** The reader's standing in chats: what says that a chat is unread, whether or not chats have rows. */
@@ -139,7 +153,8 @@ interface ChatOf {
 const NO_CHAT: ChatOf = { has: false, followed: false, unread: false, mentions: 0 };
 
 /** How a chat stands for its reader, from the newest message known of it and their state in it. `my` is their state as the chat itself said it, for a chat that came in a list. */
-export function chatStanding(chat: { id: string; seq: number; my?: ChatState | null }, standing: ChatStanding): ChatOf {
+export function chatStanding(chat: { id: string; seq: number | null; my?: ChatState | null }, standing: ChatStanding): ChatOf {
+  if (chat.seq === null) return NO_CHAT;
   const newest = Math.max(chat.seq, standing.latest.get(chat.id)?.seq ?? 0);
   if (newest <= 0) return NO_CHAT;
   const state = standing.states.get(chat.id) ?? chat.my ?? null;
@@ -153,6 +168,7 @@ export function chatStanding(chat: { id: string; seq: number; my?: ChatState | n
  * changes its state, a topic that is marked done, one that is renamed to what sorts the same) is laid out from this and sorts nothing again.
  */
 interface Shape {
+  nativeVersion:object|undefined;
   nodes: ReadonlyMap<string, TreeNode>;
   locale: string;
   showArchived: boolean;
@@ -283,7 +299,7 @@ function comparerOf(sortedBy: TreeOrder | undefined, parent: string, collator: I
 /** How the nodes stand now: the last shape when no node has moved, else a new one with its brothers sorted. */
 function shapeOf(tree: OrgTree, locale: string, showArchived: boolean, memory: LayoutMemory, sortedBy?: TreeOrder): Shape {
   const held = memory.shape;
-  if (held !== null && held.locale === locale && held.showArchived === showArchived && held.sortedBy === sortedBy && held.nodes.size === tree.nodes.size) {
+  if (held !== null && held.locale === locale && held.showArchived === showArchived && held.sortedBy === sortedBy && held.nativeVersion===tree.orderVersion && held.nodes.size === tree.nodes.size) {
     let moved = false;
     for (const [id, node] of tree.nodes) {
       const before = held.nodes.get(id);
@@ -307,14 +323,12 @@ function shapeOf(tree: OrgTree, locale: string, showArchived: boolean, memory: L
   }
   const collator = new Intl.Collator(locale, { numeric: true, sensitivity: 'base' });
   const order = new Map<string, readonly string[]>();
+  const orderNative = nativeOrder(tree);
   for (const [parent, list] of under) {
-    list.sort(comparerOf(sortedBy, parent, collator));
-    order.set(
-      parent,
-      list.map((node) => node.id),
-    );
+    const compare=comparerOf(sortedBy,parent,collator),ordered=orderNative(parent,list,compare)??list.sort(compare);
+    order.set(parent,ordered.map((node)=>node.id));
   }
-  const made: Shape = { nodes: tree.nodes, locale, showArchived, sortedBy, order };
+  const made: Shape = { nativeVersion:tree.orderVersion,nodes: tree.nodes, locale, showArchived, sortedBy, order };
   memory.shape = made;
   return made;
 }
@@ -337,8 +351,14 @@ function showsTheSame(held: NavItem, made: NavItem): boolean {
       );
     case 'doc':
       return held.type === 'doc' && held.doc === made.doc && held.nodeId === made.nodeId;
+    case 'children':
+      return held.type==='children' && held.nodeId===made.nodeId && held.state===made.state;
     case 'docs':
       return held.type === 'docs' && held.nodeId === made.nodeId && held.state === made.state;
+    case 'shortcut':
+      return held.type === 'shortcut' && held.shortcut === made.shortcut && held.nodeId === made.nodeId;
+    case 'shortcuts':
+      return held.type === 'shortcuts' && held.nodeId === made.nodeId && held.state === made.state;
     case 'chat':
       return held.type === 'chat' && held.node === made.node && held.unread === made.unread && held.mentions === made.mentions && held.quiet === made.quiet;
     case 'groups':
@@ -376,10 +396,15 @@ export interface Inside {
 }
 
 /** Works out, once for each node however many rows ask, what lies under it that needs a look: its own chat is not among it. */
-function insideOf(order: Shape['order'], nodes: ReadonlyMap<string, TreeNode>, attention: Attention, chats: ChatStanding, groups: ReadonlyMap<string, readonly GroupChat[]> = new Map(), known = new Map<string, Inside>()): (node: TreeNode) => Inside {
+function insideOf(order: Shape['order'], nodes: ReadonlyMap<string, TreeNode>, attention: Attention, chats: ChatStanding, groups: ReadonlyMap<string, readonly GroupChat[]> = new Map(), known = new Map<string, Inside>(), showArchived = false): (node: TreeNode) => Inside {
   const inside = (node: TreeNode): Inside => {
     const held = known.get(node.id);
     if (held !== undefined) return held;
+    const folded = visibleTreeFold(node.folded, showArchived);
+    if (folded !== null) {
+      const at=folded.urgency!==null&&isThreadUrgency(folded.urgency)?URGENCY.indexOf(folded.urgency):-1;
+      return {waiting:folded.waiting,unread:folded.unread,mentions:folded.mentions,urgency:at<0?URGENCY.length:at};
+    }
     const sum: Inside = { waiting: 0, unread: false, mentions: 0, urgency: URGENCY.length };
     for (const group of groups.get(node.id) ?? []) {
       const held = chatStanding({ id: group.id, seq: group.last_message_seq, my: group.my }, chats);
@@ -514,8 +539,9 @@ export function buildRows(
   const nodeOf = (id: string): TreeNode | undefined => tree.nodes.get(id);
   const attention = view.attention ?? NO_ATTENTION;
   const chats = view.chats ?? NO_CHATS;
-  const inside = insideOf(order, tree.nodes, attention, chats, byHome, layout.inside);
+  const inside = insideOf(order, tree.nodes, attention, chats, byHome, layout.inside, view.showArchived === true);
   const docs = view.docs ?? null;
+  const shortcuts = view.shortcuts ?? null;
   const chatRows = view.chatRows === true;
   const threads = view.threads !== false;
 
@@ -566,10 +592,11 @@ export function buildRows(
       const open = hit?.way === true || expanded.has(id);
       const chat = chatStanding(node.chat, chats);
       const holdsDocs = docs !== null && node.docs > 0;
+      const holdsShortcuts = shortcuts !== null && node.kind !== 'thread' && (node.shortcuts ?? 0) > 0;
       const holdsChat = chatRows && chat.has;
       // Without threads a topic holds no row of its own kind of thing: it opens only for what stands beside it.
-      const holdsRows = threads || node.kind !== 'topic' ? below.length > 0 : false;
-      const expandable = holdsRows || holdsDocs || holdsChat || (chatRows && (byHome.get(id)?.length ?? 0) > 0);
+      const holdsRows = threads || node.kind !== 'topic' ? below.length > 0 || hasFoldedChildren(node.folded, view.showArchived === true) : false;
+      const expandable = holdsRows || holdsDocs || holdsShortcuts || holdsChat || (chatRows && (byHome.get(id)?.length ?? 0) > 0);
       const isThread = node.kind === 'thread';
       const held = isThread ? null : inside(node);
       const groupHeld = isThread ? inside(node) : null;
@@ -610,6 +637,11 @@ export function buildRows(
       if (open) {
         const within = found === null || whole || hit?.match === true;
         walk(id, depth + 1, below, node.kind === 'project', within);
+        if(tree.branches!==undefined && hasFoldedChildren(node.folded, view.showArchived === true)) {
+          const branch=tree.branches.get(id);
+          const state=branch?.error ? 'failed' : branch===undefined || branch.pending===true ? (below.length===0?'loading':'loadingMore') : branch.cursor!==null?'more':null;
+          if(state!==null)leaf(`children:${id}`,depth+1,id,{type:'children',nodeId:id,state});
+        }
         // What stands beside a place is part of what lies in it: on a mere way to something found it is left out.
         if (within) besideOf(node, id, depth + 1);
         else groupsBeside(node.id, id, depth + 1, true);
@@ -623,13 +655,20 @@ export function buildRows(
       leaf(groupRowId(group.id), depth, parentRow, { type: 'group', chat: group, unread: stood.unread, mentions: stood.mentions, quiet: !stood.followed });
     }
   };
-  /** What stands beside a place after what it holds: the documents written beside it, with the line that says more are on their way or to be had, and its chat. */
+  /** What stands beside a place after what it holds: the documents written beside it and the shortcuts kept in it, each with the line that says more are on their way or to be had, and its chat. */
   const besideOf = (node: TreeNode, parentRow: string | null, depth: number) => {
     if (docs !== null && node.docs > 0) {
       const known = docs.get(node.id);
       for (const doc of known === undefined ? [] : sortedDocs(known.docs, locale, memory)) leaf(docRowId(doc.id), depth, parentRow, { type: 'doc', doc, nodeId: node.id });
       const state = known === undefined || known.state === 'loading' ? 'loading' : known.state === 'failed' ? 'failed' : known.loadingMore ? 'loadingMore' : known.more ? 'more' : null;
       if (state !== null) leaf(docsRowId(node.id), depth, parentRow, { type: 'docs', nodeId: node.id, state });
+    }
+    // Shortcuts stand in the order they were put there, after the documents.
+    if (shortcuts !== null && node.kind !== 'thread' && (node.shortcuts ?? 0) > 0) {
+      const known = shortcuts.get(node.id);
+      for (const shortcut of known?.items ?? []) leaf(shortcutRowId(shortcut.id), depth, parentRow, { type: 'shortcut', shortcut, nodeId: node.id });
+      const state = known === undefined || known.state === 'loading' ? 'loading' : known.state === 'failed' ? 'failed' : known.loadingMore ? 'loadingMore' : known.more ? 'more' : null;
+      if (state !== null) leaf(shortcutsRowId(node.id), depth, parentRow, { type: 'shortcuts', nodeId: node.id, state });
     }
     if (!chatRows) return;
     if (node.id !== rootOrg) groupsBeside(node.id, parentRow, depth);
@@ -679,6 +718,7 @@ export function buildRows(
 
 /** The rows that are open when a person sees a tree for the first time: orgs and projects, so that topics are in view. */
 export function firstExpanded(tree: OrgTree): string[] {
+  if(tree.initialOpen!==undefined)return [...tree.initialOpen??[]];
   return [...tree.nodes.values()].filter((node) => node.kind === 'org' || node.kind === 'project').map((node) => node.id);
 }
 
@@ -694,6 +734,20 @@ export function placesWithDocs(tree: OrgTree, rootId: string, expanded: Readonly
     const node = tree.nodes.get(id);
     // A thread that is out of the tree shows no documents either.
     if (node !== undefined && !node.deleted && node.docs > 0 && (threads || node.kind !== 'thread')) wanted.push(`${id}:${node.docs}:${node.docs_seq}`);
+  }
+  return wanted.sort().join(',');
+}
+
+/**
+ * The places that are open and say they keep shortcuts, each with how many and its tree stamp, as `id:count:seq`, sorted:
+ * what the tree asks the shortcuts of. Keeping, moving or removing a shortcut stamps its place. The place the tree
+ * begins at is among them where it keeps any.
+ */
+export function placesWithShortcuts(tree: OrgTree, rootId: string, expanded: ReadonlySet<string>): string {
+  const wanted: string[] = [];
+  for (const id of new Set([rootId, ...expanded])) {
+    const node = tree.nodes.get(id);
+    if (node !== undefined && !node.deleted && node.kind !== 'thread' && (node.shortcuts ?? 0) > 0) wanted.push(`${id}:${node.shortcuts}:${node.tree_seq}`);
   }
   return wanted.sort().join(',');
 }
@@ -717,7 +771,7 @@ export function stopsInOrder(tree: OrgTree, rootId: string, locale: string, view
   const { order } = shapeOf(tree, locale, view.showArchived === true, memory, view.order);
   const attention = view.attention ?? NO_ATTENTION;
   const chats = view.chats ?? NO_CHATS;
-  const inside = insideOf(order, tree.nodes, attention, chats);
+  const inside = insideOf(order, tree.nodes, attention, chats, undefined, undefined, view.showArchived === true);
   const found: Stop[] = [];
   const chatOf = (node: TreeNode) => {
     if (!withChats) return;
@@ -780,9 +834,13 @@ export function needsOf(
   const seen = new Set<string>();
   const needs: Needs = { unread: false, waiting: 0, mentions: 0 };
   const pending: TreeNode[] = [];
+  const wanted=new Set(ids);
   for (const id of ids) {
     const row = tree.nodes.get(id);
-    if (row !== undefined && !row.deleted) pending.push(row);
+    if(row===undefined||row.deleted)continue;
+    let at=row.parent_id,covered=false;const ancestors=new Set<string>();
+    while(at!==null&&!ancestors.has(at)){if(wanted.has(at)){covered=true;break;}ancestors.add(at);at=tree.nodes.get(at)?.parent_id??null;}
+    if(!covered)pending.push(row);
   }
   for (let row = pending.pop(); row !== undefined; row = pending.pop()) {
     if (seen.has(row.id) || (row.archived && !showArchived)) continue;
@@ -794,11 +852,13 @@ export function needsOf(
     const chat = chatStanding(row.chat, chats);
     if (chat.unread) needs.unread = true;
     needs.mentions += chat.mentions;
-    pending.push(...(below.get(row.id) ?? []));
+    const folded = visibleTreeFold(row.folded, showArchived);
+    if(folded!==null){needs.unread ||= folded.unread;needs.waiting+=folded.waiting;needs.mentions+=folded.mentions;}
+    else pending.push(...(below.get(row.id) ?? []));
   }
   return needs;
 }
 
 /** The name of a row, by which a typed letter finds it. */
 export const nameOf = (item: NavItem): string =>
-  item.type === 'node' ? item.node.name : item.type === 'doc' ? item.doc.title : item.type === 'group' ? (item.chat.name ?? '') : item.type === 'private' ? item.row.name : '';
+  item.type === 'node' ? item.node.name : item.type === 'doc' ? item.doc.title : item.type === 'shortcut' ? (item.shortcut.item?.name ?? '') : item.type === 'group' ? (item.chat.name ?? '') : item.type === 'private' ? item.row.name : '';

@@ -1,12 +1,12 @@
 /** The optional columns of Everything, kept separately for each signed-in person on this device. */
 import type { EverythingSort } from '@/generated/api-types';
 
-export const OPTIONAL_COLUMNS = ['admin_access', 'kind', 'owner', 'created', 'created_by', 'last_activity', 'state', 'size', 'my_access', 'tags'] as const;
+export const OPTIONAL_COLUMNS = ['kind', 'owner', 'created', 'created_by', 'last_activity', 'state', 'size', 'my_access', 'tags'] as const;
 export type OptionalColumn = (typeof OPTIONAL_COLUMNS)[number];
 export type Column = 'name' | 'where' | 'opened' | 'activity_by' | OptionalColumn;
-export const DEFAULT_COLUMNS: readonly OptionalColumn[] = ['admin_access', 'kind', 'owner', 'last_activity'];
+export const DEFAULT_COLUMNS: readonly OptionalColumn[] = ['kind', 'owner', 'last_activity'];
 export const COLUMN_SORT: Record<Column, EverythingSort> = {
-  name: 'name', admin_access: 'my_access', kind: 'kind', owner: 'owner', created: 'created', created_by: 'created_by',
+  name: 'name', kind: 'kind', owner: 'owner', created: 'created', created_by: 'created_by',
   last_activity: 'last_activity', state: 'state', size: 'size', my_access: 'my_access', tags: 'tags',
   where: 'where', opened: 'opened', activity_by: 'activity_by',
 };

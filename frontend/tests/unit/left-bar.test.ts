@@ -27,7 +27,8 @@ import { orgColor, orgMarks } from '@/features/navigation/OrgSwitcher';
 import type { PlaceRef } from '@/features/navigation/places';
 import { readChoices, SHIPPED_CHOICES, withChoices } from '@/features/navigation/preferences';
 import { resourceRows } from '@/features/navigation/Resources';
-import type { NodeDocs } from '@/features/navigation/treeDocs';
+import type { NodeDocs, NodeShortcuts } from '@/features/navigation/treeDocs';
+import type { Shortcut } from '@/api/shortcuts';
 import {
   buildRows,
   chatRowId,
@@ -40,6 +41,8 @@ import {
   newLayoutMemory,
   OUTSIDE_ROW,
   placesWithDocs,
+  placesWithShortcuts,
+  shortcutRowId,
   stopsInOrder,
   threadsInOrder,
   type TreeView,
@@ -97,8 +100,12 @@ const nameOfRow = (item: NavItem): string => {
       return item.node.name;
     case 'doc':
       return `doc ${item.doc.title}`;
+    case 'children':
     case 'docs':
+    case 'shortcuts':
       return `(${item.state})`;
+    case 'shortcut':
+      return `shortcut ${item.shortcut.item?.name ?? item.shortcut.state}`;
     case 'chat':
       return `chat of ${item.node.name}`;
     case 'groups':
@@ -328,6 +335,67 @@ const doc = (id: string, title: string, more: Partial<DocumentRef> = {}): Docume
   ({ id, title, seq: 1, seen_seq: 1, page: 'follows', archived: false, deleted: false, updated_by: null, node: { id: 'alpha', kind: 'topic', name: 'alpha', redacted: false }, ...more }) as DocumentRef;
 const docsOf = (entries: Record<string, Partial<NodeDocs>>): Map<string, NodeDocs> =>
   new Map(Object.entries(entries).map(([id, known]) => [id, { docs: [], more: false, state: 'ready', loadingMore: false, ...known }]));
+
+const shortcut = (id: string, place: string, name: string | null, more: Partial<Shortcut> = {}): Shortcut => ({
+  id,
+  node_id: place,
+  target: { kind: 'document', id: `target-${id}` },
+  position: '1',
+  state: name === null ? 'unavailable' : 'open',
+  item: name === null ? null : { name, path: [], org_id: 'acme', archived: false, color: null },
+  view: null,
+  ...more,
+});
+const shortcutsOf = (entries: Record<string, Partial<NodeShortcuts>>): Map<string, NodeShortcuts> =>
+  new Map(Object.entries(entries).map(([id, known]) => [id, { items: [], more: false, state: 'ready', loadingMore: false, ...known }]));
+
+describe('shortcuts in the tree', () => {
+  const keeping = changed(node('web', 'project', 'acme', { shortcuts: 1, docs: 1, docs_seq: 1 }), node('alpha', 'topic', 'web', { shortcuts: 2 }), thread('alpha-main', 'alpha', {}, { shortcuts: 3 }));
+  const known = shortcutsOf({
+    web: { items: [shortcut('s-road', 'web', 'Roadmap')] },
+    alpha: { items: [shortcut('s-spec', 'alpha', 'Spec'), shortcut('s-hidden', 'alpha', null)] },
+  });
+
+  it('stand under the place they are kept in, after its documents, in the order they were put there', () => {
+    const docs = docsOf({ web: { docs: [doc('d-road', 'Notes')] } });
+    expect(names(lay(keeping, ['web', 'alpha'], { shortcuts: known, docs }))).toEqual([
+      'infra',
+      'web',
+      '  alpha',
+      '    alpha-main',
+      '    shortcut Spec',
+      '    shortcut unavailable',
+      '  beta',
+      '  gamma',
+      '  doc Notes',
+      '  shortcut Roadmap',
+    ]);
+    const row = lay(keeping, ['web'], { shortcuts: known }).find((one) => one.id === shortcutRowId('s-road'));
+    expect(row?.expandable).toBe(false);
+    expect(row?.parentId).toBe('web');
+  });
+
+  it('let a place be opened that keeps nothing else, and stand in no thread', () => {
+    const lone = changed(node('infra', 'project', 'acme', { shortcuts: 1 }), node('delta', 'topic', 'infra'), thread('delta-main', 'delta', {}, { shortcuts: 1 }));
+    const empty = changed(node('infra', 'project', 'acme', { shortcuts: 1 }));
+    expect(lay(lone, ['infra', 'delta'], { shortcuts: new Map() }).find((one) => one.id === 'delta-main')?.expandable).toBe(false);
+    const bare = new Map([...empty.nodes].filter(([id]) => id !== 'delta' && id !== 'delta-main'));
+    expect(lay({ ...empty, nodes: bare }, [], { shortcuts: new Map() }).find((one) => one.id === 'infra')?.expandable).toBe(true);
+    expect(lay({ ...empty, nodes: bare }, [], { shortcuts: null }).find((one) => one.id === 'infra')?.expandable).toBe(false);
+  });
+
+  it('say that they are on their way, that they could not be read, and that there are more', () => {
+    const line = (shortcuts: Map<string, NodeShortcuts>) => names(lay(keeping, ['web', 'alpha'], { shortcuts })).filter((name) => name.includes('('));
+    expect(line(new Map())).toEqual(['    (loading)', '  (loading)']);
+    expect(line(shortcutsOf({ alpha: { state: 'failed' }, web: { items: [shortcut('s-road', 'web', 'Roadmap')], more: true } }))).toEqual(['    (failed)', '  (more)']);
+  });
+
+  it('are asked for only where a place is open and keeps some, and again when it is stamped', () => {
+    expect(placesWithShortcuts(keeping, 'acme', new Set(['web', 'alpha', 'alpha-main', 'gamma']))).toBe('alpha:2:1,web:1:1');
+    expect(placesWithShortcuts(changed(node('alpha', 'topic', 'web', { shortcuts: 2, tree_seq: 9 })), 'acme', new Set(['alpha']))).toBe('alpha:2:9');
+    expect(placesWithShortcuts(keeping, 'acme', new Set())).toBe('');
+  });
+});
 
 describe('documents in the tree', () => {
   const withDocs = changed(node('web', 'project', 'acme', { docs: 1, docs_seq: 1 }), node('alpha', 'topic', 'web', { docs: 2, docs_seq: 1 }), thread('alpha-main', 'alpha', {}, { docs: 1, docs_seq: 1 }));
@@ -604,6 +672,12 @@ describe('the menu of a document in the tree', () => {
     expect(entries(['doc.view']).find((entry) => entry.id === 'export')).toMatchObject({ disabled: t('export.menu.notAllowed', { name: ada.display_name }) });
     // Beside an archived place a document is read and not written: its title stays as it is.
     expect(menu(['doc.view', 'doc.edit', 'doc.manage'], true)).not.toContain('rename');
+  });
+
+  it('stars it and keeps a shortcut to it elsewhere right after where a press leads, whatever the caller holds on it', () => {
+    const shortcuts: MenuEntry[] = [{ id: 'star', label: 'Star', onSelect: nothing }, { id: 'add-shortcut', label: 'Add shortcut…', onSelect: nothing }];
+    const made = docMenuEntries({ archived: false, owner: ada }, { access: { permissions: ['doc.view'] } as never }, { ...acts, shortcuts }, t);
+    expect(ids(made).slice(0, 4)).toEqual(['open', 'open-tab', 'star', 'add-shortcut']);
   });
 
   it('keeps Export checking without a premature access request while current rights have not arrived', () => {
@@ -968,6 +1042,18 @@ describe('what a place\'s menu asks of the tree', () => {
     expect(entry(screen, 'collapse-others')).toBeUndefined();
     expect(entry(screen, 'mark-read')).toBeUndefined();
   });
+
+  it('keeps a shortcut to a project, a topic or a thread in another place, beside its star, and none to an org', () => {
+    const shortcut = { ...acts, addShortcut: nothing };
+    for (const kind of ['project', 'topic', 'thread'] as const) {
+      const entries = nodeMenuEntries({ ...context, place: { ...web, kind } }, shortcut, t);
+      const ids = entries.flatMap((one) => ('id' in one && one.type !== 'separator' ? [one.id] : []));
+      expect(ids.indexOf('add-shortcut')).toBe(ids.indexOf('star') + 1);
+      expect(label(entries, 'add-shortcut')).toBe('Add shortcut…');
+    }
+    expect(entry(nodeMenuEntries({ ...context, place: { ...web, kind: 'org' } }, shortcut, t), 'add-shortcut')).toBeUndefined();
+    expect(entry(nodeMenuEntries(context, acts, t), 'add-shortcut')).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------- the orgs of the rail
@@ -1028,12 +1114,13 @@ describe('the Resources view of the left bar', () => {
     mcp: none,
     mounts: none,
     skills: none,
+    pools: none,
   };
   const names = (open: ResourceKind[]) =>
     resourceRows(lists, new Set(open), 'en').map((row) => `${'  '.repeat(row.depth)}${row.item.type === 'kind' ? `${row.item.kind} ${row.item.count ?? '?'}` : row.item.type === 'thing' ? row.item.name : `(${row.item.state})`}`);
 
   it('lists every kind there is, in the order the screens of resources name them, each with how many its reader may see', () => {
-    expect(names([])).toEqual(['providers 2', 'agents 1', 'machines 0', 'environments ?', 'templates ?', 'hosts 0', 'mcp 0', 'mounts 0', 'skills 0']);
+    expect(names([])).toEqual(['providers 2', 'agents 1', 'machines 0', 'environments ?', 'templates ?', 'hosts 0', 'mcp 0', 'mounts 0', 'skills 0', 'pools 0']);
   });
 
   it('opens a kind to its things by name, says that they are on their way or could not be read, and gives a kind with nothing in it nothing to open', () => {
@@ -1051,6 +1138,7 @@ describe('the Resources view of the left bar', () => {
       'mcp 0',
       'mounts 0',
       'skills 0',
+      'pools 0',
     ]);
     const rows = resourceRows(lists, new Set<ResourceKind>(['machines']), 'en');
     expect(rows.find((row) => row.id === 'kind:machines')).toMatchObject({ expandable: false, expanded: false });

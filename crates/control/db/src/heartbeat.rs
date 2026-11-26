@@ -102,6 +102,8 @@ pub async fn server_version(conn: &mut Conn) -> Result<String, DbError> {
 /// A host, which is a machine that runs the node, as the system last saw it.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct HostSeen {
+    /// Protected origin of the host installed with the server.
+    pub bundled_with_server: bool,
     /// What the host is called.
     pub name: String,
     /// Whether it has a session with a gateway now.
@@ -115,7 +117,7 @@ pub struct HostSeen {
 /// Every host that is enrolled and not revoked or deleted, by name.
 pub async fn hosts_seen(conn: &mut Conn) -> Result<Vec<HostSeen>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT m.name, m.online, m.last_seen_at, m.connector_version
+        "SELECT m.name, m.online, m.last_seen_at, m.connector_version, h.bundled_with_server
            FROM hosts h JOIN machines m ON m.id = h.machine_id
           WHERE m.status = 'active' AND m.deleted_at IS NULL
           ORDER BY m.name",

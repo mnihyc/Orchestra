@@ -1,11 +1,12 @@
 /** Stars this person's current project view or the place alone, and opens a saved view through its ordinary address. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Folder, Star, StarOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { starProjectView } from '@/api/day100';
 import { favoritesKey, favoritesQuery, unstarNode } from '@/api/personal';
 import { normalizeProjectView, projectViewAddress } from '@/features/project/viewState';
-import type { Favorite, NodeRef, ProjectView as PersonalProjectView } from '@/generated/api-types';
+import type { NodeRef, ProjectView as PersonalProjectView, Shortcut } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
@@ -15,18 +16,20 @@ export function ProjectStar({ projectId, name, view, readableTags, path = [] }: 
   const { t } = useTranslation();
   const client = useQueryClient();
   const favorites = useQuery(favoritesQuery);
-  const current: (Favorite & { view?: PersonalProjectView | null }) | undefined = favorites.data?.find((favorite) => favorite.node.id === projectId);
+  const current: Shortcut | undefined = favorites.data?.find((favorite) => favorite.target.id === projectId);
   const saved = current?.view === undefined || current.view === null ? null : normalizeProjectView(current.view);
   const safeSaved = saved === null ? null : { ...saved, tag_ids: saved.tag_ids.filter((id) => readableTags.includes(id)) };
   const save = useMutation({
     mutationFn: (choice: 'view' | 'place' | 'remove') => choice === 'remove' ? unstarNode(projectId) : starProjectView(projectId, choice === 'place' ? null : view),
     onMutate: async (choice) => {
       await client.cancelQueries({ queryKey: favoritesKey });
-      const before = client.getQueryData<Favorite[]>(favoritesKey) ?? [];
-      const previous = before.find((favorite) => favorite.node.id === projectId);
-      const next: Favorite = { node: { id: projectId, kind: 'project', name, redacted: false }, path: previous?.path ?? path.filter((part) => part.id !== projectId), position: previous?.position ?? '', view: choice === 'view' ? view : null };
-      client.setQueryData<Favorite[]>(favoritesKey, choice === 'remove' ? before.filter((favorite) => favorite.node.id !== projectId)
-        : previous === undefined ? [...before, next] : before.map((favorite) => favorite.node.id === projectId ? next : favorite));
+      const before = client.getQueryData<Shortcut[]>(favoritesKey) ?? [];
+      const previous = before.find((favorite) => favorite.target.id === projectId);
+      const way = previous?.item?.path ?? path.filter((part) => part.id !== projectId);
+      const next: Shortcut = { id: previous?.id ?? `pending:${projectId}`, node_id: null, target: { kind: 'project', id: projectId }, position: previous?.position ?? '', state: 'open',
+        item: previous?.item ?? { name, path: way, org_id: way[0]?.id ?? null, archived: false, color: null }, view: choice === 'view' ? view : null };
+      client.setQueryData<Shortcut[]>(favoritesKey, choice === 'remove' ? before.filter((favorite) => favorite.target.id !== projectId)
+        : previous === undefined ? [...before, next] : before.map((favorite) => favorite.target.id === projectId ? next : favorite));
       return { before };
     },
     onError: (_error, _choice, context) => { client.setQueryData(favoritesKey, context?.before ?? []); },
@@ -42,7 +45,7 @@ export function ProjectStar({ projectId, name, view, readableTags, path = [] }: 
           ...(current === undefined ? [] : [{ id: 'remove', label: t('day100.views.removeStar'), icon: <StarOff aria-hidden />, disabled: save.isPending ? t('day100.views.saving') : false as const, onSelect: () => save.mutate('remove') }]),
         ]}
       />
-      {safeSaved !== null && <Button size="sm" variant="ghost" asChild><a href={projectViewAddress(projectId, safeSaved)}>{t('day100.views.openStarred')}</a></Button>}
+      {safeSaved !== null && <Button size="sm" variant="ghost" asChild><PathLink href={projectViewAddress(projectId, safeSaved)}>{t('day100.views.openStarred')}</PathLink></Button>}
       {save.error !== null && <ErrorAlert error={save.error} />}
       {favorites.isError && <ErrorState compact error={favorites.error} onRetry={() => void favorites.refetch()} />}
     </div>

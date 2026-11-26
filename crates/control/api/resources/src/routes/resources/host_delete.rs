@@ -753,7 +753,7 @@ async fn build_native(
                 .await
                 .map_err(refused)?;
                 if runtime.is_some() {
-                    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text) WHERE id=$1").bind(provider).bind(destination).execute(&mut *tx).await.map_err(DbError::from)?;
+                    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid::text))) WHERE id=$1").bind(provider).bind(destination).execute(&mut *tx).await.map_err(DbError::from)?;
                     match ctx
                         .app
                         .engine
@@ -780,7 +780,7 @@ async fn build_native(
                         Err(error) => return Err(refused(error)),
                     }
                 } else {
-                    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text) WHERE id=$1").bind(provider).bind(destination).execute(&mut *tx).await.map_err(DbError::from)?;
+                    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid::text))) WHERE id=$1").bind(provider).bind(destination).execute(&mut *tx).await.map_err(DbError::from)?;
                     match ctx
                         .app
                         .engine
@@ -1214,6 +1214,7 @@ async fn apply_creation(
     let mut environment_children = Vec::new();
     let mut provider_children = Vec::new();
     let notification = notifications::NotificationOperation {
+        actor: principal.user(),
         id: parent,
         kind: "host_delete".into(),
         name: host_row.name.clone(),
@@ -1245,7 +1246,7 @@ async fn apply_creation(
                     sqlx::query("UPDATE providers SET runtime_unavailable='Its host was removed',status='offline',status_detail='Its host was removed',machine_id=NULL,revision=revision+1,updated_at=$2 WHERE id=$1").bind(provider).bind(ctx.now).execute(&mut *tx).await.map_err(DbError::from)?;
                     match queued{jobs::provider_jobs::Queued::Made(job)=>*job,jobs::provider_jobs::Queued::Running(_)=>return Err(ApiError::new(ErrorCode::PlanBlocked,"Another operation holds a provider")),jobs::provider_jobs::Queued::NoProvider=>return Err(ApiError::not_found())}
                 },
-                ProviderAction::Replace{recipe,host}=>{sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text) WHERE id=$1").bind(recipe.target.id()).bind(host).execute(&mut *tx).await.map_err(DbError::from)?;let draft=native.providers.get(&recipe.target.id()).cloned().ok_or_else(||ApiError::internal("the prepared provider replacement is missing"))?;recreate::queue(&mut tx,draft,Some(batch),ctx.now).await.map_err(refused)?},
+                ProviderAction::Replace{recipe,host}=>{sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid::text))) WHERE id=$1").bind(recipe.target.id()).bind(host).execute(&mut *tx).await.map_err(DbError::from)?;let draft=native.providers.get(&recipe.target.id()).cloned().ok_or_else(||ApiError::internal("the prepared provider replacement is missing"))?;recreate::queue(&mut tx,draft,Some(batch),ctx.now).await.map_err(refused)?},
                 ProviderAction::Make{recipe}=>orch_engine::provider_recovery::queue(&ctx.app.engine,&mut tx,principal,&recipe,ctx.now).await.map_err(refused)?,
             };children.push(child.id);
             if let Some(action) = continuing { provider_children.push((child.id, action)); }

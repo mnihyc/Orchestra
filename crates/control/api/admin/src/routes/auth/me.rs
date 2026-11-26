@@ -8,13 +8,11 @@
 
 use crate::key_operations::credentials::key_info as token_info;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
 use crate::middleware::authentication::Authed;
 
 use crate::middleware::authentication::Via;
 
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_key;
 
 use crate::middleware::authentication::token_hash;
 
@@ -165,6 +163,8 @@ use orch_api_contract::auth::SignInProof;
 use orch_api_contract::auth::TokenCreateResponse;
 
 use orch_api_contract::auth::TokenCreated;
+
+use orch_api_contract::common::{CollectionQuery, Page};
 
 use orch_api_contract::common::ErrorCode;
 
@@ -1494,7 +1494,7 @@ fn session_list_operation<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    (): (),
+    _query: CollectionQuery,
     (): (),
 ) -> OperationFuture<'a> {
     Box::pin(async move {
@@ -1514,14 +1514,21 @@ fn session_list_operation<'a>(
     })
 }
 
-async fn sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<SessionInfo>> {
+async fn sessions(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<SessionInfo>> {
     use crate::key_operations::credentials::{self, Read};
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
     let principal = ctx.operation_principal(&mut tx).await?;
     let read = ctx.operation_data::<Read<Vec<SessionInfo>>>()?;
     let data = credentials::complete(&ctx, &mut tx, &principal, read.as_ref()).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(data)
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("{}:{}", ctx.route.name, principal.caller().user()),
+        data,
+        |row| (row.last_used_at.unix_millis().saturating_neg(), row.id),
+        |row| format!("{} {}", row.user_agent, row.ip.as_deref().unwrap_or("")),
+        false,
+    )
 }
 
 async fn session_infos(
@@ -1694,7 +1701,7 @@ fn token_list_operation<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    (): (),
+    _query: CollectionQuery,
     (): (),
 ) -> OperationFuture<'a> {
     Box::pin(async move {
@@ -1712,14 +1719,21 @@ fn token_list_operation<'a>(
     })
 }
 
-async fn tokens(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ApiTokenInfo>> {
+async fn tokens(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<ApiTokenInfo>> {
     use crate::key_operations::credentials::{self, Read};
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
     let principal = ctx.operation_principal(&mut tx).await?;
     let read = ctx.operation_data::<Read<Vec<ApiTokenInfo>>>()?;
     let data = credentials::complete(&ctx, &mut tx, &principal, read.as_ref()).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(data)
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("{}:{}", ctx.route.name, principal.caller().user()),
+        data,
+        |row| (row.created_at.unix_millis().saturating_neg(), row.id),
+        |row| row.name.clone(),
+        false,
+    )
 }
 
 /// Whether the person may see the node, which is what it takes to keep a
@@ -1792,8 +1806,7 @@ async fn token_create(
             .spend(&ctx, &mut tx, authed.id(), Purpose::TokenCreate)
             .await?;
     }
-    let id = orch_types::new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let (id, secret) = new_api_key();
     let name = asked.name.as_str();
     identity::create_api_token_scoped(
         &mut tx,

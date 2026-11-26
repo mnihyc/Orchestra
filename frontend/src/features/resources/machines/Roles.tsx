@@ -1,4 +1,5 @@
 /** The roles offered by this actual program, changed in place only after the local handover. */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
@@ -34,7 +35,7 @@ export function MachineRoles({machine}:{machine:Machine}) {
   // An old active-role snapshot in the command answer must never overwrite a newer live hello.
   // The acknowledgement supplies the pending selection; only the live machine row activates it.
   const apply=useMutation({mutationFn:(roles:readonly ConnectorRole[])=>setMachineRoles(machine.id,roles,revision),onSuccess:()=>setEditing(false)});
-  const refresh=useMutation({mutationFn:()=>cache.query({...machineQuery(machine.id),staleTime:0}),onSuccess:(current)=>{
+  const refresh=useMutation({mutationFn:()=>cache.query({...machineQuery(machine.id),...READ_NOW}),onSuccess:(current)=>{
     setDraft(CONNECTOR_ROLES.filter((role)=>current.roles.includes(role)));setRevision(current.revision);apply.reset();
   }});
   const waiting=apply.data?.reconnecting===true && !sameRoles(machine.roles,apply.data.requested_roles);
