@@ -30,6 +30,8 @@ use std::time::Duration;
 
 /// One ordinary observation pass is quick against the 120-second shipped grace and bounded stop budget.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
+pub mod operation;
+
 const PHASES: [Phase; 7] = [
     Phase {
         name: "waiting",
@@ -70,6 +72,7 @@ struct Plan {
     token: Option<Id>,
     threads: Vec<Id>,
     generation: i32,
+    control: orch_db::queries::runtime_controls::Intent,
     restart_mode: EnvironmentRestartMode,
     grace_secs: i64,
     definition: Option<Json>,
@@ -123,6 +126,17 @@ impl Engine {
         environment: Id,
         mode: EnvironmentRestartMode,
     ) -> Result<jobs::JobRow, Error> {
+        let http = crate::operation_scope::http_origin::active().ok_or_else(|| {
+            Error::Unavailable("the restart has no original HTTP operation".into())
+        })?;
+        if http.origin().operation() != "EnvironmentRestart"
+            || http.origin().user() != principal.user()
+            || principal.caller().admitted_operation() != Some("EnvironmentRestart")
+        {
+            return Err(Error::Unavailable(
+                "the restart's original operation changed".into(),
+            ));
+        }
         transaction_guard::lock_action(conn).await?;
         let affected = jobs::changes::threads(conn, Some(environment), None, true).await?;
         let env = envs::lock_environment(conn, environment)
@@ -185,6 +199,12 @@ impl Engine {
             token: principal.caller().grant().and_then(|grant| grant.token()),
             threads: affected.clone(),
             generation: env.generation,
+            control: orch_db::queries::runtime_controls::accept(
+                conn,
+                runtime.id,
+                orch_types::new_id(),
+            )
+            .await?,
             restart_mode: mode,
             grace_secs: self.recreate_grace_secs(conn, environment).await?.max(0),
             definition,
@@ -215,6 +235,7 @@ impl Engine {
             MakeError::Db(error) => Error::Internal(error.into()),
             MakeError::Internal(error) => Error::Internal(error),
         })?;
+        self.retain_restart_source(conn, &row, &http).await?;
         let mut unit = Unit::new(conn, at.get());
         for thread in affected {
             let Some(row) = threads::thread(&mut *unit.conn, thread).await? else {
@@ -265,9 +286,25 @@ pub struct Restarting {
 impl Restarting {
     /// Loads a retained request for the ordinary job runner.
     pub fn of(row: &jobs::JobRow) -> Result<Self, EngineError> {
+        if row.kind != jobs::kind::ENVIRONMENT_RESTART
+            || !super::lifecycle_commands::environment::owns_recipe(row)?
+        {
+            return Err(EngineError::BeforeEffect(Box::new(
+                crate::operation_scope::continuing::Error::Refused,
+            )));
+        }
         Ok(Self {
             plan: serde_json::from_value(row.plan.clone())?,
         })
+    }
+
+    async fn require_control(&self, conn: &mut Conn) -> Result<(), Stop> {
+        if self.plan.control.runtime() != self.plan.runtime
+            || !orch_db::queries::runtime_controls::is_current(conn, &self.plan.control).await?
+        {
+            return Err(failed("the restart was superseded by a newer control"));
+        }
+        Ok(())
     }
 
     async fn current(&self, job: &Job) -> Result<envs::RuntimeFull, Stop> {
@@ -312,6 +349,7 @@ impl Restarting {
             .filter(|host| !host.disabled)
             .ok_or_else(|| failed("the host is gone or disabled"))?;
         let _ = host;
+        self.require_control(&mut tx).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(runtime)
     }
@@ -372,6 +410,7 @@ impl Restarting {
                     "credentials could not be returned before restart: {error}"
                 ))
             })?;
+        self.current(job).await?;
         if runtime.state != "stopped" {
             job.remember(&json!({"restart_stop_requested":true}))
                 .await?;
@@ -392,6 +431,8 @@ impl Restarting {
                 .await?;
             }
             let mut tx = job.engine().db().begin().await?;
+            envs::lock_environment(&mut tx, self.plan.environment).await?;
+            self.require_control(&mut tx).await?;
             envs::set_runtime_state(
                 &mut tx,
                 runtime.id,
@@ -423,6 +464,8 @@ impl Restarting {
             .await?;
         }
         let mut tx = job.engine().db().begin().await?;
+        envs::lock_environment(&mut tx, self.plan.environment).await?;
+        self.require_control(&mut tx).await?;
         envs::set_runtime_state(
             &mut tx,
             runtime.id,
@@ -473,6 +516,7 @@ impl Restarting {
         let env = envs::lock_environment(&mut tx, self.plan.environment)
             .await?
             .ok_or_else(|| failed("the environment disappeared before restart commit"))?;
+        self.require_control(&mut tx).await?;
         let runtime = envs::live_runtime(&mut tx, self.plan.environment)
             .await?
             .filter(|runtime| runtime.id == self.plan.runtime)
@@ -598,6 +642,20 @@ impl Phased for Restarting {
         Ok(Done::Finished)
     }
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        let current = async {
+            let mut conn = job.engine().db().acquire().await?;
+            orch_db::queries::runtime_controls::is_current(&mut conn, &self.plan.control).await
+        }
+        .await;
+        match current {
+            Ok(true) => {}
+            Ok(false) => return Undone::Partly(
+                "a newer control owns the unit; the old restart sent no cleanup and kept its files".into(),
+            ),
+            Err(_) => return Undone::Partly(
+                "the original restart control could not be confirmed; no cleanup or data removal was sent".into(),
+            ),
+        }
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted restart command outcome could not be recorded");
         }
@@ -642,6 +700,10 @@ impl Phased for Restarting {
             .await
             .map_err(|error| EngineError::unreadable(format!("{error:?}")))?;
             let mut tx = job.engine().db().begin().await?;
+            envs::lock_environment(&mut tx, self.plan.environment).await?;
+            if !orch_db::queries::runtime_controls::is_current(&mut tx, &self.plan.control).await? {
+                return Ok(false);
+            }
             envs::set_runtime_state(
                 &mut tx,
                 self.plan.runtime,
@@ -675,6 +737,14 @@ impl Phased for Restarting {
             ),
             Err(_) => {
                 if let Ok(mut tx) = job.engine().db().begin().await
+                    && envs::lock_environment(&mut tx, self.plan.environment)
+                        .await
+                        .is_ok()
+                    && matches!(
+                        orch_db::queries::runtime_controls::is_current(&mut tx, &self.plan.control)
+                            .await,
+                        Ok(true)
+                    )
                     && envs::live_runtime(&mut tx, self.plan.environment)
                         .await
                         .ok()

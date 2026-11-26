@@ -26,9 +26,10 @@ use orch_link_contract::events::{
     Event, JobProgress as JobProgressEvent, NODE_LOAD_EVERY_SECS, NODE_LOAD_STEP, NodeCapacity,
     NodeFacts, NodeLoad, NodeRuntime,
 };
+use orch_link_contract::native_target::RuntimeSource;
 use orch_link_contract::streams::Stream;
 use orch_types::Id;
-use sysinfo::{MemoryRefreshKind, System};
+use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::ledger::Record;
 use crate::storages::Storages;
@@ -56,7 +57,7 @@ pub const fn state_name(state: UnitStateKind) -> &'static str {
 }
 
 /// What a runtime's unit was last said to be in: its state, and what there was to say about it.
-type Told = (String, Option<String>);
+type Told = (RuntimeSource, String, Option<String>);
 
 /// What a driver said about a unit's state, as one sentence.
 #[must_use]
@@ -82,10 +83,10 @@ struct Account {
 
 impl Account {
     /// Notes that `state` and `detail` are being told of a runtime.
-    fn note(&mut self, runtime_id: Id, state: &str, detail: Option<String>) {
+    fn note(&mut self, runtime_id: Id, source: RuntimeSource, state: &str, detail: Option<String>) {
         self.count += 1;
         self.last
-            .insert(runtime_id, ((state.to_owned(), detail), self.count));
+            .insert(runtime_id, ((source, state.to_owned(), detail), self.count));
     }
 }
 
@@ -94,6 +95,7 @@ pub struct Reports {
     publisher: Arc<dyn Publisher>,
     told: Mutex<Account>,
     networks: Mutex<HashMap<Id, orch_api_contract::environment::NetworkState>>,
+    server_update: tokio::sync::Mutex<Option<orch_link_contract::events::NodeServerUpdate>>,
 }
 
 impl std::fmt::Debug for Reports {
@@ -148,11 +150,37 @@ impl Reports {
             publisher,
             told: Mutex::new(Account::default()),
             networks: Mutex::new(HashMap::new()),
+            server_update: tokio::sync::Mutex::new(None),
         }
     }
 
     fn account(&self) -> MutexGuard<'_, Account> {
         self.told.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keep a changed updater observation in the ordinary durable node stream.
+    pub async fn server_update(
+        &self,
+        report: orch_link_contract::events::NodeServerUpdate,
+    ) -> bool {
+        let mut previous = self.server_update.lock().await;
+        if previous.as_ref() == Some(&report) {
+            return true;
+        }
+        match self
+            .publisher
+            .publish(Stream::Node, Event::NodeServerUpdate(report.clone()))
+            .await
+        {
+            Ok(()) => {
+                *previous = Some(report);
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the server update observation could not be kept in the spool");
+                false
+            }
+        }
     }
 
     async fn put(&self, event: Event) {
@@ -162,9 +190,16 @@ impl Reports {
         }
     }
 
-    async fn put_runtime(&self, runtime_id: Id, state: &str, detail: Option<String>) {
+    async fn put_runtime(
+        &self,
+        runtime_id: Id,
+        source: RuntimeSource,
+        state: &str,
+        detail: Option<String>,
+    ) {
         self.put(Event::NodeRuntime(NodeRuntime {
             runtime_id,
+            source,
             state: state.to_owned(),
             detail,
         }))
@@ -173,9 +208,16 @@ impl Reports {
 
     /// The state the driver finds a runtime's unit in, told whether or not it is what the system was last
     /// told.
-    pub async fn runtime(&self, runtime_id: Id, state: &str, detail: Option<String>) {
-        self.account().note(runtime_id, state, detail.clone());
-        self.put_runtime(runtime_id, state, detail).await;
+    pub async fn runtime(
+        &self,
+        runtime_id: Id,
+        source: RuntimeSource,
+        state: &str,
+        detail: Option<String>,
+    ) {
+        self.account()
+            .note(runtime_id, source, state, detail.clone());
+        self.put_runtime(runtime_id, source, state, detail).await;
     }
 
     /// As [`Reports::runtime`], but only when the state or what is said of it differs from what the system
@@ -183,10 +225,12 @@ impl Reports {
     pub async fn runtime_if_changed(
         &self,
         runtime_id: Id,
+        source: RuntimeSource,
         state: &str,
         detail: Option<String>,
     ) -> bool {
-        self.tell_if_changed(None, runtime_id, state, detail).await
+        self.tell_if_changed(None, runtime_id, source, state, detail)
+            .await
     }
 
     /// A point in the tellings, by which a look at the units is dated: taken before the look begins, and given
@@ -203,10 +247,11 @@ impl Reports {
         &self,
         mark: u64,
         runtime_id: Id,
+        source: RuntimeSource,
         state: &str,
         detail: Option<String>,
     ) -> bool {
-        self.tell_if_changed(Some(mark), runtime_id, state, detail)
+        self.tell_if_changed(Some(mark), runtime_id, source, state, detail)
             .await
     }
 
@@ -214,6 +259,7 @@ impl Reports {
         &self,
         mark: Option<u64>,
         runtime_id: Id,
+        source: RuntimeSource,
         state: &str,
         detail: Option<String>,
     ) -> bool {
@@ -221,15 +267,19 @@ impl Reports {
             // What was told is looked at and noted in one hold, so that two tellers cannot both find a
             // change in the same thing.
             let mut account = self.account();
-            if let Some(((last_state, last_detail), number)) = account.last.get(&runtime_id) {
+            if let Some(((last_source, last_state, last_detail), number)) =
+                account.last.get(&runtime_id)
+            {
                 let newer = mark.is_some_and(|mark| *number > mark);
-                if newer || (last_state == state && *last_detail == detail) {
+                if newer
+                    || (*last_source == source && last_state == state && *last_detail == detail)
+                {
                     return false;
                 }
             }
-            account.note(runtime_id, state, detail.clone());
+            account.note(runtime_id, source, state, detail.clone());
         }
-        self.put_runtime(runtime_id, state, detail).await;
+        self.put_runtime(runtime_id, source, state, detail).await;
         true
     }
 
@@ -239,7 +289,7 @@ impl Reports {
         self.account()
             .last
             .get(&runtime_id)
-            .map(|(told, _)| told.clone())
+            .map(|((_, state, detail), _)| (state.clone(), detail.clone()))
     }
 
     /// What the host has and can make.
@@ -385,6 +435,7 @@ impl LoadSampler {
         if let Some(resources) = storages.pool_resources() {
             let resources = resources.ok()?;
             return Some(NodeLoad {
+                pids: None,
                 cpu_percent: resources.cpu_percent?,
                 memory_used_mb: resources.memory_used_mb?,
                 disk_used_gb: resources.disk_used_gb?,
@@ -394,8 +445,14 @@ impl LoadSampler {
         self.system.refresh_cpu_usage();
         self.system
             .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
         let (capacity, free) = storages.disk();
         Some(NodeLoad {
+            pids: i64::try_from(self.system.processes().len()).ok(),
             cpu_percent: f64::from(self.system.global_cpu_usage()) * self.cpus,
             memory_used_mb: i64::try_from(self.system.used_memory() / BYTES_PER_MB)
                 .unwrap_or(i64::MAX),
@@ -563,8 +620,12 @@ mod tests {
         let id = new_id();
         Record {
             runtime_id: id,
+            incarnation: crate::ledger::Incarnation::Tracked(new_id()),
             kind: RuntimeKind::Environment,
             driver: "memory".into(),
+            system: "test".into(),
+            template: Some(serde_json::json!({})),
+            tools: vec![],
             unit: UnitRef {
                 reference: String::new(),
                 name: id.to_string(),
@@ -605,6 +666,7 @@ mod tests {
 
     fn load(cpu: f64, memory: i64, disk: i64) -> NodeLoad {
         NodeLoad {
+            pids: None,
             cpu_percent: cpu,
             memory_used_mb: memory,
             disk_used_gb: disk,
@@ -684,11 +746,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Publisher for Kept {
-        async fn publish(
+        async fn publish_from(
             &self,
+            native_opening_id: Option<Id>,
             _stream: Stream,
             event: Event,
         ) -> Result<(), orch_link::streams::PublishError> {
+            assert!(
+                native_opening_id.is_none(),
+                "runtime facts have no physical session"
+            );
             self.0.lock().unwrap().push(event);
             Ok(())
         }
@@ -722,6 +789,7 @@ mod tests {
         reports
             .runtime(
                 watched,
+                RuntimeSource::untracked(),
                 "failed",
                 Some("its connector did not enroll".into()),
             )
@@ -729,12 +797,18 @@ mod tests {
         // What the look saw of that unit is older than the telling and is not told; what it saw of another is.
         assert!(
             !reports
-                .runtime_if_changed_since(mark, watched, "failed", Some("exit status 1".into()))
+                .runtime_if_changed_since(
+                    mark,
+                    watched,
+                    RuntimeSource::untracked(),
+                    "failed",
+                    Some("exit status 1".into())
+                )
                 .await
         );
         assert!(
             reports
-                .runtime_if_changed_since(mark, other, "running", None)
+                .runtime_if_changed_since(mark, other, RuntimeSource::untracked(), "running", None)
                 .await
         );
         assert_eq!(
@@ -749,15 +823,56 @@ mod tests {
         let mark = reports.mark();
         assert!(
             reports
-                .runtime_if_changed_since(mark, watched, "absent", None)
+                .runtime_if_changed_since(mark, watched, RuntimeSource::untracked(), "absent", None)
                 .await
         );
         assert!(
             !reports
-                .runtime_if_changed_since(mark, watched, "absent", None)
+                .runtime_if_changed_since(mark, watched, RuntimeSource::untracked(), "absent", None)
                 .await
         );
         assert_eq!(reports.told_of(watched), Some(("absent".to_owned(), None)));
         assert_eq!(kept.told_of(watched).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_new_native_runtime_identity_is_reported_even_when_its_visible_state_did_not_change()
+    {
+        use orch_link_contract::native_target::RuntimeSource;
+        let kept = Arc::new(Kept::default());
+        let reports = Reports::new(kept.clone());
+        let runtime = new_id();
+        let a = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        let b = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        assert!(
+            reports
+                .runtime_if_changed(runtime, a, "running", None)
+                .await
+        );
+        assert!(
+            !reports
+                .runtime_if_changed(runtime, a, "running", None)
+                .await
+        );
+        assert!(
+            reports
+                .runtime_if_changed(runtime, b, "running", None)
+                .await
+        );
+        let sources: Vec<_> = kept
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                Event::NodeRuntime(value) if value.runtime_id == runtime => Some(value.source),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources, [a, b]);
     }
 }

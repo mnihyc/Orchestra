@@ -29,7 +29,6 @@ use orch_engine::raw_events;
 
 use orch_engine::raw_events::PAGE_DEFAULT;
 
-use orch_engine::raw_events::PAGE_MAX;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry.on_with_operation(ThreadRawList, crate::key_operations::direct::declared, list);
@@ -45,7 +44,7 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
     let limit = match query.limit {
         None => PAGE_DEFAULT,
         Some(0) => return Err(ApiError::invalid("limit", "must be at least 1")),
-        Some(limit) => limit.min(PAGE_MAX),
+        Some(limit) => limit,
     };
     if query.before.is_some_and(|before| before < 1) {
         return Err(ApiError::invalid(
@@ -53,7 +52,7 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
             "is the number of an event, from 1",
         ));
     }
-    let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    let mut conn = orch_db::queries::raw_events::begin_reading(&ctx.app.db).await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.manage").await?;
     let projection = orch_db::queries::thread_continuations::projection(
@@ -100,7 +99,55 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
     let row = rows::thread(&mut conn, thread)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let page = raw_events::page(&mut conn, &row, segment.id, query.before, limit)
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    let filtering = !words.terms().is_empty() || query.direction.is_some();
+    let batch = if filtering {
+        limit.max(PAGE_DEFAULT)
+    } else {
+        limit
+    };
+    let mut batches = if filtering {
+        super::read_history::search_batches(&mut conn).await?
+    } else {
+        1
+    };
+    let mut before = query.before;
+    let mut events = Vec::new();
+    let next_before = loop {
+        let page = raw_events::page(&mut conn, &row, segment.id, before, batch)
+            .await
+            .map_err(snapshot_read::engine_error)?;
+        let next = page
+            .has_older
+            .then(|| page.events.last().map(|event| event.n))
+            .flatten();
+        events.extend(page.events.into_iter().filter(|event| {
+            query
+                .direction
+                .is_none_or(|direction| direction == event.direction)
+                && words.matches(&event.payload.to_string())
+        }));
+        let extra = events.len() > usize::try_from(limit).map_err(ApiError::internal)?;
+        events.truncate(usize::try_from(limit).map_err(ApiError::internal)?);
+        batches = batches.saturating_sub(1);
+        if extra {
+            break events.last().map(|event| event.n);
+        }
+        if next.is_none()
+            || batches == 0
+            || events.len() == usize::try_from(limit).map_err(ApiError::internal)?
+        {
+            break next;
+        }
+        if next == before {
+            return Err(ApiError::internal(
+                "the raw search repeated its native position",
+            ));
+        }
+        before = next;
+    };
+    let capture = orch_db::queries::raw_events::capture(&mut conn, segment.id).await?;
+    let retention = raw_events::retention(&mut conn, principal.now().get())
         .await
         .map_err(snapshot_read::engine_error)?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
@@ -110,7 +157,10 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
     authorization::require_on_path_in(&ctx, &mut current, &principal, "thread.manage").await?;
     Ok(ThreadRawListReply {
         projection: Some(orch_engine::continuations::projection::scope(&projection)),
-        events: page.events,
-        has_older: page.has_older,
+        events,
+        has_older: next_before.is_some(),
+        next_before,
+        capture,
+        retention: Some(retention),
     })
 }
