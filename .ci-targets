@@ -1,0 +1,12 @@
+test -p orch-api-core --test threads_settings -- a_thread_refuses_an_embedding_only_choice_and_an_input_after_its_model_changes_purpose
+test -p orch-api-core --test threads_make -- a_thread_can_start_with_a_generation_model_and_explains_why_an_embedding_model_cannot
+test -p orch-api-core --test threads_settings -- a_concurrent_input_waits_for_the_whole_reviewed_model_choice_before_admission
+test -p orch-api-core --test binding_options -- an_embedding_only_model_is_absent_from_a_threads_generation_choices
+test -p orch-provider-contract --lib -- models::purpose_tests::
+test -p orch-engine --test preflight -- every_check_blocks_the_thread_with_its_reason_and_lets_it_through_when_its_cause_clears
+test -p orch-engine --test preflight -- a_cause_of_the_thread_stays_in_view_when_its_queue_empties_and_the_thread_is_idle_once_it_is_mended
+test -p orch-engine --lib -- models::tests::
+test -p orch-api-core --lib
+web typecheck
+web lint
+web test

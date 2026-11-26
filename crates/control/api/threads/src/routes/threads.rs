@@ -33,6 +33,8 @@ use orch_engine::inputs::InputError;
 use orch_engine::views::ReadError;
 
 use orch_types::Id;
+
+mod session_skills;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     make::mount(registry);
@@ -54,20 +56,57 @@ pub fn mount(registry: &mut Registry) {
     model_inputs::mount(registry);
     native::mount(registry);
     instructions::mount(registry);
+    session_skills::mount(registry);
     context::mount(registry);
     continuations::mount(registry);
 }
 orch_api_base::__api_bind_6de5279cdb!();
 
+fn model_refusal(model: &str, why: orch_engine::models::NotAllowed) -> ApiError {
+    if why == orch_engine::models::NotAllowed::GenerationUnsupported {
+        return ApiError::generation_unsupported().with("model", model);
+    }
+    ApiError::new(ErrorCode::ModelNotAllowed, why.describe(model))
+        .with("reason", "model")
+        .with("model", model)
+}
+
 /// The thread `thread` as the caller sees it.
 pub async fn one(ctx: &Ctx, conn: &mut Conn, thread: Id) -> ApiResult<Thread> {
     let principal = authorization::principal(ctx, conn).await?;
-    match crate::routes::nodes::view::one(conn, &principal, thread, ctx.now, Policy::default())
+    one_for(ctx, conn, &principal, thread).await
+}
+
+async fn one_for(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    thread: Id,
+) -> ApiResult<Thread> {
+    match crate::routes::nodes::view::one(conn, principal, thread, ctx.now, Policy::default())
         .await?
     {
         Some(Node::Thread(thread)) => Ok(thread),
         _ => Err(ApiError::not_found()),
     }
+}
+
+/// A failed native probe retains its actual blocking policy, without exposing arbitrary program diagnostics.
+pub(crate) fn harness_start_failed(policy: Option<&str>) -> ApiError {
+    let mut error = ApiError::new(
+        ErrorCode::BindingIncompatible,
+        "the selected harness could not start on this machine",
+    )
+    .with("reason", "harness_error");
+    if let Some(policy) = policy.filter(|policy| {
+        matches!(
+            *policy,
+            "agent.programs" | "tools.fetch" | "agent.harnesses"
+        )
+    }) {
+        error = error.with("policy", policy);
+    }
+    error
 }
 
 /// Why a thread could not be made, as the problem a client acts on.
@@ -102,17 +141,13 @@ pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiErro
             "environment.use",
             "the environment is not there or is being removed",
         ),
+        CreateThreadError::AgentStartFailed(policy) => harness_start_failed(policy.as_deref()),
         CreateThreadError::AgentNotReported => ApiError::new(
             ErrorCode::BindingIncompatible,
             "the agent profile has not reported what its harness is",
         )
         .with("reason", "harness_unreported"),
-        CreateThreadError::ModelNotAllowed(model) => ApiError::new(
-            ErrorCode::ModelNotAllowed,
-            format!("the model {model} is not available here"),
-        )
-        .with("reason", "model")
-        .with("model", model),
+        CreateThreadError::ModelNotAllowed(model, why) => model_refusal(&model, why),
         CreateThreadError::EffortNotListed(effort) => ApiError::new(
             ErrorCode::ModelNotAllowed,
             format!("the model does not take the effort {effort}"),
@@ -197,6 +232,7 @@ pub async fn input_failed(conn: &mut Conn, thread: Id, error: InputError) -> Api
             "fallback_delivery",
             orch_api_contract::threads::Delivery::Interrupt,
         ),
+        InputError::GenerationUnsupported => ApiError::generation_unsupported(),
         InputError::PlanUnsupported => ApiError::new(
             ErrorCode::CapabilityUnsupported,
             "the agent program of this thread has no plan mode",
@@ -284,6 +320,7 @@ pub(crate) async fn input_failed_projected(
         | InputError::TooLong
         | InputError::Invalid(_)
         | InputError::SteerUnsupported
+        | InputError::GenerationUnsupported
         | InputError::PlanUnsupported
         | InputError::NotPending { .. }
         | InputError::NotTheAuthor

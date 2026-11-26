@@ -72,6 +72,33 @@ async fn legacy_volume<T>(
 /// default that says the driver does not.
 #[async_trait]
 pub trait DriverExtras: Send + Sync + 'static {
+    /// Offered only by the physical bundled installation's updater implementation.
+    fn server_update_support(&self) -> Option<orch_driver_contract::descriptor::OperationSupport> {
+        None
+    }
+    /// Prepares the fixed existing updater for the exact admitted job.
+    async fn server_update(
+        &self,
+        _command: orch_types::Id,
+        _body: &orch_link_contract::commands::NodeServerUpdate,
+    ) -> Result<orch_api_contract::admin::ServerUpdateObservation, DriverError> {
+        Err(DriverError::Unsupported(
+            "this driver does not run the bundled installation's updater".into(),
+        ))
+    }
+    /// One prepared local helper still needs its exact successful command journal answer.
+    fn pending_server_update(&self) -> Option<orch_types::Id> {
+        None
+    }
+    /// Starts an already prepared helper after the command answer is durably recorded and sent.
+    fn server_update_answered(&self, _command: orch_types::Id) {}
+    /// Reads only the most recent operation's fixed status record, never a native output log.
+    async fn server_update_observation(
+        &self,
+    ) -> Result<Option<orch_link_contract::events::NodeServerUpdate>, DriverError> {
+        Ok(None)
+    }
+
     /// Fingerprints an owned volume read-only, leaving all content on its machine.
     async fn fingerprint_volume(
         &self,

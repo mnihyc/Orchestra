@@ -21,6 +21,193 @@ use rig::{MODEL, Scene};
 use serde_json::json;
 
 #[tokio::test]
+async fn a_program_without_an_auto_check_keeps_the_mode_dim_in_the_chip_and_its_setting() {
+    use orch_api_contract::settings::NodeSettingList;
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let parameters = s
+        .rig
+        .world
+        .app
+        .call(ThreadParameterGet, &[&thread])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let parameters = serde_json::to_value(parameters).unwrap();
+    let automatic = parameters["approval_choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|choice| choice["mode"] == "auto")
+        .expect("Auto stays visible with the actual missing verification");
+    assert_eq!(automatic["available"], false);
+    assert_eq!(automatic["reason"], "auto_check_unavailable");
+    assert!(
+        !parameters["approval_modes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("auto"))
+    );
+    let rows = s
+        .rig
+        .world
+        .app
+        .call(NodeSettingList, &[&thread])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let row =
+        serde_json::to_value(rows.iter().find(|row| row.key == "approval.mode").unwrap()).unwrap();
+    assert_eq!(row["approval_choices"], parameters["approval_choices"]);
+    assert!(
+        !row["available_values"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("auto"))
+    );
+}
+
+#[tokio::test]
+async fn an_unchecked_or_failed_build_has_the_same_exact_auto_reason_in_the_chip_and_setting() {
+    use orch_api_contract::settings::NodeSettingList;
+    // A machine a person connected has no runner of its own: its check runs on a build host of the system, and
+    // without one online Auto names that instead of a check that cannot run.
+    for (has_node, build_host, failed, reason) in [
+        (true, false, false, "auto_not_proven"),
+        (false, false, false, "auto_check_needs_host"),
+        (false, true, false, "auto_not_proven"),
+        (false, false, true, "auto_check_failed"),
+    ] {
+        let s = Scene::new().await;
+        let thread = s.thread().await.base.id;
+        if build_host {
+            let mut conn = s.rig.world.conn().await;
+            let host = orch_db::queries::resources::access_fixtures::insert_resource(
+                &mut conn,
+                "host",
+                None,
+                None,
+                "check-host",
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE machines SET online=true WHERE id=(SELECT machine_id FROM hosts WHERE id=$1)")
+                .bind(host)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+        let mut descriptor = rig::descriptor();
+        descriptor["kind"] = json!("codex");
+        descriptor["approval_modes"] = json!(["on_request", "auto"]);
+        let declared: orch_agent_contract::descriptor::AgentDescriptor =
+            serde_json::from_value(descriptor.clone()).unwrap();
+        s.rig.machine.handler.on(
+            orch_link_contract::commands::CommandKind::AgentStart,
+            move |_| {
+                Ok(orch_link_contract::commands::CommandResult::AgentStart(
+                    orch_link_contract::commands::AgentStartResult {
+                        home: None,
+                        reused: false,
+                        harness_version: "1.0.0".into(),
+                        descriptor: declared.clone(),
+                    },
+                ))
+            },
+        );
+        sqlx::query("UPDATE agents SET harness_kind='codex',descriptor=$2 WHERE id=$1")
+            .bind(s.on.agent)
+            .bind(&descriptor)
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE harnesses SET descriptor=$2,harness_version='1.0.0' WHERE agent_id=$1")
+            .bind(s.on.agent)
+            .bind(&descriptor)
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE machines SET placement='connected',roles=array_remove(roles,'node') || $3::text[],facts=facts || $2 WHERE id=$1")
+            .bind(s.rig.machine_id)
+            .bind(json!({"policy":{"agent.harnesses":[{"kind":"codex","path":"/selected/codex"}]},
+                "harnesses":[{"kind":"codex","path":"/selected/codex","version":"1.0.0","sha256":"c".repeat(64)}]}))
+            .bind(if has_node {vec!["node"]} else {vec![]})
+            .execute(s.rig.db.pool()).await.unwrap();
+        let check = failed.then(|| {
+            json!({"at":s.rig.world.now(),"machine":"test machine","missing":[],
+            "off":["approval_modes.auto"],"error":null,"stage":"complete","cases":[{
+                "name":"auto_review","feature":"approval_modes.auto","passed":false,
+                "error":"The scripted reviewer did not answer","unsupported":null,"elapsed_ms":1}]})
+        });
+        let mut conn = s.rig.world.conn().await;
+        orch_db::queries::resources::management::put_channel_build(&mut conn,"harness_channel:auto-choice", &json!({
+            "kind":"codex","version":"1.0.0","os":"linux","arch":"x86_64",
+            "url":"https://example.com/program","sha256":"c".repeat(64),"is_default":false,"source":"channel",
+            "status":if failed {"failed"} else {"untested"},"check":check
+        }),s.rig.world.now()).await.unwrap();
+        drop(conn);
+        let parameters = serde_json::to_value(
+            s.rig
+                .world
+                .app
+                .call(ThreadParameterGet, &[&thread])
+                .token(&s.ada.token)
+                .send()
+                .await
+                .ok(),
+        )
+        .unwrap();
+        let automatic = parameters["approval_choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|choice| choice["mode"] == "auto")
+            .unwrap();
+        assert_eq!(automatic["available"], false);
+        assert_eq!(automatic["reason"], reason);
+        assert_eq!(
+            automatic["check"],
+            if reason == "auto_check_needs_host" {
+                serde_json::Value::Null
+            } else {
+                json!({"kind":"codex","version":"1.0.0","machine_id":s.rig.machine_id,"sha256":"c".repeat(64)})
+            },
+            "{reason}"
+        );
+        assert!(
+            !parameters["approval_modes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("auto"))
+        );
+        let rows = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingList, &[&thread])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok();
+        let setting = rows.iter().find(|row| row.key == "approval.mode").unwrap();
+        assert_eq!(
+            serde_json::to_value(&setting.approval_choices).unwrap(),
+            parameters["approval_choices"]
+        );
+        assert!(
+            !setting
+                .available_values
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mode| mode == "auto")
+        );
+    }
+}
+
+#[tokio::test]
 async fn scope_setting_choices_use_reported_modes_and_never_offer_an_unproved_reviewer_or_rewrite_a_stored_mode()
  {
     use orch_api_contract::settings::{
@@ -128,6 +315,7 @@ async fn scope_setting_choices_use_reported_modes_and_never_offer_an_unproved_re
         .call(NodeSettingSet, &[&thread, &"approval.mode"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!("on_request"),
             locked: None,
             expected_revision: None,
@@ -194,6 +382,7 @@ async fn a_setting_before_the_first_turn_stamps_and_announces_the_thread_row_wit
         .call(NodeSettingSet, &[&id, &"agent.memory"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!("off"),
             locked: None,
             expected_revision: Some(0),
@@ -320,6 +509,15 @@ async fn the_parameters_show_eight_subagents_and_one_layer_by_default_and_the_sm
             Some("harness_control_unavailable")
         );
     }
+    // These choices already exist when the project and topic adopt tighter ceilings.
+    s.rig
+        .world
+        .set_at(Target::Node(id), "agents.subagents_at_once", json!(64))
+        .await;
+    s.rig
+        .world
+        .set_at(Target::Node(id), "agents.subagent_depth", json!(5))
+        .await;
     s.rig
         .world
         .set_at(
@@ -338,19 +536,11 @@ async fn the_parameters_show_eight_subagents_and_one_layer_by_default_and_the_sm
         .await;
     s.rig
         .world
-        .set_at(Target::Node(id), "agents.subagents_at_once", json!(64))
-        .await;
-    s.rig
-        .world
         .set_at(
             Target::Node(s.tree.project.base.id),
             "agents.subagent_depth",
             json!(3),
         )
-        .await;
-    s.rig
-        .world
-        .set_at(Target::Node(id), "agents.subagent_depth", json!(5))
         .await;
     let read = s
         .rig
@@ -376,6 +566,29 @@ async fn a_threads_approval_picker_offers_only_declared_allowed_modes_and_a_view
     use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
     let s = Scene::new().await;
     let id = s.thread().await.base.id;
+    let mut descriptor = rig::descriptor();
+    descriptor["approval_modes"] = json!(["ask", "on_request", "auto", "bypass"]);
+    sqlx::query("UPDATE agents SET descriptor=$2,descriptor_overrides='{}' WHERE id=$1")
+        .bind(s.on.agent)
+        .bind(&descriptor)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let declared: orch_agent_contract::descriptor::AgentDescriptor =
+        serde_json::from_value(descriptor).unwrap();
+    s.rig.machine.handler.on(
+        orch_link_contract::commands::CommandKind::AgentStart,
+        move |_| {
+            Ok(orch_link_contract::commands::CommandResult::AgentStart(
+                orch_link_contract::commands::AgentStartResult {
+                    home: None,
+                    reused: false,
+                    harness_version: "1.0.0".into(),
+                    descriptor: declared.clone(),
+                },
+            ))
+        },
+    );
     let read = s
         .rig
         .world
@@ -386,6 +599,23 @@ async fn a_threads_approval_picker_offers_only_declared_allowed_modes_and_a_view
         .await
         .ok();
     assert_eq!(read.approval_mode, "on_request");
+    let choices = serde_json::to_value(&read).unwrap()["approval_choices"].clone();
+    let auto = choices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|choice| choice["mode"] == "auto")
+        .unwrap();
+    assert_eq!(auto["available"], false);
+    assert_eq!(auto["reason"], "auto_check_unavailable");
+    let bypass = choices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|choice| choice["mode"] == "bypass")
+        .unwrap();
+    assert_eq!(bypass["available"], false);
+    assert_eq!(bypass["reason"], "required_isolation_unavailable");
     let offered = read.approval_modes.unwrap();
     assert!(offered.iter().any(|mode| mode == "ask"));
     assert!(offered.iter().any(|mode| mode == "on_request"));
@@ -415,6 +645,29 @@ async fn a_threads_approval_picker_offers_only_declared_allowed_modes_and_a_view
         .await
         .ok();
     assert_eq!(viewer.approval_modes, Some(vec!["on_request".to_owned()]));
+    let choices = serde_json::to_value(&viewer).unwrap()["approval_choices"].clone();
+    let ask = choices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|choice| choice["mode"] == "ask")
+        .unwrap();
+    assert_eq!(ask["available"], false);
+    assert_eq!(ask["reason"], "not_allowed_here");
+    let auto = choices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|choice| choice["mode"] == "auto")
+        .unwrap();
+    assert_eq!(
+        auto["reason"], "not_allowed_here",
+        "the chip names the same first refusal as native admission"
+    );
+    assert!(
+        auto.get("check").is_none(),
+        "a check cannot change this place's policy"
+    );
     let denied = s
         .rig
         .world
@@ -422,6 +675,7 @@ async fn a_threads_approval_picker_offers_only_declared_allowed_modes_and_a_view
         .call(NodeSettingSet, &[&id, &"approval.mode"])
         .token(&s.cai.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!("on_request"),
             locked: None,
             expected_revision: Some(0),
@@ -835,8 +1089,646 @@ async fn a_threads_parameters_list_only_what_exists_for_its_model_and_carry_the_
     );
 }
 
+#[tokio::test]
+async fn an_access_program_a_manager_enabled_for_the_model_is_offered_in_a_thread_at_shipped_settings()
+ {
+    use orch_api_contract::settings::WithheldChoice;
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // The adapter puts its access program behind its own feature, as Codex does.
+    let mut parameters = declared();
+    parameters[1]["feature"] = json!("codex.cyber_access");
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(jsonb_set(descriptor, '{parameters}', $1), '{features}', $2)")
+        .bind(parameters)
+        .bind(json!({"codex.cyber_access":true}))
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE provider_models SET parameters = $1 WHERE model_name = $2")
+        .bind(json!({ "access_programs": ["blue"], "default_access_program": "blue" }))
+        .bind(MODEL)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let shown = || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+            .parameters
+            .into_iter()
+            .map(|view| view.key)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        shown().await.contains(&"access_program".to_owned()),
+        "nobody switched the feature on, and the program is there"
+    );
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(ThreadParameterGet, &[&id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        choices
+            .withheld
+            .iter()
+            .all(|entry| entry.choice != WithheldChoice::Access),
+        "the shipped-on program cannot also be explained as switched off"
+    );
+    // A place that does not want it offered under it says so.
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.org.base.id),
+            "agent.features",
+            json!({ "codex.cyber_access": false }),
+        )
+        .await;
+    assert!(
+        !shown().await.contains(&"access_program".to_owned()),
+        "switched off under the org, it is not offered"
+    );
+}
+
+#[tokio::test]
+async fn a_threads_parameters_name_each_choice_the_models_managers_opened_that_it_cannot_use_and_why()
+ {
+    use orch_api_contract::settings::{WithheldChoice, WithheldParameter, WithheldReason};
+
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // An agent that publishes no speed, and whose access program waits for a feature of agents.
+    let mut defs = declared();
+    let list = defs.as_array_mut().unwrap();
+    list.retain(|def| def["key"] != "service_tier");
+    for def in list.iter_mut().filter(|def| def["key"] == "access_program") {
+        def["feature"] = json!("codex.cyber_access");
+    }
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(descriptor, '{parameters}', $1)")
+        .bind(defs)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let entry = |parameters: serde_json::Value| {
+        let pool = s.rig.db.pool();
+        async move {
+            sqlx::query("UPDATE provider_models SET parameters = $1 WHERE model_name = $2")
+                .bind(parameters)
+                .bind(MODEL)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    };
+    let read = || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+    };
+    let keys = |read: &orch_api_contract::settings::ThreadParameters| {
+        read.parameters
+            .iter()
+            .map(|view| view.key.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // A speed, a program and a larger context are open on the model.
+    entry(json!({
+        "service_tiers": [{ "id": "fast", "label": "Fast" }], "access_programs": ["blue"],
+        "context_window": 272_000, "context_max": 1_000_000
+    }))
+    .await;
+    // The feature ships on; here a manager explicitly withholds it.
+    s.rig
+        .world
+        .set_at(
+            Target::System,
+            "agent.features",
+            json!({ "codex.cyber_access": false }),
+        )
+        .await;
+    let first = read().await;
+    assert_eq!(
+        keys(&first),
+        ["context", "verbosity"],
+        "the program is behind a feature that is off, and the agent has no speed"
+    );
+    assert_eq!(
+        first.withheld,
+        [
+            WithheldParameter {
+                choice: WithheldChoice::Speed,
+                key: None,
+                reason: WithheldReason::Agent,
+                requirement: Some(orch_api_contract::settings::ParameterRequirement::Agent),
+                inapplicable_selected_value: None,
+            },
+            WithheldParameter {
+                choice: WithheldChoice::Access,
+                key: Some("access_program".to_owned()),
+                reason: WithheldReason::Feature {
+                    feature: "codex.cyber_access".to_owned()
+                },
+                requirement: Some(orch_api_contract::settings::ParameterRequirement::Feature),
+                inapplicable_selected_value: None,
+            },
+        ]
+    );
+
+    // Switching the feature on shows the program; the speed is still the agent's to take.
+    s.rig
+        .world
+        .set_at(
+            Target::System,
+            "agent.features",
+            json!({ "codex.cyber_access": true }),
+        )
+        .await;
+    let second = read().await;
+    assert_eq!(keys(&second), ["access_program", "context", "verbosity"]);
+    assert_eq!(
+        second
+            .withheld
+            .iter()
+            .map(|one| one.choice)
+            .collect::<Vec<_>>(),
+        [WithheldChoice::Speed]
+    );
+
+    // A speed and a program that are only on offer are nobody's to ask for: nothing is listed.
+    entry(json!({
+        "offered": { "service_tiers": [{ "id": "fast", "label": "Fast" }], "access_programs": ["blue"] },
+        "context_window": 272_000
+    }))
+    .await;
+    assert!(read().await.withheld.is_empty());
+}
+
 #[path = "threads_settings/prompt_cache_ttl.rs"]
 mod prompt_cache_ttl;
 
 #[path = "threads_settings/provider_options.rs"]
 mod provider_options;
+
+#[tokio::test]
+async fn a_place_can_choose_larger_subagent_defaults_without_claiming_unsupported_native_controls()
+{
+    use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    for (key, count) in [
+        ("agents.subagents_at_once", 65),
+        ("agents.subagent_depth", 6),
+    ] {
+        let accepted = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&id, &key])
+            .token(&s.ada.token)
+            .body(&NodeSettingSetBody {
+                model_choice: None,
+                value: json!(count),
+                locked: None,
+                expected_revision: None,
+            })
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap();
+        assert_eq!(accepted.value, Some(json!(count)));
+    }
+    let read = s
+        .rig
+        .world
+        .app
+        .call(ThreadParameterGet, &[&id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let limits = read.subagent_limits.unwrap();
+    assert_eq!((limits.limits.at_once, limits.limits.depth), (65, 6));
+    assert!(limits.supported.is_empty());
+    assert_eq!(s.rig.commands.issued_of("turn.start"), 0);
+}
+
+#[tokio::test]
+async fn a_model_choice_refuses_every_setting_when_either_related_revision_is_stale() {
+    use orch_api_contract::settings::{
+        ModelChoiceSetting, ModelChoiceSettings, NodeSettingList, NodeSettingSet,
+        NodeSettingSetBody,
+    };
+    for conflicting in ["agent.effort", "agent.params"] {
+        let s = Scene::without_supervisor().await;
+        let thread = s.thread().await.base.id;
+        sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by) VALUES ($1,$2,'atomic-next','Next',$3,true,'manual',$4)")
+            .bind(orch_types::new_id()).bind(s.on.provider).bind(json!({"efforts":["low","high"]})).bind(s.ada.id())
+            .execute(s.rig.db.pool()).await.unwrap();
+        s.rig
+            .world
+            .set_at(Target::Node(thread), "agent.effort", json!("high"))
+            .await;
+        s.rig
+            .world
+            .set_at(
+                Target::Node(thread),
+                "agent.params",
+                json!({"verbosity":"terse","service_tier":"fast"}),
+            )
+            .await;
+        let seen = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingList, &[&thread])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok();
+        let revision = |key: &str| {
+            seen.iter()
+                .find(|row| row.key == key)
+                .unwrap()
+                .own
+                .as_ref()
+                .map_or(0, |own| own.revision)
+        };
+        let change = NodeSettingSetBody {
+            value: json!("atomic-next"),
+            locked: None,
+            expected_revision: Some(revision("agent.model")),
+            model_choice: Some(ModelChoiceSettings {
+                effort: Some(ModelChoiceSetting {
+                    value: json!("low"),
+                    expected_revision: revision("agent.effort"),
+                }),
+                params: Some(ModelChoiceSetting {
+                    value: json!({"verbosity":"terse"}),
+                    expected_revision: revision("agent.params"),
+                }),
+            }),
+        };
+        s.rig
+            .world
+            .set_at(
+                Target::Node(thread),
+                conflicting,
+                if conflicting == "agent.effort" {
+                    json!("low")
+                } else {
+                    json!({"verbosity":"chatty","service_tier":"fast"})
+                },
+            )
+            .await;
+        let before = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingList, &[&thread])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok();
+        let refused = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&thread, &"agent.model"])
+            .token(&s.ada.token)
+            .body(&change)
+            .send()
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::ConflictStaleRevision);
+        let after = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingList, &[&thread])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok();
+        for key in ["agent.model", "agent.effort", "agent.params"] {
+            assert_eq!(
+                after.iter().find(|row| row.key == key).unwrap().own,
+                before.iter().find(|row| row.key == key).unwrap().own,
+                "a refused {conflicting} component does not commit {key}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_thread_refuses_an_embedding_only_choice_and_an_input_after_its_model_changes_purpose() {
+    use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
+    use orch_api_contract::threads::Delivery;
+    let s = Scene::without_supervisor().await;
+    let thread = s.thread().await.base.id;
+    let other = "stale-choice";
+    sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by) VALUES ($1,$2,$3,'Other',$4,true,'manual',$5)")
+        .bind(orch_types::new_id()).bind(s.on.provider).bind(other)
+        .bind(json!({"purposes":["embedding"]})).bind(s.ada.id())
+        .execute(s.rig.db.pool()).await.unwrap();
+    let refused = s
+        .rig
+        .world
+        .app
+        .call(NodeSettingSet, &[&thread, &"agent.model"])
+        .token(&s.ada.token)
+        .body(&NodeSettingSetBody {
+            model_choice: None,
+            value: json!(other),
+            locked: None,
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .problem();
+    let reason = "This model cannot generate replies. Choose a text generation model.";
+    assert_eq!(refused.code, ErrorCode::ModelNotAllowed);
+    assert_eq!(refused.extra["reason"], "generation_unsupported");
+    assert_eq!(refused.detail, reason);
+    let saved: serde_json::Value =
+        sqlx::query_scalar("SELECT value FROM settings WHERE node_id=$1 AND key='agent.model'")
+            .bind(thread)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(saved, json!(MODEL));
+    let accepted = s
+        .say(
+            &s.ada,
+            thread,
+            "Before the change",
+            Delivery::Queue,
+            "before-change",
+        )
+        .await
+        .ok()
+        .input
+        .id;
+    sqlx::query("UPDATE provider_models SET parameters=parameters || $3 WHERE provider_id=$1 AND model_name=$2")
+        .bind(s.on.provider).bind(MODEL).bind(json!({"purposes":["embedding"]})).execute(s.rig.db.pool()).await.unwrap();
+    let repeated_choice = s
+        .rig
+        .world
+        .app
+        .call(NodeSettingSet, &[&thread, &"agent.model"])
+        .token(&s.ada.token)
+        .body(&NodeSettingSetBody {
+            model_choice: None,
+            value: json!(MODEL),
+            locked: None,
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(repeated_choice.code, ErrorCode::ModelNotAllowed);
+    assert_eq!(repeated_choice.extra["reason"], "generation_unsupported");
+    let replay = s
+        .say(
+            &s.ada,
+            thread,
+            "Before the change",
+            Delivery::Queue,
+            "before-change",
+        )
+        .await
+        .ok();
+    assert_eq!(replay.input.id, accepted);
+    let refused = s
+        .say(
+            &s.ada,
+            thread,
+            "After the change",
+            Delivery::Queue,
+            "after-change",
+        )
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ModelNotAllowed);
+    assert_eq!(refused.extra["reason"], "generation_unsupported");
+    assert_eq!(refused.detail, reason);
+    let persisted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND client_id='after-change')")
+        .bind(thread).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert!(!persisted);
+}
+
+#[tokio::test]
+async fn a_concurrent_input_waits_for_the_whole_reviewed_model_choice_before_admission() {
+    use orch_api_contract::settings::{
+        ModelChoiceSetting, ModelChoiceSettings, NodeSettingList, NodeSettingSet,
+        NodeSettingSetBody,
+    };
+    use orch_api_contract::threads::{
+        ContentPart, Delivery, ThreadInputCreate, ThreadInputCreateBody,
+    };
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by) VALUES ($1,$2,'atomic-next','Next',$3,true,'manual',$4)")
+        .bind(orch_types::new_id()).bind(s.on.provider).bind(json!({"efforts":["low","high"]})).bind(s.ada.id())
+        .execute(s.rig.db.pool()).await.unwrap();
+    s.rig
+        .world
+        .set_at(Target::Node(thread), "agent.effort", json!("high"))
+        .await;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(thread),
+            "agent.params",
+            json!({"service_tier":"fast"}),
+        )
+        .await;
+    let seen = s
+        .rig
+        .world
+        .app
+        .call(NodeSettingList, &[&thread])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let revision = |key: &str| {
+        seen.iter()
+            .find(|row| row.key == key)
+            .unwrap()
+            .own
+            .as_ref()
+            .map_or(0, |own| own.revision)
+    };
+    let change = NodeSettingSetBody {
+        value: json!("atomic-next"),
+        locked: None,
+        expected_revision: Some(revision("agent.model")),
+        model_choice: Some(ModelChoiceSettings {
+            effort: Some(ModelChoiceSetting {
+                value: json!("low"),
+                expected_revision: revision("agent.effort"),
+            }),
+            params: Some(ModelChoiceSetting {
+                value: json!({}),
+                expected_revision: revision("agent.params"),
+            }),
+        }),
+    };
+    let mut held = s.rig.db.pool().begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT node_id FROM settings WHERE node_id=$1 AND key='agent.effort' FOR UPDATE")
+        .bind(thread)
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    let app = s.rig.world.app.clone();
+    let token = s.ada.token.clone();
+    let setting = tokio::spawn(async move {
+        let call = app
+            .call(NodeSettingSet, &[&thread, &"agent.model"])
+            .token(&token)
+            .body(&change);
+        call.send().await
+    });
+    rig::eventually("the model choice reaches the related setting lock", || async {
+        assert!(!setting.is_finished());
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM settings%' AND query LIKE '%FOR UPDATE%')")
+            .bind(blocker).fetch_one(s.rig.db.pool()).await.unwrap()
+    }).await;
+    let app = s.rig.world.app.clone();
+    let token = s.ada.token.clone();
+    let input = tokio::spawn(async move {
+        let call =
+            app.call(ThreadInputCreate, &[&thread])
+                .token(&token)
+                .body(&ThreadInputCreateBody {
+                    plan: false,
+                    content: vec![ContentPart::Text {
+                        text: "Use the reviewed model".into(),
+                    }],
+                    delivery: Delivery::Queue,
+                    client_id: "atomic-model-admission".into(),
+                    bypass: None,
+                    native_action: None,
+                });
+        call.send().await
+    });
+    assert!(s.rig.turn_starts(thread).is_empty());
+    held.rollback().await.unwrap();
+    setting.await.unwrap().ok();
+    input.await.unwrap().ok();
+    let turn = s.rig.run_turn(thread, 0, "Done").await;
+    assert_eq!(turn.model, "atomic-next");
+    assert_eq!(turn.effort.as_deref(), Some("low"));
+    assert!(!turn.params.contains_key("service_tier"));
+}
+
+#[tokio::test]
+async fn the_tool_details_read_only_the_accepted_session_and_never_refresh_it() {
+    use orch_api_contract::settings::{OrchToolsQuery, ThreadOrchToolsGet};
+    let s = Scene::new().await;
+    s.rig.tools_of_agents(json!("mcp")).await;
+    let thread = s.thread().await.base.id;
+    let before = s
+        .rig
+        .world
+        .app
+        .call(ThreadOrchToolsGet, &[&thread])
+        .token(&s.ada.token)
+        .query(&OrchToolsQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(before.summary.is_none());
+    s.say(
+        &s.ada,
+        thread,
+        "Read the offered tools",
+        orch_api_contract::threads::Delivery::Queue,
+        "tool-details",
+    )
+    .await
+    .ok();
+    s.rig.run_turn(thread, 0, "Done").await;
+    let first = s
+        .rig
+        .world
+        .app
+        .call(ThreadOrchToolsGet, &[&thread])
+        .token(&s.ada.token)
+        .query(&OrchToolsQuery::default())
+        .send()
+        .await
+        .ok();
+    let summary = first
+        .summary
+        .clone()
+        .expect("the native session accepted a tool offer");
+    assert!(!first.tools.items.is_empty());
+    s.rig
+        .world
+        .set_at(Target::Node(thread), "orch_tools.enabled", json!([]))
+        .await;
+    let next = s
+        .rig
+        .world
+        .app
+        .call(ThreadOrchToolsGet, &[&thread])
+        .token(&s.ada.token)
+        .query(&OrchToolsQuery {
+            session_revision: Some(summary.session_revision.clone()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        first, next,
+        "reading facts never proposes or applies a new tool offer"
+    );
+    let viewer = s
+        .rig
+        .world
+        .app
+        .call(ThreadOrchToolsGet, &[&thread])
+        .token(&s.cai.token)
+        .query(&OrchToolsQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(viewer.summary, next.summary);
+    assert!(
+        viewer.tools.items.iter().all(|tool| tool.source.is_none()),
+        "thread View reads the catalogue without acquiring private setting sources"
+    );
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(ThreadOrchToolsGet, &[&thread])
+        .token(&s.bea.token)
+        .query(&OrchToolsQuery::default())
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::AuthzDenied);
+}

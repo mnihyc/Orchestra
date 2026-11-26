@@ -32,6 +32,7 @@ pub mod adapter;
 pub mod approvals;
 pub mod child_usage;
 pub mod config;
+mod confinement;
 pub mod context_usage;
 pub mod conversation;
 pub mod descriptor;

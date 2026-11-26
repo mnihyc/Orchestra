@@ -158,6 +158,11 @@ fn master_key() -> ApiResult<&'static MasterKey> {
 pub fn mount(registry: &mut Registry) {
     registry
         .on(api::SettingRegistryGet, registry_get)
+        .on_snapshot_body_read_with_optional_operation(
+            api::SettingParameterFormResolve,
+            parameter_forms::prepare,
+            parameter_forms::form,
+        )
         .on(api::NodeSettingList, setting_list)
         .on(api::NodeSettingReachGet, reach::at_node)
         .on_with_operation(
@@ -177,21 +182,30 @@ pub fn mount(registry: &mut Registry) {
 orch_api_base::__api_bind_d9260d2301!();
 
 /// The registry, as the API's definitions.
-pub(crate) async fn registry_get(_ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SettingDef>> {
-    registry_definitions()
+pub(crate) async fn registry_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SettingDef>> {
+    registry_definitions(Some(&ctx.app.engine))
 }
 
 /// Static registry projection for readers with their own SystemRead admission.
-pub(crate) fn registry_definitions() -> ApiResult<Vec<api::SettingDef>> {
+pub(crate) fn registry_definitions(
+    engine: Option<&orch_engine::Engine>,
+) -> ApiResult<Vec<api::SettingDef>> {
     registry::all()
         .iter()
         .map(|def| {
+            let mut schema = offered_schema(def);
+            if def.key == keys::AUTO_SUMMARIZER
+                && let Some(engine) = engine
+            {
+                schema["x-summarizers"] = serde_json::to_value(engine.summarizer_descriptors())
+                    .map_err(ApiError::internal)?;
+            }
             Ok(api::SettingDef {
                 key: def.key.to_owned(),
                 title: def.title.to_owned(),
                 description: def.description.to_owned(),
                 group: def.group.as_str().to_owned(),
-                schema: offered_schema(def),
+                schema,
                 class: same(&def.class).ok_or_else(|| ApiError::internal("a class is none"))?,
                 scopes: def
                     .scopes
@@ -473,12 +487,25 @@ pub(crate) async fn add_mode_choices(
     }
     let mut approval = Vec::<ApprovalMode>::new();
     let mut applied = Vec::<ApprovalMode>::new();
+    let mut choices = Vec::<api::ApprovalModeChoice>::new();
     let mut sandbox = Vec::<SandboxMode>::new();
     for agent in agents {
         // A global Auto registration does not prove another program or build. Preserve the
         // existing union of usable profiles, each limited by its current native build evidence.
-        let Ok(Some(descriptor)) = orch_engine::harnesses::current_descriptor(conn, &agent).await
-        else {
+        let descriptor = match thread
+            .as_ref()
+            .and_then(|thread| thread.provider_id.map(|provider| (thread, provider)))
+        {
+            Some((thread, provider)) => match profiles::provider(conn, provider).await? {
+                Some(provider) => {
+                    orch_engine::harnesses::descriptor_for_thread(conn, &agent, &provider, thread)
+                        .await
+                }
+                None => orch_engine::harnesses::current_descriptor(conn, &agent).await,
+            },
+            None => orch_engine::harnesses::current_descriptor(conn, &agent).await,
+        };
+        let Ok(Some(descriptor)) = descriptor else {
             continue;
         };
         for mode in &descriptor.approval_modes {
@@ -486,10 +513,10 @@ pub(crate) async fn add_mode_choices(
                 approval.push(*mode);
             }
         }
-        for mode in ctx
+        for choice in ctx
             .app
             .engine
-            .offered_approval_modes_with_binding(
+            .approval_choices_with_binding(
                 conn,
                 environment,
                 &descriptor,
@@ -507,8 +534,17 @@ pub(crate) async fn add_mode_choices(
             .await
             .map_err(ApiError::internal)?
         {
-            if !applied.contains(&mode) {
-                applied.push(mode);
+            if choice.available {
+                let mode: ApprovalMode = serde_json::from_value(Json::String(choice.mode.clone()))
+                    .map_err(ApiError::internal)?;
+                if !applied.contains(&mode) {
+                    applied.push(mode);
+                }
+            }
+            match choices.iter_mut().find(|held| held.mode == choice.mode) {
+                Some(held) if !held.available && choice.available => *held = choice,
+                Some(_) => {}
+                None => choices.push(choice),
             }
         }
         for mode in &descriptor.sandbox_modes {
@@ -529,6 +565,9 @@ pub(crate) async fn add_mode_choices(
     let applied = words(serde_json::to_value(applied).map_err(ApiError::internal)?);
     let sandbox = words(serde_json::to_value(sandbox).map_err(ApiError::internal)?);
     for row in rows {
+        if row.key == keys::APPROVAL_MODE {
+            row.approval_choices = Some(choices.clone());
+        }
         row.available_values = match row.key.as_str() {
             keys::APPROVAL_MODE => Some(applied.clone()),
             keys::APPROVAL_ALLOWED_MODES => Some(approval.clone()),
@@ -620,6 +659,9 @@ pub(crate) async fn write_failed(
         // These native failure operands contain existing content. Their sparse form keeps
         // the same failure without invoking the rich current-value/reference renderer.
         match &error {
+            WriteError::Ceiling { .. } => {
+                return invalid("value", "exceeds the inherited maximum");
+            }
             WriteError::Stale { .. } => {
                 return ApiError::new(
                     ErrorCode::ConflictStaleRevision,
@@ -663,6 +705,17 @@ pub(crate) async fn write_failed(
                 .collect(),
         )
         .into(),
+        WriteError::Ceiling { current } => {
+            let setting = match shown_read_only(conn, principal, *current).await {
+                Ok(setting) => setting,
+                Err(error) => return error,
+            };
+            let refusal = invalid("value", "exceeds the inherited maximum");
+            match setting.inherited {
+                Some(ceiling) => refusal.with("ceiling", ceiling),
+                None => refusal,
+            }
+        }
         WriteError::SideThread => thread_is_side(conn, node).await,
         WriteError::Locked { by } => locked(conn, by.node).await,
         WriteError::Lock(refusal) => ApiError::new(
@@ -915,30 +968,6 @@ async fn answer(
         .ok_or_else(|| ApiError::internal("a setting was written and is not there"))
 }
 
-/// The effort a model is run at: the one chosen, where the model lists it;
-/// otherwise the model's own (`parameters` is its entry at the provider).
-fn run_at(chosen: Option<String>, parameters: Option<&Json>) -> Option<String> {
-    let listed = parameters
-        .and_then(|parameters| parameters.get("efforts"))
-        .and_then(Json::as_array);
-    let own = parameters
-        .and_then(|parameters| parameters.get("default_effort"))
-        .and_then(Json::as_str)
-        .map(str::to_owned);
-    match chosen {
-        Some(effort)
-            if listed.is_some_and(|efforts| {
-                efforts
-                    .iter()
-                    .any(|listed| listed.as_str() == Some(effort.as_str()))
-            }) =>
-        {
-            Some(effort)
-        }
-        _ => own,
-    }
-}
-
 /// The refusal of a model or an effort that nobody may run as it is set; none
 /// for what stops a thread whatever it runs (its provider or its profile
 /// switched off, an arrangement no longer allowed), which a change of its
@@ -989,9 +1018,14 @@ async fn may_run_what_it_runs(conn: &mut Conn, principal: &Principal, thread: Id
     let Some(model) = settings.model else {
         return Ok(());
     };
-    let parameters =
-        orch_db::queries::settings::thread_model_parameters(conn, thread, &model).await?;
-    let effort = run_at(settings.effort, parameters.as_ref());
+    let entry = orch_db::queries::resources::thread_engine::model(conn, provider, &model).await?;
+    let parameters = entry
+        .as_ref()
+        .map(orch_engine::binding::model_parameters)
+        .transpose()
+        .map_err(ApiError::engine)?;
+    let effort =
+        parameters.and_then(|parameters| parameters.effort_for(settings.effort.as_deref()));
     let policies = crate::thread_access::AuthzAccess::policies(conn, provider)
         .await
         .map_err(ApiError::internal)?;
@@ -1028,7 +1062,13 @@ async fn may_run_what_it_runs(conn: &mut Conn, principal: &Principal, thread: Id
             ApiError::internal("a question about a model was answered about an environment"),
         ),
         Err(error) => Err(refusals::problem(conn, error).await),
+    }?;
+    if let Some(entry) = entry
+        && !orch_engine::models::supports_generation(&entry).map_err(ApiError::internal)?
+    {
+        return Err(ApiError::generation_unsupported().with("model", model));
     }
+    Ok(())
 }
 
 /// What a thread runs with before one of its settings is written: what the
@@ -1169,9 +1209,7 @@ async fn before_on_a_thread(
     }
 }
 
-/// After a write or a clear that changed a key of a thread: whoever wrote the
-/// model or the effort has to be allowed to run what the thread now runs
-/// with, and the thread's history says what changed and who changed it.
+/// Record a committed thread setting change for its history and open readers.
 async fn thread_changed(
     conn: &mut Conn,
     now: chrono::DateTime<chrono::Utc>,
@@ -1180,9 +1218,6 @@ async fn thread_changed(
     key: &str,
     before: Before,
 ) -> ApiResult<()> {
-    if key == keys::AGENT_MODEL || key == keys::AGENT_EFFORT {
-        may_run_what_it_runs(conn, principal, thread).await?;
-    }
     write_lines(conn, now, thread, principal.user(), key, before).await?;
     // A setting is still a change to the thread when there is no segment in which to put a
     // history line. Stamp its ordinary row so every open reader sees the current settings.
@@ -1328,6 +1363,9 @@ pub mod editing;
 #[path = "settings/reach.rs"]
 pub mod reach;
 
+#[path = "settings/parameter_forms.rs"]
+mod parameter_forms;
+
 #[path = "settings/readers.rs"]
 pub mod readers;
 
@@ -1337,7 +1375,7 @@ pub mod tests {
     use super::*;
     #[cfg(any(test, feature = "test-support"))]
     fn every_registry_definition_and_merge_word_has_the_same_api_contract() -> ApiResult<()> {
-        let definitions = registry_definitions()?;
+        let definitions = registry_definitions(None)?;
         assert_eq!(definitions.len(), registry::all().len());
         for (definition, native) in definitions.iter().zip(registry::all()) {
             assert_eq!(definition.key, native.key);
