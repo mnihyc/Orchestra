@@ -10,9 +10,13 @@ const BYTES_PER_STEP = 1024;
 /** Above this a count of tokens is abbreviated: a longer figure is no longer read digit by digit. */
 const TOKENS_ABBREVIATED_ABOVE = 10_000;
 
+let ordinary: { locale: string; formatter: Intl.NumberFormat } | undefined;
+
 /** A number with the grouping and the decimal mark of the language. */
 export function formatNumber(value: number, locale: string, options?: Intl.NumberFormatOptions): string {
-  return new Intl.NumberFormat(locale, options).format(value);
+  if (options !== undefined) return new Intl.NumberFormat(locale, options).format(value);
+  if (ordinary?.locale !== locale) ordinary = { locale, formatter: new Intl.NumberFormat(locale) };
+  return ordinary.formatter.format(value);
 }
 
 /** A size in binary units, with one decimal where the figure is small enough to need it. */

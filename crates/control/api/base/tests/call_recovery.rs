@@ -6,6 +6,8 @@
 )]
 
 mod places;
+#[path = "call_recovery/pools.rs"]
+mod pools;
 mod rig;
 mod support;
 
@@ -14,7 +16,7 @@ use orch_api_contract::calls::{
     ThreadCallRecoveryUpdateBody,
 };
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
+use orch_api_contract::settings::{NodeSettingList, NodeSettingSet, NodeSettingSetBody};
 use orch_provider_contract::calls::Purpose;
 use rig::Scene;
 use serde_json::json;
@@ -105,6 +107,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
             .call(NodeSettingSet, &[&node, &"calls.rules"])
             .token(&scene.ada.token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value,
                 locked: None,
                 expected_revision: None,
@@ -114,6 +117,25 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
             .problem();
         assert_eq!(refused.code, ErrorCode::RequestInvalid);
     }
+    // The topic's own wider limit was saved before the project's ceiling, which it can then only follow.
+    let child = scene
+        .rig
+        .world
+        .app
+        .call(NodeSettingSet, &[&node, &"calls.repeat_limit"])
+        .token(&scene.ada.token)
+        .body(&NodeSettingSetBody {
+            model_choice: None,
+            value: json!(10),
+            locked: None,
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary writer saves its own recovery limit");
+    assert_eq!(child.own.as_ref().map(|own| &own.value), Some(&json!(10)));
     let saved = scene
         .rig
         .world
@@ -124,6 +146,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         )
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(9),
             locked: None,
             expected_revision: None,
@@ -136,25 +159,22 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .expect("this ordinary control expects the complete native setting");
     assert_eq!(saved.value, Some(json!(9)));
     assert!(!saved.own.unwrap().locked);
-    let child = scene
+    let rows = scene
         .rig
         .world
         .app
-        .call(NodeSettingSet, &[&node, &"calls.repeat_limit"])
+        .call(NodeSettingList, &[&node])
         .token(&scene.ada.token)
-        .body(&NodeSettingSetBody {
-            value: json!(10),
-            locked: None,
-            expected_revision: None,
-        })
         .send()
         .await
-        .ok()
-        .into_full()
+        .ok();
+    let read = rows
+        .iter()
+        .find(|row| row.key == "calls.repeat_limit")
         .expect("the ordinary writer reads its deferred recovery limit");
-    assert_eq!(child.value, Some(json!(9)));
-    assert_eq!(child.own.as_ref().map(|own| &own.value), Some(&json!(10)));
-    assert!(child.locked_by.is_none());
+    assert_eq!(read.value, Some(json!(9)));
+    assert_eq!(read.own.as_ref().map(|own| &own.value), Some(&json!(10)));
+    assert!(read.locked_by.is_none());
     let tighter = scene
         .rig
         .world
@@ -162,6 +182,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .call(NodeSettingSet, &[&node, &"calls.repeat_limit"])
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(4),
             locked: None,
             expected_revision: child.own.as_ref().map(|own| own.revision),
@@ -172,4 +193,103 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .into_full()
         .expect("the ordinary writer may tighten its recovery limit");
     assert_eq!(tighter.value, Some(json!(4)));
+}
+
+#[tokio::test]
+async fn the_model_line_reports_the_active_failover_and_current_return_policy_until_the_choice_changes()
+ {
+    use orch_api_contract::threads::{Delivery, ThreadSyncGet, ThreadSyncGetQuery};
+    use orch_link_contract::events::{Event, TurnCompleted, TurnOutcome};
+    use orch_settings::Target;
+    let scene = Scene::new().await;
+    let thread = scene.thread().await.base.id;
+    sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by) SELECT $1,provider_id,'route-backup','Backup',parameters,true,'manual',$3 FROM provider_models WHERE provider_id=$2 AND model_name=$4")
+        .bind(orch_types::new_id()).bind(scene.on.provider).bind(scene.ada.id()).bind(rig::MODEL).execute(scene.rig.db.pool()).await.unwrap();
+    scene.rig.world.set_at(Target::Node(scene.tree.topic.base.id), "calls.rules", json!([{"id":"backup","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":scene.on.provider,"offering":"route-backup"},"config":{}}}},"agent_id":scene.on.agent,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    scene
+        .say(
+            &scene.ada,
+            thread,
+            "Use an admitted route",
+            Delivery::Queue,
+            "route-start",
+        )
+        .await
+        .ok();
+    let failed = scene.rig.turn_start(thread, 0).await;
+    scene.rig.say(thread, rig::turn_began(failed.turn_id)).await;
+    scene.rig.say(thread, Event::TurnCompleted(TurnCompleted { turn_id: failed.turn_id, status: TurnOutcome::Failed,
+        error: Some(serde_json::from_value(json!({"code":"model_refused","message":"Synthetic refusal","retryable":true})).unwrap()) })).await;
+    scene.rig.wait_turn(failed.turn_id, "failed").await;
+    let admitted = scene.rig.turn_start(thread, 1).await;
+    assert_eq!(admitted.model, "route-backup");
+    scene
+        .rig
+        .say(thread, rig::turn_began(admitted.turn_id))
+        .await;
+    scene.rig.wait_turn(admitted.turn_id, "running").await;
+    let visible = scene
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadSyncGetQuery::default())
+        .send()
+        .await
+        .ok()
+        .thread;
+    let visible = serde_json::to_value(&visible).unwrap();
+    assert_eq!(
+        visible["binding"]["call_route"]["active_override"]["model"],
+        "route-backup"
+    );
+    assert_eq!(
+        visible["binding"]["call_route"]["original"]["model"],
+        rig::MODEL
+    );
+    scene
+        .rig
+        .world
+        .set_at(
+            Target::Node(scene.tree.topic.base.id),
+            "calls.return",
+            json!("stay"),
+        )
+        .await;
+    let staying = scene
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadSyncGetQuery::default())
+        .send()
+        .await
+        .ok()
+        .thread;
+    assert_eq!(
+        serde_json::to_value(&staying).unwrap()["binding"]["call_route"]["return_state"],
+        "stay_on_failover"
+    );
+    scene
+        .rig
+        .world
+        .set_at(Target::Node(thread), "agent.model", json!("route-backup"))
+        .await;
+    let chosen = scene
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadSyncGetQuery::default())
+        .send()
+        .await
+        .ok()
+        .thread;
+    assert!(
+        serde_json::to_value(&chosen).unwrap()["binding"]["call_route"].is_null(),
+        "a stale recovery cannot replace a newly selected route"
+    );
 }

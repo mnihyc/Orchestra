@@ -169,6 +169,8 @@ pub(super) async fn retain_command(
     command.deadline = Some(deadline);
     let key = command.key.wire();
     let proposed = orch_db::queries::link::NewCommand {
+        content_transit: false,
+        native_target: None,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),

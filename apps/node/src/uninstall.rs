@@ -21,6 +21,8 @@ fn settings(config_path: &Path, data_dir: Option<PathBuf>) -> anyhow::Result<Nod
         settings.data_dir = data_dir;
     }
     settings.config_file = Some(config_path.to_owned());
+    // The plan lists what the node made, under the name the system enrolled it with.
+    settings.follow_enrollment()?;
     Ok(settings)
 }
 
@@ -83,6 +85,12 @@ pub async fn run(
     };
     let ledger = Ledger::open(data.root())?;
     let tools = ToolCache::inspect(&settings)?;
+    // The host driver keeps its records in the data directory and each unit's own directory and the default
+    // storage's volumes in the units directory beside it: a purge removes its units and then that directory,
+    // rather than an inventory the driver does not keep.
+    let host = settings.drivers.iter().any(|driver| driver == "host");
+    settings.drivers.retain(|driver| driver != "host");
+    let units = settings.units_dir();
     let drivers = DriverHost::load(
         &settings,
         registrations(&settings),
@@ -116,6 +124,14 @@ pub async fn run(
                 blocker: Some("supplied configuration is kept".into()),
             });
         }
+    }
+    if units.exists() {
+        items.push(Item {
+            name: units.display().to_string(),
+            remove: options.purge,
+            bytes: uninstall::size(&units),
+            blocker: (!options.purge).then(|| "kept for restore until you purge it".into()),
+        });
     }
     items.extend(inventory.resources.iter().map(|resource| {
         Item {
@@ -198,6 +214,18 @@ pub async fn run(
             remaining.resources.is_empty() && remaining.unavailable.is_empty(),
             "the runtime inventory changed; the node's files are kept for a new plan"
         );
+        if host || units.exists() {
+            let driver = orch_driver_host::HostDriver::open(
+                crate::composition::host_config(&settings),
+                Arc::new(orch_types::SystemClock),
+            )
+            .await?;
+            let removed = driver.remove_all().await?;
+            println!("{removed} host units removed.");
+            std::fs::remove_dir_all(&units)
+                .with_context(|| format!("removing {}", units.display()))?;
+            println!("{} is removed.", units.display());
+        }
     }
     cancel.check()?;
     if let Some(removing) = removing {

@@ -327,7 +327,7 @@ async fn administering_a_private_provider_does_not_disclose_its_choice_usage() {
         .call(ProviderCreate, &[])
         .token(&team.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Private key".into(),
             home_id: team.acme,
             access: Some(NewResourceAccess::OnlyMe),

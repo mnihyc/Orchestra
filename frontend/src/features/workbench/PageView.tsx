@@ -1,6 +1,6 @@
 /** Full existing feature screens, each with its own typed target and stable mounted tab identity. */
 import { placeChatAddress } from '@/features/chat/targets';
-import { ViewInstanceContext } from './instance';
+import { ViewInstanceProvider } from './instance';
 import { useFrameReady } from '@/shell/FrameReadiness';
 import { canonicalOrgAddress, isOrgIdAddress } from '@/features/navigation/orgAddress';
 import { isSection } from '@/features/admin/sections';
@@ -10,7 +10,6 @@ import { isNotFound, notFound, useRouter } from '@tanstack/react-router';
 import { canonicalStringifySearch } from '@/lib/listAddress';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ErrorState } from '@/ui/ErrorState';
-import { SkeletonRows } from '@/ui/Skeleton';
 import { ContentBoundary } from '@/ui/ContentBoundary';
 import { ThreadReadProvider } from '@/realtime/threadReadContext';
 import { contentThreadRead } from '@/realtime/threadScope';
@@ -21,6 +20,8 @@ import { contentAddress, contentLocation, contentTarget, pageHref, parsePageAddr
 import { openContent } from './contentNavigation';
 import { WorkspaceContext } from './WorkspaceContext';
 import { PageFileIntent } from './PageFileIntent';
+import { pageTookReads } from './pageReads';
+import { shapeOfRoute, TabSkeleton } from './TabSkeleton';
 export { EMPTY_WORKBENCH, parsePageAddress, pageResource } from './contentAddress';
 import { useWorkbench } from './store';
 import type { ViewProps } from './views';
@@ -90,7 +91,8 @@ export function PageView({ tab }: ViewProps) {
         return;
       }
       const definition = await pageDefinition(target.route);
-      if (current()) setLoaded({ route: target.route, pathname: target.pathname, definition });
+      if (current()) setLoaded((held) => held?.route === target.route && held.pathname === target.pathname && held.definition === definition
+        ? held : { route: target.route, pathname: target.pathname, definition });
     }).catch((failure: unknown) => { if (current()) setFailure({ pathname: target.pathname, value: failure }); });
     return () => request.abort();
   }, [target, routeFailure, attempt, tab.id, href]);
@@ -102,7 +104,7 @@ export function PageView({ tab }: ViewProps) {
   if (isNotFound(error)) return <NotFound />;
   if (error !== null) return <ErrorState error={error} onRetry={() => { setFailure(null); retry((value) => value + 1); }} />;
   if (target === null) return <NotFound />;
-  if (loaded?.route !== target.route || loaded.pathname !== target.pathname) return <SkeletonRows rows={5} />;
+  if (loaded?.route !== target.route || loaded.pathname !== target.pathname) return <TabSkeleton shape={shapeOfRoute(target.route)} />;
   return <ContentBoundary resetKey={`${target.route}:${target.pathname}:${attempt}`} className="h-full"><LoadedPage tab={tab} target={target} definition={loaded.definition} /></ContentBoundary>;
 }
 
@@ -153,10 +155,9 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
     if (next.pathname === target.pathname || options.replace === true) {
       if (useWorkbench.getState().activeContent === tab.id) markPageNavigation(tab.id, href);
       useWorkbench.getState().change((layout) => setTabTarget(layout, tab.id, { href }));
-      if (useWorkbench.getState().activeContent === tab.id) await router.navigate({ href, replace: true });
+      if (useWorkbench.getState().activeContent === tab.id) await router.navigate({ href, replace: options.push !== true });
     } else {
-      openPage(href);
-      await router.navigate({ href });
+      openPage(href, 'normal', 'push');
     }
   }, [router, tab, target]);
   useEffect(() => {
@@ -170,6 +171,8 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
     if (JSON.stringify(addressed) !== JSON.stringify(restored)) void navigate({ search, replace: true });
   }, [navigate, search, target.route, target.search, definition]);
   const context = useMemo(() => ({ id: tab.id, target: validated, navigate }), [tab.id, validated, navigate]);
+  // The screen below follows what the tab began to read when it was opened; the tab's own hold on it ends here.
+  useEffect(() => { pageTookReads(tab); }, [tab]);
   const threadId = target.route === '/thread/$threadId/' ? pageParam(target, 'threadId') : null;
   const read = useMemo(() => threadId === null ? null : contentThreadRead(threadId, tab.id), [threadId, tab.id]);
   const Body = definition.Body;
@@ -191,6 +194,6 @@ export function FocusedContentMetadata() {
   const instance = useMemo(() => ({ id: owner, root, target: resource, headingOwner: owner, content: true, focusedContent: true }), [owner, resource]);
   const read = useMemo(() => resource?.kind === 'thread' ? contentThreadRead(resource.id, owner) : null, [resource, owner]);
   if (!ready || tab === null || target === null && resource?.workspace === undefined || target !== null && (target.route === '/org/$slug/' || target.route === '/org/$slug/settings/$section/') && isOrgIdAddress(target.params.slug ?? '')) return null;
-  const body = <ViewInstanceContext.Provider value={instance}>{resource?.workspace !== undefined ? <WorkspaceContext source={resource.workspace} location={location} /> : target === null ? null : <TargetContext target={target} />}</ViewInstanceContext.Provider>;
+  const body = <ViewInstanceProvider value={instance}>{resource?.workspace !== undefined ? <WorkspaceContext source={resource.workspace} location={location} /> : target === null ? null : <TargetContext target={target} />}</ViewInstanceProvider>;
   return read === null ? body : <ThreadReadProvider read={read}>{body}</ThreadReadProvider>;
 }
