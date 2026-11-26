@@ -48,7 +48,7 @@ async function uploads(page: Page, holdNative = false) {
     if (url.pathname.endsWith('/sessions')) {
       const body = request.postDataJSON() as { name: string; size: number; media_type: string };
       const id = randomUUID(); sessions.set(id, { ...body, bytes: Buffer.alloc(0) });
-      await route.fulfill({ json: { upload_id: id, chunk_bytes: 1024 * 1024, expires_at: '2099-01-01T00:00:00Z' } }); return;
+      await route.fulfill({ json: { upload_id: id, chunk_bytes: 1024 * 1024, policy: { initial_piece_bytes: 256 * 1024, initial_requests: 1, min_piece_bytes: 64 * 1024, max_piece_bytes: 1024 * 1024, target_window_ms: 1000, window_rtts: 4, max_window_bytes: 4 * 1024 * 1024, requests: 1 }, expires_at: '2099-01-01T00:00:00Z' } }); return;
     }
     const id = url.pathname.split('/')[5] ?? '', upload = sessions.get(id);
     if (upload === undefined) throw new Error('The selected upload must exist');

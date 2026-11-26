@@ -1,0 +1,5 @@
+test -p orch-api-core --test document_containers
+test -p orch-api-core --test document_tree_delete_scopes
+test -p orch-api-core --test document_tree_operation_scopes
+test -p orch-api-core --test document_restore_scopes
+test -p orch-engine --test document_folders

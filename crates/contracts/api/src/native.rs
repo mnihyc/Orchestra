@@ -14,14 +14,41 @@ pub const SNAPSHOT_COMMANDS: usize = 2_000;
 /// Half a link frame leaves room for its envelope and identity metadata.
 pub const PAGE_BYTES: usize = 128 * 1_024;
 
+/// Resolved native roster transfer defaults; they bound one page, never the complete list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundReadLimits {
+    /// Renewed idle retention in seconds.
+    pub idle_seconds: u64,
+    /// Preferred commands per native page.
+    pub page_items: u64,
+    /// Preferred serialized native page bytes; one complete command can exceed this target.
+    pub page_bytes: u64,
+    /// Command preview bytes, retaining explicit truncation facts.
+    pub preview_bytes: u64,
+}
+impl Default for BackgroundReadLimits {
+    fn default() -> Self {
+        Self {
+            idle_seconds: 30,
+            page_items: 200,
+            page_bytes: 131_072,
+            preview_bytes: 4_096,
+        }
+    }
+}
+
 /// Owned work whose lifetime can extend beyond its starting foreground turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BackgroundTask {
     /// Native task identity within this session generation.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// A distinct execution of the same native task, when supplied.
+    #[schemars(extend("x-native-reference" = true))]
     pub run_id: Option<String>,
     /// The actual tool item that started the task.
+    #[schemars(extend("x-native-reference" = true))]
     pub native_item_ref: String,
     /// The recorded turn that owns that item.
     pub origin_turn: Id,
@@ -98,8 +125,10 @@ pub struct BackgroundTasks {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NativeBackgroundWake {
     /// Unique token echoed by the admitted turn start.
+    #[schemars(extend("x-native-reference" = true))]
     pub token: String,
     /// The exact completed native task runs carried into this follow-up.
+    #[schemars(extend("x-native-reference" = true))]
     pub task_ids: Vec<String>,
 }
 
@@ -204,6 +233,9 @@ pub struct EnvironmentFactsBrowser {
 /// What the environment has to serve a display.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentFactsVnc {
+    /// The machine can share its current local desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
     /// Its display servers.
     pub servers: Vec<EnvironmentFactsProgram>,
     /// Its window manager, or null.

@@ -25,7 +25,7 @@ vi.mock('@/api/environments', async (load) => ({ ...await load<typeof Environmen
 vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), sendInput: calls.send }));
 vi.mock('@/api/source', async (load) => ({ ...await load<typeof SourceApi>(), prepareSource: calls.prepare }));
 vi.mock('@/features/change/target', async (load) => ({ ...await load<object>(), openChange: calls.change }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const priorAppearance = useAppearance.getState();
 let shownId: string | null = null;
 beforeEach(() => { vi.clearAllMocks(); calls.start.mockReset(); });
@@ -37,7 +37,7 @@ function draw(thread: Thread, input: ThreadInput) {
   function Surface() {
     const view = useThreadView(thread.id);
     const current = view.thread ?? thread;
-    return <><TimelineContextValue.Provider value={{ threadId: current.id, threadName: current.name, detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined, meId: current.owner.id, canInteract: current.access.permissions.includes('thread.interact'), canManage: current.access.permissions.includes('thread.manage'), live: true, lit: null, selection: NOT_PICKING }}><StatusLine /></TimelineContextValue.Provider>
+    return <><TimelineContextValue.Provider value={{ threadId: current.id, threadName: current.name, detail: 'normal', layout: 'one', setLayout: () => undefined, meId: current.owner.id, canInteract: current.access.permissions.includes('thread.interact'), canManage: current.access.permissions.includes('thread.manage'), live: true, lit: null, selection: NOT_PICKING }}><StatusLine threadId={current.id} blockedReasonShown /></TimelineContextValue.Provider>
       <BlockedBanner thread={current} onProceed={calls.proceed} /><SourcePreparation thread={current} /><QueueTray threadId={thread.id} queued={queuedInputs(view)} sending={[]} /></>;
   }
   return show(<Surface />);

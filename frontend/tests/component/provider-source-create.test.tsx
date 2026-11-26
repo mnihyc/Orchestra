@@ -21,7 +21,7 @@ skipOverflowFallback();
 const guide = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 const close = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => guide }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => guide }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), useNavigate: () => navigate, Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['programs',id],changeMachinePrograms:vi.fn(),
@@ -79,7 +79,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     await setLocale(language);
     useAppearance.getState().set({ theme, locale: language });
     vi.clearAllMocks();
-    setup.subscriptions_unreported=[];setup.subscriptions_withheld=[];
+    setup.subscriptions_unavailable=[];setup.subscriptions_withheld=[];
     for(const choice of setup.machines ?? [])choice.upstreams=['*'];
     vi.mocked(createProvider).mockResolvedValue({...planProvider({ kind: 'api', key_set: false, status: 'needs_setup' }),warning:null});
   });
@@ -100,13 +100,13 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
   }
 
   it('keeps unavailable subscription examples visible with their actual reason',async()=>{
-    setup.subscriptions_unreported=[{id:'cold',name:'Cold agent',address:'acme.cold',harness_kind:'custom',harness:{kind:'custom',name:'Cold agent',names:{}},machine:null,disabled:false}];
+    setup.subscriptions_unavailable=[{harness:{kind:'custom',name:'Cold agent',names:{}},agent:{id:'cold',name:'Cold agent',address:'acme.cold',harness_kind:'custom',harness:{kind:'custom',name:'Cold agent',names:{}},machine:null,disabled:false},reason:'not_reported'}];
     setup.subscriptions_withheld=[{harness:{kind:'restricted',name:'Restricted plan',names:{}},scope:null}];
     show(<AddProviderDialog onClose={close}/>);
     await userEvent.selectOptions(screen.getByRole('combobox',{name:'Home'}),'org');
     const picker=await screen.findByRole('combobox',{name:t('providerCreation.examples')});
     await userEvent.click(picker);
-    for(const [name,reason] of [['Cold agent','subscriptionUnreported'],['Restricted plan','subscriptionWithheld']] as const){
+    for(const [name,reason] of [['Cold agent','subscriptionUnavailable.not_reported'],['Restricted plan','subscriptionWithheld']] as const){
       const option=screen.getByRole('option',{name});
       expect(option).toHaveAttribute('aria-disabled','true');
       expect(option).toHaveAccessibleDescription(t(`providerCreation.${reason}`));
@@ -204,7 +204,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
   it('registers a source inline through the machine registry and selects its returned declaration without another setup read',async()=>{
     const program:MachineProgram={kind:'provider_source',name:'gpu',command:['python','/opt/source.py'],origin:'orch',ready:true,version:'1',
       descriptor:{...SOURCE_DESCRIPTOR,name:'gpu',title:'GPU source'},models:null,detail:null};
-    vi.mocked(changeMachinePrograms).mockResolvedValue({entries:[program],can_manage:true,capabilities:[],config_file:null});
+    vi.mocked(changeMachinePrograms).mockResolvedValue({approvals:[],entries:[program],can_manage:true,capabilities:[],config_file:null});
     const user=await address();await pick(t('providerCreation.machine'),'GPU machine',user);
     await user.click(button(t('providerCreation.registerSource')));
     const dialog=await screen.findByRole('dialog',{name:t('machinePrograms.addTitle')});
@@ -241,4 +241,12 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     await user.click(button(t('providerCreation.create')));
     expect(createProvider).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<AddProviderDialog onClose={vi.fn()} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('providers.add.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });
