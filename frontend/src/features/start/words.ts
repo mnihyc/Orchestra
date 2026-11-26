@@ -4,6 +4,7 @@
  * is used as it comes, and a code it sends without one is put into words here. An unfamiliar reason
  * gets a readable fallback; protocol codes stay in diagnostic data.
  */
+import { providerSetupWords } from '@/features/resources/providers/state';
 import type { TFunction } from 'i18next';
 
 import { ApiError } from '@/api/client';
@@ -14,7 +15,14 @@ import { offeredChoice } from '@/i18n/choices';
 import { providerPickerLabels } from '@/features/resources/providers/labels';
 import { isolationToolWords } from '@/features/resources/executorNames';
 
-import { type AgentRow, type ProviderRow, type Resolved, modelName } from './choices';
+import { blockedDetail, isMachineProgramVersionMismatch } from '@/features/timeline/waiting';
+
+import { type AgentRow, ENVIRONMENT_SHUT, type EnvironmentNote, type ProviderRow, type Resolved, modelName } from './choices';
+
+/** The engine's sentence for a machine whose program of the agent's kind its owner has not confirmed. */
+const PROGRAM_UNCONFIRMED = /^(.+) on (.+) is not confirmed\. The machine's owner can confirm it on the machine's page\.$/u;
+/** The engine's sentence that lists the executors an environment offers and the harness can use: names that mean nothing to a person. */
+const EXECUTORS_LISTED = /^The environment offers .+ and the harness can work through .+\.$/su;
 
 /** Known reasons use the reader's language; an unfamiliar code never becomes the visible explanation. */
 export function reasonWords(code: string): string {
@@ -22,10 +30,48 @@ export function reasonWords(code: string): string {
   return i18n.exists(key) ? i18n.t(key,{defaultValue:i18n.t('start.reason.unreported')}) : i18n.t('start.reason.unreported');
 }
 
-/** Why an arrangement cannot be had: the server's own sentence, else the code put into words. */
+/** The same default-environment reason in the picker, inline setup and missing-choice line. */
+export function environmentReasonWords(code: string, t: TFunction): string {
+  return code === 'closed' ? t('start.where.closed') : reasonWords(code);
+}
+
+/** The safe name and actual reason in the environment choice's existing source slot. */
+export function unusableEnvironmentWords(note: Extract<EnvironmentNote, { kind: 'unusable' }>, t: TFunction): string {
+  return t(note.name === null ? 'start.where.unavailableShortUnnamed' : 'start.where.unavailableShort', {
+    name: note.name ?? '', why: environmentReasonWords(note.reason, t),
+  });
+}
+
+/** Why an arrangement cannot be had: the server's own sentence in the reader's language where it is one of the known ones, else the code put into words. */
 export function arrangementWhy(entry: Arrangement, t: TFunction): string {
-  if (entry.detail !== null && entry.detail !== '' && !hasErrorCode(entry.detail)) return entry.detail;
+  const detail = entry.detail;
+  if (detail !== null && detail !== '' && !hasErrorCode(detail)) {
+    if (isMachineProgramVersionMismatch(detail)) return blockedDetail(detail, t);
+    const unconfirmed = PROGRAM_UNCONFIRMED.exec(detail);
+    if (unconfirmed?.[1] !== undefined && unconfirmed[2] !== undefined) return t('machinePrograms.notConfirmed', { name: unconfirmed[1], machine: unconfirmed[2] });
+    if (entry.reason === 'executor_missing' && EXECUTORS_LISTED.test(detail)) return reasonWords('executor_missing');
+    return detail;
+  }
   return entry.reason === null ? t('start.arrangement.notAvailable') : reasonWords(entry.reason);
+}
+
+/** What a sentence about a machine's program is: the version that is apart from the agent's, or a program nobody has confirmed. */
+export function programKind(detail: string | null): 'version' | 'unconfirmed' | null {
+  if (detail === null) return null;
+  return isMachineProgramVersionMismatch(detail) ? 'version' : PROGRAM_UNCONFIRMED.test(detail) ? 'unconfirmed' : null;
+}
+
+/**
+ * The closed arrangement that says what a person can act on: what the environment shuts comes before what the provider or a
+ * policy shuts, and among those the way through the environment's tools before a way that needs the provider's own machine.
+ */
+export function closedArrangement(row: AgentRow): Arrangement | undefined {
+  const closed = row.entry.arrangements.filter((entry) => !entry.available || !entry.permitted);
+  for (const code of ENVIRONMENT_SHUT) {
+    const found = closed.find((entry) => entry.reason === code);
+    if (found !== undefined) return found;
+  }
+  return closed[0];
 }
 
 /** A closed profile names the same native reason as its unavailable arrangement. */
@@ -33,8 +79,8 @@ export function agentWhy(row: AgentRow, t: TFunction): string {
   if (row.entry.reason === 'harness_error' || row.entry.reason === 'harness_unreported' && row.entry.program_report?.status === 'error') return t('start.agent.programFailed');
   if (row.unreported) return t('start.agent.unreported');
   if (row.entry.reason === 'no_host') return t('startPreflight.noHost');
-  const closed = row.entry.arrangements.find((entry) => !entry.available || !entry.permitted);
-  if (closed !== undefined && (row.entry.reason === null || row.entry.reason === closed.reason)) return arrangementWhy(closed, t);
+  const closed = closedArrangement(row);
+  if (closed !== undefined && (row.entry.reason === null || row.entry.reason === closed.reason || ENVIRONMENT_SHUT.includes(row.entry.reason))) return arrangementWhy(closed, t);
   return row.entry.reason === null || row.entry.reason === 'binding_incompatible' ? t('startPreflight.changed') : reasonWords(row.entry.reason);
 }
 
@@ -42,7 +88,7 @@ export function agentWhy(row: AgentRow, t: TFunction): string {
 export function providerWhy(row: ProviderRow, owner: string | null, t: TFunction): string | null {
   const why = row.why;
   if (why === null) return null;
-  if (why.kind === 'status') return t(`start.provider.status.${why.status}`);
+  if (why.kind === 'status') return why.status === 'needs_setup' ? providerSetupWords(row.entry.setup, t) : t(`start.provider.status.${why.status}`);
   if (why.reason === 'provider_not_allowed') return t('providerPolicy.notAllowed', { place:row.entry.policy_scope === 'system' ? t('resources.settings.sourceDefault') : row.entry.policy_scope?.name ?? t('craft.private') });
   return why.reason === 'no_use' && owner !== null ? t('start.provider.notYours', { owner }) : reasonWords(why.reason);
 }
@@ -62,10 +108,12 @@ export function describeIsolation(isolation: Isolation, t: TFunction): string {
 export function runsLine(resolved: Resolved, t: TFunction): string {
   const where = resolved.fresh ? t('start.quick.inNew') : resolved.environment === null ? null : t('start.quick.in', { name: resolved.environment.environment.name });
   const names=providerPickerLabels(resolved.providers.map((row)=>row.entry.provider));
-  const model = resolved.model === null ? null : modelName(resolved.model);
+  const pool = resolved.bindingPool;
+  const providerName = pool?.name ?? (resolved.provider === null ? null : names.get(resolved.provider.id) ?? resolved.provider.entry.provider.name);
+  const model = pool?.kind === 'provider' ? pool.model : resolved.model === null ? null : modelName(resolved.model);
   const effort = resolved.effort === null ? null : offeredChoice(t, 'effort', resolved.effort)?.name ?? t('changeCompact.otherEffort');
   return [
-    resolved.agent === null || resolved.provider === null ? null : t('start.quick.runs', { agent: resolved.agent.entry.agent.name, provider: names.get(resolved.provider.id) ?? resolved.provider.entry.provider.name }),
+    resolved.agent === null || providerName === null ? null : t('start.quick.runs', { agent: resolved.agent.entry.agent.name, provider: providerName }),
     model === null || effort === null ? model : t('startFlow.modelEffort', { model, effort }),
     where,
   ]

@@ -1,0 +1,4 @@
+fmt
+test -p orch-engine --lib -- summaries::handoff::tests::
+test -p orch-engine --lib -- summaries::goal_check::tests::
+test -p orch-engine --test goals

@@ -16,8 +16,8 @@ import { show } from './support';
 import { harnessName } from '../doubles/harness-names';
 
 let sessionFailure: ApiError;
-vi.mock('@/api/adoption',async(load)=>({...await load<typeof AdoptionApi>(),harnessSessionsQuery:()=>({
-  queryKey:['observed-sessions'],queryFn:()=>Promise.reject(sessionFailure),retry:false,
+vi.mock('@/api/adoption',async(load)=>({...await load<typeof AdoptionApi>(),harnessSessionsPageQuery:()=>({
+  queryKey:['observed-sessions'],initialPageParam:null,getNextPageParam:()=>null,queryFn:()=>Promise.reject(sessionFailure),retry:false,
 })}));
 const harness:SessionHarness={providerId:'provider',providerName:'Ready model',agent:{
   id:'agent',name:'Codex',address:'acme.codex',harness_kind:'codex', harness: harnessName('codex'),machine:null,disabled:false,
@@ -33,7 +33,7 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
   ] as const)(`${locale}/${theme} explains $code without calling its provider unavailable`,async({code,status})=>{
     await setLocale(locale);document.documentElement.dataset.theme=theme;
     sessionFailure=new ApiError({type:'orch:error:'+code,status,code,title:'Agent sessions',detail:'The session read could not be completed',request_id:'native-read'},null);
-    show(<HarnessSessions harnesses={[harness]}/>);
+    show(<HarnessSessions harnesses={[{ providerId: harness.providerId, providerName: harness.providerName, agents: [harness.agent] }]}/>);
     expect(await screen.findByText(i18n.t(`errors.${code}`))).toBeVisible();
     expect(screen.queryByText(i18n.t('errors.provider.unavailable'))).not.toBeInTheDocument();
     expect(screen.queryAllByRole('button',{name:i18n.t('common.tryAgain')})).toHaveLength(status===503?1:0);

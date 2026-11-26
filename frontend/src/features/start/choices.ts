@@ -16,11 +16,14 @@ import type {
   BindingProvider,
   ModelOption,
   NewEnvironment,
+  NodeRef,
   ProviderStatus,
 } from '@/generated/api-types';
 
 import type { StartOptions } from '@/api/start';
+import { environmentPoolId } from '@/features/resources/pools/environmentTarget';
 import { modelDisplayName } from '@/features/models/names';
+import { modelsForPurpose } from '@/features/models/purpose';
 
 /** What stands for "a new environment, made from the defaults of the place" among the environments that exist. */
 export const NEW_ENVIRONMENT = 'new';
@@ -44,8 +47,24 @@ export function noHostEnvironment(options: Pick<StartOptions, 'can_create' | 'ho
   return rows.find((row) => row.is_default) ?? rows.find((row) => row.used === 'topic') ?? rows[0] ?? null;
 }
 
+/** What a person says of a new environment: who may use it, the files it starts with, and the host and template it is made from. */
+export type NewPlacement = Pick<NewEnvironment, 'name' | 'access' | 'files' | 'host_id' | 'template_id'>;
+
+/** An empty optional name keeps the server's default; an authored name is sent without incidental outer spaces. */
+function namedEnvironment(values: NewPlacement): NewPlacement {
+  const { name, ...others } = values;
+  const chosen = name?.trim();
+  return chosen === undefined || chosen === '' ? others : { ...others, name: chosen };
+}
+
 /** What the person chose by hand. Everything left `null` comes from the defaults, or, in a dialog, from a suggestion. */
+export type BindingPool = { id: string; name: string } & (
+  | { kind: 'model' }
+  | { kind: 'provider'; model: string }
+);
+
 export interface Picks {
+  bindingPool?: BindingPool | null;
   provider: string | null;
   agent: string | null;
   model: string | null;
@@ -54,7 +73,7 @@ export interface Picks {
   environment: string | null;
   arrangement: ArrangementType | null;
   /** These creation choices belong to this draft, never to the remembered setup. */
-  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
+  newEnvironment?: NewPlacement;
 }
 
 export const NO_PICKS: Picks = { provider: null, agent: null, model: null, effort: null, environment: null, arrangement: null };
@@ -136,8 +155,26 @@ export interface MissingArrangement {
 /** What is in the way of starting, in the order a person meets it: a provider, a profile, a model, an environment, an arrangement. */
 export type Missing = MissingProvider | MissingAgent | MissingModel | MissingEnvironment | MissingArrangement;
 
+/** What the person is told about the environment they did not choose by hand: the default that stands, or why it does not. */
+export type EnvironmentNote =
+  /** The dialog starts on the default environment that a place above the topic set. */
+  | { kind: 'inherited'; from: NodeRef | null }
+  /** A default is set and cannot be used by this person, so what stands instead is said with the reason. */
+  | { kind: 'unusable'; name: string | null; reason: string; from: NodeRef | null }
+  /** A default is set, and the place's New threads setting gives every thread its own environment, so it is not used. */
+  | { kind: 'fresh'; name: string | null };
+
+/** A profile the person wanted that the environment shut, and what stands in its place. */
+export interface AgentHere {
+  /** The profile that was picked, or the place's default, or the one last used. */
+  wanted: AgentRow;
+  /** The profile that is used instead, when another can run there. */
+  instead: AgentRow | null;
+}
+
 export interface Resolved {
-  origins: Record<keyof Omit<Picks, 'newEnvironment'>, ChoiceOrigin>;
+  bindingPool?: BindingPool;
+  origins: Record<keyof Omit<Picks, 'newEnvironment' | 'bindingPool'>, ChoiceOrigin>;
   providers: ProviderRow[];
   provider: ProviderRow | null;
   agents: AgentRow[];
@@ -153,9 +190,14 @@ export interface Resolved {
   environments: BindingEnvironment[];
   /** The environment that exists and is chosen. */
   environment: BindingEnvironment | null;
+  environmentPool?: string;
   /** A new environment is made for the thread, from the defaults of the place. */
   fresh: boolean;
-  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
+  newEnvironment?: NewPlacement;
+  /** The default environment, said where the person did not choose; null where they chose or none is set. */
+  environmentNote: EnvironmentNote | null;
+  /** The profile the person wanted is shut by the environment, when it is: said beside the environment, with what stands instead. */
+  agentHere: AgentHere | null;
   /** The environment that was chosen is not in the answer yet: it was made a moment ago and the answer is being asked again. */
   settling: boolean;
   /** Every arrangement of the profile on the provider, the ones that can be had first, in the server's order. */
@@ -207,14 +249,36 @@ function arrangementRows(agent: AgentRow | null): ArrangementRow[] {
     .map((entry) => ({ type: entry.type, entry, open: entry.available && entry.permitted }));
 }
 
+/** The ways of an arrangement that the environment, not the provider or the policy, is what shuts. */
+export const ENVIRONMENT_SHUT: readonly string[] = ['executor_missing', 'agent_not_on_that_machine', 'handed_over_elsewhere', 'colocation_impossible'];
+
+/** The default environment, said where the person did not choose one by hand and a default is set. */
+function noteOf(options: StartOptions, picks: Picks, environment: BindingEnvironment | null, shared: BindingEnvironment | null): EnvironmentNote | null {
+  const named = options.default_environment ?? null;
+  if (picks.environment !== null || named === null) return null;
+  const row = options.environments.find((candidate) => candidate.environment.id === named.environment) ?? null;
+  const name = row?.environment.name ?? null;
+  if (options.environment_default === 'fresh') return { kind: 'fresh', name };
+  if (row === null || named.reason !== null || !canUseEnvironment(row)) {
+    return { kind: 'unusable', name, reason: named.reason ?? (row === null ? 'environment_not_seen' : 'closed'), from: named.from };
+  }
+  return environment !== null && environment === shared && named.from !== null ? { kind: 'inherited', from: named.from } : null;
+}
+
 /** Works out what a thread would be bound to. */
-export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: Picks = NO_PICKS): Resolved {
+export function resolve(options: StartOptions, requested: Picks, mode: Mode, last: Picks = NO_PICKS): Resolved {
   const missing: Missing[] = [];
   const defaults = options.defaults;
+  const picks = { ...requested,
+    ...(defaults.locks.provider ? { provider: defaults.provider_id } : {}),
+    ...(defaults.locks.agent ? { agent: defaults.agent_id } : {}),
+    ...(defaults.locks.model ? { model: defaults.model_name } : {}),
+    ...(defaults.locks.effort ? { effort: defaults.effort } : {}),
+  };
 
   const providers = providerRows(options);
   const choosable = providers.filter((row) => row.choosable);
-  const provider = choosable.find((row) => row.id === picks.provider) ?? choosable.find((row) => row.id === defaults.provider_id) ?? (!defaults.locked ? choosable.find((row) => row.id === last.provider) : undefined) ?? (mode.suggest && (!mode.respectDefaults || defaults.provider_id === null) ? choosable[0] : undefined) ?? null;
+  const provider = defaults.locks.provider ? choosable.find((row) => row.id === defaults.provider_id) ?? null : choosable.find((row) => row.id === picks.provider) ?? choosable.find((row) => row.id === defaults.provider_id) ?? choosable.find((row) => row.id === last.provider) ?? (mode.suggest && (!mode.respectDefaults || defaults.provider_id === null) ? choosable[0] : undefined) ?? null;
   // Do not borrow another provider's profile/model/consent when a place default wins.
   const previous = provider?.id === last.provider ? last : NO_PICKS;
   if (provider === null) {
@@ -226,17 +290,22 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
     });
   }
 
+  const bindingPool = defaults.locks.provider || defaults.locks.model ? null : picks.bindingPool ?? null;
+  const pool = environmentPoolId(picks.environment);
   const agents = agentRows(provider, options);
   const startable = agents.filter((row) => row.startable);
   // A profile the place defaults to that cannot be used is not swapped for another behind its back: the inline starter asks, and waits where it has not reported.
   const defaultBlocked = agents.some((row) => row.isDefault && !row.startable);
-  // A provider that offers one profile only has nothing to choose: that profile is the one.
-  const agent =
-    provider === null
-      ? null
-      : (startable.find((row) => row.id === picks.agent) ?? startable.find((row) => row.id === defaults.agent_id) ?? startable.find((row) => row.id === previous.agent) ?? ((startable.length === 1 && !defaultBlocked) || (mode.suggest && (!mode.respectDefaults || !defaultBlocked)) ? startable[0] : undefined) ?? null);
+  const fixedAgent = defaults.locks.agent ? defaults.agent_id : pool === undefined && bindingPool === null ? null : picks.agent;
+  const agent = provider === null ? null : fixedAgent !== null
+    ? startable.find((row) => row.id === fixedAgent) ?? null
+    : startable.find((row) => row.id === picks.agent)
+      ?? startable.find((row) => row.id === defaults.agent_id)
+      ?? startable.find((row) => row.id === previous.agent)
+      ?? ((startable.length === 1 && !defaultBlocked) || (mode.suggest && (!mode.respectDefaults || !defaultBlocked)) ? startable[0] : undefined)
+      ?? null;
   if (provider !== null && agent === null) {
-    const unusable = agents.find((row) => row.isDefault && !row.startable) ?? null;
+    const unusable = agents.find((row) => !row.startable && (fixedAgent === null ? row.isDefault : row.id === fixedAgent)) ?? null;
     missing.push({
       kind: 'agent',
       // The profile the place defaults to has not reported, or none of them has: what is waited for, with nothing offered that cannot run.
@@ -246,18 +315,21 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
     });
   }
 
-  const models = (provider?.entry.models ?? []).filter((candidate) => candidate.allowed);
+  const models = modelsForPurpose(provider?.entry.models ?? [], 'generation').filter((candidate) => candidate.allowed);
   const closedModels = (provider?.entry.models ?? []).filter((candidate) => !candidate.allowed);
   // The same for the model: one the place names that cannot be had is not replaced by the only one that can.
   const modelBlocked = defaults.model_name !== null && !models.some((candidate) => candidate.model_name === defaults.model_name);
   const model =
-    provider === null
+    provider === null || bindingPool?.kind === 'model'
       ? null
-      : (models.find((candidate) => candidate.model_name === picks.model) ?? models.find((candidate) => candidate.model_name === defaults.model_name) ?? models.find((candidate) => candidate.model_name === previous.model) ?? ((models.length === 1 && !modelBlocked) || (mode.suggest && (!mode.respectDefaults || !modelBlocked)) ? models[0] : undefined) ?? null);
-  if (provider !== null && model === null) missing.push({ kind: 'model', none: models.length === 0 });
+      : bindingPool?.kind === 'provider' ? models.find((candidate) => candidate.model_name === bindingPool.model.trim()) ?? null
+      : defaults.locks.model && defaults.model_name !== null ? models.find((candidate) => candidate.model_name === defaults.model_name) ?? null : (models.find((candidate) => candidate.model_name === picks.model) ?? models.find((candidate) => candidate.model_name === defaults.model_name) ?? models.find((candidate) => candidate.model_name === previous.model) ?? ((models.length === 1 && !modelBlocked) || (mode.suggest && (!mode.respectDefaults || !modelBlocked)) ? models[0] : undefined) ?? null);
+  if (bindingPool?.kind === 'provider' && bindingPool.model.trim() === '') missing.push({kind:'model', none:false});
+  if (bindingPool === null && provider !== null && model === null) missing.push({ kind: 'model', none: models.length === 0 });
 
   const efforts = model?.parameters.efforts ?? [];
-  const effort =
+  const effort = defaults.locks.effort && defaults.effort !== null ? defaults.effort :
+    bindingPool !== null ? picks.effort ?? defaults.effort :
     efforts.length === 0
       ? null
       : efforts.includes(picks.effort ?? '')
@@ -266,43 +338,51 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
           ? defaults.effort
           : model?.model_name === previous.model && efforts.includes(previous.effort ?? '') ? previous.effort : (model?.parameters.default_effort ?? efforts[0] ?? null);
 
+  if (bindingPool === null && defaults.locks.effort && defaults.effort !== null && !efforts.includes(defaults.effort) && model !== null) missing.push({ kind: 'model', none: false });
   const environments = options.environments.filter(canUseEnvironment);
   const mayMake = canCreateEnvironment(options);
   const choosingExisting = picks.environment === CHOOSE_EXISTING_ENVIRONMENT;
-  const named = picks.environment !== null && picks.environment !== NEW_ENVIRONMENT && !choosingExisting;
+  const named = pool === undefined && picks.environment !== null && picks.environment !== NEW_ENVIRONMENT && !choosingExisting;
   const kept = named ? (environments.find((candidate) => candidate.environment.id === picks.environment) ?? null) : null;
   // An environment that was made a moment ago is the person's choice before the answer lists it.
-  const settling = named && !options.environments.some((candidate) => candidate.environment.id === picks.environment);
+  const settling = pool !== undefined ? options.assessedEnvironmentPool !== pool : named && !options.environments.some((candidate) => candidate.environment.id === picks.environment);
   const unavailable = named && !settling && kept === null;
   const shared = options.environment_default === 'shared' ? (environments.find((candidate) => candidate.is_default) ?? null) : null;
   const previousEnvironment = picks.environment === null && shared === null && options.environment_default === 'shared' ? environments.find((candidate) => candidate.environment.id === last.environment) ?? null : null;
   const hostFallback = picks.environment === null ? noHostEnvironment(options) : null;
   // What is pre-selected follows the place's own rule: its default environment where the person may use it, otherwise a new one.
-  const fresh = !choosingExisting && !settling && !unavailable && kept === null && previousEnvironment === null && (picks.environment === NEW_ENVIRONMENT ? mayMake : shared === null && mayMake);
-  const environment = unavailable || picks.environment === NEW_ENVIRONMENT && !mayMake ? null : kept ?? previousEnvironment ?? (fresh || settling ? null : (shared ?? hostFallback ?? (mode.suggest && !mode.respectDefaults ? (environments[0] ?? null) : null)));
-  if (!fresh && !settling && environment === null) missing.push({ kind: 'environment' });
+  const fresh = pool === undefined && !choosingExisting && !settling && !unavailable && kept === null && previousEnvironment === null && (picks.environment === NEW_ENVIRONMENT ? options.can_create.allowed : shared === null && mayMake);
+  const environment = pool !== undefined || unavailable || picks.environment === NEW_ENVIRONMENT && !options.can_create.allowed ? null : kept ?? previousEnvironment ?? (fresh || settling ? null : (shared ?? hostFallback ?? (mode.suggest && !mode.respectDefaults ? (environments[0] ?? null) : null)));
+  if (pool === undefined && !fresh && !settling && environment === null) missing.push({ kind: 'environment' });
+  if (fresh && !mayMake) missing.push({ kind: 'environment' });
 
   const arrangements = arrangementRows(agent);
   const open = arrangements.filter((row) => row.open);
   const defaultArrangement = open[0]?.type ?? null;
   // Optional placement follows the current place/provider preference; an old setup is not new credential consent.
-  const arrangement = open.find((row) => row.type === picks.arrangement)?.type ?? defaultArrangement;
-  if (provider !== null && agent !== null && arrangement === null) missing.push({ kind: 'arrangement', first: arrangements[0] ?? null });
+  const arrangement = picks.arrangement ?? defaultArrangement;
+  const selectedArrangement = arrangements.find((row) => row.type === arrangement);
+  if (provider !== null && agent !== null && selectedArrangement?.open !== true) missing.push({ kind: 'arrangement', first: selectedArrangement ?? (picks.arrangement === null ? arrangements[0] ?? null : null) });
 
+  const wantedAgent = agents.find((row) => row.id === (picks.agent ?? defaults.agent_id ?? previous.agent)) ?? null;
+  const shutHere = wantedAgent !== null && !wantedAgent.startable
+    && wantedAgent.entry.arrangements.some((choice) => !(choice.available && choice.permitted) && ENVIRONMENT_SHUT.includes(choice.reason ?? ''));
+  const agentHere: AgentHere | null = wantedAgent === null || !shutHere ? null : { wanted: wantedAgent, instead: agent !== null && agent.id !== wantedAgent.id ? agent : null };
   const waiting = missing.some((entry) => entry.kind === 'agent' && entry.unreported);
   const origin = (value: string | null | undefined, picked: string | null, configured: string | null, remembered: string | null): ChoiceOrigin =>
     (value === null || value === undefined) ? null : value === picked ? null : value === configured ? 'topic_default' : value === remembered ? 'last_used' : 'suggested';
   const origins: Resolved['origins'] = {
-    provider: origin(provider?.id, picks.provider, defaults.provider_id, defaults.locked ? null : last.provider),
-    agent: origin(agent?.id, picks.agent, defaults.agent_id, previous.agent),
-    model: origin(model?.model_name, picks.model, defaults.model_name, previous.model),
-    effort: origin(effort, picks.effort, defaults.effort, model?.model_name === previous.model ? previous.effort : null),
+    provider: bindingPool !== null ? null : origin(provider?.id, requested.provider, defaults.provider_id, defaults.locks.provider ? null : last.provider),
+    agent: origin(agent?.id, requested.agent, defaults.agent_id, previous.agent),
+    model: bindingPool !== null ? null : origin(model?.model_name, requested.model, defaults.model_name, previous.model),
+    effort: origin(effort, requested.effort, defaults.effort, model?.model_name === previous.model ? previous.effort : null),
     environment: fresh ? picks.environment === NEW_ENVIRONMENT ? null : 'topic_default' : environment === null ? null
       : environment.environment.id === picks.environment ? null : environment === shared ? 'shared_default' : environment === previousEnvironment ? 'last_used' : 'suggested',
     arrangement: origin(arrangement, picks.arrangement, null, null),
   };
   return {
     origins,
+    ...(bindingPool === null ? {} : { bindingPool }),
     providers,
     provider,
     agents,
@@ -315,7 +395,10 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
     environments,
     environment,
     fresh,
-    ...(fresh && picks.newEnvironment !== undefined ? { newEnvironment: picks.newEnvironment } : {}),
+    ...(fresh && picks.newEnvironment !== undefined ? { newEnvironment: namedEnvironment(picks.newEnvironment) } : {}),
+    ...(pool === undefined ? {} : { environmentPool: pool }),
+    environmentNote: pool === undefined ? noteOf(options, picks, environment, shared) : null,
+    agentHere,
     settling,
     arrangements,
     arrangement,
@@ -323,6 +406,12 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
     missing,
     waiting,
   };
+}
+
+/** A model pool supplies the offering at admission. A provider pool uses the name the person entered. */
+export function startModelName(resolved: Resolved): string | null {
+  if (resolved.bindingPool?.kind === 'provider') return resolved.bindingPool.model.trim();
+  return resolved.model?.model_name ?? null;
 }
 
 /** The settings a person's choice would write as the defaults of a place: those that differ from what the place has already. */

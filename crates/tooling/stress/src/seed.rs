@@ -837,11 +837,11 @@ async fn make_threads(
                 ));
             };
             let name = format!("Thread {j:03}");
-            let mut binding = json!({ "agent_id": agent, "provider_id": provider });
+            let mut binding = json!({ "agent_id": agent, "target": { "type": "single", "resource": { "kind": "provider", "id": provider } } });
             if let Some(arrangement) = &o.arrangement {
                 binding["arrangement"] = json!(arrangement);
             }
-            let body = json!({ "name": name, "binding": binding, "model": o.model, "environment": { "use": environment } });
+            let body = json!({ "name": name, "binding": binding, "model": o.model, "environment": { "use": { "type": "single", "resource": { "kind": "environment", "id": environment } } } });
             let owner = (!org.members.is_empty()).then(|| org.members[j % org.members.len()]);
             let mut reply = match owner {
                 Some(p) => api.post(&people[p], "/topics/{id}/threads", &[&topics[topic].id], &body).await,

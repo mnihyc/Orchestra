@@ -23,7 +23,7 @@ const input = '00000000-0000-4000-8101-000000000004';
 const key = 'creation-once';
 const named = { name: 'Only this creation', description: 'An accepted change' };
 const first: CreateThread = {
-  environment: { use: '00000000-0000-4000-8101-000000000005' },
+  environment: { use: { type: 'single', resource: { kind: 'environment', id: '00000000-0000-4000-8101-000000000005' } } },
   first_input: { client_id: input, content: [{ type: 'text', text: 'Only this first input' }] },
 };
 

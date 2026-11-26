@@ -11,6 +11,8 @@ pub(crate) struct Source {
     call: Call,
     root: Id,
     configured: (Id, String),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_pool: Option<Id>,
     workflow: Id,
     task: String,
     history: Option<(Id, i64)>,
@@ -50,6 +52,7 @@ impl Source {
             call: call.clone(),
             root,
             configured: configured.clone(),
+            model_pool: host.model_pool,
             workflow: host.workflow,
             task: host.task.into(),
             history,
@@ -101,11 +104,41 @@ impl Source {
         command: &NewCommand<'_>,
         clock: &dyn Clock,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+        if command.id != self.call.id {
+            return Ok(None);
+        }
+        let request: ProviderComplete = serde_json::from_value(command.body.clone())?;
+        let request = CompletionRequest {
+            backend: orch_provider_contract::capabilities::BackendRef {
+                route: orch_summarizer_model::capabilities::ROUTE.into(),
+                offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider: request.provider_id,
+                    offering: request.model_name,
+                }),
+                ..Default::default()
+            },
+            purpose: request.purpose,
+            params: request.params,
+            system: request.system,
+            input: request.input,
+            max_output_tokens: request.max_output_tokens,
+        };
+        self.current_completion(conn, &request, clock, false).await
+    }
+
+    /// The same standing workflow checks a program model step without inventing an API command.
+    pub(crate) async fn current_completion(
+        &self,
+        conn: &mut Conn,
+        request: &CompletionRequest,
+        clock: &dyn Clock,
+        native: bool,
+    ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let Some(writer) = self.call.person_id else {
             return Ok(None);
         };
         let kept: Option<Call> = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL")
-            .bind(command.id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
+            .bind(self.call.id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
         if kept.as_ref() != Some(&self.call) {
             return Ok(None);
         }
@@ -147,28 +180,60 @@ impl Source {
                 id: self.call.node_id,
             }
         };
-        if !crate::summaries::sources::readable(conn, &principal, target)
-            .await
-            .map_err(|_| unavailable())?
-            || !activity::accepts_command(
+        let source_active = if native {
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM summary_calls c WHERE c.id=$1 AND c.cancel_reason IS NULL AND (c.agent_id IS NULL OR EXISTS(SELECT 1 FROM agents a WHERE a.id=c.agent_id AND NOT a.disabled AND a.deleted_at IS NULL)) AND (c.environment_id IS NULL OR EXISTS(SELECT 1 FROM environments e WHERE e.id=c.environment_id AND e.status<>'disabled' AND e.deleted_at IS NULL)))")
+                .bind(self.call.id).fetch_one(&mut *conn).await.map_err(DbError::from)?
+        } else {
+            activity::accepts_command(
                 conn,
-                command.id,
+                self.call.id,
                 self.call.provider_id,
                 &self.call.model_name,
             )
             .await?
+        };
+        if !crate::summaries::sources::readable(conn, &principal, target)
+            .await
+            .map_err(|_| unavailable())?
+            || !source_active
         {
             return Ok(None);
         }
-        let request: ProviderComplete = serde_json::from_value(command.body.clone())?;
-        if request.provider_id != self.call.provider_id
-            || request.model_name != self.call.model_name
+        let Some(offering) = request.backend.offering.as_ref() else {
+            return Ok(None);
+        };
+        if offering.provider != self.call.provider_id
+            || offering.offering != self.call.model_name
             || request.purpose != orch_link_contract::commands::CompletionPurpose::Summary
         {
             return Ok(None);
         }
+        if let Some(pool) = self.model_pool {
+            let field = super::super::pool::Field {
+                pool,
+                node: self.call.node_id,
+                workflow: self.workflow,
+                task: self.task.clone(),
+                call: self.call.id,
+            };
+            let selection = field
+                .selection(conn, &principal, offering.provider, &offering.offering)
+                .await?;
+            if !super::super::pool::allowed(
+                conn,
+                &principal,
+                self.call.node_id,
+                &selection,
+                &request.backend,
+                request.params.as_ref(),
+            )
+            .await?
+            {
+                return Ok(None);
+            }
+        }
         if self.call.id != self.root
-            || (request.provider_id, &request.model_name) != (self.configured.0, &self.configured.1)
+            || (offering.provider, &offering.offering) != (self.configured.0, &self.configured.1)
         {
             let Some(recovery) = crate::calls::read_root(
                 conn,
