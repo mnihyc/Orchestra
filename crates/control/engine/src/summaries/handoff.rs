@@ -539,6 +539,45 @@ async fn brief_tail(
     }))
 }
 
+/// The transcript and its omission notice must fit the exact escaped prompt.
+pub(super) fn fit_model(
+    request: &mut SummaryRequest,
+    config: &orch_summarizer_model::descriptor::Config,
+    bytes: usize,
+) -> Result<(), EngineError> {
+    let previous = std::mem::take(&mut request.previous);
+    let (system, frame) = orch_summarizer_model::prompts::render(request, config);
+    let room = bytes
+        .checked_sub(system.len().saturating_add(frame.len()))
+        .ok_or_else(|| {
+            EngineError::unreadable(
+                "the summary model's input allowance cannot hold its instructions",
+            )
+        })?;
+    request.previous = model_material_within(&previous, room).ok_or_else(|| {
+            EngineError::unreadable("the summary model's input allowance cannot hold the handoff material and its omission notice")
+        })?;
+    Ok(())
+}
+
+pub(super) async fn member_room(
+    conn: &mut orch_db::Conn,
+    thread: Id,
+    config: &orch_summarizer_model::descriptor::Config,
+) -> Result<usize, EngineError> {
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let reasons = super::budget::reasons(conn, config).await?;
+    let output = config.output_reserve(SummaryField::Handoff, reasons);
+    let budget =
+        super::budget::input_budget(conn, thread, offering.provider, &offering.offering, output)
+            .await?;
+    let configured = usize::try_from(
+        i64::from(config.context_tokens).saturating_mul(crate::fork_history::CARRY_BYTES_PER_TOKEN),
+    )
+    .unwrap_or(usize::MAX);
+    Ok(budget.bytes.min(configured))
+}
+
 /// The share of the summary model's window that a request may send, read from the frozen choice of the producer.
 pub(crate) async fn handoff_budget(
     engine: &Engine,
@@ -547,10 +586,44 @@ pub(crate) async fn handoff_budget(
 ) -> Result<InputBudget, EngineError> {
     let HandoffChoice { chosen, .. } = serde_json::from_value(frozen.clone())?;
     let mut conn = engine.db().acquire().await?;
+    if chosen.kind == "model"
+        && orch_summarizer_model::descriptor::Config::pool_id(&chosen.config)
+            .map_err(EngineError::unreadable)?
+            .is_some()
+    {
+        // Reading the pinned source precedes selection. Cap the read by the authored context.
+        // The selected member is fitted again to its actual window, output and place share.
+        let share = super::budget::handoff_share(&mut conn, thread).await?;
+        let configured = chosen
+            .config
+            .get("context_tokens")
+            .and_then(Json::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(orch_summarizer_model::descriptor::CONTEXT_TOKENS);
+        let bytes = usize::try_from(
+            i64::from(configured).saturating_mul(crate::fork_history::CARRY_BYTES_PER_TOKEN),
+        )
+        .unwrap_or(usize::MAX);
+        return Ok(InputBudget {
+            window: None,
+            share,
+            tokens: i64::from(configured),
+            bytes,
+        });
+    }
     match orch_summarizer_model::descriptor::Config::read(&chosen.config) {
         Ok(config) if chosen.kind == "model" => {
-            super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-                .await
+            let offering = config.offering().map_err(EngineError::unreadable)?;
+            let reasons = super::budget::reasons(&mut conn, &config).await?;
+            let output = config.output_reserve(SummaryField::Handoff, reasons);
+            super::budget::input_budget(
+                &mut conn,
+                thread,
+                offering.provider,
+                &offering.offering,
+                output,
+            )
+            .await
         }
         _ => Ok(super::budget::budget_of(None, super::budget::DEFAULT_SHARE)),
     }
@@ -589,7 +662,7 @@ pub(crate) async fn handoff_transcript(
     drop(conn);
     // The material is the newest turns in brief and a line for each older turn, within the share: never the whole.
     let bounded = bounded_input(previous, recent.as_ref(), &budget);
-    handoff_captured(engine, thread, &bounded.text, request_id, &frozen).await
+    handoff_captured(engine, thread, &bounded.text, request_id, &frozen, None).await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -614,12 +687,57 @@ pub(crate) async fn capture_handoff_choice(
     })?)
 }
 
+/// The native cut owning this receipt; callers have already checked its source governors.
+pub(crate) struct HandoffObservation {
+    input_call: Id,
+    attempt: Option<Id>,
+    pub result: orch_api_contract::summary_facts::HandoffResult,
+}
+
+pub(crate) struct HandoffCapture<'a> {
+    pub cut: Id,
+    pub input: &'a crate::fork_history::cut::HandoffInput,
+    pub receipt: &'a mut Option<HandoffObservation>,
+}
+
+impl HandoffCapture<'_> {
+    async fn input(
+        &self,
+        engine: &Engine,
+        call: Id,
+        material: &str,
+    ) -> Result<orch_api_contract::summary_facts::HandoffInputCoverage, EngineError> {
+        let key = format!("handoff_input:{call}");
+        let proposed = self.input.coverage_for(material);
+        let mut conn = engine.db().acquire().await?;
+        // The request digest identifies the exact paid prompt. Recovery keeps its first observation,
+        // even if the same frozen words are read again after a default or the wall clock changes.
+        thread_history_cuts::keep_artifact(
+            &mut conn,
+            self.cut,
+            &key,
+            &serde_json::to_value(&proposed)?,
+            &[],
+        )
+        .await?;
+        let cut = thread_history_cuts::cut(&mut conn, self.cut)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("the retained handoff source disappeared"))?;
+        Ok(serde_json::from_value(
+            cut.artifacts.get(&key).cloned().ok_or_else(|| {
+                EngineError::unreadable("the handoff input observation is absent")
+            })?,
+        )?)
+    }
+}
+
 pub(crate) async fn handoff_captured(
     engine: &Engine,
     thread: Id,
     previous: &str,
     request_id: Id,
     frozen: &Json,
+    mut capture: Option<HandoffCapture<'_>>,
 ) -> Result<String, EngineError> {
     let HandoffChoice { chosen, name } = serde_json::from_value(frozen.clone())?;
     let budget = handoff_budget(engine, thread, frozen).await?;
@@ -638,26 +756,22 @@ pub(crate) async fn handoff_captured(
         limits,
         config: chosen.config.clone(),
     };
-    if chosen.kind == "model" {
+    let model_pool = if chosen.kind == "model" {
+        orch_summarizer_model::descriptor::Config::pool_id(&chosen.config)
+            .map_err(EngineError::unreadable)?
+    } else {
+        None
+    };
+    if chosen.kind == "model" && model_pool.is_none() {
         let config = orch_summarizer_model::descriptor::Config::read(&chosen.config)
             .map_err(EngineError::unreadable)?;
-        let previous = std::mem::take(&mut request.previous);
-        let (system, frame) = orch_summarizer_model::prompts::render(&request, &config);
-        let room = budget
-            .bytes
-            .checked_sub(system.len().saturating_add(frame.len()))
-            .ok_or_else(|| {
-                EngineError::unreadable(
-                    "the summary model's input allowance cannot hold its instructions",
-                )
-            })?;
-        request.previous = model_material_within(&previous, room).ok_or_else(|| {
-            EngineError::unreadable("the summary model's input allowance cannot hold the handoff material and its omission notice")
-        })?;
+        fit_model(&mut request, &config, budget.bytes)?;
     }
-    let digest = orch_types::Hash::of(&serde_json::to_vec(
-        &json!({"request":request,"writer":chosen.writer}),
-    )?);
+    let mut identity = json!({"request":request,"writer":chosen.writer});
+    if model_pool.is_some() {
+        identity["cut"] = json!(capture.as_ref().map(|c| c.cut));
+    }
+    let digest = orch_types::Hash::of(&serde_json::to_vec(&identity)?);
     let call = crate::ids::derived(
         "summary.handoff",
         &[
@@ -665,15 +779,86 @@ pub(crate) async fn handoff_captured(
             digest.as_bytes().as_slice(),
         ],
     );
+    let mut admitted = None;
+    let chosen = if let Some(pool) = model_pool {
+        let field = super::pool::Field {
+            node: thread,
+            workflow: request_id,
+            task: "handoff".into(),
+            call,
+            pool,
+        };
+        let config = super::pool::reserve(
+            engine,
+            &chosen,
+            &mut request,
+            &field,
+            capture.as_ref().map(|c| c.cut),
+        )
+        .await
+        .map_err(EngineError::unreadable)?;
+        request.config = serde_json::to_value(&config)?;
+        admitted = Some(super::pool::Admitted { field, config });
+        super::Choice {
+            config: request.config.clone(),
+            ..chosen
+        }
+    } else {
+        chosen
+    };
     let producer = engine
-        .producer(&chosen, call, request_id, SummaryField::Handoff)
+        .producer(&chosen, call, request_id, SummaryField::Handoff, model_pool)
         .filter(|producer| producer.describe().writes(SummaryField::Handoff))
         .ok_or_else(|| {
             EngineError::unreadable("the chosen producer cannot write a handoff summary")
         })?;
-    let result = producer.summarize(request).await;
+    if let Some(capture) = capture.as_mut() {
+        let coverage = capture.input(engine, call, &request.previous).await?;
+        if capture
+            .receipt
+            .as_ref()
+            .is_none_or(|before| before.input_call != call)
+        {
+            *capture.receipt = Some(HandoffObservation {
+                input_call: call,
+                attempt: None,
+                result: orch_api_contract::summary_facts::HandoffResult {
+                    input_coverage: Some(coverage),
+                    result_facts: None,
+                },
+            });
+        }
+    }
+    let result = producer
+        .summarize(request)
+        .await
+        .map(|answer| answer.conform(SummaryField::Handoff, &limits, &[]));
+    if let Some(capture) = capture.as_mut() {
+        let facts = super::facts::produced(
+            &mut *engine.db().acquire().await?,
+            &chosen,
+            &producer.describe(),
+            call,
+            thread,
+            result.as_ref().ok(),
+            orch_types::Time::new(engine.inner.clock.now()),
+        )
+        .await?;
+        if let Some(facts) = facts
+            && let Some(observed) = capture.receipt.as_mut()
+        {
+            // An unpaid continuation is not another answer and cannot erase a captured transformation.
+            if result.is_ok()
+                || facts.attempt != observed.attempt
+                || observed.result.result_facts.is_none()
+            {
+                observed.attempt = facts.attempt;
+                observed.result.result_facts = facts.result;
+            }
+        }
+    }
     let answer = match result {
-        Ok(answer) => answer.conform(SummaryField::Handoff, &limits, &[]),
+        Ok(answer) => answer,
         Err(error) => {
             if chosen.kind == "model" {
                 engine
@@ -708,6 +893,23 @@ pub(crate) async fn handoff_captured(
             "ok"
         },
     );
+    if let Some(admitted) = admitted {
+        let mut conn = engine.db().acquire().await?;
+        let writer = chosen
+            .writer
+            .ok_or_else(|| EngineError::unreadable("The handoff setting writer is unavailable."))?;
+        let principal = orch_authz::Principal::load(
+            &mut conn,
+            orch_authz::Caller::session(writer).with_admin_mode(false),
+            engine.inner.clock.time(),
+        )
+        .await?;
+        if !admitted.publishable(&mut conn, &principal).await? {
+            return Err(EngineError::unreadable(
+                "The handoff pool choice changed before the answer could be used.",
+            ));
+        }
+    }
     answer
         .result
         .text

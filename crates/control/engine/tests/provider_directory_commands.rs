@@ -62,6 +62,7 @@ async fn a_legacy_online_harness_reconciles_its_home_once_without_repeating_setu
         starts.fetch_add(1, Ordering::SeqCst);
         Ok(CommandResult::AgentStart(
             orch_link_contract::commands::AgentStartResult {
+                home: None,
                 reused: true,
                 harness_version: "1.0.0".into(),
                 descriptor: serde_json::from_value(common::descriptor()).unwrap(),
@@ -122,6 +123,7 @@ async fn a_legacy_online_harness_reconciles_its_home_once_without_repeating_setu
                 },
                 &orch_link_contract::events::Event::HarnessStatus(
                     orch_link_contract::events::HarnessStatus {
+                        home: None,
                         status: status.into(),
                         detail: None,
                         harness_version: Some("1.0.0".into()),
@@ -214,6 +216,7 @@ async fn directory_runtime_commands_use_scoped_values_and_the_shared_policy_supp
                     },
                     &orch_link_contract::events::Event::HarnessStatus(
                         orch_link_contract::events::HarnessStatus {
+                            home: None,
                             status: "online".into(),
                             detail: None,
                             harness_version: Some("early-status".into()),

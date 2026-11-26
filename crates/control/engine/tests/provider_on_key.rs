@@ -463,6 +463,65 @@ async fn a_provider_whose_machine_is_away_blocks_its_threads_and_they_go_on_when
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_online_flag_cannot_spend_an_input_while_the_key_keeper_has_no_session() {
+    let world = World::on_a_key(KEY).await;
+    let keeper = keep_the_key_elsewhere(&world).await;
+    let thread = world.thread("Waiting for the key keeper").await;
+    world.hub.set_api_down(true);
+    world.hub.disconnect(keeper.id);
+    world.wait_for_presence_words(keeper.id, 2).await;
+    assert!(world.hub.session_of(keeper.id).is_none());
+    assert!(world.hub.session_of(world.machine_id).is_some());
+
+    // Reproduce a missed disconnect while the harness remains reachable.
+    world.set_machine_online(keeper.id, true).await;
+    world
+        .exec(&format!(
+            "UPDATE providers SET status='ready' WHERE id='{}'",
+            world.provider
+        ))
+        .await;
+    let sent = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Read the file"))
+        .await
+        .unwrap();
+    world.wait_blocked(thread, "provider_unavailable").await;
+    common::eventually("the provider shows the missing keeper", || async {
+        world
+            .scalar::<String>("SELECT status FROM providers WHERE id=$1", world.provider)
+            .await
+            == "offline"
+    })
+    .await;
+    assert_eq!(world.input_state(sent.input.id).await.0, "pending");
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
+            .await,
+        0
+    );
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM leases WHERE thread_id=$1", thread)
+            .await,
+        0
+    );
+    assert!(world.ordered().is_empty());
+
+    world.hub.set_api_down(false);
+    world.run_turn(thread, 0, "The file contents").await;
+    assert_eq!(keeper.seen.of_kind(CommandKind::LeaseOpen).len(), 1);
+    assert_eq!(world.ran(CommandKind::TurnStart), 1);
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
+            .await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_machine_that_does_not_take_the_role_of_a_provider_cannot_keep_the_key() {
     let world = World::on_a_key(KEY).await;
     let keeper = keep_the_key_elsewhere(&world).await;

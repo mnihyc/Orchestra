@@ -1,4 +1,4 @@
-//! Reserved program metadata stays inert and cannot masquerade as an API binding.
+//! An Ask segment retains the exact API interface or private program selection that served it.
 use super::*;
 use orch_db::queries::{ask as rows, threads};
 
@@ -15,7 +15,10 @@ async fn api_segment(s: &Scene) -> (Id, Id) {
         conversation,
         &rows::SegmentBinding {
             provider_id: provider,
-            protocol: "openai-responses".into(),
+            transport: rows::DialogueTransport::Api {
+                protocol: "openai-responses".into(),
+                backend: AskModelIdentity::api(provider, MODEL.into()).backend,
+            },
             model: MODEL.into(),
         },
         s.ada.id(),
@@ -30,7 +33,7 @@ async fn api_segment(s: &Scene) -> (Id, Id) {
 }
 
 #[tokio::test]
-async fn api_segments_keep_their_protocol_and_an_unset_program_backend() {
+async fn api_segments_keep_their_exact_backend_and_protocol() {
     let s = Scene::new().await;
     s.rig.engine.stop();
     let (conversation, segment) = api_segment(&s).await;
@@ -41,12 +44,22 @@ async fn api_segments_keep_their_protocol_and_an_unset_program_backend() {
             .fetch_one(&mut *conn)
             .await
             .unwrap();
-    assert_eq!(stored, ("openai-responses".into(), None));
+    assert_eq!(stored.0, "openai-responses");
     let binding = rows::segment_binding(&mut conn, conversation, segment)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(binding.protocol, "openai-responses");
+    assert_eq!(
+        binding.transport,
+        rows::DialogueTransport::Api {
+            protocol: "openai-responses".into(),
+            backend: AskModelIdentity::api(binding.provider_id, MODEL.into()).backend
+        }
+    );
+    assert_eq!(
+        stored.1,
+        Some(serde_json::to_value(binding.transport.backend()).unwrap())
+    );
     assert_eq!(binding.model, MODEL);
     assert!(
         rows::program_binding(&mut conn, conversation)
@@ -54,6 +67,86 @@ async fn api_segments_keep_their_protocol_and_an_unset_program_backend() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn a_program_segment_keeps_its_exact_backend_without_borrowing_an_api_interface() {
+    let s = Scene::new().await;
+    s.rig.engine.stop();
+    let (conversation, previous) = api_segment(&s).await;
+    let provider = s.on.provider;
+    let backend = serde_json::from_value(json!({
+        "route":"ask.delegation","offering":{"provider":provider,"offering":MODEL},
+        "config":{"environment_id":s.on.environment,"helper_topic_id":s.tree.topic.base.id},
+        "x_choice":{"revision":"selected"}
+    }))
+    .unwrap();
+    let binding = rows::SegmentBinding {
+        provider_id: provider,
+        model: MODEL.into(),
+        transport: rows::DialogueTransport::Program(backend),
+    };
+    let segment = new_id();
+    let mut tx = s.rig.db.begin().await.unwrap();
+    let mut unit = orch_engine::unit::Unit::new(&mut tx, s.rig.world.now());
+    let seq = unit.stamp(conversation).await.unwrap();
+    let mut mismatched = binding.clone();
+    mismatched.provider_id = new_id();
+    assert!(
+        rows::segment(
+            unit.conn,
+            segment,
+            conversation,
+            &mismatched,
+            s.ada.id(),
+            s.rig.world.now(),
+            seq
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT ended_at IS NULL FROM segments WHERE id=$1")
+            .bind(previous)
+            .fetch_one(&mut *unit.conn)
+            .await
+            .unwrap()
+    );
+    rows::segment(
+        unit.conn,
+        segment,
+        conversation,
+        &binding,
+        s.ada.id(),
+        s.rig.world.now(),
+        seq,
+    )
+    .await
+    .unwrap();
+    unit.finish().await.unwrap();
+    tx.commit().await.unwrap();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    assert_eq!(
+        rows::segment_binding(&mut conn, conversation, segment)
+            .await
+            .unwrap(),
+        Some(binding)
+    );
+    assert!(
+        rows::program_binding(&mut conn, conversation)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let physical: (Option<String>, Option<Id>, Option<Id>, String) = sqlx::query_as(
+        "SELECT program_protocol,environment_id,agent_id,credential_path FROM segments WHERE id=$1",
+    )
+    .bind(segment)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(physical, (None, None, None, "native".into()));
+    assert_eq!(s.rig.commands.issued_of("provider.generate"), 0);
 }
 
 #[tokio::test]
@@ -144,5 +237,236 @@ async fn program_backend_shape_and_native_segment_metadata_are_constrained() {
             .as_database_error()
             .and_then(|error| error.constraint()),
         Some("segments_program_protocol_check")
+    );
+}
+
+#[tokio::test]
+async fn a_live_ask_counts_remaining_items_and_its_continuation_cascade_releases_the_whole_count() {
+    let s = Scene::new().await;
+    let (conversation, segment) = api_segment(&s).await;
+    let mut tx = s.rig.db.begin().await.unwrap();
+    let owner: Id =
+        sqlx::query_scalar("SELECT active_continuation_id FROM threads WHERE node_id=$1")
+            .bind(conversation)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,continuation_id,kind,status,payload,seq_created,seq_updated)
+        SELECT gen_random_uuid(),$1,$2,$3,'agent_message','completed','{}',n,n FROM generate_series(1,3) AS n")
+        .bind(conversation).bind(segment).bind(owner).execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "DELETE FROM items WHERE continuation_id=$1 AND kind='agent_message' AND seq_created=1",
+    )
+    .bind(owner)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let remaining:(i64,i64,i64)=sqlx::query_as("SELECT item_count,first_seq,last_seq FROM thread_history_turn_counts
+        WHERE continuation_id=$1 AND turn_id IS NULL AND stream='main' AND kind='agent_message' AND NOT before_orch")
+        .bind(owner).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(remaining, (2, 2, 3));
+    // The governing-root cascade deletes the owned node directly.
+    sqlx::query("DELETE FROM nodes WHERE id=$1")
+        .bind(conversation)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let retained: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM thread_history_turn_counts WHERE continuation_id=$1)",
+    )
+    .bind(owner)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert!(!retained);
+}
+
+#[tokio::test]
+async fn reading_one_conversation_checks_only_its_ancestry_and_the_requested_private_helper() {
+    use orch_db::queries::hierarchy;
+    let s = Scene::new().await;
+    let conversation = create_unseeded(&s, &s.ada).await.conversation_id;
+    let helper = s.thread_by(&s.eve, "A private model helper").await.base.id;
+    let ordinary = s.thread_by(&s.eve, "A team conversation").await.base.id;
+    let mut tx = s.rig.db.begin().await.unwrap();
+    // One real thread has a journal whose source has been deleted. The other rows are
+    // unrelated retired helpers awaiting collection, with no remaining thread or source.
+    sqlx::query("WITH attempts AS MATERIALIZED (SELECT n,gen_random_uuid() AS request FROM generate_series(1,2048) n)
+        INSERT INTO delegated_program_work(id,request_id,attempt_id,helper_id,actor_id,request_node_id,purpose,backend,record,created_at,deadline_at)
+        SELECT gen_random_uuid(),request,request,CASE WHEN n=1 THEN $1::uuid ELSE gen_random_uuid() END,
+            $2,$3,'ask','{}','{}',now(),now()+interval '1 hour' FROM attempts")
+        .bind(helper).bind(s.eve.id()).bind(s.tree.org.base.id).execute(&mut *tx).await.unwrap();
+    sqlx::query("ANALYZE delegated_program_work")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let requested = [ordinary, conversation, helper];
+    let ancestors = hierarchy::with_ancestor_governance(&mut tx, &requested)
+        .await
+        .unwrap();
+    assert!(
+        ancestors
+            .iter()
+            .any(|(node, governance)| node.id == ordinary && governance.is_none())
+    );
+    let ordinary_plan = hierarchy::explain_ancestors(&mut tx, &[ordinary])
+        .await
+        .unwrap();
+    fn plans_source_calls(node: &Json) -> bool {
+        node["Relation Name"] == "ask_calls"
+            || node["Plans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(plans_source_calls)
+    }
+    assert!(
+        !plans_source_calls(&ordinary_plan[0]["Plan"]),
+        "an ordinary conversation need not plan the source calls of private helpers"
+    );
+    let boundary = |id| {
+        ancestors
+            .iter()
+            .find(|(node, _)| node.id == id)
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+    };
+    assert_eq!(boundary(conversation).person_id, s.ada.id());
+    assert!(boundary(conversation).inspectable && boundary(conversation).root_live);
+    assert_eq!(boundary(helper).person_id, s.eve.id());
+    assert_eq!(boundary(helper).root_org_id, s.tree.org.base.id);
+    assert!(!boundary(helper).inspectable && !boundary(helper).root_live);
+
+    fn helper_rows(plan: &Json) -> u64 {
+        let count = |key: &str| plan[key].as_u64().unwrap_or_default();
+        let own = if plan["Relation Name"] == "delegated_program_work" {
+            (count("Actual Rows")
+                + count("Rows Removed by Filter")
+                + count("Rows Removed by Index Recheck"))
+                * count("Actual Loops")
+        } else {
+            0
+        };
+        own + plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(helper_rows)
+            .sum::<u64>()
+    }
+    let plan = hierarchy::explain_ancestors(&mut tx, &requested)
+        .await
+        .unwrap();
+    let visited = helper_rows(&plan[0]["Plan"]);
+    assert!(
+        visited <= ancestors.len() as u64,
+        "the ancestor read visited {visited} helper rows for {} ancestors",
+        ancestors.len()
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn asking_twice_with_the_same_client_id_pays_for_one_answer_from_the_selected_pool() {
+    accepted_pool_answer("model").await;
+}
+
+#[tokio::test]
+async fn an_ask_provider_pool_serves_the_requested_model_once_for_the_accepted_answer() {
+    accepted_pool_answer("provider").await;
+}
+
+async fn accepted_pool_answer(kind: &str) {
+    use orch_api_contract::pools::PoolCreate;
+
+    let s = Scene::new().await;
+    let provider = provider(&s).await;
+    let member = AskModelIdentity::api(provider, MODEL.into());
+    let resource = if kind == "provider" {
+        json!({"kind":"provider","id":provider})
+    } else {
+        json!({"kind":"model","backend":member.backend})
+    };
+    let pool = s.rig.world.app.call(PoolCreate, &[]).token(&s.ada.token)
+        .raw_body(&json!({
+            "name":"Ask models","description":"","home_id":s.ada.person.personal_org,"access":"only_me",
+            "definition":{"kind":kind,"enabled":true,"policy":{"type":"round_robin"},"lend_members":false,
+                "config":{},"members":[{"id":new_id(),"enabled":true,"rule":{"type":"single","resource":resource}}]}
+        })).send().await.ok();
+    let target = json!({"type":"pool","kind":kind,"id":pool.id});
+    let mut entry = json!({"target":&target});
+    if kind == "provider" {
+        entry["model"] = json!(MODEL);
+    }
+    setting(&s, "ask.models", json!([&entry])).await;
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&s.ada.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(json!(choices.default_model), entry);
+    let draws = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pool_choices WHERE target=$1 AND state='selected'",
+        )
+        .bind(target.clone())
+        .fetch_one(s.rig.db.pool())
+    };
+    assert_eq!(draws().await.unwrap(), 0);
+
+    let made = create_unseeded(&s, &s.ada).await;
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&served);
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, move |command| {
+            let Command::ProviderGenerate(request) = command else {
+                panic!("generation")
+            };
+            observed
+                .lock()
+                .unwrap()
+                .push((request.provider_id, request.model_name.clone()));
+            Ok(simple_answer())
+        });
+    let question = AskMessageBody {
+        client_id: "pooled-answer".into(),
+        content: vec![ContentPart::Text {
+            text: "Which model answers?".into(),
+        }],
+        context: None,
+        model: None,
+    };
+    let send = || {
+        s.rig
+            .world
+            .app
+            .call(AskMessageCreate, &[&made.conversation_id])
+            .token(&s.ada.token)
+            .body(&question)
+            .send()
+    };
+    let first = send().await.ok();
+    assert!(first.turn_id.is_some());
+    eventually("the chosen account answers", || async {
+        !served.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(send().await.ok().turn_id, first.turn_id);
+    assert_eq!(draws().await.unwrap(), 1);
+    assert_eq!(
+        served.lock().unwrap().as_slice(),
+        [(provider, MODEL.to_owned())]
     );
 }

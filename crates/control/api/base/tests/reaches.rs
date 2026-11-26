@@ -148,6 +148,7 @@ async fn people_behind(desk: &Desk, plural: &str, id: Id, holder: String) -> Vec
         .call(PermissionPeopleList, &[&plural, &id])
         .token(&desk.ada.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder,
             limit: Some(200),
             cursor: None,

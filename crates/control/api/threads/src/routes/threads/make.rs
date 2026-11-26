@@ -109,10 +109,22 @@ pub(super) struct Chosen {
 }
 
 /// A word of the API's contract as the same word of the agent contract.
-fn arrangement_of(word: orch_api_contract::binding::ArrangementType) -> Option<AgentArrangement> {
+pub(super) fn arrangement_of(
+    word: orch_api_contract::binding::ArrangementType,
+) -> Option<AgentArrangement> {
     serde_json::to_value(word)
         .ok()
         .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub(super) fn requires_birth(body: &CreateThread) -> bool {
+    body.environment
+        .as_ref()
+        .is_some_and(EnvironmentChoice::requires_birth)
+        || body
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.target.single_provider().is_none())
 }
 
 /// The agent profile and the provider a thread is bound to: the ones the
@@ -130,7 +142,12 @@ pub(super) async fn binding_of(
     if let Some(binding) = requested {
         return Ok(Some(Chosen {
             agent: binding.agent_id,
-            provider: binding.provider_id,
+            provider: binding.target.single_provider().ok_or_else(|| {
+                invalid(
+                    "binding.target",
+                    "This creation requires a concrete provider",
+                )
+            })?,
             arrangement: binding.arrangement.and_then(arrangement_of),
         }));
     }
@@ -152,6 +169,8 @@ pub(super) async fn binding_of(
         .provider_use(
             conn,
             &ProviderUse {
+                pool: None,
+                purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                 person,
                 node: topic,
                 provider,
@@ -247,14 +266,20 @@ pub(super) async fn environment_of(
     asked: Option<&EnvironmentChoice>,
 ) -> ApiResult<Id> {
     match asked {
-        Some(EnvironmentChoice::Use(id)) => {
-            if !orch_db::queries::loss::accepts_threads(conn, *id).await? {
+        Some(EnvironmentChoice::Use(target)) => {
+            let id = target.single_environment().ok_or_else(|| {
+                invalid(
+                    "environment.use",
+                    "Choose a single existing environment for this operation",
+                )
+            })?;
+            if !orch_db::queries::loss::accepts_threads(conn, id).await? {
                 return Err(ApiError::new(
                     ErrorCode::EnvironmentUnavailable,
                     "The environment was lost or removed; choose another environment",
                 ));
             }
-            Ok(*id)
+            Ok(id)
         }
         Some(EnvironmentChoice::New(_)) => Err(invalid(
             "environment.new",
@@ -421,10 +446,12 @@ pub(crate) async fn scheduled_choices(
             effort: body.effort.clone(),
         },
         Birth {
+            model_pool: None,
             let_into_environment: body.let_into_environment.unwrap_or(false),
             agent_access: body.agent_access.into(),
             first_input: None,
             prepare_source: body.prepare_source,
+            workspace_edits: body.workspace_edits.clone(),
             worktree,
             titled_by_automation: false,
             settings,
@@ -444,6 +471,7 @@ pub(crate) async fn resolve_in(
     topic: Id,
     body: &CreateThread,
     creator_prefix: bool,
+    thread: Id,
 ) -> ApiResult<(NewThread, Birth, Option<(Id, Id)>)> {
     if body.program.is_some() {
         return Err(invalid(
@@ -464,23 +492,6 @@ pub(crate) async fn resolve_in(
             .await
             .map_err(ApiError::internal)?,
     };
-    let chosen = binding_of(
-        &ctx.app,
-        conn,
-        topic,
-        principal.user(),
-        body.binding.as_ref(),
-        model.as_deref(),
-        body.effort.as_deref(),
-    )
-    .await?
-    .ok_or_else(|| {
-        ApiError::new(
-            ErrorCode::BindingIncompatible,
-            "No permitted binding was selected",
-        )
-        .with("reason", "unbound")
-    })?;
     let fallback = if body.environment.is_none()
         && needs_new_default(&ctx.app, conn, topic, principal.user()).await?
     {
@@ -494,7 +505,14 @@ pub(crate) async fn resolve_in(
         None
     };
     let mut new_environment_home = None;
-    let environment = match body.environment.as_ref().or(fallback.as_ref()) {
+    use orch_provider_contract::pools::Target as ResourceTarget;
+    let requested_environment = body.environment.as_ref().or(fallback.as_ref());
+    let environment_pool = match requested_environment {
+        Some(EnvironmentChoice::Use(target @ ResourceTarget::Pool { .. })) => Some(target),
+        _ => None,
+    };
+    let concrete_environment = match requested_environment {
+        Some(EnvironmentChoice::Use(ResourceTarget::Pool { .. })) => None,
         Some(EnvironmentChoice::New(new)) => {
             let mut new = (**new).clone();
             let home = *new.home_node_id.get_or_insert(topic);
@@ -544,9 +562,9 @@ pub(crate) async fn resolve_in(
                 }
             })?;
             new_environment_home = Some((home, made.job.id));
-            made.id
+            Some(made.id)
         }
-        _ => {
+        _ => Some(
             environment_of(
                 &ctx.app,
                 conn,
@@ -554,9 +572,113 @@ pub(crate) async fn resolve_in(
                 principal.user(),
                 body.environment.as_ref(),
             )
-            .await?
-        }
+            .await?,
+        ),
     };
+    let (chosen, selected_model, provider_selection) = if let Some(binding) = body
+        .binding
+        .as_ref()
+        .filter(|b| b.target.single_provider().is_none())
+    {
+        use orch_engine::binding::model_pool::{Placement, Request, choose};
+        let placement = match (concrete_environment, environment_pool) {
+            (Some(id), _) => Placement::Environment(id),
+            (_, Some(ResourceTarget::Pool { id, .. })) => Placement::Pool(*id),
+            _ => return Err(invalid("environment", "Choose where this thread runs")),
+        };
+        let arrangement = binding.arrangement.and_then(arrangement_of);
+        let selected = match choose(
+            conn,
+            &ctx.app.engine,
+            principal,
+            Request {
+                thread,
+                topic,
+                agent: binding.agent_id,
+                model: model.as_deref(),
+                effort: body.effort.as_deref(),
+                arrangement,
+                placement,
+                target: &binding.target,
+            },
+        )
+        .await
+        {
+            Ok(Some(selected)) => selected,
+            Ok(None) => {
+                return Err(ApiError::new(
+                    ErrorCode::BindingIncompatible,
+                    "No available member supports this agent, model and placement.",
+                )
+                .with("reason", "pool_exhausted"));
+            }
+            Err(error) => return Err(create_failed(conn, error).await),
+        };
+        (
+            Chosen {
+                agent: binding.agent_id,
+                provider: selected.provider,
+                arrangement,
+            },
+            Some(selected.model),
+            selected.pool,
+        )
+    } else {
+        let chosen = binding_of(
+            &ctx.app,
+            conn,
+            topic,
+            principal.user(),
+            body.binding.as_ref(),
+            model.as_deref(),
+            body.effort.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::BindingIncompatible,
+                "No permitted binding was selected",
+            )
+            .with("reason", "unbound")
+        })?;
+        (chosen, body.model.clone(), None)
+    };
+    let environment =
+        if let Some(target) = environment_pool {
+            target
+                .validate(orch_provider_contract::pools::Kind::Environment)
+                .map_err(|reason| invalid("environment.use", &reason))?;
+            use orch_engine::binding::environment_pool::{Request, choose};
+            match choose(
+                conn,
+                &ctx.app.engine,
+                principal,
+                Request {
+                    thread,
+                    topic,
+                    target,
+                    agent: chosen.agent,
+                    provider: chosen.provider,
+                    model: selected_model.as_deref(),
+                    provider_selection: provider_selection.clone(),
+                    effort: body.effort.as_deref(),
+                    arrangement: chosen.arrangement,
+                },
+            )
+            .await
+            {
+                Ok(Some(environment)) => environment,
+                Ok(None) => return Err(ApiError::new(
+                    ErrorCode::EnvironmentNoneUsable,
+                    "No available member of this environment pool accepts the selected binding.",
+                )
+                .with("reason", "pool_exhausted")),
+                Err(error) => return Err(create_failed(conn, error).await),
+            }
+        } else {
+            concrete_environment
+                .ok_or_else(|| invalid("environment", "Choose where this thread runs"))?
+        };
     let mut settings = Vec::new();
     if let Some(params) = &body.params {
         settings.push((keys::AGENT_PARAMS.to_owned(), json!(params)));
@@ -576,14 +698,16 @@ pub(crate) async fn resolve_in(
             .or_else(|| body.directory.clone())
             .unwrap_or_default(),
         arrangement: chosen.arrangement,
-        model: body.model.clone(),
+        model: selected_model,
         effort: body.effort.clone(),
     };
     let birth = Birth {
+        model_pool: provider_selection,
         let_into_environment: body.let_into_environment.unwrap_or(false),
         agent_access: body.agent_access.into(),
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
+        workspace_edits: body.workspace_edits.clone(),
         worktree,
         titled_by_automation: body.name.is_none(),
         settings,
@@ -599,18 +723,12 @@ pub(crate) async fn create_in(
     topic: Id,
     body: &CreateThread,
 ) -> ApiResult<Thread> {
-    let (new, birth, _) = resolve_in(ctx, conn, principal, topic, body, false).await?;
+    let thread = orch_types::new_id();
+    let (new, birth, _) = resolve_in(ctx, conn, principal, topic, body, false, thread).await?;
     let made = ctx
         .app
         .engine
-        .create_thread_in_transaction(
-            conn,
-            principal.caller(),
-            &new,
-            &birth,
-            orch_types::new_id(),
-            ctx.now,
-        )
+        .create_thread_in_transaction(conn, principal.caller(), &new, &birth, thread, ctx.now)
         .await;
     let made = match made {
         Ok(made) => made,
@@ -623,6 +741,8 @@ orch_api_base::__api_bind_db6ac243da!();
 pub(super) fn worktree_of(
     body: &CreateThread,
 ) -> ApiResult<Option<orch_api_contract::source::WorktreeChoice>> {
+    orch_engine::jobs::source::validate_workspace_edits(&body.workspace_edits)
+        .map_err(|why| ApiError::invalid("workspace_edits", why))?;
     let Some(mut choice) = body.worktree.clone() else {
         return Ok(None);
     };
@@ -739,7 +859,7 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
     } else {
         false
     };
-    if automatic_new || matches!(body.environment.as_ref(), Some(EnvironmentChoice::New(_))) {
+    if automatic_new || requires_birth(&body) {
         let topic = ctx.id("id")?;
         let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
         let principal = guard.into_principal();
@@ -826,10 +946,12 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
         effort: body.effort.clone(),
     };
     let birth = Birth {
+        model_pool: None,
         let_into_environment: body.let_into_environment.unwrap_or(false),
         agent_access: body.agent_access.into(),
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
+        workspace_edits: body.workspace_edits.clone(),
         worktree: worktree.clone(),
         titled_by_automation: name.is_none(),
         settings,
@@ -846,15 +968,21 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
             .await;
         if matches!(&created, Err(CreateThreadError::AgentNotReported)) && !discovered {
             discovered = true;
-            if matches!(
-                ctx.app
-                    .engine
-                    .learn_descriptor(new.agent, new.provider, Some(new.environment))
-                    .await
-                    .map_err(ApiError::engine)?,
-                Learning::Known
-            ) {
-                continue;
+            match ctx
+                .app
+                .engine
+                .learn_descriptor(new.agent, new.provider, Some(new.environment))
+                .await
+                .map_err(ApiError::engine)?
+            {
+                Learning::Known => continue,
+                Learning::Unknown(orch_engine::provider_setup::Unlearned::Policy(key)) => {
+                    return Err(super::harness_start_failed(Some(&key)));
+                }
+                Learning::Unknown(orch_engine::provider_setup::Unlearned::Failed(_)) => {
+                    return Err(super::harness_start_failed(None));
+                }
+                Learning::Unknown(_) => {}
             }
         }
         break created;

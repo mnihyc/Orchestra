@@ -67,6 +67,12 @@ const ROW: Declaration<&'static str> = Declaration {
             cardinality: Cardinality::Collection,
         },
         Binding {
+            source: "creator_pool_placement",
+            target: Target::ResolvedCollection("creator_pool_placement"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
             source: "creator_initial_file_threads",
             target: Target::ResolvedCollection("creator_initial_file_threads"),
             usage: FacetUsage::Required,

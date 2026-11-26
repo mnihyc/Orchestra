@@ -113,12 +113,12 @@ async fn a_side_thread_is_closed_by_its_maker_parent_page_manager_or_environment
         .body(&CreateThread {
             name: Some("Private parent".to_owned()),
             access: Some(ThreadAccess::Preset(AccessPreset::Private)),
-            binding: Some(CreateThreadBinding {
-                agent_id: scene.on.agent,
-                provider_id: scene.on.provider,
-                arrangement: None,
-            }),
-            environment: Some(EnvironmentChoice::Use(scene.on.environment)),
+            binding: Some(CreateThreadBinding::provider(
+                scene.on.agent,
+                scene.on.provider,
+                None,
+            )),
+            environment: Some(EnvironmentChoice::existing(scene.on.environment)),
             model: Some(rig::MODEL.to_owned()),
             ..CreateThread::default()
         })
@@ -642,6 +642,8 @@ async fn confirmed_environment_deletion_settles_idle_and_running_bindings_and_pr
         let query = EnvironmentDeleteQuery {
             confirm: "Workspace".to_owned(),
             at: Some(at),
+            expected_keep_days: None,
+            expected_revision: None,
         };
         let refused = scene
             .rig
@@ -803,6 +805,8 @@ async fn keeping_an_environment_cannot_withdraw_a_removal_that_begins_while_the_
         .query(&EnvironmentDeleteQuery {
             confirm: "Workspace".to_owned(),
             at: Some(at),
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await

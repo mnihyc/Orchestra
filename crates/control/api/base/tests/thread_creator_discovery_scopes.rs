@@ -163,11 +163,12 @@ async fn a_cold_existing_managed_generation_zero_uses_the_actual_provider_withou
         now,
         &principal,
         &Request {
+            identity: None,
             owner: s.ada.id(),
             name: Some("Never activated existing workspace"),
             home: s.tree.topic.base.id,
             template: Some(template),
-            host: Some(Some(host)),
+            host: Some(Some(orch_provider_contract::pools::Target::host(host))),
             config: &json!({}),
         },
     )
@@ -202,7 +203,9 @@ async fn a_cold_existing_managed_generation_zero_uses_the_actual_provider_withou
     cold(&s).await;
     let token = token(&s, s.ada.id()).await;
     let mut requested = body(&s);
-    requested.environment = Some(orch_api_contract::binding::EnvironmentChoice::Use(made.id));
+    requested.environment = Some(orch_api_contract::binding::EnvironmentChoice::existing(
+        made.id,
+    ));
     requested.binding.as_mut().unwrap().arrangement =
         Some(orch_api_contract::binding::ArrangementType::Separated);
     let (status, reply) = thread(&s, &token, s.tree.topic.base.id, &requested).await;

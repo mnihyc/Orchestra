@@ -9,12 +9,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { ShieldUser } from 'lucide-react';
-import { type ComponentType, lazy, type LazyExoticComponent, Suspense } from 'react';
+import { type ComponentType, lazy, type LazyExoticComponent, type ReactNode, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { meQuery } from '@/api/auth';
 import { AdminModeEnableAction, useAdminMode } from '@/features/access/AdminMode';
 import { isSection, sectionOf, type SectionId, type SectionProps } from '@/features/admin/sections';
+import { Storage } from '@/features/admin/Storage';
+import { useFrameReady } from '@/shell/FrameReadiness';
 import { SettingsFrame } from '@/features/settings/Frame';
 import { managementSections } from '@/features/settings/navigation';
 import { Page, PageHeader } from '@/shell/Page';
@@ -28,7 +30,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 type Body = LazyExoticComponent<ComponentType<SectionProps>>;
 
 /** Each section is its own chunk: Management is opened by few, and a chart library or a long form is not for the rest. */
-const BODIES: Record<SectionId, Body> = {
+const BODIES: Record<Exclude<SectionId, 'storage'>, Body> = {
   system: lazy(() => import('@/features/admin/System').then((module) => ({ default: module.System }))),
   overview: lazy(() => import('@/features/admin/Overview').then((module) => ({ default: module.Overview }))),
   tokens: lazy(() => import('@/features/admin/Tokens').then((module) => ({ default: module.Tokens }))),
@@ -49,7 +51,6 @@ const BODIES: Record<SectionId, Body> = {
   defaults: lazy(() => import('@/features/admin/AccessDefaults').then((module) => ({ default: module.AccessDefaults }))),
   rates: lazy(() => import('@/features/admin/Rates').then((module) => ({ default: module.Rates }))),
   settings: lazy(() => import('@/features/admin/Settings').then((module) => ({ default: module.Settings }))),
-  storage: lazy(() => import('@/features/admin/Storage').then((module) => ({ default: module.Storage }))),
   'semantic-search': lazy(() => import('@/features/admin/SemanticSearch').then((module) => ({ default: module.SemanticSearch }))),
   pki: lazy(() => import('@/features/admin/Pki').then((module) => ({ default: module.Pki }))),
   audit: lazy(() => import('@/features/admin/Audit').then((module) => ({ default: module.Audit }))),
@@ -84,6 +85,7 @@ export function Management({ section, search, onSearch }: ManagementProps) {
   const { t } = useTranslation();
   const me = useQuery(meQuery);
   const mode = useAdminMode();
+  const ready = useFrameReady();
   const id: SectionId = isSection(section) ? section : 'overview';
   const { icon: Icon } = sectionOf(id);
   const allowed = me.data?.is_system_admin === true && mode.data?.as_admin === true;
@@ -97,24 +99,28 @@ export function Management({ section, search, onSearch }: ManagementProps) {
   if (me.isPending) return <SkeletonRows read={me} className="p-6" rows={4} />;
   if (me.isError) return <ErrorState error={me.error} retrying={me.isRefetching} onRetry={() => void me.refetch()} />;
   if (!me.data.is_system_admin) return <Refusal />;
-  if (mode.isPending) return <SkeletonRows read={mode} className="p-6" rows={4} />;
-  if (mode.isError) return <ErrorState error={mode.error} onRetry={() => void mode.refetch()} />;
-  if (!mode.data.as_admin) return <Page><PageHeader title={t('admin.title')} /><div className="flex flex-wrap items-center gap-2"><AdminModeEnableAction /></div></Page>;
+  const checkingStorage = id === 'storage' && (mode.isPending || (!ready && allowed));
+  if (!checkingStorage) {
+    if (mode.isPending) return <SkeletonRows read={mode} className="p-6" rows={4} />;
+    if (mode.isError) return <ErrorState error={mode.error} onRetry={() => void mode.refetch()} />;
+    if (!mode.data.as_admin) return <Page><PageHeader title={t('admin.title')} /><div className="flex flex-wrap items-center gap-2"><AdminModeEnableAction /></div></Page>;
+  }
 
-  const Body = BODIES[id];
-  return (
+  const frame = (body: ReactNode) => (
     <SettingsFrame title={t(`admin.sections.${id}.title`)} lead={id === 'tokens' ? undefined : t(`admin.sections.${id}.lead`)}
       label={t('admin.nav.label')} current={id} items={managementSections(t)}>
-          <div data-management-content>
-          <ErrorBoundary
-            resetKey={id}
-            fallback={(error, retry) => <ErrorState error={error} onRetry={retry} />}
-          >
-            <Suspense fallback={<SkeletonRows rows={6} />}>
-              <Body search={search} onSearch={onSearch} />
-            </Suspense>
-          </ErrorBoundary>
-          </div>
+      <div data-management-content>
+        <ErrorBoundary resetKey={id} fallback={(error, retry) => <ErrorState error={error} onRetry={retry} />}>
+          <Suspense fallback={<SkeletonRows rows={6} />}>{body}</Suspense>
+        </ErrorBoundary>
+      </div>
     </SettingsFrame>
   );
+  if (id === 'storage') {
+    return <Storage confirmSession={checkingStorage} frame={checkingStorage
+      ? (body) => <Page><PageHeader title={t('admin.sections.storage.title')} />{body}</Page>
+      : frame} />;
+  }
+  const Body = BODIES[id];
+  return frame(<Body search={search} onSearch={onSearch} />);
 }

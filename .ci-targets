@@ -1,0 +1,7 @@
+fmt
+test -p orch-api-core --test binding_options
+test -p orch-api-core --test thread_creator_operation_scopes
+test -p orch-api-core --test threads_make
+web typecheck
+web lint
+web test
