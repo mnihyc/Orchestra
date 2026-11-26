@@ -81,6 +81,11 @@ async fn anonymous_known_and_chunked_oversized_json_reaches_the_client_as_413_an
     // The deployment entrypoint creates empty includes when HTTPS is not configured.
     std::fs::write(directory.path().join("frontend-https.conf"), "").unwrap();
     std::fs::write(directory.path().join("ports-https.conf"), "").unwrap();
+    std::fs::write(
+        directory.path().join("frontend-csp.conf"),
+        "set $csp_script \"\";\nset $csp_style \"\";\nset $csp_connect \"\";\nset $csp_frame \"\";\n",
+    )
+    .unwrap();
     let authority = CertificateAuthority::create("Edge body test", 30, &SystemClock).unwrap();
     std::fs::write(directory.path().join("ca.pem"), authority.certificate_pem()).unwrap();
     let (key, certificate) = authority
@@ -125,8 +130,17 @@ async fn anonymous_known_and_chunked_oversized_json_reaches_the_client_as_413_an
             &format!("        listen 127.0.0.1:{PORT_NAMES_PORT};\n"),
         )
         .replace("https://api:8443", &format!("https://127.0.0.1:{API_PORT}"))
+        .replace(
+            "server api:8443 resolve;",
+            &format!("server 127.0.0.1:{API_PORT};"),
+        )
+        .replace(
+            "server gateway:9444 resolve;",
+            &format!("server 127.0.0.1:{API_PORT};"),
+        )
         .replace("/tmp/frontend-https.conf", "/fixture/frontend-https.conf")
         .replace("/tmp/ports-https.conf", "/fixture/ports-https.conf")
+        .replace("/tmp/frontend-csp*.conf", "/fixture/frontend-csp.conf")
         .replace("/etc/orch/secrets/orch_ca_cert.pem", "/fixture/ca.pem");
     std::fs::write(directory.path().join("nginx.conf"), config).unwrap();
     let compose = std::fs::read_to_string(root.join("deploy/compose.yml")).unwrap();

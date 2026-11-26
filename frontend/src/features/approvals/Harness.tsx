@@ -9,7 +9,7 @@
  * when the card appears.
  */
 import type { TFunction } from 'i18next';
-import { useState } from 'react';
+import { useState, Fragment } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type {
@@ -61,13 +61,26 @@ export function RequestBody({ request }: { request: HarnessRequest }) {
           <JsonTree value={request.detail.permissions} label={t('approvals.permissions')} />
         </div>
       );
-    case 'other':
+    case 'other': {
+      // A tool's request reads as what it was called with (`url`, `prompt`), in its own names; the call whole stays one click away.
+      const raw = request.detail.raw;
+      const input = typeof raw === 'object' && raw !== null && !Array.isArray(raw) && 'input' in raw ? raw.input : null;
+      const fields = typeof input === 'object' && input !== null && !Array.isArray(input)
+        ? Object.entries(input).flatMap(([name, value]) => typeof value === 'string' && value.trim() !== '' ? [[name, value] as const] : []) : [];
+      const summary = request.detail.summary.trim();
       return (
         <div className="flex flex-col gap-2">
-          <p className="text-sm text-text">{request.detail.summary}</p>
-          <JsonTree value={request.detail.raw} label={t('approvals.raw')} />
+          {summary !== '' && !fields.some(([, value]) => value.trim() === summary) && <p className="text-sm text-text">{summary}</p>}
+          {fields.length > 0 && <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm" data-request-fields>
+            {fields.map(([name, value]) => <Fragment key={name}><dt className="text-text-muted">{name}</dt><dd className="wrap-anywhere whitespace-pre-wrap text-text">{value}</dd></Fragment>)}
+          </dl>}
+          {fields.length > 0 ? <details className="text-sm">
+            <summary className="cursor-pointer text-xs text-text-muted">{t('approvals.raw')}</summary>
+            <JsonTree value={raw} label={t('approvals.raw')} />
+          </details> : <JsonTree value={raw} label={t('approvals.raw')} />}
         </div>
       );
+    }
     case 'plan':
       return <div className="max-h-(--diff-max-height) overflow-y-auto text-sm" data-plan-text><Markdown text={request.detail.plan} /></div>;
     case 'user_input':

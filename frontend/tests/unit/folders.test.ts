@@ -3,7 +3,7 @@ import { listedTreeNode } from '../doubles/tree-node';
 import { describe, expect, it } from 'vitest';
 
 import { ApiError } from '@/api/client';
-import { deletesDepartment } from '@/features/navigation/NodeDialogs';
+import { deletesDepartment } from '@/features/navigation/NodeDialogHost';
 import { buildRows, newLayoutMemory, type NavItem } from '@/features/navigation/NodeTree';
 import { type NodeMenuActions, type NodeMenuContext, nodeMenuEntries } from '@/features/navigation/NodeMenu';
 import { depthWords } from '@/features/navigation/depth';

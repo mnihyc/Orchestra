@@ -1,3 +1,5 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { Input } from '@/ui/Input';
 /** Direct and group chats of a root org with unread state.
  *
  * The screen at `/org/$slug/messages`: the list of the caller's direct and group chats in this org, the
@@ -77,7 +79,8 @@ function MessagesOf({ rootId, org, slug, search, onSearch }: MessagesProps & { r
   const { t } = useTranslation();
   const me = useStore(client.session, (state) => state.userId);
   const [creating, setCreating] = useState(false);
-  const mine = useInfiniteQuery(orgChatsQuery(rootId, { scope: 'mine', of: null, participating: search.participating === 'true' }));
+  const names = useCollectionSearch('my-chats:' + rootId);
+  const mine = useInfiniteQuery(orgChatsQuery(rootId, { scope: 'mine', of: null, participating: search.participating === 'true', ...(names.q === '' ? {} : { q: names.q }) }));
   useOrgTreeFeed(org === null ? null : rootId);
 
 
@@ -132,7 +135,7 @@ function MessagesOf({ rootId, org, slug, search, onSearch }: MessagesProps & { r
           onClick={() => readAll.mutate()}
         />} />
       </div>
-      <FilterBar className="shrink-0 border-b border-border px-3 py-2"
+      <FilterBar className="shrink-0 border-b border-border px-3 py-2" search={<Input type="search" hideLabel label={t('ui.collection.find', { name: t('screens.messages.title') })} placeholder={t('ui.combobox.search')} value={names.text} onChange={(event) => names.onText(event.target.value)} />}
         participation={<ParticipationFilter checked={search.participating === 'true'} onCheckedChange={(on) => onSearch({ participating: on ? 'true' : undefined })} />}
         action={canStartMessage ? <Button size="sm" variant="primary" icon={<MessageSquarePlus aria-hidden />} onClick={() => setCreating(true)}>{t('chat.new.title')}</Button> : undefined} />
       {org !== null && <AllChats org={org} slug={slug} search={search} me={me} />}
