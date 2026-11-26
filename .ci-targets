@@ -1,0 +1,2 @@
+# The help, catalogue and label checks over the changed words (tool access, Use Open, Deny with note)
+web test -- tests/unit/help-content.test.ts tests/unit/help-coverage.test.ts tests/unit/provider-help.test.ts tests/unit/ask-guide.test.ts tests/unit/catalogue-usage.test.ts tests/unit/label-words.test.ts tests/unit/acts.test.ts

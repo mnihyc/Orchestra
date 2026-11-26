@@ -1,5 +1,5 @@
 /** A real refused restore distinguishes a previous device session from a first entrance. */
-import { act, cleanup, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createApiClient } from '@/api/client';
 import { SessionEndedNotice } from '@/features/auth/SessionEnded';
@@ -34,6 +34,37 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(screen.getByText(i18n.t('auth.login.sessionEnded'))).toBeVisible();
     act(() => current.adopt(grant()));
     expect(screen.queryByText(i18n.t('auth.login.sessionEnded'))).not.toBeInTheDocument();
+  });
+
+  it.each(['expired','revoked','account_unavailable'] as const)(`keeps a native %s result attached to its former session and clears its open facts on replacement in ${locale}`,async(cause)=>{
+    useAppearance.setState({locale});await setLocale(locale);
+    const at='2026-11-15T04:00:00Z';
+    const fetch=vi.fn(()=>Promise.resolve(Response.json({type:'orch:error:auth.invalid_token',code:'auth.invalid_token',title:'Sign in',detail:'Sign in',status:401,request_id:'test',session_end:{cause,...(cause==='account_unavailable'?{}:{at_if_known:at})}},{status:401,headers:{'content-type':'application/problem+json'}})));
+    const current=createApiClient({...options,fetch});current.adopt(grant());
+    const view=show(<SessionEndedNotice session={current.session}/>);
+    await act(async()=>{expect(await current.renew()).toBe(false);});
+    const word=cause==='account_unavailable'?'accountUnavailable':cause;
+    expect(screen.getByText(i18n.t(`auth.login.sessionEnd.${word}`))).toBeVisible();
+    fireEvent.click(screen.getByRole('button',{name:i18n.t('common.details')}));
+    expect(screen.getByRole('dialog')).toBeVisible();
+    expect(screen.getByText(i18n.t('auth.login.sessionEnd.reason'))).toBeVisible();
+    if(cause==='account_unavailable')expect(within(screen.getByLabelText(i18n.t('factDisclosure.groups.recordedOutcome'))).getByText(i18n.t('factDisclosure.notReported'))).toBeVisible();
+    else expect(view.baseElement.querySelector('time')?.dateTime).toBe(at);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    act(()=>current.adopt({...grant(),user:me(2,'replacement','Replacement')}));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:i18n.t('common.details')})).not.toBeInTheDocument();
+  });
+
+  it(`leaves missing session facts unreported instead of rebuilding them from a current expiry default in ${locale}`,async()=>{
+    useAppearance.setState({locale});await setLocale(locale);
+    const current=createApiClient(options);current.adopt(grant());
+    show(<SessionEndedNotice session={current.session}/>);
+    await act(async()=>{expect(await current.renew()).toBe(false);});
+    expect(screen.getByText(i18n.t('auth.login.sessionEnded'))).toBeVisible();
+    fireEvent.click(screen.getByRole('button',{name:i18n.t('common.details')}));
+    expect(within(screen.getByLabelText(i18n.t('factDisclosure.groups.recordedOutcome'))).getAllByText(i18n.t('factDisclosure.notReported'))).toHaveLength(2);
+    expect(screen.queryByText(i18n.t('auth.login.sessionEnd.expired'))).not.toBeInTheDocument();
   });
 }
 
