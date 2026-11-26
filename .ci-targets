@@ -1,0 +1,1 @@
+web-e2e tests/e2e/search.spec.ts tests/e2e/ffix-start.spec.ts tests/accessibility/ffix-start.spec.ts tests/e2e/frame-review.spec.ts --project=chromium --retries=1

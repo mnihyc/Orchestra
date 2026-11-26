@@ -59,6 +59,7 @@ async fn a_live_readonly_mount_appears_and_detaches_without_restarting_the_proce
     let pid = lab.inspect(&unit).await.state.unwrap().pid;
     let process = lab.read(&unit, "/opt/process-kept").await.unwrap();
     let mount = MountSpec {
+        resource_id: None,
         name: "live-data".into(),
         kind: MountKind::Path,
         source: data.to_string_lossy().into_owned(),
@@ -134,6 +135,7 @@ async fn a_live_private_mount_keeps_changes_in_its_layer_and_never_writes_the_da
     lab.track_volume(&layer);
     lab.track_volume(&format!("{layer}-view"));
     let mount = MountSpec {
+        resource_id: None,
         name: "private-data".into(),
         kind: MountKind::Path,
         source: data.to_string_lossy().into_owned(),
@@ -198,6 +200,7 @@ async fn a_failed_second_attach_restores_the_previous_set_and_keeps_the_process_
     });
     let unit = lab.run(&request).await;
     let old = MountSpec {
+        resource_id: None,
         name: "kept-data".into(),
         kind: MountKind::Path,
         source: old_data.to_string_lossy().into_owned(),
@@ -229,6 +232,7 @@ async fn a_failed_second_attach_restores_the_previous_set_and_keeps_the_process_
         ..old.clone()
     };
     let impossible = MountSpec {
+        resource_id: None,
         name: "cannot-attach".into(),
         target: "/opt/not-a-directory/child".into(),
         ..changed.clone()

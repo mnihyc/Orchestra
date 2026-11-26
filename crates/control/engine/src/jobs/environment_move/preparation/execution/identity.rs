@@ -511,7 +511,13 @@ async fn switch_destinations(
         _ => return Err(closed()),
     };
     let host = selected_host.unwrap_or(planned);
-    if new.host_id.flatten().is_some_and(|named| named != host) {
+    if new
+        .host_id
+        .as_ref()
+        .and_then(Option::as_ref)
+        .and_then(orch_provider_contract::pools::Target::single_host)
+        .is_some_and(|named| named != host)
+    {
         return Err(closed());
     }
     let node = orch_db::queries::hierarchy::with_ancestors(conn, &[home])

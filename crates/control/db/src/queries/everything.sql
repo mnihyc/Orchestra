@@ -15,6 +15,8 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
          n."grant",
          n.id uuid_key
     FROM node_access n
+   -- Only resources stand under the Resources group: its list reads no place, document or chat at all.
+   WHERE __NOT_RESOURCES__
 ), resource_rows AS NOT MATERIALIZED (
   SELECT 'environment'::text kind, e.id, e.name, e.home_node_id home, e.org_id, e.owner_id,
          e.created_at, e.last_activity_at last_activity, e.status state, e.retained_bytes size_bytes,
@@ -31,6 +33,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
   UNION ALL SELECT 'template', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN enabled THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM env_templates WHERE deleted_at IS NULL
   UNION ALL SELECT 'mount', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN enabled THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM mounts WHERE deleted_at IS NULL
   UNION ALL SELECT 'skill', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN enabled THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM skills WHERE deleted_at IS NULL
+  UNION ALL SELECT 'pool', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN (definition->>'enabled')::boolean THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM pools WHERE deleted_at IS NULL
 ), inventory AS NOT MATERIALIZED (
   SELECT kind,id,name,parent_id,path,org_id,created_by,owner_id,created_at,last_activity,state,size_bytes,takes,"grant" FROM node_rows
   UNION ALL
@@ -38,7 +41,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
          d.created_by, d.owner_id, d.created_at, d.updated_at, NULL, d.bytes + d.files_bytes, NULL,
          COALESCE(__GRANTS__->'objects'->d.id::text, '{}'::jsonb)
     FROM documents d JOIN nodes n ON n.id = d.node_id
-   WHERE d.deleted_at IS NULL
+   WHERE d.deleted_at IS NULL AND __NOT_RESOURCES__
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
   UNION ALL
   -- Keep node paths plain and the shared parent expression intact, so both existing indexes remain usable.
@@ -50,7 +53,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
            THEN COALESCE(n."grant"->'chat', '{}'::jsonb)
            ELSE jsonb_set(COALESCE(n."grant"->'chat', '{}'::jsonb),'{named}','false'::jsonb) END
     FROM chats c JOIN nodes root ON root.id = c.org_id JOIN node_rows n ON n.uuid_key = c.node_id
-   WHERE c.node_id IS NOT NULL
+   WHERE c.node_id IS NOT NULL AND __NOT_RESOURCES__
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
   UNION ALL
   SELECT 'chat', c.id::text,
@@ -59,7 +62,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
          c.created_by, NULL, c.created_at, c.last_message_at, NULL, NULL, NULL,
          COALESCE(__GRANTS__->'objects'->c.id::text, '{}'::jsonb)
     FROM chats c JOIN nodes root ON root.id = c.org_id JOIN nodes home ON home.id=COALESCE(c.home_id,c.org_id)
-   WHERE c.node_id IS NULL
+   WHERE c.node_id IS NULL AND __NOT_RESOURCES__
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(home.path) AND gone.deleted_at IS NOT NULL)
   UNION ALL
   SELECT r.kind, r.id::text, r.name, 'resources', COALESCE(n.path, '{}'::uuid[]), r.org_id,
@@ -91,6 +94,8 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
     AND ($32::text IS NULL OR CASE i.kind
       WHEN 'template' THEN EXISTS (SELECT 1 FROM env_templates t WHERE t.id=i.id::uuid AND t.kind=$32)
       WHEN 'environment' THEN EXISTS (SELECT 1 FROM environments e WHERE e.id=i.id::uuid AND CASE WHEN e.template_id IS NULL THEN 'machine' ELSE 'template' END=$32)
+      WHEN 'pool' THEN EXISTS(SELECT 1 FROM pools p WHERE p.id=i.id::uuid AND p.kind=$32)
+      WHEN 'agent' THEN $32='system' AND EXISTS (SELECT 1 FROM agents a WHERE a.id=i.id::uuid AND a.home_id IS NULL)
       ELSE false END)
     AND (NOT $33::boolean OR COALESCE((i."grant"->>'library_scope')::boolean,false))
     AND ($34::uuid IS NULL OR i.path @> ARRAY[$34])) fits
@@ -210,7 +215,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
         SELECT tag_id FROM node_tags WHERE node_id=CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
         UNION ALL
         SELECT tag_id FROM resource_tags WHERE resource_kind=i.kind
-          AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill') THEN i.id::uuid END
+          AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool') THEN i.id::uuid END
       ) tt JOIN tags tag ON tag.id=tt.tag_id JOIN nodes place ON place.id=tag.node_id
      WHERE COALESCE((i."grant"->>'view')::boolean, false)
   ), '[]'::jsonb) END tags,
@@ -235,7 +240,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
       SELECT tag_id FROM node_tags WHERE node_id=CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
       UNION ALL
       SELECT tag_id FROM resource_tags WHERE resource_kind=i.kind
-        AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill') THEN i.id::uuid END
+        AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool') THEN i.id::uuid END
     ) tt JOIN tags t ON t.id=tt.tag_id)
   END ELSE CASE WHEN $12 = 'name' AND (i."grant"->>'named')::boolean THEN lower(i.name) END END sort_key
   FROM (SELECT * FROM filtered UNION ALL SELECT * FROM groups) i

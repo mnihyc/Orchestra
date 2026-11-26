@@ -12,6 +12,7 @@
 pub mod client_address;
 pub mod connector;
 pub mod loader;
+pub mod observed;
 pub mod secrets;
 pub mod server;
 

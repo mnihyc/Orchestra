@@ -15,6 +15,7 @@ import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { ProviderSources } from './Sources';
 import { ProviderServices } from './Services';
+import { ProviderRelay } from './Relay';
 
 export function ProviderSettings({ provider }: { provider: Provider }) {
   const { t } = useTranslation();
@@ -23,6 +24,7 @@ export function ProviderSettings({ provider }: { provider: Provider }) {
     <div className="flex min-w-0 flex-col gap-6">
     <ProviderSources provider={provider} />
     <ProviderServices provider={provider} />
+    <ProviderRelay provider={provider} />
     <Section id="provider-settings" title={t('providerRecovery.runtimeSettings')}>
       {settings.isPending ? (
         <SkeletonRows read={settings} rows={4} />
@@ -30,7 +32,7 @@ export function ProviderSettings({ provider }: { provider: Provider }) {
         <ErrorState compact error={settings.error} retrying={settings.isRefetching} onRetry={() => void settings.refetch()} />
       ) : (
         <>
-          <SettingsTable settings={settings.data} label={t('providers.settings.title')} target={{ kind: 'provider', id: provider.id }} place={{ name: provider.name, owner: provider.owner, access: provider.access, kind: null }} runtime={provider.runtime_changes} />
+          <SettingsTable settings={settings.data} label={t('providers.settings.title')} target={{ kind: 'provider', id: provider.id }} place={{ name: provider.name, owner: provider.owner, access: provider.access, kind: null }} />
         </>
       )}
     </Section>
