@@ -1151,6 +1151,9 @@ async fn following_then_muting_a_chat_changes_focus_without_changing_view() {
             .call(OrgChatList, &[&root])
             .token(&reader.token)
             .query(&OrgChatListQuery {
+                ids: None,
+                include_empty: None,
+                q: None,
                 participating: Some(true),
                 scope: Some(ChatListScope::Nodes),
                 of: None,
@@ -1408,6 +1411,7 @@ async fn thread_document_and_chat_activity_reach_the_tree_inventory_and_finder_w
         .call(OrgTreeGet, &[&root])
         .token(&reader.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(before.seq),
             ..Default::default()
         })
