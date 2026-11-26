@@ -11,7 +11,7 @@ use orch_access_contract::{
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::environment::EnvironmentReachGet;
 use orch_api_contract::mounts::{MountCreate, MountCreateBody, MountGet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{identity, resources::mounts};
@@ -115,7 +115,7 @@ async fn key(s: &Scene, user: Id, rules: Vec<Json>) -> Key {
         }
     }
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.world.conn().await,
         &identity::NewApiToken {
@@ -139,7 +139,7 @@ async fn legacy(s: &Scene, user: Id, node: Option<Id>) -> Key {
     orch_authz::TokenGrant::from_stored(&scopes, node)
         .expect("concrete legacy wildcard fixture is valid");
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.world.conn().await,
         &identity::NewApiToken {

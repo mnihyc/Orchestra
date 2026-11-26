@@ -47,7 +47,7 @@ pub enum OverviewPart<T> {
     /// The native reader's refusal or failure, with its ordinary diagnostics.
     Failed {
         /// The same problem the native reader would return.
-        problem: crate::common::Problem,
+        problem: Box<crate::common::Problem>,
         /// Native retry delay, in seconds, when supplied by the reader.
         retry_after: Option<u64>,
     },
@@ -137,7 +137,9 @@ pub struct NodeOverviewGetQuery {
 }
 
 /// What kind of node something is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     /// An org. It lies in another org or stands alone; inside another org it is what people usually
@@ -320,6 +322,9 @@ pub struct NodeBase<K> {
     pub tags_source: FieldSource,
     /// When automation last wrote the title or tags.
     pub auto_updated_at: Option<Time>,
+    /// Retained automatic field outcomes and actual scheduling facts; current ownership still wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_fields: Option<crate::summary_facts::AutomaticFields>,
     /// How its permission page stands against the defaults.
     pub page: PageState,
     /// The node's chat; reading it needs its own permission.
@@ -513,9 +518,23 @@ pub enum JobState {
     Lost,
 }
 
+/// Source clone figures for readers with file-view access to the thread's environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CloneProgress {
+    /// Repository bytes received.
+    pub bytes: i64,
+    /// Git objects received.
+    pub objects: i64,
+    /// How long this attempt may go without progress.
+    pub idle_seconds: u64,
+}
+
 /// A job, in the few words that a thing it holds locked carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct JobRef {
+    /// Present while the source clone runs or when it stalls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone: Option<CloneProgress>,
     /// The job's identifier.
     pub id: Id,
     /// What it does, as a word such as `thread_fork`.
@@ -531,6 +550,10 @@ pub struct JobRef {
 /// A node of the tree, with what a tree view needs and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TreeNode {
+    /// Current reader-visible descendants summarized without retaining their rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<TreeFold>,
+
     /// Own and rolled-up thread, document and chat activity; absent only on a deletion stub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_at: Option<Time>,
@@ -567,13 +590,43 @@ pub struct TreeNode {
     pub topic: Option<TreeTopic>,
     /// What a thread adds.
     pub thread: Option<TreeThread>,
-    /// Its chat and how far the chat has come.
-    pub chat: TreeChat,
+    /// Its chat identity; message progress is withheld without that chat's current View.
+    pub chat: TreeNodeChat,
     /// Live documents beside it that follow its documents rows; private ones are listed separately.
     pub docs: i64,
     /// The native document-directory membership stamp, independent of this node's name or activity.
     #[serde(default)]
     pub docs_seq: Seq,
+}
+
+/// Attention inside a hierarchy branch, computed for this reader at the page's cut.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeFold {
+    /// Whether this root's current readable descendants fit the requested initial page.
+    /// Omitted when this page does not ask for the root's initial shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_tree: Option<bool>,
+    /// Facts from readable paths that are not archived.
+    #[serde(flatten)]
+    pub active: TreeFoldCounts,
+    /// Readable archived paths, kept separate so each current view can include or omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<TreeFoldCounts>,
+}
+
+/// Authorized facts inside one visibility class of a hierarchy branch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeFoldCounts {
+    /// A native View-authorized direct child exists, whether or not loaded in this browser.
+    pub has_children: bool,
+    /// Pending decisions inside it.
+    pub waiting: i64,
+    /// Any unread followed thread or chat inside it.
+    pub unread: bool,
+    /// Unread personal mentions inside it.
+    pub mentions: i64,
+    /// The most urgent current thread presentation inside it.
+    pub urgency: Option<crate::threads::ThreadDisplayState>,
 }
 
 /// What a tree view says of a topic.
@@ -652,6 +705,15 @@ pub struct TreeChat {
     pub seq: Seq,
 }
 
+/// A node's known chat identity, with message progress admitted separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeNodeChat {
+    /// The chat identity that belongs to the node.
+    pub id: Id,
+    /// Its message position when this reader has Chat View; null when withheld.
+    pub seq: Option<Seq>,
+}
+
 crate::common::full_or_receipt! {
     /// An ordinary created organization or its accepted creation receipt.
     #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
@@ -666,6 +728,19 @@ crate::common::full_or_receipt! {
 /// The nodes of an org's tree that the caller may view, whole or as a change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrgTreeGetReply {
+    /// The effective navigation order and safe relative context, when an order was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordering: Option<HierarchyOrdering>,
+    /// The effective default or explicitly requested page size for this opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<i64>,
+    /// The same bounded metadata protocol used by document directory views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
+    /// Authorized structural ancestors of this page, outside its result window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestors: Vec<Listed<TreeNode>>,
+
     /// The native settings of this root, on the first full-load page only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Vec<crate::settings::ResolvedSetting>>,
@@ -787,11 +862,14 @@ pub enum AuditActor {
 /// Read-only deletion facts returned by an authorized inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeletedInspection {
+    /// Present for a node inspected under its restoration authority; distinct from purge_at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_hold: Option<NodeCleanupHold>,
     /// When the object was deleted.
     pub deleted_at: Time,
     /// Who deleted it, where known.
     pub deleted_by: Option<UserRef>,
-    /// Its promised purge day.
+    /// The recorded restoration cutoff; physical cleanup can wait for retained dependencies.
     pub purge_at: Time,
     /// Always true for an inspection.
     pub readonly: bool,
@@ -1062,6 +1140,7 @@ pub struct FirstInput {
     /// What to say to the agent.
     pub content: Vec<ContentPart>,
     /// A value of the client's own that makes sending it again safe.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1157,6 +1236,10 @@ pub struct CreateThread {
     /// Prepare the repository when the directory is missing on any machine, unless explicitly false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepare_source: Option<bool>,
+    /// File edits saved before a new workspace exists. Creation applies them conditionally
+    /// after source preparation and before the agent's first input, then consumes this plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_edits: Vec<crate::source::WorkspaceFileEdit>,
     /// An own branch and unused worktree directory in an existing environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::source::WorktreeChoice>,
@@ -1239,6 +1322,9 @@ pub enum ArchivedFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeChildListQuery {
+    /// Words in the admitted visible name, before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Only ordinary page access, independent of native administrator reach; before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub participating: Option<bool>,
@@ -1376,6 +1462,7 @@ pub struct ThreadAdoptBody {
     /// The agent profile.
     pub agent_id: Id,
     /// The harness's own reference to the session.
+    #[schemars(extend("x-storage-exact" = true))]
     pub native_session_ref: String,
     /// The environment; the caller's one on that machine whose root holds the
     /// session's directory when left out.
@@ -1670,18 +1757,105 @@ pub struct NodeAuditListQuery {
     pub cursor: Option<String>,
 }
 
+/// The order requested for a hierarchy window; Navigation resolves this reader's current saved choice.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HierarchySort {
+    Navigation,
+    Newest,
+    Changed,
+    Name,
+    Custom,
+}
+
+/// The current native presentation order, after resolving the saved choice.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HierarchyOrderBy {
+    Newest,
+    Changed,
+    Name,
+    Custom,
+}
+
+/// The supported numeric, base-letter name ordering used by navigation.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+pub enum HierarchyLocale {
+    #[default]
+    #[serde(rename = "en")]
+    En,
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+}
+
+/// Current ordering facts, with only safe relative orders of identities already returned in this page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HierarchyOrdering {
+    pub by: HierarchyOrderBy,
+    /// Changes with the effective order and locale; it contains no private identifiers or raw ranks.
+    pub revision: orch_types::Hash,
+    /// Partial sibling orders, only for already returned visible or inspectable identities.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub known_order: std::collections::BTreeMap<Id, Vec<Id>>,
+}
+
 /// What an org's tree answers with, from a sequence.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct OrgTreeGetQuery {
+    /// Order the complete eligible sibling set before paging; omission uses native identity order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<HierarchySort>,
+    /// Navigation's actual supported language, not the API process's operating-system locale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<HierarchyLocale>,
+    /// Reveal this node's ancestor path instead of reading siblings or descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_to: Option<Id>,
+    /// Search readable names in the root on the server; an empty value lists its first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Exclude threads before selecting a place page when false; omission includes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_threads: Option<bool>,
+    /// Narrow a paged selector to this native node kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<NodeKind>,
+    /// Restrict selector results to this place and its descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below_id: Option<Id>,
+
+    /// Only the direct children of this node within the root organization. Omitted reads the full tree.
+    /// A branch snapshot cannot be combined with `since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Id>,
     /// Only the nodes that changed after this tree sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Seq>,
     /// Continue a full load; cannot be combined with `since`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// Nodes scanned in a full-load page, from 1 to [`TREE_SYNC_MAX_CHANGES`].
-    /// Omitted means that maximum. A delta always uses the change bound.
+    /// Positive page size. A branch defaults to navigation.tree_page_size; a full tree defaults
+    /// to the ordinary sync batch size. An explicit size may be larger. A delta uses its change bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -1718,6 +1892,64 @@ pub enum SharedListItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admin_access: Option<crate::access::AdminAccess>,
     },
+}
+
+/// The independently searchable kinds in Shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedListKind {
+    /// An organization.
+    Org,
+    /// A project or hierarchy folder.
+    Project,
+    /// A topic.
+    Topic,
+    /// A thread.
+    Thread,
+    /// A document-only folder.
+    DocumentContainer,
+    /// A text document.
+    Document,
+}
+
+/// Search visible shared names, descriptions and disclosed path names before paging.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SharedListQuery {
+    /// All kinds by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SharedListKind>,
+    /// Literal visible words, with no minimum length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries requested in this page; fifty by default, any positive u32.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same actor, kind and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl SharedListQuery {
+    /// A page size is a default, never the collection's total.
+    pub fn limit(&self) -> u32 {
+        self.limit.unwrap_or(crate::common::DEFAULT_LIMIT).max(1)
+    }
+    /// Shared bound continuation fields.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+    /// Ordinary candidate paging can retain its existing empty-page continuation.
+    pub fn filtered(&self) -> bool {
+        self.kind.is_some() || self.q.as_deref().is_some_and(|q| !q.trim().is_empty())
+    }
 }
 
 /// Newest named shares, including documents and owned document folders. The cursor
@@ -1799,9 +2031,47 @@ pub struct NodeArchiveEnvironment {
     pub redacted: bool,
 }
 
+/// The native condition holding an otherwise configured automatic node action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRetentionHold {
+    ActiveWork,
+    AlreadyArchived,
+    AncestorArchived,
+    NotArchived,
+}
+
+/// One effective policy and its eligibility, assessed by the enforcing scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeRetentionPolicy {
+    pub days: Option<i64>,
+    /// Safe layer only; private ancestor names and identifiers are not disclosed.
+    pub source: Option<crate::settings::SettingScope>,
+    pub eligible_at: crate::workspace::JobWaitTime,
+    pub hold_reason: Option<NodeRetentionHold>,
+}
+
+/// Current automatic eligibility, separate from an accepted deletion's recovery cutoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeRetention {
+    pub archive: NodeRetentionPolicy,
+    pub delete: NodeRetentionPolicy,
+    pub measured_at: Time,
+}
+
+/// The physical purge worker's current dependency predicate, with no private reference names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeCleanupHold {
+    pub held: bool,
+    pub measured_at: Time,
+}
+
 /// The complete read-only review of archiving or unarchiving a subtree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeArchivePlan {
+    /// The same automatic assessment as the native scheduler, not the review token lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<NodeRetention>,
     /// Caller-bound stored review, for this node and direction only.
     pub preflight_id: Id,
     /// When the review expires.
@@ -2145,9 +2415,10 @@ crate::endpoints! {
             Facet::required(Read,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("results")),
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("hierarchy_names")),
             Facet::response_content(&[Object(K::Org)],Target::ResolvedCollection("tree_settings")),
+            Facet::response_content(&[Identity(I::Chat)],Target::ResolvedCollection("tree_groups")),
         ]);
     /// Lists named places whose parent is unreadable and current named/owned document folders.
-    SharedList: GET "/shared", User, query crate::common::PageQuery, none, json SharedListReply, 200,
+    SharedList: GET "/shared", User, query SharedListQuery, none, json SharedListReply, 200,
         operation Op::facets(&list_reader_facets(Read, &[
             Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread),
             Object(K::Document), Object(K::DocumentContainer),
@@ -2418,6 +2689,15 @@ crate::endpoints! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn small_overview_sections_keep_the_native_problem_and_retry_delay_on_failure() {
+        let problem = crate::common::Problem::not_found();
+        let written = json!({"status":"failed", "problem":problem, "retry_after":5});
+        let part: OverviewPart<()> = serde_json::from_value(written.clone()).unwrap();
+        assert!(std::mem::size_of_val(&part) < std::mem::size_of_val(&problem));
+        assert_eq!(serde_json::to_value(part).unwrap(), written);
+    }
+
     #[test]
     fn a_shared_document_folder_has_a_distinct_typed_identity_and_redacted_hierarchy_path() {
         use crate::document_tree::{DocumentContainerMark, DocumentContainerRef};

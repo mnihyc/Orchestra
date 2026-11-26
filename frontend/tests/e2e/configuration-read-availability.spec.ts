@@ -1,29 +1,35 @@
 /** Native settings failures retain the existing configuration entrance and revisioned rate controls. */
-import { expect, test } from '@playwright/test';
+import { type APIResponse, expect, type Route, test } from '@playwright/test';
 import { askModels } from '../unit/ask-fixtures';
 import type { MeBootstrapReply, NodeChatOpening, OrgTreeGetReply } from '../../src/generated/api-types';
-import { ACME, scenario, signIn } from './support';
+import { ACME, readsOneByOne, scenario, signIn } from './support';
 import { fixture, language, openAsk } from './ask-support';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
+
+/** Passes a read on with its answer changed. A read the page lets go meanwhile (a navigation of the case) is no fault here. */
+async function changed<T>(route: Route, change: (data: T) => T): Promise<void> {
+  const read = await route.fetch()
+    .then(async (response: APIResponse) => ({ response, data: await response.json() as T }))
+    .catch(() => null);
+  if (read === null) return;
+  await route.fulfill({ response: read.response, json: change(read.data) }).catch(() => undefined);
+}
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [1280, 400]) {
   test(`rate settings retry ${locale}/${theme}/${width}`, async ({ page }, info) => {
     await scenario(); await page.setViewportSize({ width, height: 1000 });
     await page.emulateMedia({ colorScheme: theme });
     let failing = true;
+    // The page's own reads come by themselves, so that the routes below see the tree and the chat opening.
+    await readsOneByOne(page);
     // Navigation and visible Chat can both supply the rate dialog's settings cache.
-    await page.route((url) => url.pathname === `/api/v1/orgs/${ACME.org}/tree`, async (route) => {
-      const response = await route.fetch();
-      const data = await response.json() as OrgTreeGetReply;
-      await route.fulfill({ response, json: { ...data, settings: null } });
-    });
-    await page.route(`**/api/v1/nodes/${ACME.org}/chat-opening?*`, async (route) => {
-      const response = await route.fetch();
-      const data = await response.json() as NodeChatOpening;
+    await page.route((url) => url.pathname === `/api/v1/orgs/${ACME.org}/tree`, (route) =>
+      changed<OrgTreeGetReply>(route, (data) => ({ ...data, settings: null })));
+    await page.route(`**/api/v1/nodes/${ACME.org}/chat-opening?*`, (route) => changed<NodeChatOpening>(route, (data) => {
       if (data.defaults !== null && data.defaults !== undefined) data.defaults.settings = null;
-      await route.fulfill({ response, json: data });
-    });
+      return data;
+    }));
     await page.route(`**/api/v1/nodes/${ACME.org}/settings`, async (route) => {
       if (route.request().method() === 'GET' && failing) await route.abort('failed'); else await route.continue();
     });
@@ -51,6 +57,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   test(`Ask configuration read retry ${locale}/${theme}/${width}`, async ({ page, request }, info) => {
     await scenario(); await page.setViewportSize({ width, height: 1000 });
     await fixture(page);
+    await readsOneByOne(page);
     // A root outside the shell's ordinary org list needs its own native configuration-name read.
     await page.route('**/api/v1/me/bootstrap', async (route) => {
       const response = await route.fetch();

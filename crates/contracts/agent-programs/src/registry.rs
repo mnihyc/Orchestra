@@ -13,7 +13,8 @@ use crate::executors::ExecutorManifest;
 use crate::manifest::{ManifestFault, ProgramManifest};
 
 /// The manifests of the programs Orch ships, one file for each.
-const PROGRAM_FILES: [&str; 4] = [
+const PROGRAM_FILES: [&str; 5] = [
+    include_str!("../manifests/antigravity.json"),
     include_str!("../manifests/claude-code.json"),
     include_str!("../manifests/codex.json"),
     include_str!("../manifests/dsh.json"),
@@ -398,9 +399,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_programs_orch_ships_are_four_and_each_is_consistent() {
+    fn the_shipped_programs_each_have_a_consistent_manifest() {
         let kinds: Vec<_> = Programs::builtin().kinds().collect();
-        assert_eq!(kinds, ["claude-code", "codex", "dsh", "fake"]);
+        assert_eq!(
+            kinds,
+            ["antigravity", "claude-code", "codex", "dsh", "fake"]
+        );
         for manifest in Programs::builtin().programs() {
             assert_eq!(manifest.check(), Ok(()), "{}", manifest.kind);
             assert!(
@@ -419,7 +423,7 @@ mod tests {
     fn the_real_programs_run_inside_environments_by_default_and_the_fake_does_not() {
         assert_eq!(
             Programs::builtin().colocated_by_default(),
-            ["claude-code", "codex", "dsh"]
+            ["antigravity", "claude-code", "codex", "dsh"]
         );
     }
 
@@ -504,7 +508,7 @@ mod tests {
     fn codex_keeps_the_interface_and_cases_its_adapter_was_written_against() {
         let codex = Programs::builtin().program("codex").unwrap();
         let probe = codex.checks.interface.as_ref().unwrap();
-        assert_eq!(probe.needs.len(), 74);
+        assert_eq!(probe.needs.len(), 79);
         for name in [
             "thread/environment/connected",
             "thread/environment/disconnected",
@@ -532,12 +536,20 @@ mod tests {
                 "native_import",
                 "tools.result_form",
                 "history.native_import",
+                "background_commands",
             ]
         );
         assert_eq!(codex.probe_programs(), ["codex"]);
         let claude = Programs::builtin().program("claude-code").unwrap();
         assert_eq!(claude.checks.interface.as_ref().unwrap().needs.len(), 25);
-        assert_eq!(claude.checks.conformance.len(), 6);
+        assert_eq!(claude.checks.conformance.len(), 9);
+        assert!(
+            claude
+                .checks
+                .cases()
+                .any(|(name, feature)| name == "auto_review"
+                    && feature == Some("approval_modes.auto"))
+        );
         assert_eq!(claude.probe_programs(), ["claude-code", "claude"]);
         assert_eq!(claude.program_names(), ["claude", "claude-code"]);
     }

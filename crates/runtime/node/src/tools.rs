@@ -131,8 +131,13 @@ const PROGRAM_MODE: u32 = 0o755;
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     /// The machine's kept or handed setting refuses a new download.
-    #[error("{0}")]
-    Policy(String),
+    #[error("{message}")]
+    Policy {
+        /// The current machine policy's safe explanation.
+        message: String,
+        /// The policy key and its actual deciding authority.
+        details: Option<orch_types::Json>,
+    },
     /// The name, the version, the hash or the address is not one.
     #[error("{0}")]
     Invalid(String),
@@ -180,7 +185,7 @@ pub enum ToolError {
 impl From<ToolError> for CommandError {
     fn from(error: ToolError) -> Self {
         let (code, retryable) = match &error {
-            ToolError::Policy(_) => (ErrorCode::Unsupported.as_str(), false),
+            ToolError::Policy { .. } => (ErrorCode::Unsupported.as_str(), false),
             ToolError::Invalid(_) | ToolError::Shape(_) => (INVALID, false),
             ToolError::Held { .. } => (ErrorCode::Conflict.as_str(), false),
             ToolError::Download(_) | ToolError::HashMismatch { .. } => {
@@ -192,6 +197,7 @@ impl From<ToolError> for CommandError {
         // A download that is not what its vendor published is said as such, so that the build is refused, not tried
         // again.
         let details = match &error {
+            ToolError::Policy { details, .. } => details.clone(),
             ToolError::HashMismatch { expected, found } => Some(serde_json::json!({
                 "checksum": "mismatch", "expected": expected, "found": found,
             })),
@@ -480,7 +486,10 @@ impl ToolCache {
         self.policy.as_ref().map_or(Ok(()), |policy| {
             policy
                 .require_tools_fetch()
-                .map_err(|error| ToolError::Policy(error.detail))
+                .map_err(|error| ToolError::Policy {
+                    message: error.detail,
+                    details: error.details,
+                })
         })
     }
 
@@ -615,7 +624,10 @@ impl ToolCache {
         cancel: &CancellationToken,
         reports: Option<&Reports>,
     ) -> Result<PathBuf, ToolError> {
-        let _change = self.changes.lock().await;
+        let _change = tokio::select! {
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            guard = self.changes.lock() => guard,
+        };
         self.check_root()?;
         let mut progress = DownloadReport {
             reports,
@@ -1085,6 +1097,49 @@ fn unpack_zip(download: &Path, content: &Path) -> Result<(), ToolError> {
     archive
         .extract(content)
         .map_err(|error| ToolError::Shape(format!("the archive cannot be unpacked: {error}")))
+}
+
+#[async_trait::async_trait]
+impl orch_connector_core::builds::BuildCache for ToolCache {
+    async fn ensure(
+        &self,
+        request: &NodeToolEnsure,
+        services: &orch_connector_core::roles::Services,
+        cancel: &CancellationToken,
+    ) -> Result<PathBuf, CommandError> {
+        self.with_policy(std::sync::Arc::clone(&services.policy))
+            .with_link(
+                services.link.clone(),
+                std::sync::Arc::clone(&services.clock),
+            )
+            .ensure(request, cancel)
+            .await
+            .map_err(CommandError::from)
+    }
+
+    fn installed(
+        &self,
+        registry: &orch_connector_core::harnesses::AdapterRegistry,
+    ) -> Vec<orch_connector_core::builds::Installed> {
+        self.list()
+            .into_iter()
+            .filter_map(|(kind, version)| {
+                if !registry.kinds_with_a_program().contains(&kind.as_str()) {
+                    return None;
+                }
+                let program = orch_connector_core::builds::find_program(
+                    &self.dir.join(&kind),
+                    &version,
+                    &registry.programs_of(&kind),
+                )?;
+                Some(orch_connector_core::builds::Installed {
+                    kind,
+                    program,
+                    version,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
