@@ -1,0 +1,1 @@
+test -p orch-api-core --test resource_resume -- a_provider_stop_notifies_each_person_once_only_when_that_operation_was_chosen

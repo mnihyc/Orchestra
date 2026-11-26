@@ -12,7 +12,8 @@ const MAIN = ACME.mainThread;
 const INTERRUPT = /\/threads\/[^/]+\/interrupt$/;
 
 const conversation = (page: Page) => page.getByRole('log', { name: 'Conversation' });
-const stop = (page: Page) => page.getByRole('group', { name: 'Message controls', exact: true }).getByRole('button', { name: 'Stop', exact: true });
+/** The Stop button says "Stop", and "Stopping…" (with the time once it lasts more than a second) while the stop is under way. */
+const stop = (page: Page) => page.getByRole('group', { name: 'Message controls', exact: true }).getByRole('button', { name: /^Stop(?:ping….*)?$/u });
 const stopped = (page: Page) => conversation(page).getByText('Stopped by Ada Lovelace');
 /** The thread's tab in the main area says what the thread's own state is. */
 const working = (page: Page) => page.getByRole('tab', { name: /^Running Main thread\b/u });
@@ -163,7 +164,7 @@ for (const width of [1440, 400]) {
       await expect(page.getByRole('alert')).toHaveCount(0);
     });
 
-    for (const [failure, words] of [['the server fails', 'The server could not complete this request. Try again.'], ['the network is lost', 'The server could not be reached. Try again.']] as const) {
+    for (const [failure, words] of [['the server fails', 'The server could not complete this request. Try again.'], ['the network is lost', 'Connection failed before a response']] as const) {
       test(`a Stop that fails because ${failure} is told, and Stop is offered again and works (${width})`, async ({ page }) => {
         let failing = true;
         await page.route(INTERRUPT, async (route: Route) => {
