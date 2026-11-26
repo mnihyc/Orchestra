@@ -1,5 +1,5 @@
 /** Matched provider cards preserve zero, family, missing data, overage and privacy. */
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useQuery } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +12,7 @@ import { PlanPanel } from '@/features/resources/providers/PlanPanel';
 import { ProviderUsageCard } from '@/features/resources/providers/ProviderUsageCard';
 import { OBSERVED, planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
+import {setLocale} from '@/i18n';
 
 vi.mock('@tanstack/react-router',async(load)=>({...await load<typeof RouterModule>(),Link:({to,params,search,hash,children,...anchor}:AnchorHTMLAttributes<HTMLAnchorElement> & {to:string;params?:Record<string,string>;search?:Record<string,string>;hash?:string;children?:ReactNode})=><a {...anchor} href={`${to.replace(/\$(\w+)/g,(_,key:string)=>params?.[key] ?? '')}?${new URLSearchParams(search)}${hash===undefined ? '' : `#${hash}`}`}>{children}</a>}));
 vi.mock('@/api/resources', async (load) => ({ ...await load<typeof ResourcesApi>(), refreshProvider: vi.fn() }));
@@ -71,7 +72,7 @@ describe('one provider usage card', () => {
     expect(screen.queryByText(/5-hour/)).not.toBeInTheDocument();
     provider.access.permissions = ['provider.use'];
     rerender(<ProviderUsageCard compact provider={provider} />);
-    expect(screen.getByText('Room not visible')).toBeInTheDocument();
+    expect(screen.getByText('Remaining usage not visible')).toBeInTheDocument();
     expect(screen.queryByText(/81%/)).not.toBeInTheDocument();
   });
   it('keeps known spending when the balance read has told nothing yet', () => {
@@ -135,11 +136,24 @@ describe('one provider usage card', () => {
   });
   it('marks a gone model with when it was seen without switching it off', () => {
     const provider = planProvider();
-    provider.facts.models = [];
+    provider.facts.models_count = 0;
     provider.facts_state.models = 'empty';
     provider.facts.field_times.models = OBSERVED;
-    const { container } = show(<ModelAvailability provider={provider} name="old-model" />);
+    const { container } = show(<ModelAvailability provider={provider} name="old-model" listing={[]} />);
     expect(screen.getByText(/No longer offered/)).toBeInTheDocument();
     expect(container.querySelector('time')).toHaveAttribute('datetime', OBSERVED);
   });
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps Refresh available while naming the actual source reuse window in ${locale}`, async () => {
+  await setLocale(locale);
+  try {
+    const refresh = vi.fn();
+    const provider = planProvider({facts_refresh: {eligible:false,source_minimum:true,next_at:'2090-01-01T00:00:00Z'}});
+    show(<ProviderUsageCard provider={provider} onRefresh={refresh}/>);
+    const button = screen.getByRole('button', {name: locale === 'en' ? /Refresh · reuses read until/ : /刷新 · 复用读取至/});
+    expect(button).toHaveAttribute('title', locale === 'en' ? 'Source minimum interval' : '来源的最短读取间隔');
+    await userEvent.click(button);
+    expect(refresh).toHaveBeenCalledOnce();
+  } finally { cleanup(); await setLocale('en'); }
 });

@@ -130,6 +130,16 @@ impl Ending {
             .fetch_optional(&mut *tx)
             .await
             .map_err(DbError::from)?;
+            let generation = generation
+                .map(|(machine, native)| {
+                    native
+                        .as_deref()
+                        .map(orch_types::storable::decode_key)
+                        .transpose()
+                        .map(|native| (machine, native))
+                })
+                .transpose()
+                .map_err(DbError::from)?;
             if generation
                 != Some((
                     Some(target.machine_id),

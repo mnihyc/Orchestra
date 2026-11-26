@@ -33,6 +33,7 @@ pub const RESOURCES: &[KeyTargetKind] = &[
     KeyTargetKind::Object(ObjectKind::McpServer),
     KeyTargetKind::Object(ObjectKind::Mount),
     KeyTargetKind::Object(ObjectKind::Skill),
+    KeyTargetKind::Object(ObjectKind::Pool),
 ];
 
 /// Native address-domain roles in hierarchy kind order.
