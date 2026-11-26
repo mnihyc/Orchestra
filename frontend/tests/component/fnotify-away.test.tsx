@@ -1,9 +1,15 @@
 /** A pause stays confirmed while saving, keeps proposed edits after a stale revision, and never implies receipt. */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { NoticeDecisionFacts } from '@/features/notifications/NoticeDecision';
+import { RouteOutcome } from '@/features/settings/personal/away/Outcome';
+import type { AwayRoute } from '@/features/settings/personal/away/types';
+import { InboxRetention } from '@/features/inbox/Retention';
+import { client } from '@/api/client';
+import * as NotificationApi from '@/api/notifications';
 import { changePrefs } from '@/api/away';
 import type * as AwayApi from '@/api/away';
 import { ApiError } from '@/api/client';
@@ -13,6 +19,7 @@ import type { AwayPrefs } from '@/features/settings/personal/away/types';
 import { useAppearance } from '@/lib/appearance';
 import { i18n, setLocale } from '@/i18n';
 import { TooltipProvider } from '@/ui/Tooltip';
+import { show } from './support';
 
 vi.setConfig({ testTimeout: 30_000 });
 vi.mock('@/api/away', async () => {
@@ -28,7 +35,8 @@ function draw() {
   render(<QueryClientProvider client={client}><TooltipProvider><PauseDialog open initial={prefs} mode="pause" onOpenChange={close} /></TooltipProvider></QueryClientProvider>);
   return { client, close };
 }
-afterEach(async () => { vi.clearAllMocks(); cleanup(); await setLocale('en'); });
+const originalSession=client.session.getState();
+afterEach(async () => { vi.restoreAllMocks(); vi.clearAllMocks(); cleanup(); focusManager.setFocused(undefined); client.session.setState(originalSession); await setLocale('en'); });
 
 describe('the shared pause form', () => {
   it.each(['en', 'zh-CN'] as const)('keeps precise pause limits in the deliberate dialog, not an idle Inbox paragraph (%s)', async (locale) => {
@@ -80,4 +88,47 @@ describe('the shared pause form', () => {
     expect(screen.getByText('Outside Orch: off')).toBeVisible();
     expect(changePrefs).not.toHaveBeenCalled();
   });
+});
+
+it.each(['en','zh-CN'] as const)('reads a global Inbox boundary only on opening and retires it when the account changes (%s)',async(locale)=>{
+  await setLocale(locale);
+  const before=client.session.getState();
+  const read=vi.spyOn(NotificationApi,'fetchNotifications').mockResolvedValue({items:[],next_cursor:null,retention:{days:30,source:{scope:'system',node:null},expires_before:'2026-10-01T00:00:00Z',actual_oldest_retained:null,measured_at:'2026-11-01T00:00:00Z'}});
+  client.session.setState({...before,userId:'reader-one',readerVersion:1,status:'signed_in'});
+  const cache=new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const user=userEvent.setup({delay:null});
+  show(<InboxRetention/>,cache);
+  expect(read).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button',{name:i18n.t('common.details')}));
+  await waitFor(()=>expect(read).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText(i18n.t('placesMail.none'))).toBeVisible();
+  expect(screen.queryByText(i18n.t('factDisclosure.notReported'))).not.toBeInTheDocument();
+  await act(async()=>{focusManager.setFocused(false);focusManager.setFocused(true);await Promise.resolve();});
+  expect(read).toHaveBeenCalledTimes(1);
+  act(()=>client.session.setState({userId:'reader-two',readerVersion:2}));
+  await waitFor(()=>expect(screen.queryByText(i18n.t('placesMail.none'))).not.toBeInTheDocument());
+  expect(read).toHaveBeenCalledTimes(1);
+  client.session.setState(before);
+  read.mockRestore();
+});
+
+it.each(['en','zh-CN'] as const)('keeps missing decisions unreported and displays recorded suppression rather than current preferences (%s)',async(locale)=>{
+  await setLocale(locale);
+  const user=userEvent.setup({delay:null});
+  const view=show(<NoticeDecisionFacts/>);
+  await user.click(screen.getByRole('button',{name:i18n.t('common.details')}));
+  expect(screen.getAllByText(i18n.t('factDisclosure.notReported')).length).toBeGreaterThan(0);
+  view.rerender(<NoticeDecisionFacts decision={{outcome:'suppressed',reason:'already_watching',evaluated_at:'2026-10-01T00:00:00Z'}}/>);
+  expect(screen.getByText(locale==='en'?'No turn-ended notice · Already watching':'未发送本轮结束通知 · 正在查看')).toBeVisible();
+});
+
+it.each(['en','zh-CN'] as const)('never turns an absent delivery record into zero attempts or channel acceptance (%s)',async(locale)=>{
+  await setLocale(locale);
+  const route={id:'route',channel_id:'channel',channel:null,enabled:true,health:'never',last_ok_at:null,failed_at:null,failure:null,waiting_count:0,needs:null,link:null,label:null,kinds:[],unread_delay_minutes:null,min_interval_minutes:null,last_sent_at:null} as AwayRoute;
+  const user=userEvent.setup({delay:null});
+  const view=show(<RouteOutcome route={route}/>);
+  await user.click(screen.getByRole('button',{name:i18n.t('common.details')}));
+  expect(screen.getAllByText(i18n.t('factDisclosure.notReported')).length).toBeGreaterThan(0);
+  view.rerender(<RouteOutcome route={{...route,pending_delivery:{attempts:2,last_attempt_at:'2026-10-01T00:00:00Z',next_eligible_at:'2026-10-02T00:00:00Z',acceptance:'unknown',safe_problem:null}}}/>);
+  expect(screen.getByText(locale==='en'?'Channel acceptance not confirmed':'尚未确认渠道是否接收')).toBeVisible();
 });

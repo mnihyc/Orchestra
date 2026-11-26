@@ -1,0 +1,4 @@
+test -p orch-api-core --test thread_gone_references --test notifications_channels --test notifications_destinations --test threads_read --test thread_opening_scopes --test screen_openings
+test -p orch-notifier-email --lib --test smtp
+test -p orch-notifier-webhook --test hooks
+test -p orch-notifier-contract --lib

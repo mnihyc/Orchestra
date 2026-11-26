@@ -209,6 +209,27 @@ pub(crate) async fn original_callers_with_limits(
     access: &dyn crate::access::ResourceAccess,
     limits: &[orch_authz::CapturedCaller],
 ) -> Result<CallOrigins, EngineError> {
+    restored_callers(conn, call, clock, Some(access), limits).await
+}
+
+/// Restore the actual input operations for a bounded execution artifact. Resource Use is
+/// checked separately by its native first-effect guard, as for ordinary input preflight.
+pub(crate) async fn input_callers_with_limits(
+    conn: &mut Conn,
+    call: &super::CallContext,
+    clock: &dyn orch_types::Clock,
+    limits: &[orch_authz::CapturedCaller],
+) -> Result<CallOrigins, EngineError> {
+    Box::pin(restored_callers(conn, call, clock, None, limits)).await
+}
+
+async fn restored_callers(
+    conn: &mut Conn,
+    call: &super::CallContext,
+    clock: &dyn orch_types::Clock,
+    access: Option<&dyn crate::access::ResourceAccess>,
+    limits: &[orch_authz::CapturedCaller],
+) -> Result<CallOrigins, EngineError> {
     check_call(conn, call).await?;
     let thread = threads::thread(conn, call.thread)
         .await?
@@ -322,23 +343,25 @@ pub(crate) async fn original_callers_with_limits(
                 }
                 caller.clone()
             };
-            ordinary(
-                crate::inputs::check_sender_for_turn(
-                    &mut unit,
-                    &caller,
-                    &thread,
-                    need_provider,
-                    Some(&turn),
-                    access,
+            if let Some(access) = access {
+                ordinary(
+                    crate::inputs::check_sender_for_turn(
+                        &mut unit,
+                        &caller,
+                        &thread,
+                        need_provider,
+                        Some(&turn),
+                        access,
+                    )
+                    .await,
                 )
-                .await,
-            )
-            .inspect_err(|_| {
-                #[cfg(test)]
-                if std::env::var_os("ORCH_TEST_SERVICE_TRACE").is_some() {
-                    eprintln!("service_original_source sender");
-                }
-            })?;
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    if std::env::var_os("ORCH_TEST_SERVICE_TRACE").is_some() {
+                        eprintln!("service_original_source sender");
+                    }
+                })?;
+            }
             if crate::preflight::second_step_missing(unit.conn, caller.user(), thread.node_id)
                 .await?
             {
@@ -609,7 +632,25 @@ async fn owned_cleanup(
 /// keeps its protected body, identity and original budget; this table holds no payload.
 pub(crate) fn issue<'a>(
     engine: &'a Engine,
+    command: Outgoing,
+) -> futures::future::BoxFuture<'a, Result<Outgoing, EngineError>> {
+    issue_admitting(engine, command, None)
+}
+
+/// Committed command pins take custody of the bytes before a native issuer can wait.
+/// Without source admission, the caller keeps its publication through the ordinary write.
+pub(crate) fn issue_published<'a>(
+    engine: &'a Engine,
+    command: Outgoing,
+    publication: &'a mut Option<orch_blob_contract::store::Stored>,
+) -> futures::future::BoxFuture<'a, Result<Outgoing, EngineError>> {
+    issue_admitting(engine, command, Some(publication))
+}
+
+fn issue_admitting<'a>(
+    engine: &'a Engine,
     mut command: Outgoing,
+    publication: Option<&'a mut Option<orch_blob_contract::store::Stored>>,
 ) -> futures::future::BoxFuture<'a, Result<Outgoing, EngineError>> {
     Box::pin(async move {
         if let Ok(source) = SOURCE.try_with(|source| *source) {
@@ -685,6 +726,9 @@ pub(crate) fn issue<'a>(
                 command.body = saved.body;
                 command.deadline = Some(Time::new(saved.deadline_at));
                 tx.commit().await.map_err(orch_db::DbError::from)?;
+                if let Some(publication) = publication {
+                    drop(publication.take());
+                }
                 engine.inner.commands.issue(command.clone()).await?;
                 return Ok(command);
             }
@@ -714,6 +758,8 @@ pub(crate) fn issue<'a>(
                 .map(serde_json::to_value)
                 .transpose()?;
             let proposed = link::NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -825,6 +871,9 @@ pub(crate) fn issue<'a>(
             }
             command.deadline = Some(Time::new(saved.deadline_at));
             tx.commit().await.map_err(orch_db::DbError::from)?;
+            if let Some(publication) = publication {
+                drop(publication.take());
+            }
             #[cfg(test)]
             tests::native_admitted(source.thread, source.answer, command.kind).await;
         }
@@ -854,7 +903,11 @@ pub(crate) async fn download_state(
     let environment: Id = serde_json::from_value(row.body["environment_id"].clone())?;
     Ok(Some((
         Outgoing {
+            content_transit: false,
+            native_target: None,
             authority: None,
+            input_facts: None,
+            session_offer: None,
             id,
             machine: row.machine_id,
             key: SerialKey::Environment(environment),
@@ -879,7 +932,7 @@ struct NativeHold {
 async fn native_hold(conn: &mut Conn, id: Id) -> Result<Option<NativeHold>, EngineError> {
     Ok(sqlx::query_as("SELECT e.thread_id,e.environment_id,e.queue_provider_id,c.machine_id,e.fence_id,e.fence_retry_at
         FROM thread_tool_commands e JOIN commands c ON c.id=e.command_id
-        WHERE e.command_id=$1 AND NOT e.settled AND COALESCE(c.serial_key,c.body->>'$key')=COALESCE(e.queue_provider_id,e.environment_id)::text
+        WHERE e.command_id=$1 AND NOT e.settled AND c.serial_key=COALESCE(e.queue_provider_id,e.environment_id)::text
         FOR UPDATE OF e")
         .bind(id).fetch_optional(conn).await.map_err(orch_db::DbError::from)?)
 }
@@ -976,6 +1029,8 @@ async fn fence(engine: &Engine, id: Id) -> Result<(), EngineError> {
             link::insert_command(
                 &mut tx,
                 &link::NewCommand {
+                    content_transit: false,
+                    native_target: None,
                     id: fence_id,
                     machine_id: owned.machine_id,
                     kind: CommandKind::MachineProbe.as_str(),

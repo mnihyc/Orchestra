@@ -1,4 +1,5 @@
 /** The actual readable folder path of a topic, including truthful nonlinks for concealed ancestors. */
+import { PathLink } from '@/shell/TrailLink';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
@@ -10,7 +11,7 @@ import type { Topic } from '@/generated/api-types';
 function OrgPart({ id, name }: { id: string; name: string }) {
   const node = useQuery(nodeQuery(id));
   if (node.data?.kind !== 'org') return <span>{name}</span>;
-  return <a href={`/org/${encodeURIComponent(node.data.address)}`} className="rounded-sm wrap-anywhere hover:underline">{name}</a>;
+  return <PathLink href={`/org/${encodeURIComponent(node.data.address)}`} className="rounded-sm wrap-anywhere hover:underline">{name}</PathLink>;
 }
 
 export function TopicPath({ topic }: { topic: Pick<Topic, 'path'> }) {
