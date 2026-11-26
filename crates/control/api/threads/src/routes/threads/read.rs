@@ -6,8 +6,6 @@
 //! the node in the path; storing a read position checks it again inside the
 //! transaction that writes that position.
 
-use super::one;
-
 use super::read_failed;
 
 use super::read_operation;
@@ -60,6 +58,11 @@ use orch_api_contract::threads::OutlineEntry;
 
 use orch_api_contract::threads::OutlineKind;
 
+use orch_api_contract::threads::{OutlineAgent, OutlineMessage, OutlineSelection};
+
+use crate::middleware::authorization::refusals;
+use orch_api_contract::threads::RawCall;
+
 use orch_api_contract::threads::THREAD_SYNC_DEFAULT_LIMIT;
 
 use orch_api_contract::threads::THREAD_SYNC_MAX_LIMIT;
@@ -82,6 +85,8 @@ use orch_api_contract::threads::ThreadItemOutputGet;
 
 use orch_api_contract::threads::ThreadItemOutputGetQuery;
 
+use orch_api_contract::threads::ThreadItemRawGet;
+
 use orch_api_contract::threads::ThreadOutlineGet;
 
 use orch_api_contract::threads::ThreadOutlineGetQuery;
@@ -102,8 +107,6 @@ use orch_db::queries::threads as rows;
 
 use orch_engine::views::Around;
 
-use orch_engine::views::ThreadFrame;
-
 use orch_engine::views::search_text;
 
 use orch_types::Time;
@@ -113,6 +116,7 @@ pub fn mount(registry: &mut Registry) {
         .on_with_operation(ThreadSyncGet, read_operation::prepare, sync)
         .on_with_operation(ThreadItemList, read_operation::prepare, item_list)
         .on_with_operation(ThreadItemGet, read_operation::prepare, item_get)
+        .on_with_operation(ThreadItemRawGet, read_operation::prepare, item_raw_get)
         .on_raw_read_with_operation(ThreadItemOutputGet, read_operation::prepare, output_get)
         .on_with_operation(ThreadOutlineGet, read_operation::prepare, outline)
         .on_with_operation(ThreadCatchupGet, read_operation::prepare, catchup)
@@ -144,23 +148,35 @@ pub(super) async fn sync_in(
     tx: &mut orch_db::Conn,
     query: ThreadSyncGetQuery,
 ) -> ApiResult<ThreadSync> {
-    let thread = ctx.id("id")?;
     let limit = limit_of(
         query.limit,
         THREAD_SYNC_DEFAULT_LIMIT,
         THREAD_SYNC_MAX_LIMIT,
     )?;
-    let view = one(ctx, tx, thread).await?;
+    let principal = crate::middleware::authorization::principal(ctx, tx).await?;
+    sync_window_in(ctx, tx, &principal, query, limit).await
+}
+
+/// An opening chooses its configured window; cursor reads keep their own request defaults.
+pub(super) async fn sync_window_in(
+    ctx: &Ctx,
+    tx: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: ThreadSyncGetQuery,
+    limit: u32,
+) -> ApiResult<ThreadSync> {
+    let thread = ctx.id("id")?;
+    let view = super::one_for(ctx, tx, principal, thread).await?;
     #[cfg(any(test, feature = "test-support"))]
     crate::realtime::history_read_tests::pause(crate::realtime::history_read_tests::Cut::HttpHead)
         .await;
-    let data = ctx
+    let mut reply = ctx
         .app
         .engine
-        .sync_view_in(
+        .sync_with_thread_in(
             tx,
-            thread,
-            Some(ctx.user()?.id()),
+            view,
+            principal.user(),
             query.since,
             limit,
             ThreadReadSelector {
@@ -171,25 +187,9 @@ pub(super) async fn sync_in(
         )
         .await
         .map_err(read_failed)?;
-    let mut reply = data.assemble(ThreadFrame {
-        background: view.background,
-        goal: view.goal,
-        base: view.base,
-        binding: view.binding,
-        side_of: view.side_of,
-        sides: view.sides,
-        memory: view.memory,
-        lock: view.lock,
-        blocked: view.blocked,
-        environment_permissions: view.environment_permissions,
-        directory_threads: view.directory_threads,
-        input_access: view.input_access,
-        can: view.can,
-    });
     if reply.complete
         && let Some(projection) = &reply.projection
     {
-        let principal = crate::middleware::authorization::principal(ctx, tx).await?;
         let mut ids = orch_engine::continuations::projection::item_inputs(&reply.items);
         let changed = orch_engine::continuations::projection::changed_ids(
             tx,
@@ -216,7 +216,7 @@ pub(super) async fn sync_in(
             let metadata = match orch_engine::continuations::projection::metadata(
                 &ctx.app.engine,
                 tx,
-                &principal,
+                principal,
                 thread,
                 projection.viewed_continuation_id,
                 ids,
@@ -236,10 +236,9 @@ pub(super) async fn sync_in(
             orch_api_contract::threads::ItemPayload::Approval(_)
         )
     }) {
-        let principal = crate::middleware::authorization::principal(ctx, tx).await?;
         super::approval_items::project(
             tx,
-            &principal,
+            principal,
             thread,
             &mut reply.items,
             ctx.now,
@@ -247,6 +246,14 @@ pub(super) async fn sync_in(
         )
         .await?;
     }
+    orch_engine::notifications::decisions::project(
+        tx,
+        ctx.user()?.id(),
+        &mut reply.turns,
+        &mut reply.items,
+    )
+    .await
+    .map_err(ApiError::internal)?;
     Ok(reply)
 }
 
@@ -271,7 +278,23 @@ async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<Th
     let projection = continuation_rows::projection(&mut tx, thread, query.continuation_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let around = if let Some(turn) = query.turn {
+    let around = if query.retained_inputs_cursor.is_some() {
+        if query.turn.is_some()
+            || query.before.is_some()
+            || query.after.is_some()
+            || query.around.is_some()
+            || query
+                .stream
+                .as_deref()
+                .is_some_and(|stream| stream != "main")
+        {
+            return Err(ApiError::invalid(
+                "retained_inputs_cursor",
+                "continue one retained-input group without another timeline position",
+            ));
+        }
+        None
+    } else if let Some(turn) = query.turn {
         if turn < 1 || query.before.is_some() || query.after.is_some() || query.around.is_some() {
             return Err(ApiError::invalid(
                 "turn",
@@ -288,28 +311,46 @@ async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<Th
             .await?
             .ok_or_else(ApiError::not_found)?
         };
-        Around::After(anchor.1.saturating_sub(1))
+        Some(Around::After(anchor.1.saturating_sub(1)))
     } else {
-        around_of(&query)?
+        Some(around_of(&query)?)
     };
     let limit = limit_of(query.limit, ITEMS_DEFAULT_LIMIT, ITEMS_MAX_LIMIT)?;
-    let mut page = ctx
-        .app
-        .engine
-        .items_view_in(
-            &mut tx,
-            thread,
-            around,
-            limit,
-            query.stream.as_deref(),
-            ThreadReadSelector {
-                continuation_id: query.continuation_id,
-                projection_revision: query.projection_revision,
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(read_failed)?;
+    let mut page = if let Some(cursor) = &query.retained_inputs_cursor {
+        ctx.app
+            .engine
+            .retained_inputs_page_in(
+                &mut tx,
+                thread,
+                cursor,
+                limit,
+                usize::try_from(orch_db::queries::thread_history::PAGE_BYTES).unwrap_or(usize::MAX),
+                ThreadReadSelector {
+                    continuation_id: query.continuation_id,
+                    projection_revision: query.projection_revision,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(read_failed)?
+    } else {
+        ctx.app
+            .engine
+            .items_view_in(
+                &mut tx,
+                thread,
+                around.ok_or_else(|| ApiError::invalid("", "choose a timeline position"))?,
+                limit,
+                query.stream.as_deref(),
+                ThreadReadSelector {
+                    continuation_id: query.continuation_id,
+                    projection_revision: query.projection_revision,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(read_failed)?
+    };
     let principal = crate::middleware::authorization::principal(&ctx, &mut tx).await?;
     let prompt_summaries = match orch_engine::continuations::projection::summaries(
         &ctx.app.engine,
@@ -341,9 +382,19 @@ async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<Th
         )
         .await?;
     }
+    orch_engine::notifications::decisions::project(
+        &mut tx,
+        principal.user(),
+        &mut page.turns,
+        &mut page.items,
+    )
+    .await
+    .map_err(ApiError::internal)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     read_operation::before_return(&ctx).await?;
     Ok(ThreadItemListReply {
+        retained_inputs: page.retained_inputs,
+        retained_inputs_next: page.retained_inputs_next,
         projection: Some(page.projection),
         prompt_summaries,
         items: page.items,
@@ -352,6 +403,29 @@ async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<Th
         has_older: page.has_older,
         has_newer: page.has_newer,
     })
+}
+
+/// One tool call of the thread exactly as its harness made it: what the thread's own items leave out.
+async fn item_raw_get(ctx: Ctx, query: ThreadReadSelector, (): ()) -> ApiResult<RawCall> {
+    let thread = ctx.id("id")?;
+    let item = ctx.id("item_id")?;
+    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
+    let found = ctx
+        .app
+        .engine
+        .item_raw_in(
+            &mut tx,
+            thread,
+            item,
+            query.continuation_id,
+            query.projection_revision,
+        )
+        .await
+        .map_err(read_failed)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    read_operation::before_return(&ctx).await?;
+    Ok(found)
 }
 
 /// One item of the thread.
@@ -391,6 +465,14 @@ async fn item_get(
         )
         .await?;
     }
+    orch_engine::notifications::decisions::project(
+        &mut tx,
+        ctx.user()?.id(),
+        &mut [],
+        std::slice::from_mut(&mut found),
+    )
+    .await
+    .map_err(ApiError::internal)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     read_operation::before_return(&ctx).await?;
     Ok(found)
@@ -420,6 +502,18 @@ async fn output_get(ctx: Ctx, query: ThreadItemOutputGetQuery, _: Body) -> ApiRe
     )
     .await
     .map_err(read_failed)?;
+    if let Some(expected) = query.expected_blob
+        && row
+            .payload
+            .pointer("/tool/output/blob")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected.to_string().as_str())
+    {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::ConflictStaleRevision,
+            "the selected retained output changed; read its current reference",
+        ));
+    }
     tx.commit().await.map_err(orch_db::DbError::from)?;
     // Immutable output I/O keeps its existing producer and happens after releasing the snapshot.
     // The configured raw registration rechecks this same operation before returning any response.
@@ -537,6 +631,109 @@ fn outline_goal_condition(row: &rows::reading::OutlinePoint) -> Option<String> {
 }
 
 /// The line an item makes in the outline, if its kind makes one.
+fn outline_message(
+    row: &rows::reading::OutlinePoint,
+    people: &std::collections::HashMap<orch_types::Id, orch_api_contract::users::UserRef>,
+) -> Option<OutlineMessage> {
+    if row.kind != "user_message" && row.kind != "agent_message" {
+        return None;
+    }
+    Some(OutlineMessage {
+        author: row.author_id.and_then(|id| people.get(&id).cloned()),
+        source: row
+            .payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        turn_id: row.turn_id,
+        added: row
+            .metadata
+            .get("added")
+            .and_then(serde_json::Value::as_i64),
+        removed: row
+            .metadata
+            .get("removed")
+            .and_then(serde_json::Value::as_i64),
+        phase: row
+            .payload
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        last_agent_seq: row
+            .metadata
+            .get("last_agent")
+            .and_then(serde_json::Value::as_i64),
+        last_final_seq: row
+            .metadata
+            .get("last_final")
+            .and_then(serde_json::Value::as_i64),
+        last_work_seq: row
+            .metadata
+            .get("last_work")
+            .and_then(serde_json::Value::as_i64),
+        ended: row
+            .metadata
+            .get("ended")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn outline_agent(row: &rows::reading::OutlinePoint) -> Option<OutlineAgent> {
+    if row.kind != "tool_call"
+        || row
+            .payload
+            .pointer("/tool/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("subagent")
+    {
+        return None;
+    }
+    Some(OutlineAgent {
+        stream: row
+            .payload
+            .pointer("/tool/child_stream")?
+            .as_str()?
+            .to_owned(),
+        turn_id: row.turn_id,
+        name: row
+            .payload
+            .pointer("/tool/name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        state: serde_json::from_value(row.payload.pointer("/tool/state")?.clone()).ok()?,
+        started_at: row
+            .payload
+            .get("started_at")
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        duration_ms: row
+            .payload
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_i64),
+        tokens_out: row
+            .metadata
+            .get("tokens_out")
+            .and_then(serde_json::Value::as_i64),
+        result: row
+            .metadata
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+        recorded: row
+            .metadata
+            .get("recorded")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        updated_seq: row
+            .metadata
+            .get("updated_seq")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(row.seq_created),
+    })
+}
+
 fn outline_line(
     row: &rows::reading::OutlinePoint,
     approval_titles: &std::collections::HashMap<orch_types::Id, String>,
@@ -557,6 +754,23 @@ fn outline_line(
             ),
         ),
         "agent_message" => (OutlineKind::AgentMessage, said("text")),
+        "error" => (OutlineKind::Error, said("message")),
+        "tool_call"
+            if row
+                .payload
+                .pointer("/tool/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("subagent") =>
+        {
+            (
+                OutlineKind::Subagent,
+                row.payload
+                    .pointer("/tool/name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        }
         "announcement"
             if row
                 .payload
@@ -622,12 +836,103 @@ pub(super) async fn outline_in(
     conn: &mut orch_db::Conn,
     query: ThreadOutlineGetQuery,
 ) -> ApiResult<ThreadOutlinePage> {
-    let thread = ctx.id("id")?;
-    let limit = i64::from(limit_of(
+    if matches!(
+        query.selection,
+        Some(OutlineSelection::Messages | OutlineSelection::Agents)
+    ) || query.q.as_deref().is_none_or(|q| q.trim().is_empty()) && query.kinds.is_none()
+    {
+        return outline_page(ctx, conn, query).await;
+    }
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    let kinds = query
+        .kinds
+        .as_deref()
+        .map(|text| {
+            text.split(',')
+                .filter(|kind| !kind.trim().is_empty())
+                .map(|kind| {
+                    serde_json::from_value::<OutlineKind>(serde_json::Value::String(
+                        kind.trim().to_owned(),
+                    ))
+                    .map_err(|_| ApiError::invalid("kinds", "contains an unknown outline kind"))
+                })
+                .collect::<ApiResult<Vec<_>>>()
+        })
+        .transpose()?;
+    let wanted = usize::try_from(super::read_history::positive_limit(
         query.limit,
         THREAD_SYNC_DEFAULT_LIMIT,
-        THREAD_SYNC_MAX_LIMIT,
-    )?);
+    )?)
+    .map_err(ApiError::internal)?;
+    let mut scan = query.clone();
+    scan.q = None; // Conversation words are matched on the projected titles below.
+    scan.limit = Some(
+        query
+            .limit
+            .unwrap_or(THREAD_SYNC_DEFAULT_LIMIT)
+            .max(THREAD_SYNC_DEFAULT_LIMIT),
+    );
+    let mut batches = super::read_history::search_batches(conn).await?;
+    let mut result = Vec::new();
+    loop {
+        let mut page = outline_page(ctx, conn, scan.clone()).await?;
+        let matching = page
+            .entries
+            .iter()
+            .filter(|entry| {
+                kinds
+                    .as_ref()
+                    .is_none_or(|kinds| kinds.contains(&entry.kind))
+                    && words.matches(&format!(
+                        "{} {} {}",
+                        entry.title,
+                        entry.goal_condition.as_deref().unwrap_or(""),
+                        entry
+                            .turn_ordinal
+                            .map(|n| n.to_string())
+                            .unwrap_or_default()
+                    ))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        result.extend(matching.into_iter().rev());
+        let mut points = std::collections::BTreeSet::new();
+        let mut extra = false;
+        result.retain(|entry| {
+            if !points.contains(&entry.seq) && points.len() == wanted {
+                extra = true;
+                return false;
+            }
+            points.insert(entry.seq);
+            true
+        });
+        if extra {
+            page.next_before = result.last().map(|entry| entry.seq);
+        }
+        batches = batches.saturating_sub(1);
+        if extra
+            || points.len() == wanted
+            || page.next_before.is_none()
+            || batches == 0
+            || query.around.is_some()
+            || query.turn.is_some()
+        {
+            result.sort_by_key(|entry| entry.seq);
+            page.entries = result;
+            return Ok(page);
+        }
+        scan.before = page.next_before;
+        scan.projection_revision = page.projection.as_ref().map(|p| p.projection_revision);
+    }
+}
+
+async fn outline_page(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    query: ThreadOutlineGetQuery,
+) -> ApiResult<ThreadOutlinePage> {
+    let thread = ctx.id("id")?;
+    let limit = super::read_history::positive_limit(query.limit, THREAD_SYNC_DEFAULT_LIMIT)?;
     let anchors = usize::from(query.before.is_some())
         + usize::from(query.around.is_some())
         + usize::from(query.turn.is_some());
@@ -672,40 +977,51 @@ pub(super) async fn outline_in(
         None
     };
     let title_chars = i64::from(OUTLINE_TITLE_CHARS);
+    let selection = match query.selection.unwrap_or(OutlineSelection::Conversation) {
+        OutlineSelection::Conversation => "conversation",
+        OutlineSelection::Messages => "messages",
+        OutlineSelection::Agents => "agents",
+    };
+    let q = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let changes = query.include_changes.unwrap_or(selection == "messages");
+    let window = |boundary, forward, limit| rows::reading::OutlineWindow {
+        boundary,
+        forward,
+        limit,
+        title_chars,
+        selection,
+        q,
+        changes,
+    };
     let mut found = if let Some(anchor) = anchor {
         let older = (limit + 1) / 2;
-        let mut points = rows::reading::outline_points_view(
+        let mut points = rows::reading::outline_selected_points_view(
             conn,
             thread,
             view,
-            Some(anchor.saturating_add(1)),
-            false,
-            older,
-            title_chars,
+            window(Some(anchor.saturating_add(1)), false, older),
         )
         .await?;
         points.extend(
-            rows::reading::outline_points_view(
+            rows::reading::outline_selected_points_view(
                 conn,
                 thread,
                 view,
-                Some(anchor),
-                true,
-                limit - older,
-                title_chars,
+                window(Some(anchor), true, limit - older),
             )
             .await?,
         );
         points
     } else {
-        rows::reading::outline_points_view(
+        rows::reading::outline_selected_points_view(
             conn,
             thread,
             view,
-            query.before,
-            false,
-            limit + 1,
-            title_chars,
+            window(query.before, false, limit + 1),
         )
         .await?
     };
@@ -716,14 +1032,14 @@ pub(super) async fn outline_in(
     let next_before = if let Some(first) = found.first() {
         let older = extra
             || (anchor.is_some()
-                && !rows::reading::outline_points_view(
+                && !rows::reading::outline_selected_points_view(
                     conn,
                     thread,
                     view,
-                    Some(first.seq_created),
-                    false,
-                    1,
-                    title_chars,
+                    rows::reading::OutlineWindow {
+                        changes: false,
+                        ..window(Some(first.seq_created), false, 1)
+                    },
                 )
                 .await?
                 .is_empty());
@@ -749,10 +1065,18 @@ pub(super) async fn outline_in(
             .into_iter()
             .collect()
     };
+    let authors: Vec<orch_types::Id> = found.iter().filter_map(|row| row.author_id).collect();
+    let people = refusals::user_refs(conn, &authors).await?;
+    let total = if selection == "agents" {
+        Some(rows::reading::outline_agent_count_view(conn, thread, view).await?)
+    } else {
+        None
+    };
     let mut lines = Vec::with_capacity(found.len());
     for row in &found {
         let at = Time::new(row.created_at);
-        if row.starts_turn
+        if selection == "conversation"
+            && row.starts_turn
             && let Some(ordinal) = row.turn_ordinal
         {
             lines.push(OutlineEntry {
@@ -763,9 +1087,14 @@ pub(super) async fn outline_in(
                 kind: OutlineKind::Turn,
                 turn_ordinal: Some(ordinal),
                 goal_condition: None,
+                message: None,
+                agent: None,
             });
         }
         if let Some((kind, title)) = outline_line(row, &approval_titles) {
+            if kind == OutlineKind::Subagent && selection != "agents" {
+                continue;
+            }
             lines.push(OutlineEntry {
                 item_id: row.id,
                 seq: row.seq_created,
@@ -774,6 +1103,8 @@ pub(super) async fn outline_in(
                 kind,
                 turn_ordinal: None,
                 goal_condition: outline_goal_condition(row),
+                message: outline_message(row, &people),
+                agent: outline_agent(row),
             });
         }
     }
@@ -782,6 +1113,7 @@ pub(super) async fn outline_in(
         entries: lines,
         next_before,
         seq: head.seq(),
+        total,
     })
 }
 
