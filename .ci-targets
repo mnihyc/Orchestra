@@ -1,0 +1,14 @@
+# The tool access permission, turn admission and readiness on the same head (the server programs the other run leaves out)
+test -p orch-agent-contract --lib
+test -p orch-api-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-settings --lib
+test -p orch-engine --lib -- sessions
+test -p orch-engine --test approval_rules
+test -p orch-engine --test matrix_confinement
+test -p orch-adapter-acp --lib
+test -p orch-adapter-codex --lib -- approvals
+test -p orch-adapter-fake --lib
+test -p orch-api-core --test kfix_settings
+test -p orch-api-core --test threads_settings
+test -p orch-api-core --test environment_readiness

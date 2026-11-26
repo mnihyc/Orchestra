@@ -64,6 +64,8 @@ async fn prepare(site: &Site, token: &str) -> RawReply {
         .body(&EnvironmentSourcePrepareBody {
             thread_id: site.thread,
             source: None,
+            workspace_edits: None,
+            workspace_edit_revision: None,
         });
     call.send_bytes().await
 }
@@ -277,6 +279,8 @@ async fn preparation_refreshes_the_current_key_after_the_actual_environment_lock
                 .body(&EnvironmentSourcePrepareBody {
                     thread_id: thread,
                     source: None,
+                    workspace_edits: None,
+                    workspace_edit_revision: None,
                 });
             call.send_bytes().await
         });
@@ -433,6 +437,8 @@ async fn generated_preparation_ack_survives_activity_time_expiry_without_returni
             .body(&EnvironmentSourcePrepareBody {
                 thread_id: thread,
                 source: None,
+                workspace_edits: None,
+                workspace_edit_revision: None,
             });
         call.send_bytes().await
     });

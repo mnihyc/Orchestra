@@ -1,14 +1,28 @@
 /** Setting names and keywords use the reader's catalogue, and numeric meanings use declared metadata rather than guessed keys. */
 import { describe, expect, it } from 'vitest';
-import { localizedSetting, numericSettingDisplay, numericSettingText, settingShape } from '@/features/settings/settingText';
+import { localizedSetting, numericSettingDisplay, numericSettingText, settingFieldName, settingShape } from '@/features/settings/settingText';
 import { i18n, loadSearchCatalogues, setLocale } from '@/i18n';
 import { answer, settingEntries } from '@/features/finder/local';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import type { SettingDef as SettingWithText } from '@/generated/api-types';
+import { DEFAULT_CONNECTION_QUALITY } from '@/realtime/connectionQuality';
 
 const def: SettingWithText = { key: 'agent.instructions', title: 'Instructions', description: 'Fallback sentence', group: 'agent', schema: { type: 'string' }, class: 'parameter', scopes: ['project'], merge: 'append', default: '', example: 'Keep the examples current.', text_key: 'day100.builtin.agent.instructions', keywords: [] };
 
 describe('catalogue wording', () => {
+  it('names each measured-link default naturally in both languages and shares its shipped value', async () => {
+    const definition = SETTINGS_REGISTRY.find((entry) => entry.key === 'interface.connection_quality');
+    expect(definition?.default).toEqual(DEFAULT_CONNECTION_QUALITY);
+    for (const locale of ['en', 'zh-CN'] as const) {
+      await setLocale(locale);
+      for (const field of Object.keys(DEFAULT_CONNECTION_QUALITY)) {
+        const label = settingFieldName(field, 'interface.connection_quality', i18n.t);
+        expect(label).not.toContain('_');
+        if (locale === 'zh-CN') expect(label).toMatch(/\p{Script=Han}/u);
+      }
+    }
+    await setLocale('en');
+  });
   it('uses Chinese registry wording for every built-in, without counting English fallback as a translation', async () => {
     await loadSearchCatalogues();
     await setLocale('zh-CN');

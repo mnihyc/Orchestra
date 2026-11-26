@@ -105,6 +105,61 @@ describe('lost text, rather than a clipping class', () => {
 });
 
 describe('the single delegated reader', () => {
+
+  it('opens settings links without measuring every label and still reveals a clipped name until it fits', () => {
+    const link = document.createElement('a');
+    link.href = '#defaults';
+    const { element, size } = label('Organisation defaults and inherited settings');
+    link.append(element);
+    document.body.append(link);
+    const styles = vi.spyOn(window, 'getComputedStyle');
+    install();
+    expect(styles.mock.calls.some(([node]) => node === link || node === element)).toBe(false);
+    expect(element).not.toHaveAttribute('tabindex');
+    link.focus();
+    expect(tip()).toHaveTextContent('Organisation defaults and inherited settings');
+    expect(observeSizes).toHaveBeenCalledWith(element);
+    size.contentWidth = size.width;
+    reportResize(element);
+    expect(tip()).toBeNull();
+    expect(unobserveSizes).toHaveBeenCalledWith(element);
+  });
+  it('asks no style of words that no loaded rule or own style can shorten, and still finds those a style sheet shortens', () => {
+    const sheet = document.createElement('style');
+    sheet.textContent = '.cut { text-overflow: ellipsis; overflow: hidden; white-space: nowrap }';
+    document.head.append(sheet);
+    try {
+      const ordinary = document.createElement('p');
+      ordinary.textContent = 'An ordinary sentence that nothing shortens';
+      document.body.append(ordinary);
+      const styled = label('A name that the style sheet shortens'), inline = label();
+      styled.element.removeAttribute('style');
+      styled.element.className = 'cut';
+      const styles = vi.spyOn(window, 'getComputedStyle');
+      install();
+      const asked = styles.mock.calls.map(([element]) => element);
+      expect(asked).not.toContain(ordinary);
+      expect(asked).not.toContain(document.body);
+      expect(styled.element).toHaveAttribute('tabindex', '0');
+      expect(inline.element).toHaveAttribute('tabindex', '0');
+    } finally { sheet.remove(); }
+  });
+  it('lets a link carry the words its box shortens without making the box a second keyboard stop', () => {
+    const box = document.createElement('div');
+    box.style.cssText = 'text-overflow:ellipsis;overflow:hidden;white-space:nowrap';
+    Object.defineProperties(box, {
+      clientWidth: { get: () => 100 }, scrollWidth: { get: () => 250 }, clientHeight: { get: () => 20 }, scrollHeight: { get: () => 20 },
+    });
+    const link = document.createElement('a');
+    link.href = '#later';
+    link.textContent = 'A long destination name that its box shortens';
+    box.append(link);
+    document.body.append(box);
+    install();
+    expect(box).not.toHaveAttribute('tabindex');
+    link.focus();
+    expect(tip()).toHaveTextContent('A long destination name that its box shortens');
+  });
   it('does not read styles for a text-free icon mutation and still discovers later text', async () => {
     const root = document.createElement('section');
     root.append(document.createElementNS('http://www.w3.org/2000/svg', 'svg'));

@@ -90,6 +90,7 @@ impl Floor {
             json!([{"type":"separated","executor":"codex-exec-server","executor_version":"same"}]);
         rig.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".into(),
                 descriptor: serde_json::from_value(descriptor.clone()).unwrap(),
