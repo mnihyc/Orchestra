@@ -39,6 +39,8 @@ fn row(name: &str) {
     let directory = tempfile::tempdir().unwrap();
     let outputs = OutputStore::new(directory.path().join("outputs"));
     let mut mapper = Mapper::new(MapperConfig {
+        opening_id: orch_types::new_id(),
+        output_capture_bytes: 67_108_864,
         thread_id: new_id(),
         segment_id: new_id(),
         native_thread: thread,

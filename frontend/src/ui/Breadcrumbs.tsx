@@ -4,6 +4,7 @@
  * or a few clipped letters. Below 600px the nearest parent is the one back link. Redacted places
  * stay named and unlinked.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -50,11 +51,11 @@ export function Breadcrumbs({ crumbs, className }: BreadcrumbsProps) {
         {crumb.icon !== undefined && <span className="hidden shrink-0 text-text-subtle min-[600px]:inline-flex">{crumb.icon}</span>}
         {crumb.href !== undefined ? (
           <Tooltip content={crumb.label}>
-            <a href={crumb.href} className={LINK} title={crumb.label}
+            <PathLink href={crumb.href} className={LINK} title={crumb.label}
               onClick={(event) => {
                 if (crumb.go === undefined || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 event.preventDefault(); crumb.go();
-              }}>{crumb.label}</a>
+              }}>{crumb.label}</PathLink>
           </Tooltip>
         ) : crumb.render ? (
           crumb.render(LINK)

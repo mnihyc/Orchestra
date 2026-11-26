@@ -130,7 +130,7 @@ impl Link {
                     <= self
                         .inner
                         .settings
-                        .gateway_sample_max_age_secs
+                        .placement_sample_max_age_secs
                         .saturating_mul(1_000)
             })
     }
@@ -364,7 +364,7 @@ impl Link {
             destination_measured_at: destination_samples
                 .as_ref()
                 .map(|samples| samples.measured_at),
-            max_sample_age_secs: self.inner.settings.gateway_sample_max_age_secs,
+            max_sample_age_secs: self.inner.settings.placement_sample_max_age_secs,
             combined_round_trip_ms: combined(&preferred_gateway.id, source_rtts, destination_rtts)
                 .and_then(|score| u64::try_from(score).ok()),
         };
@@ -392,7 +392,11 @@ impl Link {
                 && self.supports_tunnel_attachments(source)
                 && matches!(
                     claims.kind,
-                    TunnelKind::Exec | TunnelKind::Mcp | TunnelKind::Llm | TunnelKind::Port
+                    TunnelKind::Exec
+                        | TunnelKind::Program
+                        | TunnelKind::Mcp
+                        | TunnelKind::Llm
+                        | TunnelKind::Port
                 )
             {
                 route = self.designated_plan(claims).await?;

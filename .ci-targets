@@ -1,0 +1,1 @@
+test -p orch-api-core --lib -- snapshot_get_prepares_its_native_projection_once_for_each_http_credential

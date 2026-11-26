@@ -642,6 +642,8 @@ async fn confirmed_environment_deletion_settles_idle_and_running_bindings_and_pr
         let query = EnvironmentDeleteQuery {
             confirm: "Workspace".to_owned(),
             at: Some(at),
+            expected_keep_days: None,
+            expected_revision: None,
         };
         let refused = scene
             .rig
@@ -803,6 +805,8 @@ async fn keeping_an_environment_cannot_withdraw_a_removal_that_begins_while_the_
         .query(&EnvironmentDeleteQuery {
             confirm: "Workspace".to_owned(),
             at: Some(at),
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await

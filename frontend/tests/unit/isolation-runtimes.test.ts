@@ -21,7 +21,7 @@ const gvisor: RuntimeClass = {
   recreate_preserves_files: false,
   keeps_software_on_stop: false,
   memory_overhead_mb: 64,
-  limits: [limit('live_changes', [], 'a mount or device change makes the environment again'), limit('file_events', [MOUNTS_SUBJECT]), limit('kvm', ['kvm']), limit('docker_inside_network', ['docker_inside'])],
+  limits: [limit('live_changes', [], 'a mount or device change recreates the environment'), limit('file_events', [MOUNTS_SUBJECT]), limit('kvm', ['kvm']), limit('docker_inside_network', ['docker_inside'])],
 };
 
 const hostOf = (...runtimes: RuntimeClass[]): Pick<Host, 'drivers'> => ({ drivers: [{ name: 'docker', runtime_classes: runtimes.map((entry) => entry.name), runtimes } as unknown as Host['drivers'][number]] });
@@ -62,7 +62,7 @@ describe('the limits that touch an environment', () => {
   });
 
   it('are shown as sentences that start with a capital', () => {
-    expect(capitalize('a mount or device change makes the environment again')).toBe('A mount or device change makes the environment again');
+    expect(capitalize('a mount or device change recreates the environment')).toBe('A mount or device change recreates the environment');
     expect(capitalize('')).toBe('');
   });
 });

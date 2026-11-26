@@ -88,6 +88,11 @@
       "gateRefused": "来自服务器的拒绝",
       "meterRing": "环形，用于标题栏，未满时保持安静：",
       "meterProgress": "进行中任务的进度条，数字由页面自己写出："
+    },
+    "facts": {
+      "shortened": "已缩短",
+      "usageOwner": "用量归属",
+      "recordedUsage": "已记录用量"
     }
   }
 }

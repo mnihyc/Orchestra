@@ -319,6 +319,19 @@ impl Lab {
         ]);
     }
 
+    /// Track one bare work unit and its private proxy graph even when a later assertion fails.
+    pub fn track_work(&self, work: orch_types::Id) {
+        let name = format!("orch-work-{}", work.simple());
+        let mut made = self.made.lock().unwrap();
+        made.containers.extend([
+            name.clone(),
+            format!("{name}-proxy"),
+            format!("{name}-addresses"),
+        ]);
+        made.networks
+            .extend([format!("{name}-net"), format!("{name}-out")]);
+    }
+
     /// Records a volume the test made by itself.
     pub fn track_volume(&self, name: &str) {
         self.made.lock().unwrap().volumes.push(name.to_owned());
@@ -755,4 +768,54 @@ pub async fn address_on(docker: &Docker, container: &str, network: &str) -> Stri
         })
         .filter(|address| !address.is_empty())
         .expect("an address on the network")
+}
+
+/// This fixture runs the product's real proxy inside the trusted sidecar image.
+/// The ordinary Docker lab's simulated gateway-only proxy cannot prove provider confinement.
+pub async fn capability_proxy_lab() -> Lab {
+    let executable = std::env::current_exe().unwrap();
+    let lab = Lab::with(move |config, dir| {
+        config.egress.dir = Some(dir.join("egress"));
+        config.egress.proxy_image = Some("ubuntu:24.04".into());
+        std::fs::copy(&executable, dir.join("connector/work-proxy-fixture")).unwrap();
+        let script = format!(
+            "{}\n{}",
+            r#"#!/bin/sh
+if [ "$1" = proxy ]; then
+  export ORCH_WORK_PROXY_DIR="$3"
+  export ORCH_WORK_PROXY_LISTEN="$5"
+  exec /opt/orch/bin/work-proxy-fixture --ignored --exact capability_unit_proxy_fixture --nocapture
+fi
+"#,
+            CONNECTOR_SCRIPT
+        );
+        std::fs::write(dir.join("connector/orch-connector"), script).unwrap();
+    })
+    .await
+    .expect("the confinement case needs a real Docker daemon");
+    assert!(
+        lab.driver.facts().restricted_egress,
+        "this runner must prove its restricted network instead of skipping confinement"
+    );
+    lab.have("ubuntu:24.04").await;
+    lab
+}
+
+pub async fn serve_capability_proxy() {
+    let dir =
+        std::env::var("ORCH_WORK_PROXY_DIR").expect("this entrypoint needs its sidecar directory");
+    let listen = std::env::var("ORCH_WORK_PROXY_LISTEN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    orch_driver_docker::egress::program::run(
+        orch_driver_docker::egress::program::Options {
+            host_inventory: true,
+            dir: dir.into(),
+            listen,
+        },
+        std::sync::Arc::new(orch_types::SystemClock),
+    )
+    .await
+    .unwrap();
 }
