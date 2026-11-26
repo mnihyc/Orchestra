@@ -6,8 +6,8 @@
 import { expect, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { toolCall } from '../doubles/thread-rows.ts';
-import { ACME, DOUBLE, emit, scenario, signIn } from './support.ts';
+import { agentMessage, rawOf, reasoning, toolCall, turn } from '../doubles/thread-rows.ts';
+import { ACME, configureThread, DOUBLE, emit, scenario, signIn } from './support.ts';
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   test(`native web action families survive the thread click path (${locale}, ${theme})`, async ({ page }, info) => {
@@ -33,12 +33,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     for (const [item, arguments_] of [[serverSearch, { query: 'Native server search' }], [serverPage, { url: 'https://docs.python.org/' }]] as const) {
       if (item.kind !== 'tool_call') throw new Error('the server operation is a tool item');
       const nativeInput = JSON.stringify(arguments_);
-      item.payload.raw.input = { inline: nativeInput, total_len: new TextEncoder().encode(nativeInput).length, blob: null, truncated: false };
+      rawOf(item).input = { inline: nativeInput, total_len: new TextEncoder().encode(nativeInput).length, blob: null, truncated: false };
     }
     if (searched.kind !== 'tool_call') throw new Error('the page operation is a tool item');
     const input = JSON.stringify({ query: null, action: { type: 'findInPage', url: 'https://docs.python.org/tutorial/', pattern: 'classes' } });
-    searched.payload.raw.input = { inline: input, total_len: new TextEncoder().encode(input).length, blob: null, truncated: false };
-    searched.payload.raw.output = null;
+    rawOf(searched).input = { inline: input, total_len: new TextEncoder().encode(input).length, blob: null, truncated: false };
+    rawOf(searched).output = null;
     await emit(ACME.mainThread, { items: [found, opened, searched, serverSearch, serverPage, managedSearch, managedPage] });
     await page.goto(`/thread/${ACME.mainThread}`);
     await expect(page.locator('[data-thread-header]')).toBeVisible();
@@ -94,3 +94,40 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await expect(servicePage).toContainText('The actual managed page content');
   });
 }
+
+
+test('a reader sees one Working line during a live search and none after the answer', async ({ page }) => {
+  await scenario();
+  await configureThread(ACME.mainThread, { reset: true });
+  const run = turn('search-turn', { ordinal: 1, state: 'running', inputId: 'search-input', startedAt: new Date().toISOString() });
+  const thought = reasoning('search-thought', 'Find the official title', { turn: run.id, status: 'completed' });
+  await emit(ACME.mainThread, { thread: { state: 'running', current_turn_id: run.id }, turns: [run], items: [thought] });
+  await signIn(page);
+  await page.goto(`/thread/${ACME.mainThread}`);
+
+  const fold = page.locator(`button[data-fold="${run.id}"]`);
+  const dock = page.locator('[data-status-line]');
+  const working = page.locator('main').getByText(english.thread.now.working, { exact: true });
+  await expect(fold).toHaveAttribute('aria-expanded', 'true');
+  await expect(dock).toContainText(english.thread.now.working);
+  await expect(working).toHaveCount(1);
+
+  const search = toolCall('native-search', { kind: 'web_search', action: { type: 'search' }, query: 'W3C WAI', results: [] },
+    { turn: run.id, title: 'Search the web', status: 'in_progress' });
+  await emit(ACME.mainThread, { items: [search] });
+  await expect(dock).toContainText('W3C WAI');
+  await fold.click();
+  await expect(fold).toHaveAttribute('aria-expanded', 'false');
+  await fold.click();
+  await expect(page.locator('[data-step="native-search"]')).toBeVisible();
+  await emit(ACME.mainThread, { items: [{ ...search, status: 'completed' }] });
+  await expect(dock).toContainText(english.thread.now.working);
+  await expect(working).toHaveCount(1);
+
+  await emit(ACME.mainThread, { thread: { state: 'idle', current_turn_id: null },
+    turns: [{ ...run, state: 'completed', completed_at: new Date().toISOString() }],
+    items: [agentMessage('search-answer', 'Web Accessibility Initiative', { turn: run.id, phase: 'final' })] });
+  await expect(page.getByText('Web Accessibility Initiative', { exact: true })).toBeVisible();
+  await expect(dock).toHaveCount(0);
+  await expect(working).toHaveCount(0);
+});

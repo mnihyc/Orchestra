@@ -19,9 +19,9 @@ import { Select } from '@/ui/Select';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
 vi.mock('@/help', async () => {
   // This suite exercises entrance ownership. The separate content suite checks the real shipped files/assets.
   const { makeGuide } = await import('@/help/guide');
@@ -104,6 +104,20 @@ it('promotes the remaining setting question when the named guide leaves, retaini
   await userEvent.click(screen.getByRole('button', { name: question(title('approval.mode')) }));
   await userEvent.click(screen.getByRole('button', { name: i18n.t('helpGroups.readGuide', { guide: i18n.t('helpRelease.guides.approvals') }) }));
   expect(calls.open).toHaveBeenLastCalledWith('how-approvals-work');
+});
+
+it('looks up translations only for the settings shown beside the thread controls', () => {
+  const resources = vi.spyOn(i18n, 'getResource');
+  try {
+    show(<><SettingHelpGroup settingKeys={['agent.model']} term="Model" article="resources" />
+      <SettingHelpLink settingKey="agent.params.service_tier" /></>);
+    const keys = resources.mock.calls.map((call) => call[2]);
+    expect(keys).toContain('settingRegistry.agent.model.title');
+    expect(keys).toContain('settingRegistry.agent.params.title');
+    expect(keys).not.toContain('settingRegistry.ask.models.title');
+  } finally {
+    resources.mockRestore();
+  }
 });
 
 it.each(['en', 'zh-CN'] as const)('offers only Model help when no effort control is present in %s', async (locale) => {

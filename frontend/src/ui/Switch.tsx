@@ -9,6 +9,8 @@ import { type ComponentPropsWithoutRef, type ReactNode, useId } from 'react';
 import { cx } from '@/ui/cx';
 import { Choice, type ChoiceName, type ChoiceProps } from '@/ui/Choice';
 import { AdminActTooltip, type AdminActSpec } from '@/ui/AdminAct';
+import { DeviceToggleFacts } from '@/ui/DeviceChoiceFacts';
+import { deviceChoiceOf } from '@/lib/viewChoiceFacts';
 
 export type SwitchProps = ChoiceName & Omit<ComponentPropsWithoutRef<typeof Primitive.Root>, 'name' | 'children' | 'asChild' | 'defaultChecked'> & {
   admin?: AdminActSpec;
@@ -37,7 +39,7 @@ export function Switch({ name, label, checked, onCheckedChange, disabled = false
     <Choice name={name ?? label} description={description ?? hint} help={help} presentation={presentation} htmlFor={id}
       className="w-full items-start justify-between gap-4" nameClassName={cx('text-base',disabled?'text-text-disabled':'text-text')}>
       {(content,control)=><>{content}
-      <AdminActTooltip spec={admin} content={tooltip ?? (presentation === 'compact' ? description ?? hint : undefined)}><Primitive.Root
+      <span className="inline-flex min-w-0 flex-wrap items-center gap-1"><AdminActTooltip spec={admin} content={tooltip ?? (presentation === 'compact' ? description ?? hint : undefined)}><Primitive.Root
         {...controlProps}
         aria-labelledby={controlProps['aria-label'] === undefined ? control['aria-labelledby'] : undefined}
         aria-describedby={[control['aria-describedby'], controlProps['aria-describedby']].filter(Boolean).join(' ') || undefined}
@@ -54,7 +56,7 @@ export function Switch({ name, label, checked, onCheckedChange, disabled = false
       >
         {/* The thumb remains white in both themes. */}
         <Primitive.Thumb data-choice-thumb className="block size-4 translate-x-0.5 rounded-full shadow-sm transition-transform data-[state=checked]:translate-x-3" />
-      </Primitive.Root></AdminActTooltip>
+      </Primitive.Root></AdminActTooltip>{deviceChoiceOf(onCheckedChange) !== undefined && <DeviceToggleFacts writer={onCheckedChange} checked={checked} />}</span>
       </>}
     </Choice>
     </div>

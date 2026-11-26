@@ -118,6 +118,7 @@ const KINDS: &[KeyTargetKind] = &[
     KeyTargetKind::Object(ObjectKind::McpServer),
     KeyTargetKind::Object(ObjectKind::Mount),
     KeyTargetKind::Object(ObjectKind::Skill),
+    KeyTargetKind::Object(ObjectKind::Pool),
 ];
 
 pub const HOME_FACETS: &[FacetSpec] = &[

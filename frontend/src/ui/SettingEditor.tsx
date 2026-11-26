@@ -9,6 +9,8 @@ import { restoreFocusQuietly } from '@/ui/focus';
 export interface SettingEditorProps extends Omit<SettingRowProps, 'value'> {
   /** The compact value, shown instead of the editor until it is opened. */
   summary: ReactNode;
+  /** The row's choice stays visible while its editor is opened or closed. */
+  start?: ReactNode;
   label: string;
   children: ReactNode;
   open?: boolean;
@@ -17,10 +19,10 @@ export interface SettingEditorProps extends Omit<SettingRowProps, 'value'> {
   /** Some form cleanups discard validity. They retain effects and pause their data with the open state instead. */
   pauseEffects?: boolean;
   /** Registry controls edit in the value column; larger resource forms retain their details area. */
-  placement?: 'inline' | 'details';
+  placement?: 'inline' | 'details' | 'full';
 }
 
-export function SettingEditor({ summary, label, children, open, onOpenChange, disabled = false, pauseEffects = true, placement = 'details', details, ...row }: SettingEditorProps) {
+export function SettingEditor({ summary, start, label, children, open, onOpenChange, disabled = false, pauseEffects = true, placement = 'details', details, ...row }: SettingEditorProps) {
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -30,7 +32,7 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
     if (!expanded) return;
     const editor = content.current;
     const opener = trigger.current;
-    if (placement === 'inline') {
+    if (placement !== 'details') {
       // A pencil begins editing here; keyboard input and Escape belong to the revealed value.
       // Larger details disclosures retain their existing focus behavior.
       const controls = Array.from(editor?.querySelectorAll<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button, [contenteditable="true"]') ?? [])
@@ -60,19 +62,20 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
     <Activity mode={expanded || !pauseEffects ? 'visible' : 'hidden'}>{(visited || expanded) && children}</Activity>
   </div>;
   return <SettingRow {...row}
-    value={placement === 'inline' ? <div data-setting-inline-editor className="flex min-w-0 max-w-full flex-col gap-2">
+    value={placement !== 'details' ? <div data-setting-inline-editor className="flex min-w-0 max-w-full flex-col gap-2">
+      {start}
       <div className="flex min-w-0 max-w-full items-start gap-2">
         <span id={`${id}-summary`} hidden={expanded} className="min-w-0">{summary}</span>
         <IconButton ref={trigger} data-setting-editor-trigger size="sm" label={label} icon={<Pencil aria-hidden />} aria-expanded={expanded} aria-controls={id}
           className="relative top-[calc((1lh-var(--control-sm))/2)]"
           aria-describedby={`${id}-summary`} pending={disabled} onClick={() => change(!expanded)} />
       </div>
-      {editor}
+      {placement === 'inline' && editor}
     </div> : <Button ref={trigger} data-setting-editor-trigger size="sm" aria-label={label} aria-expanded={expanded} aria-controls={id} aria-describedby={`${id}-summary`}
       pending={disabled} aria-busy={disabled || undefined} className="h-auto! min-h-(--control-sm) min-w-0 max-w-full py-1" onClick={() => change(!expanded)}>
       <span id={`${id}-summary`} className="truncate">{summary}</span>
     </Button>}
-    detailsVisible={placement === 'details' ? expanded || details !== undefined : details !== undefined}
+    detailsVisible={placement !== 'inline' ? expanded || details !== undefined : details !== undefined}
     details={placement === 'inline' ? details : <>{details}{editor}</>}
   />;
 }

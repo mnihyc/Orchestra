@@ -152,7 +152,22 @@ fn a_ticket_the_system_signed_is_good_for_the_machine_it_names_until_it_expires(
         TicketSource::Machine(opener),
         (clock.now() + Duration::hours(1)).into(),
     );
-    let ticket = signer.issue(&request).unwrap();
+    let ticket = signer
+        .issue_for_session(
+            &request,
+            Some((new_id(), 0)),
+            None,
+            &orch_link_contract::tunnels::ToolSessionScope {
+                opening_epoch: 1,
+                thread_id: request.thread_id.unwrap(),
+                segment_id: new_id(),
+                opening_id: new_id(),
+                member: "exec".into(),
+                nonce: new_id(),
+                revision: 1,
+            },
+        )
+        .unwrap();
     let claims = verifier
         .verify(&ticket, TicketSource::Machine(opener), clock.time())
         .unwrap();

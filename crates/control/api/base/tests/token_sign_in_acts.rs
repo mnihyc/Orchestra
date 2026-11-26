@@ -53,6 +53,7 @@ async fn an_api_token_cannot_revoke_its_users_browser_session() {
         .send()
         .await
         .ok()
+        .items
         .into_iter()
         .find(|session| session.current)
         .unwrap()
@@ -73,6 +74,7 @@ async fn an_api_token_cannot_revoke_its_users_browser_session() {
             .send()
             .await
             .ok()
+            .items
             .iter()
             .any(|live| live.id == session)
     );
@@ -108,7 +110,8 @@ async fn an_api_token_may_list_sign_ins_without_being_a_browser_sign_in() {
         .token(&token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(!listed.is_empty());
     assert!(listed.iter().all(|sign_in| !sign_in.current));
 }

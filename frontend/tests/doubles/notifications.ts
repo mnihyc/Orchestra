@@ -1,3 +1,4 @@
+import { channelPage } from './collection.ts';
 /** What the fake API says of a person's notifications, the approvals that wait for them, how they are told, and the feed that keeps the first two current.
  *
  * Each person has an Inbox: rows with a number that only grows (a read mark restamps the row), counters
@@ -524,7 +525,7 @@ export class NotificationWorld implements Part {
   }
 
   /** Every channel the person can route to: those of the system and of their orgs (kept by the settings double) and their own webhooks. */
-  private channelsFor(person: Person): NotificationChannel[] {
+  channelsFor(person: Person): NotificationChannel[] {
     const shared = this.world.settings.channelsVisibleTo(person).filter((channel) => this.only === null || this.only.has(channel.kind));
     return [...shared.map((channel) => this.sharedChannel(person, channel)), ...this.channels.filter((def) => def.user === person.me.username).map((def) => this.ownChannel(person, def))];
   }
@@ -580,7 +581,7 @@ export class NotificationWorld implements Part {
     }
 
     // What a person can route to, without an org named; the channels of an org, and the kinds there are, are the settings double's.
-    if (route === 'GET /notification-channels' && !query.has('org_id')) return { status: 200, body: this.channelsFor(person) };
+    if (route === 'GET /notification-channels' && !query.has('org_id')) return { status: 200, body: channelPage(this.channelsFor(person), query) };
 
     if ((found = /^PUT \/me\/notification-routes\/([^/]+)$/.exec(route))) return { status: 200, body: this.setRoute(person, found[1] ?? '', body) };
     if ((found = /^DELETE \/me\/notification-routes\/([^/]+)$/.exec(route))) {
