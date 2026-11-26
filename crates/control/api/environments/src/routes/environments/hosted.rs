@@ -207,6 +207,7 @@ pub(crate) async fn create_with_prepared_initial(
 orch_api_base::__api_bind_25a1104266!();
 
 struct CreationInput {
+    identity: Option<Id>,
     body: NewEnvironment,
     config: serde_json::Value,
     name: Option<String>,
@@ -218,11 +219,12 @@ struct CreationInput {
 impl CreationInput {
     fn request<'a>(&'a self, principal: &Principal) -> Request<'a> {
         Request {
+            identity: self.identity,
             owner: principal.user(),
             name: self.name.as_deref(),
             home: self.home,
             template: self.body.template_id,
-            host: self.body.host_id,
+            host: self.body.host_id.clone(),
             config: &self.config,
         }
     }
@@ -235,6 +237,11 @@ async fn prepare_input(
     body: NewEnvironment,
     prepared: Option<orch_engine::initial_files::Plan>,
 ) -> ApiResult<CreationInput> {
+    if let Some(Some(target)) = &body.host_id {
+        target
+            .validate(orch_provider_contract::pools::Kind::Host)
+            .map_err(|reason| invalid("host_id", &reason))?;
+    }
     let mut config = body.config.clone().unwrap_or_else(|| json!({}));
     if let Some(sources) = &body.data_sources {
         let own = config
@@ -295,6 +302,7 @@ async fn prepare_input(
     }
     let _ = ctx;
     Ok(CreationInput {
+        identity: ctx.operation_request().map(|request| request.identity()),
         body,
         config,
         name,
@@ -376,10 +384,24 @@ async fn finish_input(
 async fn restart(ctx: Ctx, (): (), body: api::EnvironmentRestartBody) -> ApiResult<Job> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let row = ctx
-        .app
-        .engine
-        .queue_restart(&mut tx, &principal, id, body.mode)
+    let caller = orch_engine::jobs::restart::operation::admit(&mut tx, principal.caller(), id)
+        .await
+        .map_err(ApiError::engine)?;
+    let principal = orch_authz::Principal::load(&mut tx, caller, principal.now())
+        .await
+        .map_err(orch_engine::EngineError::from)
+        .map_err(ApiError::engine)?;
+    let origin =
+        orch_authz::CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let http =
+        crate::key_operations::native::http_origin::capture_operation(&ctx, &mut tx, &origin)
+            .await?;
+    let row = http
+        .scope(
+            ctx.app
+                .engine
+                .queue_restart(&mut tx, &principal, id, body.mode),
+        )
         .await
         .map_err(|error| match error {
             orch_engine::jobs::restart::Error::NotFound => ApiError::not_found(),

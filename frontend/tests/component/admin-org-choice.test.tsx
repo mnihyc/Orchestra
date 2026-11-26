@@ -8,12 +8,16 @@ import type * as Admin from '@/api/admin';
 import type * as Client from '@/api/client';
 import { ApiError, client } from '@/api/client';
 import { IdentityProviders } from '@/features/admin/IdentityProviders';
+import { Agents } from '@/features/admin/Agents';
 import { OrganizationChoice } from '@/features/admin/OrganizationChoice';
 import type { IdentityProvider, Org, OrgPage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { Toaster } from '@/ui/Toast';
 import { id, me, org, userRef } from '../doubles/fixtures';
+import { inventoryRow } from '../doubles/everything-row';
+import { detailAgent } from './resource-detail-fixtures';
+import { TestRouter } from './TestRouter';
 
 interface Options { params?: { path?: { id?: string }; query?: Record<string, unknown> }; signal?: AbortSignal }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options?: Options) => Promise<unknown>>(),
@@ -56,7 +60,7 @@ function Harness({ value = current.id, disabled = false }: { value?: string | nu
 const clients: QueryClient[] = [];
 function draw(ui: ReactNode) {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); clients.push(queries);
-  return { queries, ...render(<QueryClientProvider client={queries}><TooltipProvider overflow={false}><Toaster>{ui}</Toaster></TooltipProvider></QueryClientProvider>) };
+  return { queries, ...render(<QueryClientProvider client={queries}><TooltipProvider overflow={false}><TestRouter><Toaster>{ui}</Toaster></TestRouter></TooltipProvider></QueryClientProvider>) };
 }
 const field = () => screen.getByRole('combobox', { name: i18n.t('admin.idp.defaultOrg') });
 const list = () => within(screen.getByRole('listbox', { name: i18n.t('admin.idp.defaultOrg') }));
@@ -67,7 +71,7 @@ beforeEach(async () => {
   await setLocale('en'); calls.read.mockReset(); calls.changed.mockReset(); calls.submit.mockReset(); calls.update.mockReset();
   client.session.setState({ readerVersion: 1 });
   calls.read.mockImplementation((path, options) => {
-    if (path === '/admin/identity-providers') return Promise.resolve([provider]);
+    if (path === '/admin/identity-providers') return Promise.resolve({ items: [provider], next_cursor: null });
     if (path === '/nodes/{id}') return Promise.resolve(options?.params?.path?.id === late.id ? late : current);
     if (path === '/admin/orgs') return Promise.resolve(page(first, 'after-first'));
     return Promise.reject(new Error(`Unexpected read: ${path}`));
@@ -196,7 +200,7 @@ it('makes no closed candidate read or disabled field read and does not submit on
 });
 
 for (const clear of [false, true]) it(`keeps the real IDP role/secret draft and writes ${clear ? 'null organization and role' : 'the department ID'} only on explicit Save`, async () => {
-  calls.read.mockImplementation((path, options) => Promise.resolve(path === '/admin/identity-providers' ? [provider] : path === '/nodes/{id}' ? current
+  calls.read.mockImplementation((path, options) => Promise.resolve(path === '/admin/identity-providers' ? { items: [provider], next_cursor: null } : path === '/nodes/{id}' ? current
     : page(options?.params?.query?.q === 'research' ? [late] : first)));
   const saved = deferred<IdentityProvider>(); calls.update.mockReturnValue(saved.promise);
   const user = userEvent.setup(); draw(<IdentityProviders />);
@@ -204,7 +208,11 @@ for (const clear of [false, true]) it(`keeps the real IDP role/secret draft and 
   await user.click(screen.getByRole('menuitem', { name: i18n.t('admin.idp.edit') }));
   const dialog = screen.getByRole('dialog', { name: i18n.t('admin.idp.editTitle', { name: provider.name }) });
   await waitFor(() => expect(field()).toHaveValue(current.name));
-  await user.type(within(dialog).getByLabelText(i18n.t('admin.idp.secret')), 'replacement-secret-draft');
+  // The saved secret shows as dots that are set; a new one is typed after Replace and stays through the other choices of the form.
+  expect(within(dialog).getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
+  await user.click(within(dialog).getByRole('button', { name: i18n.t('settingsEditors.secret.replace') }));
+  await user.click(within(dialog).getByLabelText(i18n.t('admin.idp.secret')));
+  await user.paste('replacement-secret-draft');
   if (clear) await user.click(screen.getByRole('button', { name: i18n.t('resources.bulk.clear') }));
   else {
     await user.click(field()); await user.type(field(), 'research');
@@ -222,4 +230,47 @@ for (const clear of [false, true]) it(`keeps the real IDP role/secret draft and 
   expect(field()).toBeDisabled();
   await act(async () => { saved.resolve({ ...provider, revision: 8, default_org_id: clear ? null : late.id, default_role: clear ? null : 'developer' }); await Promise.resolve(); });
   await waitFor(() => expect(dialog).not.toBeInTheDocument());
+});
+
+
+it('names a new identity provider before its key and shows the actual fallback name', async () => {
+  const user = userEvent.setup(); draw(<IdentityProviders />);
+  await user.click(await screen.findByRole('button', { name: i18n.t('admin.idp.addTitle') }));
+  const dialog = within(screen.getByRole('dialog'));
+  const name = dialog.getByRole('textbox', { name: i18n.t('admin.idp.nameField') + ' ' + i18n.t('ui.field.optional') });
+  expect(dialog.getAllByRole('textbox')[0]).toBe(name);
+  await user.type(dialog.getByRole('textbox', { name: i18n.t('admin.idp.key') }), 'workforce');
+  expect(name).toHaveAttribute('placeholder', 'workforce');
+});
+
+it('finds a sign-in provider beyond a thousand by server search without opening a new creation form', async () => {
+  const all = Array.from({ length: 1_001 }, (_, index) => ({ ...provider, id: id(90, index + 1), name: 'Workforce ' + String(index).padStart(4, '0') }));
+  calls.read.mockImplementation((path, options) => {
+    if (path !== '/admin/identity-providers') return Promise.resolve(page([]));
+    const q = options?.params?.query?.q;
+    return Promise.resolve({ items: typeof q === 'string' && q !== '' ? all.filter((row) => row.name === q) : all.slice(0, 37), next_cursor: q === '' ? 'after-37' : null });
+  });
+  draw(<IdentityProviders />);
+  const user = userEvent.setup();
+  const search = await screen.findByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('admin.signIn.providers.title') }) });
+  await user.click(search); await user.paste('Workforce 1000');
+  expect(await screen.findByText('Workforce 1000')).toBeVisible();
+  expect(calls.read.mock.calls.some(([path, options]) => path === '/admin/identity-providers' && options?.params?.query?.q === 'Workforce 1000')).toBe(true);
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+it('selects system profiles in the native pager before finding a late name', async () => {
+  calls.read.mockImplementation((path, options) => {
+    if (path === '/harness-kinds') return Promise.resolve([]);
+    if (path !== '/everything') return Promise.resolve({ items: [], next_cursor: null });
+    const query = options?.params?.query;
+    const agent = { ...detailAgent, name: 'System profile 1001', home: null, org_id: null };
+    const items = query?.q === agent.name ? [inventoryRow({ id: agent.id, kind: 'agent', name: agent.name, resource: { kind: 'agent', value: agent } })] : [];
+    return Promise.resolve({ items, next_cursor: null });
+  });
+  draw(<Agents />);
+  const search = await screen.findByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('admin.sections.agents.title') }) });
+  const user = userEvent.setup(); await user.click(search); await user.paste('System profile 1001');
+  expect(await screen.findByRole('link', { name: 'System profile 1001' })).toBeVisible();
+  expect(calls.read.mock.calls.some(([path, options]) => path === '/everything' && options?.params?.query?.resource_kind === 'system' && options.params.query.q === 'System profile 1001')).toBe(true);
 });

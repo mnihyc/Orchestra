@@ -73,23 +73,18 @@ async fn a_usable_profile_without_a_report_is_explained_without_guessing_subscri
         .await
         .unwrap();
     let page = setup(&world, &c.boss, c.acme).await.ok();
-    assert!(!page.subscriptions.iter().any(|entry| entry.agent.id == id));
     assert!(
-        page.subscriptions_unreported
-            .as_ref()
-            .is_some_and(|agents| agents.iter().any(|agent| agent.id == id))
+        serde_json::to_value(&page)
+            .unwrap()
+            .get("subscriptions_unreported")
+            .is_none(),
+        "subscription availability has one current representation"
     );
+    assert!(!page.subscriptions.iter().any(|entry| entry.agent.id == id));
     assert!(page.subscriptions_unavailable.as_ref().is_some_and(|rows|rows.iter().any(|row|
         row.agent.as_ref().is_some_and(|agent|agent.id==id)
         && row.reason==orch_api_contract::resources::ProviderSetupSubscriptionUnavailableReason::NotReported)));
     let hidden = setup(&world, &c.viewer, c.acme).await.ok();
-    assert!(
-        hidden
-            .subscriptions_unreported
-            .as_ref()
-            .is_none_or(|agents| agents.iter().all(|agent| agent.id != id)),
-        "unknown capability does not disclose an unusable private profile"
-    );
     assert!(
         hidden
             .subscriptions_unavailable
@@ -207,7 +202,8 @@ async fn the_setup_lists_the_protocols_with_their_options_and_the_presets_a_memb
             "openai-responses",
             "openai-chat",
             "anthropic-messages",
-            "openai-embeddings"
+            "openai-embeddings",
+            "google-interactions"
         ]
     );
     assert_eq!(page.protocols[3].title, "OpenAI Embeddings");
@@ -231,6 +227,9 @@ async fn the_setup_lists_the_protocols_with_their_options_and_the_presets_a_memb
             && preset_names.contains(&"OpenRouter"),
         "{preset_names:?}"
     );
+    let google = page.presets.iter().find(|preset| preset.name == "Google Gemini").unwrap();
+    assert!(google.upstreams.iter().any(|upstream| upstream.protocol == "google-interactions" && upstream.base_url == "https://generativelanguage.googleapis.com/v1beta"));
+    assert!(google.upstreams.iter().any(|upstream| upstream.protocol == "openai-chat" && upstream.base_url == "https://generativelanguage.googleapis.com/v1beta/openai"));
     let openai = page.presets.iter().find(|p| p.name == "OpenAI").unwrap();
     assert_eq!(openai.upstreams[0].protocol, "openai-responses");
     let openrouter = page
@@ -590,7 +589,7 @@ async fn default_source_admin_secrets_are_manager_only_sealed_and_independent_of
         .call(ProviderCreate, &[])
         .token(&c.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Independent source credentials".into(),
             home_id: c.acme,
             access: None,
@@ -614,11 +613,17 @@ async fn default_source_admin_secrets_are_manager_only_sealed_and_independent_of
         .provider;
     let id = made.base.id;
     // Do not start an unavailable keeper as part of a secret-storage test.
-    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
-        .bind(id)
-        .execute(&world.db.pool)
-        .await
-        .unwrap();
+    let mut revision: i64 =
+        sqlx::query_scalar("UPDATE providers SET status='disabled' WHERE id=$1 RETURNING revision")
+            .bind(id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        revision,
+        made.revision + 1,
+        "deliberately disabling a provider changes an editable choice"
+    );
     let ordinary: Vec<u8> = sqlx::query_scalar(
         "SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='api_key'",
     )
@@ -627,9 +632,8 @@ async fn default_source_admin_secrets_are_manager_only_sealed_and_independent_of
     .await
     .unwrap();
     let denied = world.app.call(ProviderSourcesSet, &[&id]).token(&c.viewer.token)
-        .raw_body(&json!({"expected_revision":made.revision,"facts":{"by":"default","secrets":{"admin_key":"test-admin-first"}}})).send().await.problem();
+        .raw_body(&json!({"expected_revision":revision,"facts":{"by":"default","secrets":{"admin_key":"test-admin-first"}}})).send().await.problem();
     assert_eq!(denied.code, ErrorCode::AuthzDenied);
-    let mut revision = made.revision;
     for value in [
         Some("test-admin-first"),
         Some("test-admin-replacement"),

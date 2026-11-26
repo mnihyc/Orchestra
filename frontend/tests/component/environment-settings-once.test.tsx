@@ -3,6 +3,7 @@ import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as SettingsApi from '@/api/settings';
 import { EnvironmentSettings } from '@/features/resources/environments/Settings';
+import { IdleControl } from '@/features/inspector/IdleControl';
 import { localizedSetting } from '@/features/settings/settingText';
 import type { Environment, ResolvedSetting } from '@/generated/api-types';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
@@ -17,6 +18,14 @@ const entries = [
   { key: 'env.lifetime', value: 'temporary' }, { key: 'env.temporary_idle_hours', value: 24 },
   { key: 'network.allowed_hosts', value: ['packages.example.test'] }, { key: 'browser.preset', value: 'headless' },
 ];
+
+for (const locale of ['en', 'zh-CN'] as const) it(`says that native work keeps the unit awake instead of promising its old idle time (${locale})`, async () => {
+  await setLocale(locale);
+  const environment = { ...detailEnvironment, status: 'running' as const, idle_stop_at: '2020-01-01T10:00:00Z', idle_stop_deferred: true };
+  const view = show(<IdleControl environment={environment} door={{ environmentId: environment.id, threadId: null }} mayManage={false} />);
+  expect(screen.getByText(locale === 'en' ? 'Work keeps it awake' : '任务运行中，暂不自动停止')).toBeVisible();
+  expect(view.container).not.toHaveTextContent('2020');
+});
 const server = vi.hoisted(() => ({ values: vi.fn<() => Promise<ResolvedSetting[]>>() }));
 vi.mock('@/api/settings', async (load) => {
   const actual = await load<typeof SettingsApi>();
@@ -26,7 +35,7 @@ vi.mock('@/api/settings', async (load) => {
   };
 });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/resources/environments/unit', searchStr: '?tab=settings' }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const priorAppearance = useAppearance.getState();
 beforeEach(() => {
   vi.clearAllMocks();

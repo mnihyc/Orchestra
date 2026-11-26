@@ -13,6 +13,7 @@ import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/
 import { api, client, done, ok, repeatable } from '@/api/client';
 import type { Chat, GroupCreateFields, GroupUpdateBody } from '@/api/chat-contract';
 import { queryClient } from '@/api/query';
+import { publishInRead } from '@/api/reads';
 import { beginPeopleRead } from '@/api/peopleChanges';
 import { nodeKey } from '@/api/nodes';
 import { beginDefaultsOpening, hasUnattemptedPeopleHint, seedNodeDefaults, type DefaultsDemand } from '@/api/defaultsOpening';
@@ -37,7 +38,6 @@ import type {
   ForwardCreateReply,
   Item,
   OrgChatCreateBody,
-  UserRef,
 } from '@/generated/api-types';
 
 // ---------------------------------------------------------------- parts
@@ -58,10 +58,6 @@ export const FORWARD_MAX_MESSAGES = 20;
 /** The most items of a thread a forward takes. */
 export const FORWARD_MAX_ITEMS = 200;
 export const FORWARD_MAX_DESTINATIONS = 10;
-/** The fewest characters a search for people is asked with. */
-export const PEOPLE_SEARCH_MIN_CHARS = 2;
-/** How many people a search for people shows: more than a list to choose from is read as a result to search again. */
-export const PEOPLE_SHOWN = 8;
 /** How many chats a page of a list asks for. */
 export const CHATS_PAGE = 50;
 
@@ -123,7 +119,8 @@ export const nodeChatOpeningQuery = (nodeId: string, scope: string, chatId: stri
     }));
     signal.throwIfAborted();
     if (client.session.getState().readerVersion !== reader || client.session.getState().userId !== userId) throw new DOMException('The chat reader changed', 'AbortError');
-    if (requestedDefaults !== undefined && (ownsDefaults === undefined || ownsDefaults()) && seedNodeDefaults(cache, nodeId, data.defaults, requestedDefaults, `${userId ?? ''}:${reader ?? 0}`)) {
+    if (requestedDefaults !== undefined && (ownsDefaults === undefined || ownsDefaults()) && publishInRead(cache, queryKey,
+      () => seedNodeDefaults(cache, nodeId, data.defaults, requestedDefaults, `${userId ?? ''}:${reader ?? 0}`))) {
       checkedNode?.accept(); if (read !== undefined) read.projection = data.defaults ?? undefined;
     }
     else checkedNode?.cancel();
@@ -202,11 +199,24 @@ export const orgChatsKey = (orgId: string) => ['chats', orgId] as const;
 
 /** What a list of an org's chats is of: the caller's own, the others' they may read, or those of nodes. */
 export interface ChatListFilter {
+  q?: string;
+  /** Resolve saved identities through this same native list source in one batch. */
+  ids?: readonly string[];
+  includeEmpty?: boolean;
   participating?: boolean;
   scope: ChatListScope;
   /** With `others`: the org of the tree whose people's chats are read. */
   of: string | null;
 }
+
+/** The roster uses ChatGet's actual name and read projection, without replacing the complete chat cache. */
+export const chatMembersPageQuery = (id: string, q: string) => infiniteQueryOptions({
+  queryKey: ['chat-members', id, 'pages', q] as const, initialPageParam: null as string | null,
+  queryFn: async ({ pageParam, signal }) => {
+    const reply = await ok(api.GET('/chats/{id}', { params: { path: { id }, query: { members_q: q, members_limit: 50, ...(pageParam === null ? {} : { members_cursor: pageParam }) } }, signal }));
+    return { items: reply.members ?? [], next_cursor: reply.members_next_cursor ?? null, disclosed: reply.members !== null };
+  }, getNextPageParam: (last) => last.next_cursor, retry: false,
+});
 
 /** The chats of a root org, newest activity first, a page at a time. */
 export const orgChatsQuery = (orgId: string, filter: ChatListFilter) =>
@@ -220,6 +230,9 @@ export const orgChatsQuery = (orgId: string, filter: ChatListFilter) =>
             path: { id: orgId },
             query: {
               scope: filter.scope,
+              ...(filter.q?.trim() ? { q: filter.q.trim() } : {}),
+              ...(filter.ids === undefined ? {} : { ids: filter.ids.join(',') }),
+              ...(filter.includeEmpty === true ? { include_empty: true } : {}),
               ...(filter.participating === true ? { participating: true } : {}),
               limit: CHATS_PAGE,
               ...(filter.of === null ? {} : { of: filter.of }),
@@ -234,16 +247,6 @@ export const orgChatsQuery = (orgId: string, filter: ChatListFilter) =>
     retry: false,
   });
 
-/** Searches the people the caller shares an org with, by the start of a username or a part of a name. */
-export const peopleKey = (orgId: string | null, q: string) => ['people', orgId, q] as const;
-export const peopleQuery = (orgId: string | null, q: string) =>
-  queryOptions({
-    queryKey: peopleKey(orgId, q),
-    queryFn: ({ signal }): Promise<UserRef[]> =>
-      ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }) } }, signal })),
-    staleTime: 60_000,
-  });
-
 /** An item of a thread, as a quote shows it. A reader who may not read the timeline is refused, and that is final. */
 export const quotedItemKey = (threadId: string, itemId: string) => ['thread-item', threadId, itemId] as const;
 export const quotedItemQuery = (threadId: string, itemId: string) =>
@@ -252,7 +255,6 @@ export const quotedItemQuery = (threadId: string, itemId: string) =>
     queryFn: ({ signal }): Promise<Item> =>
       ok(api.GET('/threads/{id}/items/{item_id}', { params: { path: { id: threadId, item_id: itemId } }, signal })),
     retry: false,
-    staleTime: 5 * 60_000,
   });
 
 // ---------------------------------------------------------------- writing in a chat
