@@ -425,6 +425,15 @@ impl<I: source::Intent> effects::Apply for Preview<I> {
                     .execute(&mut *conn)
                     .await
                     .map_err(orch_db::DbError::from)?;
+                if let Some(audience) = &value.fetched.audience {
+                    orch_db::queries::notifications::operations::preview_for(
+                        conn,
+                        plan.preflight_id,
+                        &audience.people,
+                        "person.notify",
+                    )
+                    .await?;
+                }
             }
             Ok(effects::Outcome::Applied(Accepted {
                 plan,
@@ -477,12 +486,9 @@ async fn run_for<I: source::Intent>(
         .moving()
         .map(orch_engine::fork_plan::moving::Review::public);
     let notification = done.output.audience.as_ref().map(|audience| {
-        orch_api_contract::duplicates::ChatDuplicateAudience {
+        orch_api_contract::duplicates::ThreadMoveAudience {
             people: audience.count,
-            notify_limit: orch_engine::fork_plan::moving::NOTICE_LIMIT,
-            preview_id: (audience.count > 0
-                && audience.count <= u64::from(orch_engine::fork_plan::moving::NOTICE_LIMIT))
-            .then_some(done.output.plan.preflight_id),
+            preview_id: (audience.count > 0).then_some(done.output.plan.preflight_id),
         }
     });
     let open_sides = Some(done.output.open_sides.clone());

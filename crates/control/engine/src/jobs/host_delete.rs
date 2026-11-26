@@ -183,6 +183,7 @@ impl Deleting {
                 return;
             }
             progress.activity = Some(JobActivity {
+                captured_deadline: None,
                 waiting_for: reason,
                 updated_at: Time::new(job.now()),
                 stall_after_seconds: 0,
@@ -462,8 +463,9 @@ impl Phased for Deleting {
                 .await
                 .ok()
                 .is_some_and(|plan| plan["host_copies_committed"] == true)
+            && crate::mount_copies::undo(job).await.is_err()
         {
-            let _left = crate::mount_copies::undo(job).await;
+            return Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into());
         }
         if let Ok(mut conn) = job.engine().db().acquire().await {
             let _=sqlx::query("UPDATE hosts SET schedulable=$2,revision=revision+1,updated_at=$3 WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM machines m WHERE m.id=hosts.machine_id AND (m.deleted_at IS NOT NULL OR m.lost_at IS NOT NULL))").bind(self.recipe.host).bind(self.recipe.schedulable).bind(job.now()).execute(&mut *conn).await;

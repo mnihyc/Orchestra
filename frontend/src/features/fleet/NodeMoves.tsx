@@ -1,3 +1,4 @@
+import { CompleteCollection } from '@/ui/CompleteCollection';
 /** Native node-scoped fleet moves retain one plan, audience and retry identity per selected home. */
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -12,7 +13,7 @@ import { moveLists } from '@/features/change/EnvironmentChange';
 import { PlanLists } from '@/features/change/Lists';
 import { Time } from '@/features/change/Time';
 import { transferFacts } from '@/features/change/environmentTransfer';
-import { openChange } from '@/features/change/target';
+import { openChange, type EnvironmentMoveSource } from '@/features/change/target';
 import { JobProgress } from '@/features/change/Progress';
 import { MeasurementReason, Measurements } from '@/features/change/Measurements';
 import { NotifyPeople } from '@/features/notifications/NotifyPeople';
@@ -20,7 +21,7 @@ import { usePlaceLabel } from '@/features/navigation/placeLabels';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { MachineLink } from '@/features/resources/machines/MachineLink';
 import { hostChoice, templateChoice } from '@/features/resources/choiceAvailability';
-import type { Environment, EnvironmentBatch, EnvironmentMovePlan, EnvironmentRef, ForkCreateBody, NodeEnvironmentMoveCreateReceipt } from '@/generated/api-types';
+import type { EnvironmentBatch, EnvironmentMovePlan, EnvironmentRef, ForkCreateBody, NodeEnvironmentMoveCreateReceipt } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { useActKey } from '@/lib/forms';
@@ -38,8 +39,8 @@ import { Table } from '@/ui/Table';
 import { EnvironmentBatchProgress } from './MoveDialog';
 import { RunningTurnChoice } from './UpdateDialog';
 
-export interface MoveGroup { home: Environment['home']; environments: Environment[] }
-export function environmentMoveGroups(environments: readonly Environment[]): MoveGroup[] {
+export interface MoveGroup { home: EnvironmentMoveSource['home']; environments: EnvironmentMoveSource[] }
+export function environmentMoveGroups(environments: readonly EnvironmentMoveSource[]): MoveGroup[] {
   const groups = new Map<string, MoveGroup>();
   const seen = new Set<string>();
   for (const environment of environments) {
@@ -51,11 +52,11 @@ export function environmentMoveGroups(environments: readonly Environment[]): Mov
   return [...groups.values()];
 }
 
-export function NodeMovesDialog({ environments, onClose }: { environments: readonly Environment[]; onClose: () => void }) {
+export function NodeMovesDialog({ environments, onClose }: { environments: readonly EnvironmentMoveSource[]; onClose: () => void }) {
   const reader = useStore(client.session, (state) => state.readerVersion ?? 0);
   return <NodeMoves key={reader} environments={environments} reader={reader} onClose={onClose} />;
 }
-function NodeMoves({ environments, reader, onClose }: { environments: readonly Environment[]; reader: number; onClose: () => void }) {
+function NodeMoves({ environments, reader, onClose }: { environments: readonly EnvironmentMoveSource[]; reader: number; onClose: () => void }) {
   const { t } = useTranslation();
   const placeLabel = usePlaceLabel();
   const groups = environmentMoveGroups(environments);
@@ -136,7 +137,7 @@ function GroupMoves({ group, active, reader, onPending, onReceipt, onClose }: {
     <Checkbox label={t('changeCompact.copyDirectories')} checked={copy} onCheckedChange={setCopy} disabled={run.isPending} />
     {plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : plan.isPending ? <SkeletonRows read={plan} rows={3} /> : <>
       {running > 0 && <RunningTurnChoice activeTurn={turn ?? plan.data.options.active_turn} minutes={wait ?? plan.data.options.wait_minutes} running={running} disabled={run.isPending} onChoice={setTurn} onMinutes={setWait} />}
-      <Table label={t('fleetMoves.title')} rows={rows} rowKey={(row) => row.environment.id} columns={[
+      <CompleteCollection label={t('fleetMoves.title')} items={rows} textOf={(row)=>row.environment.name}>{(page)=><Table label={t('fleetMoves.title')} rows={page} rowKey={(row) => row.environment.id} columns={[
         { id: 'environment', header: t('loss.environment'), cell: (row) => <div className="flex min-w-0 flex-col gap-1"><ResourceChip subject={{ kind: 'environment', environment: row.environment }} />
           {row.plan !== null && <span className="text-sm text-text-muted">{t(transferFacts(row.plan).kind === 'switch_copy' ? 'envTransfer.copy' : 'change.env.confirm.move')}</span>}
           {row.refusal !== null && <span className="text-sm text-text-muted">{row.refusal}</span>}
@@ -149,7 +150,7 @@ function GroupMoves({ group, active, reader, onPending, onReceipt, onClose }: {
             <Button size="sm" onClick={() => { onClose(); openChange({ kind: 'environment', id: row.environment.id, name: row.environment.name }, { kind: 'move' }); }}>{t('resources.act.open')}</Button>
           </div>
         </Popover> },
-      ]} />
+      ]} />}</CompleteCollection>
       <Time estimate={plan.data.estimate} options={{ ...plan.data.options, active_turn: turn ?? plan.data.options.active_turn, wait_minutes: wait ?? plan.data.options.wait_minutes }} turnRunning={running > 0}
         stands={t('change.env.standsStill', { count: plan.data.plans.reduce((count, value) => count + value.threads.length, 0) })} />
     </>}

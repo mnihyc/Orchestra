@@ -14,8 +14,6 @@ use crate::registry::Registry;
 
 use orch_api_contract::threads::ITEMS_DEFAULT_LIMIT;
 
-use orch_api_contract::threads::ITEMS_MAX_LIMIT;
-
 use orch_api_contract::threads::ThreadHistoryListQuery;
 
 use orch_api_contract::threads::ThreadSegmentList;
@@ -44,11 +42,25 @@ fn limit(query: &ThreadHistoryListQuery) -> ApiResult<i64> {
             "is a positive permanent ordinal",
         ));
     }
-    Ok(i64::from(super::read::limit_of(
-        query.limit,
-        ITEMS_DEFAULT_LIMIT,
-        ITEMS_MAX_LIMIT,
-    )?))
+    positive_limit(query.limit, ITEMS_DEFAULT_LIMIT)
+}
+
+pub(super) fn positive_limit(limit: Option<u32>, default: u32) -> ApiResult<i64> {
+    match limit.unwrap_or(default) {
+        0 => Err(ApiError::invalid("limit", "must be greater than zero")),
+        limit => Ok(i64::from(limit)),
+    }
+}
+
+pub(super) async fn search_batches(conn: &mut orch_db::Conn) -> ApiResult<u64> {
+    orch_settings::get::<u64>(
+        conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::SEARCH_HISTORY_CANDIDATE_BATCHES,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::internal("the history search work setting has no value"))
 }
 
 async fn segments(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<ThreadSegmentPage> {
@@ -69,29 +81,66 @@ async fn segments(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<
             ),
         ));
     }
-    let mut rows = continuation_rows::reading::segments(
-        &mut tx,
-        thread,
-        projection.viewed_continuation_id,
-        query.before,
-        limit + 1,
-    )
-    .await?;
-    let more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
-    if more {
-        rows.remove(0);
-    }
-    let next_before = if more {
-        rows.first().map(|row| row.ordinal)
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    let mut before = query.before;
+    let scanning = !words.terms().is_empty();
+    let batch = if scanning {
+        limit.max(i64::from(ITEMS_DEFAULT_LIMIT))
     } else {
-        None
+        limit
     };
-    let (_, segments) = ctx
-        .app
-        .engine
-        .project_history_in(&mut tx, &[], &rows)
-        .await
-        .map_err(super::read_failed)?;
+    let mut batches = if scanning {
+        search_batches(&mut tx).await?
+    } else {
+        1
+    };
+    let mut result = Vec::new();
+    let next_before = loop {
+        let mut rows = continuation_rows::reading::segments(
+            &mut tx,
+            thread,
+            projection.viewed_continuation_id,
+            before,
+            batch + 1,
+        )
+        .await?;
+        let more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > batch;
+        if more {
+            rows.remove(0);
+        }
+        let next = more.then(|| rows.first().map(|row| row.ordinal)).flatten();
+        let (_, projected) = ctx
+            .app
+            .engine
+            .project_history_in(&mut tx, &[], &rows)
+            .await
+            .map_err(super::read_failed)?;
+        result.extend(projected.into_iter().rev().filter(|one| {
+            words.matches(&format!(
+                "{} · {} · {}",
+                one.ordinal,
+                one.agent.as_ref().map(|a| a.name.as_str()).unwrap_or(""),
+                one.provider.as_ref().map(|p| p.name.as_str()).unwrap_or("")
+            ))
+        }));
+        let extra = i64::try_from(result.len()).unwrap_or(i64::MAX) > limit;
+        result.truncate(usize::try_from(limit).map_err(ApiError::internal)?);
+        batches = batches.saturating_sub(1);
+        if extra {
+            break result
+                .last()
+                .and_then(|row| i32::try_from(row.ordinal).ok());
+        }
+        if next.is_none()
+            || batches == 0
+            || i64::try_from(result.len()).unwrap_or(i64::MAX) == limit
+        {
+            break next;
+        }
+        before = next;
+    };
+    result.reverse();
+    let segments = result;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     #[cfg(any(test, feature = "test-support"))]
     crate::realtime::history_read_tests::pause(
@@ -126,37 +175,89 @@ async fn turns(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<Thr
             ),
         ));
     }
-    let mut rows = continuation_rows::reading::turns(
-        &mut tx,
-        thread,
-        projection.viewed_continuation_id,
-        query.before,
-        limit + 1,
-    )
-    .await?;
-    let more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
-    if more {
-        rows.remove(0);
-    }
-    let next_before = if more {
-        rows.first().map(|row| row.ordinal)
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    let mut before = query.before;
+    let scanning = !words.terms().is_empty();
+    let batch = if scanning {
+        limit.max(i64::from(ITEMS_DEFAULT_LIMIT))
     } else {
-        None
+        limit
     };
-    let segment_ids: Vec<_> = rows.iter().map(|row| row.segment_id).collect();
-    let segments = continuation_rows::reading::segments_among(
-        &mut tx,
-        thread,
-        projection.viewed_continuation_id,
-        &segment_ids,
-    )
-    .await?;
-    let (turns, segments) = ctx
-        .app
-        .engine
-        .project_history_in(&mut tx, &rows, &segments)
+    let mut batches = if scanning {
+        search_batches(&mut tx).await?
+    } else {
+        1
+    };
+    let mut result = Vec::new();
+    let mut related = std::collections::BTreeMap::new();
+    let next_before = loop {
+        let mut rows = continuation_rows::reading::turns(
+            &mut tx,
+            thread,
+            projection.viewed_continuation_id,
+            before,
+            batch + 1,
+        )
+        .await?;
+        let more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > batch;
+        if more {
+            rows.remove(0);
+        }
+        let next = more.then(|| rows.first().map(|row| row.ordinal)).flatten();
+        let segment_ids: Vec<_> = rows.iter().map(|row| row.segment_id).collect();
+        let references = continuation_rows::reading::segments_among(
+            &mut tx,
+            thread,
+            projection.viewed_continuation_id,
+            &segment_ids,
+        )
+        .await?;
+        let (projected, projected_segments) = ctx
+            .app
+            .engine
+            .project_history_in(&mut tx, &rows, &references)
+            .await
+            .map_err(super::read_failed)?;
+        result.extend(projected.into_iter().rev().filter(|one| {
+            words.matches(&format!(
+                "{} {} {}",
+                one.ordinal,
+                one.model,
+                serde_json::to_value(one.state).unwrap_or_default()
+            ))
+        }));
+        for segment in projected_segments {
+            related.insert(segment.id, segment);
+        }
+        let extra = i64::try_from(result.len()).unwrap_or(i64::MAX) > limit;
+        result.truncate(usize::try_from(limit).map_err(ApiError::internal)?);
+        batches = batches.saturating_sub(1);
+        if extra {
+            break result
+                .last()
+                .and_then(|row| i32::try_from(row.ordinal).ok());
+        }
+        if next.is_none()
+            || batches == 0
+            || i64::try_from(result.len()).unwrap_or(i64::MAX) == limit
+        {
+            break next;
+        }
+        before = next;
+    };
+    result.reverse();
+    let mut turns = result;
+    let ids = turns
+        .iter()
+        .map(|turn| turn.segment_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let segments = related
+        .into_values()
+        .filter(|segment| ids.contains(&segment.id))
+        .collect();
+    orch_engine::notifications::decisions::project(&mut tx, ctx.user()?.id(), &mut turns, &mut [])
         .await
-        .map_err(super::read_failed)?;
+        .map_err(ApiError::internal)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     #[cfg(any(test, feature = "test-support"))]
     crate::realtime::history_read_tests::pause(
