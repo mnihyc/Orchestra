@@ -35,6 +35,7 @@ pub(super) struct Value {
     plan: Plan,
     env: EnvironmentRow,
     facts: Vec<native::Facts<Role>>,
+    workspace_edit_revision: Option<orch_types::Hash>,
 }
 
 pub(super) struct Output {
@@ -43,7 +44,17 @@ pub(super) struct Output {
 
 // Actual same-request child association, never source admission or a skipped ordinary gate.
 #[derive(PartialEq)]
-struct Created(orch_db::queries::jobs::JobRow);
+pub(super) struct Created {
+    pub(super) row: orch_db::queries::jobs::JobRow,
+    pub(super) workspace_replacement: Option<WorkspaceReplacement>,
+}
+
+/// Only this request's accepted replacement can bridge its original and applied edit revisions.
+#[derive(PartialEq)]
+pub(super) struct WorkspaceReplacement {
+    pub(super) before: orch_types::Hash,
+    pub(super) after: orch_types::Hash,
+}
 
 async fn native_mode(conn: &mut Conn, body: &EnvironmentSourcePrepareBody) -> ApiResult<bool> {
     let row = threads::thread(conn, body.thread_id)
@@ -125,10 +136,10 @@ impl Effect for Prepare {
             {
                 let created = ctx.optional_retained_source::<Created>()?;
                 if !created.as_ref().is_some_and(|created| {
-                    created.0.id == open.id
-                        && created.0.environment_id == open.environment_id
-                        && created.0.node_id == open.node_id
-                        && created.0.created_by == open.created_by
+                    created.row.id == open.id
+                        && created.row.environment_id == open.environment_id
+                        && created.row.node_id == open.node_id
+                        && created.row.created_by == open.created_by
                 }) {
                     // Keep the native Env-before-Thread creator order without waiting on an
                     // active source job's Thread while holding the Env it needs to finish.
@@ -173,6 +184,7 @@ impl Effect for Prepare {
                 .intersect_restrictions(caller)
                 .map_err(ApiError::internal)?;
             let principal = actor(ctx, conn, &caller, &body).await?;
+            let workspace_edit_revision = body.workspace_edit_revision;
             let (plan, env) = prepare_native(ctx, conn, principal, body).await?;
             let facts = operation::facts(conn, &plan)
                 .await
@@ -182,6 +194,7 @@ impl Effect for Prepare {
                     plan,
                     env,
                     facts: facts.clone(),
+                    workspace_edit_revision,
                 },
                 facts,
             ))
@@ -264,7 +277,28 @@ impl Apply for Prepare {
             )
             .await
             .map_err(ApiError::engine)?;
-            ctx.retain_source(Created(row.clone()))?;
+            let workspace_replacement = if let Some(before) = value.workspace_edit_revision {
+                let thread =
+                    threads::thread(conn, value.plan.thread.ok_or_else(ApiError::not_found)?)
+                        .await?
+                        .ok_or_else(ApiError::not_found)?;
+                let edits = thread
+                    .source
+                    .as_ref()
+                    .map(source::staged_edits)
+                    .transpose()
+                    .map_err(ApiError::engine)?
+                    .unwrap_or_default();
+                let after = source::workspace_edit_revision(&thread, value.env.generation, &edits)
+                    .map_err(ApiError::engine)?;
+                Some(WorkspaceReplacement { before, after })
+            } else {
+                None
+            };
+            ctx.retain_source(Created {
+                row: row.clone(),
+                workspace_replacement,
+            })?;
             Ok(Outcome::Applied(Output { row }))
         })
     }
@@ -383,6 +417,9 @@ pub(super) async fn run(ctx: Ctx, _: (), _: EnvironmentSourcePrepareBody) -> Api
     guard.check_deadline(&current)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     crate::key_operations::publication::receipt(&current, &shown)?;
+    if let Some(thread) = completed.output.row.node_id {
+        current.app.engine.wake(thread);
+    }
     current.app.engine.kick();
     Ok(shown)
 }
