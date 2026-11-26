@@ -30,9 +30,13 @@ must produce the exact pin's mismatch marker and `harness_diverged`, with no new
 turn or autonomous action. The manifest pin inventory must equal the production
 pin map. Missing optional native values remain unknown in separate adapter tests.
 
-Native plan approval is unoffered on both schemas. Native terminal End is also
-unoffered on both: neither list nor terminate is probed, and the unavailable cause
-is retained. Ordinary turn interruption and session close remain supported.
+Native plan approval is unoffered on both schemas. Native terminal End is offered
+by every build at or above the oldest proven one (0.167.0), whatever its line: the
+0.167.2 corpus lists, re-lists and ends exactly, and the 0.165.0 corpus, whose schema
+lacks both methods, keeps it unsupported. A build below the oldest proven one is
+refused at the start, so no startable build is without the controls; a later build
+that has changed them fails at the use of the act. Ordinary turn interruption and
+session close remain supported.
 The 0.165.0 command schema additionally lacks humanCommand checkpoint and
 prompt-user callbacks. The explicit synthetic future-build method-not-found case
 stays in the adapter's separate fixture directory; it is not native evidence for
