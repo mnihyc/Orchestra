@@ -2,15 +2,13 @@
  */
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
 
 import { SettingRow, type RowPlace } from '@/features/settings/SettingRow';
 import { localizedSetting } from '@/features/settings/settingText';
 import { lockAbove, withGroup } from '@/features/settings/settingsModel';
 import { ReadOnlySettingsNotice } from '@/features/settings/ReadOnlyNotice';
-import { runtimeEffect } from '@/features/settings/runtimeEffects';
 import { registryQuery, targetSettingsKey, type SettingsTarget } from '@/api/settings';
-import type { ResolvedSetting, RuntimeChanges } from '@/generated/api-types';
+import type { ResolvedSetting } from '@/generated/api-types';
 import { SettingRow as SettingRowLayout } from '@/ui/SettingRow';
 import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -26,7 +24,7 @@ export function settingValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function SettingsTable({ settings, label, target, place, runtime, effectFor, readOnlyNotice = true }: { settings: readonly ResolvedSetting[]; label: string; target?: SettingsTarget; place?: RowPlace; runtime?: RuntimeChanges | null; effectFor?: (key: string) => ReactNode; readOnlyNotice?: boolean }) {
+export function SettingsTable({ settings, label, target, place, readOnlyNotice = true }: { settings: readonly ResolvedSetting[]; label: string; target?: SettingsTarget; place?: RowPlace; readOnlyNotice?: boolean }) {
   const { t, i18n } = useTranslation();
   const client = useQueryClient();
   const registry = useQuery({ ...registryQuery, enabled: target !== undefined });
@@ -37,8 +35,6 @@ export function SettingsTable({ settings, label, target, place, runtime, effectF
   const editable = target !== undefined && settings.some((row) => row.writable && lockAbove(row, target) === null);
   return <>{readOnlyNotice && readOnly && <ReadOnlySettingsNotice owner={place?.owner} partial={editable} />}<ul aria-label={label} className="min-w-0 divide-y divide-border rounded-lg border border-border bg-surface">{settings.map((setting) => {
     const def = definitions.get(setting.key);
-    const effect = runtimeEffect(setting.key, runtime);
-    const note = effectFor === undefined ? effect === null ? null : <span className="text-xs text-text-muted">{t(`runtimeChanges.${effect}`)}</span> : effectFor(setting.key);
     if (def === undefined || target === undefined) {
       return <SettingRowLayout key={setting.key} name={def?.title ?? t('settings.compact.definitionMissing')} description={def?.description} settingKey={setting.key}
         value={<SettingSummary def={def ?? { key: setting.key }} value={setting.value} />} readOnly
@@ -46,7 +42,7 @@ export function SettingsTable({ settings, label, target, place, runtime, effectF
         actions={def === undefined && target !== undefined ? <Button size="sm" pending={registry.isFetching} onClick={() => void registry.refetch()}>{t('common.tryAgain')}</Button> : undefined} />;
     }
     const context = place ?? { name: label, kind: null, owner: null, access: null };
-    return <SettingRow key={setting.key} def={def} setting={setting} target={target} place={context} effectNote={note}
+    return <SettingRow key={setting.key} def={def} setting={setting} target={target} place={context}
       onChanged={(next) => client.setQueryData<ResolvedSetting[]>(targetSettingsKey(target), (before) => before?.map((row) => row.key === next.key ? next : row))} />;
   })}</ul></>;
 }

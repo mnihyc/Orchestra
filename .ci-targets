@@ -1,0 +1,5 @@
+test -p orch-engine --lib
+test -p orch-engine --test document_folders --test trace_retention
+test -p orch-api-core --lib
+test -p orch-worker-core --lib --test command_purge --test document_maintenance --test upkeep
+test -p orch-api-core --test document_purge --test karchive_retention --test notifications_feed --test trace_history --test trace_readers --test uploads --test document_history

@@ -3,6 +3,7 @@ import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
+import { SettingSummary } from '@/features/settings/SettingSummary';
 import { SettingChoiceContext } from '@/features/settings/choiceCopy';
 import { shapeOf } from '@/features/settings/settingsModel';
 import { ValueControl } from '@/features/settings/ValueControl';
@@ -48,6 +49,19 @@ describe('catalogued choices in the common setting editor', () => {
     } finally { await setLocale('en'); }
   });
 
+  it.each([['en', 'Relayed', 'Cached'], ['zh-CN', '中转', '缓存']] as const)('names the two states of the file relay switch in %s', async (locale, relayed, cached) => {
+    await setLocale(locale);
+    try {
+      const shape = shapeOf({ type: 'boolean' });
+      for (const [value, word, other] of [[true, relayed, cached], [false, cached, relayed]] as const) {
+        const view = show(<SettingChoiceContext.Provider value="storage.relay_transfers"><ValueControl shape={shape} value={value} onChange={() => undefined} label="File relay" say={(name) => i18n.t(`settings.editor.words.${name}`)} /></SettingChoiceContext.Provider>);
+        expect(screen.getByText(word)).toBeVisible();
+        expect(screen.queryByText(other)).not.toBeInTheDocument();
+        view.unmount();
+      }
+    } finally { await setLocale('en'); }
+  });
+
   it('keeps choice context through a nested policy object', () => {
     const shape = shapeOf({ type: 'object', properties: {
       decision: { type: 'string', enum: ['allow', 'ask', 'deny'] },
@@ -57,4 +71,20 @@ describe('catalogued choices in the common setting editor', () => {
     const values = screen.getAllByRole<HTMLInputElement>('combobox').map((control) => control.value);
     expect(values).toEqual(expect.arrayContaining(['Allow', 'Environment']));
   });
+});
+
+it.each([['en', 'Auto · names after another contributor'], ['zh-CN', '自动 · 有其他贡献者后署名']] as const)('says when automatic attribution begins in its current setting value (%s)', async (locale, words) => {
+  await setLocale(locale);
+  const view = show(<SettingSummary def={{ key: 'collab.attribution' }} value="auto" />);
+  try {
+    expect(screen.getByText(words, { exact: true })).toBeVisible();
+    view.rerender(<SettingSummary def={{ key: 'collab.attribution' }} value="never" />);
+    expect(screen.getByText(i18n.t('choiceCatalog.attribution.never.name'))).toBeVisible();
+  } finally { view.unmount(); await setLocale('en'); }
+});
+it.each(['en', 'zh-CN'] as const)('names wake permission as a policy rather than a promise that the next send wakes (%s)', async (locale) => {
+  await setLocale(locale);
+  const view = show(<SettingSummary def={{ key: 'broadcast.wake_idle' }} value={true} />);
+  try { expect(screen.getByText(locale === 'en' ? 'Wake allowed' : '允许唤醒')).toBeVisible(); }
+  finally { view.unmount(); await setLocale('en'); }
 });

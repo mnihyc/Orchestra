@@ -28,7 +28,7 @@ async fn prepared_folder_check_precedes_material_and_native_replay_never_calls_i
     );
     command.name = Some("Prepared research".into());
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let calls = AtomicUsize::new(0);
     let mut tx = area.world.pool.begin().await?;
     let actor = domain::Actor::Agent { thread: area.agent };
@@ -98,7 +98,7 @@ async fn prepared_folder_packet_from_an_ended_transaction_cannot_apply_or_call_t
     );
     command.name = Some("Never created".into());
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let calls = AtomicUsize::new(0);
     let mut original = area.world.pool.begin().await?;
@@ -322,7 +322,7 @@ async fn prepared_document_move_checks_before_update_and_native_replay_never_mov
         .document("move-source/notes.md", "Native movement source")
         .await?;
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let command = request(
         domain::Command::Move,
@@ -398,7 +398,7 @@ async fn prepared_document_move_from_an_ended_transaction_refuses_before_callbac
         .document("ended-move/notes.md", "Unapplied native source")
         .await?;
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let command = request(
         domain::Command::Move,
@@ -472,7 +472,7 @@ async fn prepared_document_restore_checks_before_clearing_deletion_and_replay_ne
         .document("retained-native-source.md", "Retained content")
         .await?;
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     delete_native_text(&area, document, now, options).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let command = request(
@@ -559,7 +559,7 @@ async fn prepared_document_restore_from_an_ended_transaction_refuses_before_call
         .document("ended-restoration.md", "Unchanged retained content")
         .await?;
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     delete_native_text(&area, document, now, options).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let command = request(

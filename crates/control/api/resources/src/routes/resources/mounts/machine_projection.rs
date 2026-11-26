@@ -94,6 +94,7 @@ impl Mounts {
             .iter()
             .map(|row| {
                 Ok(api::MachineMount {
+                    environments_next_cursor: None,
                     mount: reference(&row.mount),
                     target: row.mount.target.clone(),
                     kind: row.kind,
@@ -127,6 +128,7 @@ impl Mounts {
             })
             .collect();
         Ok(api::MachineMounts {
+            next_cursor: None,
             grouping: Vec::new(),
             locations,
             available,
