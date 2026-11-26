@@ -16,7 +16,7 @@ import {
 import { useWorkbench } from '@/features/workbench/store';
 import { findView } from '@/features/workbench/layout';
 import '@/features/chat/register';
-import type { TreeNode } from '@/generated/api-types';
+import type { NameHit, TreeNode } from '@/generated/api-types';
 import { type OrgTree, useTreeStore } from '@/realtime/stores/tree';
 
 import { ADA, chat, DORA, GRACE } from '../doubles/chat-rows';
@@ -33,17 +33,21 @@ describe('where a forward can go', () => {
     node('removed', 'topic', 'web', { deleted: true }),
   ];
 
-  it('offers the chats of places that take a message, the most recently active first and then by name', () => {
-    const found = nodeDestinations(nodes, '', () => null);
-    expect(found.map((one) => one.label)).toEqual(['fix login', 'web', 'acme']);
-    // Archived and deleted places take no message.
-    expect(found.map((one) => one.label)).not.toContain('old idea');
-    expect(found.map((one) => one.label)).not.toContain('removed');
+  const placeChats = [nodes[2], nodes[1], nodes[0], nodes[3], nodes[4]].flatMap((node) => node === undefined ? [] : [chat({
+    id: node.chat.id, kind: 'node', name: null, node: { id: node.id, kind: node.kind, name: node.name, redacted: false },
+    home: null, can: { ...chat().can, send: !node.archived && !node.deleted },
+  })]);
+
+  it('offers writable place chats in the native order and retains native refusals', () => {
+    expect(nodeDestinations(placeChats).map((one) => one.label)).toEqual(['fix login', 'web', 'acme']);
+    expect(nodeDestinations(placeChats).map((one) => one.label)).not.toContain('old idea');
+    expect(nodeDestinations(placeChats).map((one) => one.label)).not.toContain('removed');
   });
 
-  it('narrows the places by what was typed, in any case, and says where each lies', () => {
-    const found = nodeDestinations(nodes, ' LOGIN ', (one) => `under ${one.parent_id ?? 'nothing'}`);
-    expect(found).toEqual([expect.objectContaining({ key: 'chat:chat-fix', kind: 'node', detail: 'under web', nodeKind: 'topic' })]);
+  it('keeps the native name match and only its disclosed context instead of borrowing a loaded tree', () => {
+    const source = placeChats[0]; if (source === undefined) throw new Error('Missing native chat');
+    const found = nodeDestinations([{ ...source, home: { id: 'private-home', kind: 'project', name: null, redacted: true } }]);
+    expect(found).toEqual([{ key: 'chat:chat-fix', kind: 'node', chatId: 'chat-fix', label: 'fix login', detail: null, nodeKind: 'topic' }]);
   });
 
   it('offers the groups the person can write in, by name or by the names of their people', () => {
@@ -61,37 +65,34 @@ describe('where a forward can go', () => {
   it('offers people, never the person themselves nor a service', () => {
     const service = { ...GRACE, id: 'svc', kind: 'service' as const, username: 'bot' };
     const found = personDestinations([ADA, DORA, service], ADA.id);
-    expect(found).toEqual([{ key: `user:${DORA.id}`, kind: 'person', userId: DORA.id, label: 'Dora Developer', detail: '@dora' }]);
+    expect(found).toEqual([{ key: `user:${DORA.id}`, kind: 'person', userId: DORA.id, label: 'Dora Developer', detail: '@dora', person: DORA }]);
   });
 
   it('makes the request out of the choice: a chat by its id, a person by theirs', () => {
-    const chosen = [...nodeDestinations(nodes, 'fix', () => null), ...personDestinations([DORA], ADA.id)];
+    const chosen = [...nodeDestinations(placeChats.filter((row) => row.id === 'chat-fix')), ...personDestinations([DORA], ADA.id)];
     expect(destinationsOf(chosen)).toEqual([{ chat_id: 'chat-fix' }, { user_id: DORA.id }]);
   });
 
   it('says what the choice comes to: how many chats, which people, how many places', () => {
-    const chosen = [...nodeDestinations(nodes, 'fix', () => null), ...personDestinations([DORA, GRACE], ADA.id)];
+    const chosen = [...nodeDestinations(placeChats.filter((row) => row.id === 'chat-fix')), ...personDestinations([DORA, GRACE], ADA.id)];
     expect(summary(chosen)).toEqual({ chats: 1, people: ['Dora Developer', 'Grace Hopper'], threads: [], places: 3 });
   });
 
-  it('offers the agents of the threads, the most recently active first, never the thread the items come from', () => {
-    const threads = [
-      ...nodes,
-      node('repro', 'thread', 'fix login', { thread: { state: 'running', display: display('running'), blocked_reason: null, pending_approvals: 0, activity_seq: 4, last_activity_at: null, attention: { uncommitted: null, unpushed: null, failed: false, stale: true, as_of: null, reason: null } } }),
-      node('docs', 'thread', 'fix login', { thread: { state: 'idle', display: display('idle'), blocked_reason: null, pending_approvals: 0, activity_seq: 9, last_activity_at: null, attention: { uncommitted: null, unpushed: null, failed: false, stale: true, as_of: null, reason: null } } }),
-      node('gone', 'thread', 'fix login', { deleted: true }),
-    ];
-    const found = threadDestinations(threads, '', () => 'fix login', 'docs');
-    expect(found).toEqual([{ key: 'thread:repro', kind: 'thread', threadId: 'repro', label: 'repro', detail: 'fix login', state: 'running', display: display('running') }]);
-    expect(threadDestinations(threads, 'DOC', () => null).map((one) => one.label)).toEqual(['docs']);
-    // A forward to a thread is an input of the sender's there, asked for by the thread; a refusal that names it is found.
+  it('offers native agent-thread matches with state and readable context while excluding the source', () => {
+    const hit = (id: string, archived = false): NameHit => ({ id, kind: 'thread', name: id, archived, home_path: [], address: null,
+      avatar: null, color: null, custom_color: null, owner: null, recent: false, username: null, tag: null, thread_attention: null,
+      path: [{ id: 'fix', kind: 'topic', name: 'fix login', redacted: false }, { id, kind: 'thread', name: id, redacted: false }], thread_display: display('running') });
+    const threads = [hit('docs'), hit('repro'), hit('old', true)];
+    const found = threadDestinations(threads, 'docs');
+    expect(found).toEqual([{ key: 'thread:repro', kind: 'thread', threadId: 'repro', label: 'repro', detail: 'fix login', display: display('running') }]);
+    expect(threadDestinations([hit('docs')]).map((one) => one.label)).toEqual(['docs']);
     expect(destinationsOf(found)).toEqual([{ thread_id: 'repro' }]);
     expect(summary(found)).toEqual({ chats: 0, people: [], threads: ['repro'], places: 1 });
     expect(refusedDestination(found, { thread_id: 'repro' })?.label).toBe('repro');
   });
 
   it('finds the destination a refusal names, by chat or by person, and none when it names nobody', () => {
-    const chosen = [...nodeDestinations(nodes, 'fix', () => null), ...personDestinations([DORA], ADA.id)];
+    const chosen = [...nodeDestinations(placeChats.filter((row) => row.id === 'chat-fix')), ...personDestinations([DORA], ADA.id)];
     expect(refusedDestination(chosen, { chat_id: 'chat-fix' })?.label).toBe('fix login');
     expect(refusedDestination(chosen, { user_id: DORA.id })?.label).toBe('Dora Developer');
     expect(refusedDestination(chosen, { chat_id: 'elsewhere' })).toBeNull();

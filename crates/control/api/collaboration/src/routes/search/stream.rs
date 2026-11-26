@@ -4,6 +4,9 @@
 //! command; no detached retrieval can outlive a reader. Continuations retain source positions and seen part
 //! identities, never payloads or permissions, and every resumed source authorizes its new batch again.
 
+#[path = "source_facts.rs"]
+mod source_facts;
+
 use crate::middleware::requests::ApiError;
 
 use crate::middleware::requests::ApiResult;
@@ -82,6 +85,9 @@ fn selection(query: &SearchListQuery) -> SearchListQuery {
         limit: None,
         immediate: None,
         typing_age_ms: None,
+        source_details: None,
+        source_offset: None,
+        source_filter: None,
         ..query.clone()
     }
 }
@@ -289,7 +295,18 @@ impl Streaming {
         self.cursor.seen.extend(self.sent.iter().cloned());
         self.cursor.seen.sort_unstable();
         self.cursor.seen.dedup();
-        let cursor = if self.cursor.words_done && self.cursor.meaning_done {
+        let has_more = !self.cursor.words_done || !self.cursor.meaning_done;
+        let receipts: Vec<_> = self
+            .cursor
+            .meaning_positions
+            .values()
+            .filter_map(|position| position.receipt.as_ref())
+            .collect();
+        let total = u32::try_from(receipts.len()).map_err(ApiError::internal)?;
+        let unreported = source_facts::unreported(&self.cursor.meaning_positions);
+        let single = (receipts.len() == 1 && !unreported).then(|| source_facts::model(receipts[0]));
+        let has_receipt = total > 0 || unreported;
+        let cursor = if !has_more && !has_receipt {
             if self.cursor.revision > 0 {
                 let consumed = sqlx::query(
                     "DELETE FROM search_sessions WHERE id=$1 AND user_id=$2 AND revision=$3",
@@ -335,7 +352,16 @@ impl Streaming {
                 .map_err(orch_db::DbError::from)?;
             Some(format!("{}:{}", self.cursor.session, self.cursor.revision))
         };
-        Ok(Some(Event::Cursor { cursor }))
+        self.events.push_back(Event::Cursor {
+            cursor: if has_more { cursor.clone() } else { None },
+        });
+        Ok(Some(Event::MeaningSources {
+            cursor: if has_receipt { cursor } else { None },
+            total,
+            unreported,
+            single,
+            page: None,
+        }))
     }
 }
 
@@ -359,14 +385,17 @@ pub(super) async fn search(
         ));
     };
     prepared.accept(&accepted)?;
+    let facts = prepared.details.as_ref().map(|_| prepared.clone());
     crate::key_operations::publication::retain(
         &ctx,
         &accepted,
-        (),
-        |ctx, conn, reader, _source| {
+        facts,
+        |ctx, conn, reader, source| {
             Box::pin(async move {
-                let _ = conn;
                 super::stream_native::check_opening(ctx, reader.caller())?;
+                if let Some(source) = source {
+                    source.check_facts(ctx, conn, reader).await?;
+                }
                 Ok(())
             })
         },
@@ -381,6 +410,20 @@ pub(super) struct StreamSelection {
 }
 
 pub(super) fn validate(query: SearchStreamListQuery) -> ApiResult<StreamSelection> {
+    if query.source_details == Some(true) && query.cursor.is_none() {
+        return Err(invalid(
+            "cursor",
+            "source facts require the captured search receipt",
+        ));
+    }
+    if query.source_details != Some(true)
+        && (query.source_offset.is_some() || query.source_filter.is_some())
+    {
+        return Err(invalid(
+            "source_details",
+            "source paging belongs to the captured-facts read",
+        ));
+    }
     let select = selection(&query);
     if select.q.trim().is_empty() {
         return Err(invalid("q", "give a word or phrase"));
@@ -406,9 +449,68 @@ pub(super) struct PreparedStream {
     cursor: Cursor,
     generation: String,
     options: HashMap<&'static str, i64>,
+    details: Option<orch_api_contract::search::SearchMeaningSourcePage>,
 }
 
 impl PreparedStream {
+    /// Retained names and scope are checked again at delivery; receipt ownership grants no lasting access.
+    async fn check_facts(
+        &self,
+        ctx: &Ctx,
+        conn: &mut orch_db::Conn,
+        reader: &orch_authz::Principal,
+    ) -> ApiResult<()> {
+        let (principal, scopes, exhausted, _) = super::native::content_frame(
+            ctx,
+            conn,
+            reader.caller(),
+            &orch_api_contract::search_sources::STREAM,
+            &self.select,
+        )
+        .await?;
+        let mut current = self.clone();
+        current
+            .prepare_facts(ctx, conn, &principal, &scopes, exhausted)
+            .await?;
+        if current.details != self.details {
+            return Err(ApiError::new(
+                orch_api_contract::common::ErrorCode::RequestValueRefused,
+                "Search source details changed. Open them again.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn prepare_facts(
+        &mut self,
+        ctx: &Ctx,
+        conn: &mut orch_db::Conn,
+        principal: &orch_authz::Principal,
+        scopes: &orch_types::Json,
+        exhausted: bool,
+    ) -> ApiResult<()> {
+        if self.query.source_details != Some(true) {
+            return Ok(());
+        }
+        self.details = Some(
+            source_facts::page(
+                ctx,
+                conn,
+                principal,
+                &self.select,
+                scopes,
+                exhausted,
+                &self.cursor.meaning_positions,
+                self.query.source_offset.unwrap_or(0),
+                self.query.limit.unwrap_or_else(|| {
+                    u32::try_from(self.options[&keys::SEARCH_PAGE_SIZE]).unwrap_or(1)
+                }),
+                self.query.source_filter.as_deref().unwrap_or_default(),
+            )
+            .await?,
+        );
+        Ok(())
+    }
     pub(super) fn origin(&self) -> Option<&orch_authz::CapturedOperation> {
         self.cursor.origin.as_ref()
     }
@@ -431,9 +533,13 @@ pub(super) async fn prepare(
 ) -> ApiResult<PreparedStream> {
     let StreamSelection { query, select } = selected;
     let user = ctx.user()?.id();
-    let generation: String = sqlx::query_scalar("SELECT COALESCE(string_agg(id::text||':'||COALESCE(dimensions,0)::text,',' ORDER BY id),'') FROM search_generations WHERE state='active'")
-        .fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
-    let generation = orch_types::Hash::of(generation.as_bytes()).to_string();
+    let generation = if query.source_details == Some(true) {
+        String::new()
+    } else {
+        let value: String = sqlx::query_scalar("SELECT COALESCE(string_agg(id::text||':'||COALESCE(dimensions,0)::text,',' ORDER BY id),'') FROM search_generations WHERE state='active'")
+            .fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        orch_types::Hash::of(value.as_bytes()).to_string()
+    };
     let cursor = if let Some(raw) = &query.cursor {
         let bad = || invalid("cursor", "is expired or belongs to another search");
         let (id, revision) = raw.split_once(':').ok_or_else(bad)?;
@@ -471,6 +577,7 @@ pub(super) async fn prepare(
         keys::SEARCH_MEANING_PAUSE_MS,
         keys::SEARCH_CURSOR_TTL_SECS,
         keys::SEARCH_CURSOR_ENTRIES,
+        keys::SEARCH_TEXT_CHARS,
     ] {
         options.insert(
             key,
@@ -486,6 +593,7 @@ pub(super) async fn prepare(
         cursor,
         generation,
         options,
+        details: None,
     })
 }
 
@@ -497,15 +605,50 @@ fn begin(ctx: Ctx, prepared: PreparedStream, queued_at: std::time::Instant) -> S
         mut cursor,
         generation,
         options,
+        details,
     } = prepared;
+    if let Some(page) = details {
+        return Streaming {
+            pending: tokio::task::JoinSet::new(),
+            tasks: HashMap::new(),
+            events: VecDeque::from([
+                Event::MeaningSources {
+                    cursor: query.cursor.clone(),
+                    total: page.total,
+                    unreported: page.unreported,
+                    single: (page.total == 1 && !page.unreported)
+                        .then(|| page.sources.first().map(|source| source.model.clone()))
+                        .flatten(),
+                    page: Some(Box::new(page)),
+                },
+                Event::Cursor { cursor: None },
+            ]),
+            cursor,
+            lists: vec![Vec::new()],
+            sent: HashSet::new(),
+            fields: HashMap::new(),
+            fusion_k: DEFAULT_FUSION_K,
+            finished: true,
+            started: false,
+            ctx,
+            ttl_secs: 0,
+            cursor_entries: 0,
+        };
+    }
     let number = |key| u32::try_from(options[&key]).unwrap_or_default();
     let page_size = number(keys::SEARCH_PAGE_SIZE);
     let pause = number(keys::SEARCH_MEANING_PAUSE_MS);
-    let mut events = VecDeque::from([Event::Options {
-        page_size,
-        reorder_window_secs: number(keys::SEARCH_REORDER_WINDOW_SECS),
-        meaning_pause_ms: pause,
-    }]);
+    let mut events = VecDeque::from([
+        Event::Coverage {
+            conversation_chars: u64::try_from(options[&keys::SEARCH_TEXT_CHARS])
+                .unwrap_or_default(),
+        },
+        Event::Options {
+            page_size,
+            reorder_window_secs: number(keys::SEARCH_REORDER_WINDOW_SECS),
+            meaning_pause_ms: pause,
+        },
+    ]);
     let mut pending = tokio::task::JoinSet::new();
     let mut tasks = HashMap::new();
     if !cursor.meaning_done && cursor.generation != generation {

@@ -165,6 +165,9 @@ audit_actions! {
         AuthLogin = "auth.login", trail, "Somebody signed in.";
         AuthLoginFailed = "auth.login_failed", trail, "A sign-in was tried and failed.";
         AuthLocked = "auth.locked", trail, "Wrong tries at a name filled its count, and one proof was locked for that name.";
+        AuthHumanCheckAdmitted = "auth.human_check_admitted", trail, "People were let in without a human check, because the service that makes it could not be asked.";
+        AuthHumanCheckRefused = "auth.human_check_refused", trail, "People were turned away, because the service that makes the human check could not be asked.";
+        AuthHumanCheckSecretChanged = "auth.human_check_secret_changed", trail, "The secret of the human check was set or taken away.";
         AuthLogout = "auth.logout", trail, "Somebody signed out.";
         AuthAdminModeChanged = "auth.admin_mode_changed", trail, "A browser session changed its explicit As admin switch.";
         AdminOpened = "admin.opened", trail, "An object was opened through this session's native administrative reach.";
@@ -378,12 +381,17 @@ audit_actions! {
         McpDeleted = "mcp.deleted", line, "An MCP server was deleted.";
         McpImported = "mcp.imported", line, "An MCP server was imported from the harness configuration of a machine.";
         McpRestarted = "mcp.restarted", line, "One environment MCP server was restarted with its failure count cleared.";
+        PoolCreated = "pool.created", line, "A resource pool was added.";
+        PoolDeleted = "pool.deleted", line, "A resource pool was removed.";
+        PoolUpdated = "pool.updated", line, "A resource pool was changed.";
+        PoolMemberUpdated = "pool.member_updated", line, "A pool member was changed.";
         SkillCreated = "skill.created", line, "A skill was added.";
         SkillDisabled = "skill.disabled", line, "A skill was disabled.";
         SkillEnabled = "skill.enabled", line, "A skill was enabled.";
         SkillDeleted = "skill.deleted", line, "A skill was deleted.";
         SkillVersionMade = "skill.version_made", line, "A version of a skill was made: imported, updated from where it came from, uploaded or published from its draft.";
         EnvironmentExecChanged = "environment.exec_changed", line, "What an environment's exec node offers was changed, or whether its agents get Orch's own tools.";
+        ResourcePoolLendingChanged = "resource.pool_lending_changed", line, "Lending a resource through pools was changed.";
         ResourceTransferred = "resource.transferred", line, "The first owner of a resource changed.";
         ResourceHomeChanged = "resource.home_changed", line, "A resource's sharing and settings home changed.";
         ResourceTagsChanged = "resource.tags_changed", line, "The display tags of a resource changed.";
@@ -403,6 +411,7 @@ audit_actions! {
         MachinePolicyChanged = "machine.policy_changed", trail, "A key of a machine's local policy was changed, on the machine or from Orch.";
         MachineProgramsChanged = "machine.programs_changed", trail, "A machine manager registered, tested, removed or reloaded an external program.";
         MachineRolesChanged = "machine.roles_changed", trail, "A machine manager changed the connector roles handed to Orch.";
+        MachineGatewayChanged = "machine.gateway_changed", trail, "A machine manager changed its primary gateway choice.";
         MachineUpdateRequested = "machine.update_requested", trail, "A verified physical connector or node update was requested.";
         MachineReportRefused = "machine.report_refused", trail, "Reports from a machine about something it does not hold were refused.";
     }
@@ -466,6 +475,7 @@ audit_actions! {
         RateCatalogueLoaded = "rate_catalogue.loaded", trail, "A rate catalogue was loaded.";
     }
     System {
+        ServerUpdateRequested = "server.update_requested", trail, "The server release updater was requested on its bundled node.";
         SystemSettingsUpdated = "system.settings_updated", trail, "A setting of the system was written.";
         CapabilityDefUpdated = "capability_def.updated", trail, "The definition of a capability was changed.";
         HostUpdated = "host.updated", line, "A host was changed: its name, its labels, or what it does when it is full.";
@@ -508,6 +518,7 @@ impl AuditAction {
             | Self::InputScheduleCreated
             | Self::ScheduleCreatedByAgent
             | Self::McpCreated
+            | Self::PoolCreated
             | Self::SkillCreated
             | Self::MountCreated
             | Self::NodeCreated
@@ -562,6 +573,8 @@ impl AuditAction {
             | Self::McpDisabled
             | Self::McpEnabled
             | Self::McpUpdated
+            | Self::PoolUpdated
+            | Self::PoolMemberUpdated
             | Self::SkillDisabled
             | Self::SkillEnabled
             | Self::SkillVersionMade
@@ -580,8 +593,10 @@ impl AuditAction {
             | Self::ProviderUpdated
             | Self::ProviderSourcesChanged
             | Self::ResourceTagsChanged
+            | Self::ResourcePoolLendingChanged
             | Self::SettingsReset
             | Self::SettingsUpdated
+            | Self::ServerUpdateRequested
             | Self::SystemSettingsUpdated
             | Self::TemplateDisabled
             | Self::TemplateEnabled
@@ -621,7 +636,8 @@ impl AuditAction {
             | Self::TemplateDeleted
             | Self::UsageCapDeleted
             | Self::WorkspaceFileDeleted
-            | Self::StorageCleaned => AuditKind::Deleted,
+            | Self::StorageCleaned
+            | Self::PoolDeleted => AuditKind::Deleted,
             Self::AccessApproved
             | Self::AccessDenied
             | Self::AccessRequested
@@ -652,6 +668,7 @@ impl AuditAction {
             | Self::MachinePolicyChanged
             | Self::MachineProgramsChanged
             | Self::MachineRolesChanged
+            | Self::MachineGatewayChanged
             | Self::MachineRenewed
             | Self::MachineRevoked
             | Self::MachineReportRefused
@@ -764,6 +781,9 @@ impl AuditAction {
             | Self::AuthEmailCodeEnabled
             | Self::AuthIdentityLinked
             | Self::AuthIdentityUnlinked
+            | Self::AuthHumanCheckAdmitted
+            | Self::AuthHumanCheckRefused
+            | Self::AuthHumanCheckSecretChanged
             | Self::AuthLocked
             | Self::AuthLogin
             | Self::AuthLoginFailed
@@ -813,6 +833,7 @@ impl AuditAction {
             | Self::ResourceTransferred
             | Self::ResourceHomeChanged
             | Self::ResourceTagsChanged
+            | Self::ResourcePoolLendingChanged
             | Self::ShareFileDownloaded
             | Self::StorageCleaned => None,
             // An invitation to make an org is about the person it was given to: no org exists yet.
@@ -1033,6 +1054,7 @@ mod tests {
             A::MachinePolicyChanged,
             A::MachineProgramsChanged,
             A::MachineRolesChanged,
+            A::MachineGatewayChanged,
             A::MachineReportRefused,
         ] {
             assert!(!action.is_history_line(), "{action}");

@@ -1,0 +1,4 @@
+fmt
+test -p orch-api-core --test everything_scale -- simultaneous:: --nocapture --test-threads=1 --skip simultaneous::restoring_the_team_members_session_with_home_s_first_reads_stays_within_the_servers_share --skip simultaneous::restoring_the_team_members_session_with_the_machine_list_stays_within_the_servers_share --skip simultaneous::restoring_the_team_members_session_with_the_shell_tree_and_a_resource_list_stays_within_the_servers_share
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test bound

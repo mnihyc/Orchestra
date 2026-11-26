@@ -1208,6 +1208,7 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
         .handler
         .on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: announced.clone(),
