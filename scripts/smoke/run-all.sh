@@ -12,7 +12,7 @@
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 failed=""
-fresh="first-start restore installers installation-records managed-environment managed-harness managed-provider shipped-image"
+fresh="first-start update-doctor update-files restore installers installation-records managed-environment managed-harness managed-provider shipped-image"
 upgrade="update rollback recover release-distribution"
 # The profile transfers and actual-duration soak take hours and need prebuilt fixtures/browser prerequisites.
 if [ "${ORCH_SMOKE_RELEASE_PROOFS:-0}" = 1 ]; then fresh="$fresh link-load load soak"; fi

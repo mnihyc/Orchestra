@@ -26,8 +26,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await expect(article).toContainText(locale === 'en' ? '30 days after its last message' : '最后一条消息发出 30 天后永久删除');
     await article.locator('[id="installation-addresses"]').scrollIntoViewIfNeeded(); await expect(article).toContainText('alternate_urls');
     await page.screenshot({ path: info.outputPath(`ask-guide-${locale}-${width}-${theme}.png`), animations: 'disabled' });
-    await article.getByRole('link', { name: locale === 'en' ? 'following a running thread' : '关注正在运行的线程', exact: true }).click();
-    await expect(page.getByRole('heading', { name: locale === 'en' ? 'Follow a running thread' : '关注正在运行的线程', level: 1, exact: true })).toBeVisible();
+    await article.getByRole('link', { name: locale === 'en' ? 'following a running thread' : '关注正在运行的会话', exact: true }).click();
+    await expect(page.getByRole('heading', { name: locale === 'en' ? 'Follow a running thread' : '关注正在运行的会话', level: 1, exact: true })).toBeVisible();
     if (await page.locator('[data-help-reading]').isVisible()) await page.getByRole('button', { name: t('helpFlow.back'), exact: true }).click();
     await openAsk(page, t);
     await expect(panel.getByRole('textbox', { name: t('ask.composer') })).toHaveValue('Keep my unsent question');

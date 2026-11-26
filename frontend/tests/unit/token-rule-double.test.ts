@@ -45,13 +45,15 @@ it('mints the exact modern Info through both existing UI producers and retains a
   const world = new World(), person = world.people.get('ada')!;
   const answer = world.settings.handle(person, 'POST', '/me/tokens', new URLSearchParams(), { name: 'explicit', rules, proof: { password: person.password } });
   expect(answer?.body).toMatchObject({ already_created: false, info: { rules, scopes: [], node: null } });
-  expect(world.settings.handle(person, 'GET', '/me/tokens', new URLSearchParams(), {})?.body).toEqual([expect.objectContaining({ rules, scopes: [] })]);
+  expect(world.settings.handle(person, 'GET', '/me/tokens', new URLSearchParams(), {})?.body).toMatchObject({ items: [expect.objectContaining({ rules, scopes: [] })], next_cursor: null });
   const accounts = world.settings.handle(person, 'GET', `/orgs/${ACME.org}/service-accounts`, new URLSearchParams(), {})?.body;
-  const account: unknown = Array.isArray(accounts) ? accounts[0] : undefined;
+  const account: unknown = record(accounts) && Array.isArray(accounts.items) ? accounts.items[0] : undefined;
   if (!record(account) || !record(account.user) || typeof account.user.id !== 'string') throw new Error('The native-shaped service fixture is missing');
   const serviceId = account.user.id;
   const serviceRules = rules.map((rule) => ({ ...rule, target: { ...rule.target, id: serviceId } }));
   expect(world.settings.handle(person, 'POST', `/service-accounts/${serviceId}/tokens`, new URLSearchParams(), { name: 'service', rules: serviceRules, proof: { password: person.password } })?.body).toMatchObject({ already_created: false, info: { rules: serviceRules, scopes: [] } });
+  expect(world.settings.handle(person, 'GET', `/service-accounts/${serviceId}/tokens`, new URLSearchParams(), {})?.body)
+    .toMatchObject({ items: [expect.objectContaining({rules:serviceRules})], next_cursor:null });
 });
 
 it('returns a secretless replay for the same actor/intent and refuses changed input', () => {

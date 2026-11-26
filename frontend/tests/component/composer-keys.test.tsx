@@ -10,6 +10,11 @@ import type * as Uploads from '@/lib/uploads';
 import type * as Live from '@/realtime/live';
 import type * as Draft from '@/features/composer/Draft';
 import { Composer } from '@/features/composer/Composer';
+import { ThreadHeader } from '@/features/thread/Header';
+import { NowStop, ThreadNowProvider } from '@/features/thread/NowLine';
+import { StatusLine } from '@/features/timeline/StatusLine';
+import { ViewOpeningContext } from '@/features/workbench/viewOpening';
+import { applyThreadFeedRows } from '@/realtime/threadFeed';
 import { composerWriter, useComposerStore } from '@/features/composer/Draft';
 import { client } from '@/api/client';
 import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters, ThreadLimits, LimitReached } from '@/generated/api-types';
@@ -19,9 +24,9 @@ import type { CodeViewProps } from '@/ui/CodeView';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { isApplePlatform } from '@/lib/shortcuts';
 import { defaultThreadRead } from '@/realtime/threadScope';
-import { threadWriter } from '@/realtime/stores/thread';
+import { threadWriter, useThreadPart } from '@/realtime/stores/thread';
 import { ACME, meta } from '../doubles/fixtures';
-import { turn } from '../doubles/thread-rows';
+import { threadInput, turn } from '../doubles/thread-rows';
 import { harnessName } from '../doubles/harness-names';
 import { World } from '../doubles/world';
 import { choiceCap } from '../unit/resource-facts-fixtures';
@@ -29,15 +34,15 @@ import { show } from './support';
 
 const server = vi.hoisted(() => {
   const limits: ThreadLimits = { reached: [], bypass_all: false };
-  return { submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true, limits };
+  return { settingsRead: vi.fn<() => Promise<ResolvedSetting[]>>(), submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true, limits, interrupt: vi.fn<typeof ThreadsApi.interruptTurn>() };
 });
 vi.mock('@/features/composer/Draft', async (load) => ({ ...await load<typeof Draft>(), useDraftSync: () => 'idle', submitInput: server.submit }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useSocketStatus: () => ({ phase: server.live ? 'ready' : 'reconnecting' }) }));
-vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(),
+vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), interruptTurn: server.interrupt,
   parametersQuery: (id: string) => ({ queryKey: ['keyboard-parameters', id], queryFn: () => Promise.resolve(parameters) }),
   limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], initialData: server.limits, queryFn: () => Promise.resolve(server.limits) }),
 }));
-vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: () => Promise.resolve(settings) }) }));
+vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: server.settingsRead }) }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), metaQuery: { queryKey: ['keyboard-meta'], queryFn: () => Promise.resolve(meta()) } }));
 vi.mock('@/api/context', async (load) => ({ ...await load<typeof ContextApi>(), threadContextQuery: (id: string, detail: 'kept' | 'count', revision: number) => ({ queryKey: ['keyboard-context', id, detail, revision], queryFn: () => server.context() }) }));
 vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>Model</button> }));
@@ -61,7 +66,9 @@ let theme: string | null = null;
 let signedIn: string | null = null;
 beforeEach(() => {
   locale = currentLocale(); theme = document.documentElement.getAttribute('data-theme'); signedIn = client.session.getState().userId;
-  server.submit.mockReset(); server.live = true; server.limits = { reached: [], bypass_all: false };
+  server.settingsRead.mockReset().mockImplementation(() => Promise.resolve(settings));
+  delete parameters.composer;
+  server.submit.mockReset(); server.interrupt.mockReset(); server.live = true; server.limits = { reached: [], bypass_all: false };
   server.cancelUpload.mockReset().mockResolvedValue(undefined);
   server.context.mockReset(); server.context.mockResolvedValue({ harness_kind: null, harness: null, reports: { tokens: false, context: false, breakdown: false }, fill: null, turn_id: null, shortened: null, can_count: false });
   parameters.model.options = [];
@@ -251,10 +258,15 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   });
 });
 
-it('offers Plan only where the agent program plans, and sends with Plan on as a plan', async () => {
+it('explains an unsupported Plan without enabling it, and sends an explicit supported plan', async () => {
   if (native.binding === null) throw new Error('The fixture must name its agent');
   const view = show(<Composer thread={{ ...native, state: 'idle', binding: { ...native.binding, plan_mode: false } }} />);
-  expect(screen.queryByRole('button', { name: i18n.t('composer.plan.label') })).toBeNull();
+  const unavailable = screen.getByRole('button', { name: i18n.t('composer.plan.label') });
+  expect(unavailable).toHaveAttribute('aria-disabled', 'true');
+  await userEvent.click(unavailable);
+  expect(unavailable).toHaveAttribute('aria-pressed', 'false');
+  await userEvent.hover(unavailable);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('composer.plan.unsupported'));
   const planning = { ...native, state: 'idle' as const, binding: { ...native.binding, plan_mode: true } };
   view.rerender(<Composer thread={planning} />);
   const plan = screen.getByRole('button', { name: i18n.t('composer.plan.label') });
@@ -406,4 +418,99 @@ it('marks the first-message Plan default and retires the mark after an explicit 
     await userEvent.type(screen.getByRole('textbox', { name: i18n.t('composer.label') }), 'Work directly{Enter}');
     expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Work directly' }], 'queue', undefined, undefined, false);
   } finally { settings.pop(); }
+});
+
+
+it('marks the first-message Plan default from compact composer facts without a settings read', async () => {
+  if (native.binding === null) throw new Error('The fixture needs its reported program');
+  native = { ...native, state: 'idle', current_turn_id: null, usage: null, binding: { ...native.binding, plan_mode: true } };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  parameters.composer = { default_delivery: 'queue', paste_inline_context_share: 25, plan_first: true, owner_reads: false,
+    auto_unavailable: false, approval_default: false, sandbox_mode: null, sandbox_default: false };
+  show(<Composer thread={native} />);
+  const plan = () => screen.getByRole('button', { name: i18n.t('composer.plan.label') });
+  await waitFor(() => expect(plan()).toHaveAttribute('aria-pressed', 'true'));
+  expect(within(plan()).getByText(i18n.t('composer.plan.placeDefault'))).toBeVisible();
+  expect(server.settingsRead).not.toHaveBeenCalled();
+  await userEvent.click(plan());
+  expect(plan()).toHaveAttribute('aria-pressed', 'false');
+  expect(within(plan()).queryByText(i18n.t('composer.plan.placeDefault'))).toBeNull();
+});
+
+it('waits for the first-message setting before marking its Plan default', async () => {
+  if (native.binding === null) throw new Error('The fixture needs its reported program');
+  native = { ...native, state: 'idle', current_turn_id: null, usage: null, binding: { ...native.binding, plan_mode: true } };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  let finish: ((rows: ResolvedSetting[]) => void) | undefined;
+  const pending = new Promise<ResolvedSetting[]>((resolve) => { finish = resolve; });
+  server.settingsRead.mockReturnValue(pending);
+  show(<Composer thread={native} />);
+  const plan = () => screen.getByRole('button', { name: i18n.t('composer.plan.label') });
+  await waitFor(() => expect(server.settingsRead).toHaveBeenCalledOnce());
+  expect(plan()).toHaveAttribute('aria-pressed', 'false');
+  expect(within(plan()).queryByText(i18n.t('composer.plan.placeDefault'))).toBeNull();
+  const resolve = finish;
+  if (resolve === undefined) throw new Error('The pending setting read is required');
+  await act(async () => {
+    resolve([...settings, { key: 'thread.plan_first', value: true, own: null, source: { scope: 'topic', node: null }, locked_by: null, writable: false, parts: [] }]);
+    await pending;
+  });
+  await waitFor(() => expect(plan()).toHaveAttribute('aria-pressed', 'true'));
+  expect(within(plan()).getByText(i18n.t('composer.plan.placeDefault'))).toBeVisible();
+});
+
+
+function StopPage() {
+  const current = useThreadPart(native.id, (view) => view.thread) ?? native;
+  return <ViewOpeningContext value={null}><ThreadNowProvider threadId={native.id}>
+    <div data-testid="shared-stop-header"><ThreadHeader thread={current} /><NowStop /></div>
+    <div data-testid="shared-stop-composer"><Composer thread={current} /></div>
+    <StatusLine threadId={native.id} />
+  </ThreadNowProvider></ViewOpeningContext>;
+}
+
+for (const language of ['en', 'zh-CN'] as const) for (const hasTurn of [false, true]) {
+  it(`shares the accepted Stop across the composer, header and status even with an equal sequence (${language}, turn=${hasTurn})`, async () => {
+    await setLocale(language);
+    const current = { ...turn('running-key-turn', { ordinal: 1, state: 'running', inputId: 'earlier' }), thread_id: native.id };
+    native = { ...native, state: hasTurn ? 'running' : 'starting', current_turn_id: hasTurn ? current.id : null };
+    threadWriter.reset(native.id, { thread: native, turns: hasTurn ? [current] : [] }, false);
+    const requested = new Date().toISOString();
+    const stopping = { version: 1, requested_at: requested, pending: true, thread_seq: native.seq, state_seq: native.seq };
+    server.interrupt.mockResolvedValue({ state: 'stopping', requested_at: requested,
+      turn: hasTurn ? { ...current, interrupted_by: native.owner, interrupted_at: requested } : null, ...{ stopping } });
+    const page = show(<StopPage />);
+    const composer = within(screen.getByTestId('shared-stop-composer'));
+    const header = within(screen.getByTestId('shared-stop-header'));
+    await userEvent.click(composer.getByRole('button', { name: i18n.t('composer.stop') }));
+    await waitFor(() => {
+      expect(composer.getByRole('button', { name: /^Stopping|^正在停止/u })).toBeVisible();
+      expect(header.getByRole('button', { name: /^Stopping|^正在停止/u })).toBeVisible();
+      expect(header.getByRole('img', { name: i18n.t('thread.stopping.line') })).toHaveTextContent(i18n.t('thread.stopping.line'));
+      expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.stopping.line'));
+    });
+    expect(page.container.querySelector('[data-status-item="elapsed"]')).toBeNull();
+    expect(server.interrupt).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), hasTurn ? current.id : null);
+  });
+}
+
+it.each(['en', 'zh-CN'] as const)('shows another page’s accepted Stop and never revives older activity while its thread row catches up in %s', async (language) => {
+  await setLocale(language);
+  const requested = new Date().toISOString();
+  const page = show(<StopPage />);
+  const stopping = { version: 2, requested_at: requested, pending: true, thread_seq: native.seq, state_seq: native.seq };
+  act(() => { applyThreadFeedRows(native.id, { thread: { ...native, ...{ stopping } } }, false); });
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.stopping.line')));
+  expect(within(screen.getByTestId('shared-stop-composer')).getByRole('button', { name: /^Stopping|^正在停止/u })).toBeVisible();
+  act(() => { applyThreadFeedRows(native.id, { thread: { ...native, ...{ stopping: { ...stopping, version: 1, pending: false } } } }, false); });
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.stopping.line'));
+  const ended = { ...stopping, version: 3, pending: false, thread_seq: native.seq + 1, state_seq: native.seq + 1 };
+  act(() => { applyThreadFeedRows(native.id, { thread: { ...native, ...{ stopping: ended } } }, false); });
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.stopping.line'));
+  // A later accepted input proves its own write, while the changed activity row can still be in flight.
+  act(() => { threadWriter.apply(native.id, { inputs: [{ ...threadInput('later-reply', 'Queued after Stop', { author: native.owner, position: '1' }), thread_id: native.id, seq_updated: native.seq + 2 }] }); });
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.stopping.line'));
+  act(() => { applyThreadFeedRows(native.id, { thread: { ...native, seq: native.seq + 1, state: 'idle', current_turn_id: null, ...{ stopping: ended } } }, false); });
+  expect(page.container.querySelector('[data-status-line]')).toBeNull();
+  expect(server.interrupt).not.toHaveBeenCalled(); expect(server.submit).not.toHaveBeenCalled();
 });

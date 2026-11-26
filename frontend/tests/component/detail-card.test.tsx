@@ -191,6 +191,10 @@ it('follows a combobox virtual highlight and keeps its input and selection while
   ] }]} />);
   const input = screen.getByRole('combobox', { name: 'Provider' });
   await user.click(input);
+  // Opening shows the rows alone; the card follows the highlight once the person moves through them.
+  expect(screen.getByRole('option', { name: 'Alpha' })).toBeVisible();
+  expect(screen.queryByLabelText('Alpha', { selector: '[data-inspection-card]' })).toBeNull();
+  await user.keyboard('{ArrowDown}{ArrowUp}');
   const card = await screen.findByLabelText('Alpha', { selector: '[data-inspection-card]' });
   expect(within(card).getByRole('button', { name: 'Inspect Alpha' })).toBeVisible();
   await user.keyboard('{ArrowDown}{ArrowRight}');
