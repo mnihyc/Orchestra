@@ -53,8 +53,8 @@ impl HandoverFixture {
             "target":{"kind":"provider","id":login.provider,"reach":"self"},
             "allow":[{"operation":RETURN,"actions":["manage"]}]
         }]}))?;
-        let token = new_token(API_TOKEN_PREFIX);
         let token_id = new_id();
+        let token = crate::middleware::authentication::new_api_token(token_id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {
@@ -249,7 +249,7 @@ impl HandoverFixture {
         assert_eq!(
             serde_json::to_value(&wire[0])?,
             json!({"id":command.id,"k":command.kind.as_str(),"key":command.key.wire(),
-                "deadline":deadline,"b":command.body}),
+                "deadline":deadline,"authority_until":wire[0].authority_until,"b":command.body}),
             "private caller/source evidence never enters the native frame"
         );
         Ok(())

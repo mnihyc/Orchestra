@@ -276,15 +276,14 @@ pub(super) fn address<'a>(
     Box::pin(prepare(ctx, conn, caller, true))
 }
 
-async fn read(ctx: &Ctx) -> ApiResult<Vec<Org>> {
-    let mut conn = ctx.app.db.begin_snapshot().await?;
-    let principal = ctx.operation_principal(&mut conn).await?;
+async fn read(ctx: &Ctx, conn: &mut Conn) -> ApiResult<Vec<Org>> {
+    let principal = ctx.operation_principal(conn).await?;
     let prepared = ctx.operation_data::<Prepared>()?;
     let nodes = if prepared.names.limited {
         prepared
             .response
             .clone()
-            .read_response(ctx, &mut conn, principal.caller(), move |conn, reader| {
+            .read_response(ctx, conn, principal.caller(), move |conn, reader| {
                 Box::pin(async move {
                     view::visible_with_read_sources(
                         conn,
@@ -306,7 +305,7 @@ async fn read(ctx: &Ctx) -> ApiResult<Vec<Org>> {
             })?
     } else {
         view::visible(
-            &mut conn,
+            conn,
             &principal,
             &prepared.ids,
             principal.now().get(),
@@ -321,18 +320,19 @@ async fn read(ctx: &Ctx) -> ApiResult<Vec<Org>> {
             _ => None,
         })
         .collect();
-    conn.commit().await.map_err(DbError::from)?;
     Ok(result)
 }
 
 pub(super) async fn get_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Org>> {
-    read(&ctx).await
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let orgs = read(&ctx, &mut tx).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(orgs)
 }
 
 pub(super) async fn get_address(ctx: Ctx, (): (), (): ()) -> ApiResult<Org> {
-    read(&ctx)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(ApiError::not_found)
+    let mut tx = ctx.page_read_snapshot().await?;
+    let orgs = orch_authz::read_facts::scope(&mut tx, |conn| Box::pin(read(&ctx, conn))).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    orgs.into_iter().next().ok_or_else(ApiError::not_found)
 }

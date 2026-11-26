@@ -1,4 +1,4 @@
-//! A person's favorites, recents, subscriptions, read positions and the state their interface keeps, over HTTP.
+//! A person's own shortcuts (their stars), recents, subscriptions, read positions and the state their interface keeps, over HTTP.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -7,6 +7,8 @@
 
 mod chat_world;
 mod desk;
+#[path = "personal/person_lock.rs"]
+mod person_lock;
 mod places;
 mod search_world;
 mod support;
@@ -26,11 +28,13 @@ use orch_api_contract::document_tree::{
 use orch_api_contract::documents::NodeDocumentCreateBody;
 use orch_api_contract::nodes::{NodeSubscriptionSet, NodeSubscriptionSetBody};
 use orch_api_contract::personal::{
-    Favorite, MeFavoriteDelete, MeFavoriteList, MeFavoriteSet, MeFavoriteSetBody,
-    MeItemFavoriteDelete, MeItemFavoriteSet, MeItemFavoriteSetBody, MeReadStateList,
-    MeReadStateListQuery, MeRecentCreate, MeRecentCreateBody, MeStateGet, MeStateSet,
-    MeSubscriptionList, MeSubscriptionListQuery, MeVisitCreate, PersonalTarget, SubscriptionSource,
+    MeFavoriteDelete, MeFavoriteList, MeFavoriteSet, MeFavoriteSetBody, MeItemFavoriteDelete,
+    MeItemFavoriteSet, MeItemFavoriteSetBody, MeReadStateList, MeReadStateListQuery,
+    MeRecentCreate, MeRecentCreateBody, MeStateGet, MeStateSet, MeSubscriptionList,
+    MeSubscriptionListQuery, MeVisitCreate, PersonalTarget, Shortcut, ShortcutTargetState,
+    SubscriptionSource,
 };
+use orch_api_contract::personal::{MeModelRecentCreate, MeModelRecentList, ModelRecent};
 use orch_api_contract::search::{NameKind, NameSearchList, NameSearchListQuery, NameSearchPage};
 use orch_db::queries::hierarchy;
 use orch_types::Id;
@@ -38,7 +42,7 @@ use places::{Who, join, make_org, make_project, person};
 use serde_json::json;
 use support::{Statements, World};
 
-async fn favorites(world: &World, who: &Who) -> Vec<Favorite> {
+async fn favorites(world: &World, who: &Who) -> Vec<Shortcut> {
     world
         .app
         .call(MeFavoriteList, &[])
@@ -61,6 +65,196 @@ async fn favor(world: &World, who: &Who, node: Id, after: Option<Option<Id>>) ->
         .await
         .status
         .as_u16()
+}
+
+#[tokio::test]
+async fn model_choices_from_two_devices_stay_private_and_replayed_old_use_never_displaces_the_newest()
+ {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let first = ModelRecent {
+        provider_id: orch_types::new_id(),
+        model_name: "local-chat".into(),
+    };
+    let second = ModelRecent {
+        provider_id: first.provider_id,
+        model_name: "other-chat".into(),
+    };
+    let other_provider = ModelRecent {
+        provider_id: orch_types::new_id(),
+        model_name: first.model_name.clone(),
+    };
+    let first_key = orch_types::new_id().to_string();
+    world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .header("Idempotency-Key", &first_key)
+        .body(&first)
+        .send()
+        .await
+        .ok();
+    let one = world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .body(&second);
+    let two = world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .body(&other_provider);
+    let (one, two) = tokio::join!(one.send(), two.send());
+    one.ok();
+    two.ok();
+    let held = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        held.recent.len(),
+        3,
+        "both concurrent selections survive and providers distinguish the same model name"
+    );
+    assert!(
+        held.recent_count > 0,
+        "the Recent group uses the registry default"
+    );
+    assert!(
+        held.recent.contains(&first)
+            && held.recent.contains(&second)
+            && held.recent.contains(&other_provider)
+    );
+    let latest = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok()
+        .recent;
+    world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .header("Idempotency-Key", &first_key)
+        .body(&first)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&ada.token)
+            .send()
+            .await
+            .ok()
+            .recent,
+        latest
+    );
+    world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .body(&first)
+        .send()
+        .await
+        .ok();
+    let updated = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(updated.recent.first(), Some(&first));
+    assert_eq!(updated.recent.len(), 3);
+    world
+        .set_at(
+            orch_settings::Target::System,
+            orch_settings_contract::registry::keys::INTERFACE_RECENT_MODELS,
+            json!(0),
+        )
+        .await;
+    let hidden = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(hidden.recent_count, 0);
+    assert_eq!(
+        hidden.recent.len(),
+        3,
+        "hiding Recent does not erase private history"
+    );
+    world
+        .set_at(
+            orch_settings::Target::System,
+            orch_settings_contract::registry::keys::INTERFACE_RECENT_MODELS,
+            json!(10000),
+        )
+        .await;
+    assert_eq!(
+        world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&ada.token)
+            .send()
+            .await
+            .ok()
+            .recent_count,
+        10000
+    );
+    assert!(
+        world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&bea.token)
+            .send()
+            .await
+            .ok()
+            .recent
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn the_successful_thread_setup_is_a_persons_server_preference_and_never_another_persons() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let setup = json!({"place":"topic", "picks":{"provider":"source", "model":"chat", "effort":"high", "agent":"agent", "environment":"workspace", "arrangement":"separated"}});
+    world
+        .app
+        .call(MeStateSet, &[&"thread_setup"])
+        .token(&ada.token)
+        .raw_body(&setup)
+        .send()
+        .await
+        .ok();
+    let held = world
+        .app
+        .call(MeStateGet, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(held.get("thread_setup"), Some(&setup));
+    let other = world
+        .app
+        .call(MeStateGet, &[])
+        .token(&bea.token)
+        .send()
+        .await
+        .ok();
+    assert!(!other.contains_key("thread_setup"));
 }
 
 #[tokio::test]
@@ -279,6 +473,7 @@ async fn every_searchable_kind_can_be_starred_and_recent_through_the_same_person
             NameKind::Template => Some(format!("/resources/templates/{}", hit.id)),
             NameKind::McpServer => Some(format!("/resources/mcp/{}", hit.id)),
             NameKind::Mount => Some(format!("/resources/mounts/{}", hit.id)),
+            NameKind::Pool => Some(format!("/resources/pools/{}", hit.id)),
             NameKind::Skill => Some(format!("/resources/skills/{}", hit.id)),
             NameKind::Machine => Some(format!("/resources/machines/{}", hit.id)),
         };
@@ -307,12 +502,14 @@ async fn every_searchable_kind_can_be_starred_and_recent_through_the_same_person
     }
     // A stale identity of another kind with the same UUID is independent of this project's star.
     let mut conn = desk.world.conn().await;
-    sqlx::query("INSERT INTO favorites(user_id,kind,id,position) VALUES($1,'document',$2,999)")
-        .bind(desk.ada.id())
-        .bind(desk.project)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO shortcuts(user_id,kind,target_id,position) VALUES($1,'document',$2,999)",
+    )
+    .bind(desk.ada.id())
+    .bind(desk.project)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
     drop(conn);
     desk.world
         .app
@@ -506,9 +703,9 @@ async fn favorites_are_kept_in_order_and_a_favorite_put_again_is_moved() {
     for node in [one, two, three] {
         assert_eq!(favor(&world, &ada, node, None).await, 204);
     }
-    let order = |list: &[Favorite]| {
+    let order = |list: &[Shortcut]| {
         list.iter()
-            .map(|favorite| favorite.node.id)
+            .map(|favorite| favorite.target.id)
             .collect::<Vec<_>>()
     };
     assert_eq!(order(&favorites(&world, &ada).await), vec![one, two, three]);
@@ -521,7 +718,7 @@ async fn favorites_are_kept_in_order_and_a_favorite_put_again_is_moved() {
     // Again and again between the same two, without renumbering the rest.
     for _ in 0..5 {
         let all = favorites(&world, &ada).await;
-        let (first, last) = (all[0].node.id, all[2].node.id);
+        let (first, last) = (all[0].target.id, all[2].target.id);
         assert_eq!(favor(&world, &ada, last, Some(Some(first))).await, 204);
         assert_eq!(favor(&world, &ada, last, Some(None)).await, 204);
     }
@@ -541,8 +738,9 @@ async fn favorites_are_kept_in_order_and_a_favorite_put_again_is_moved() {
     // Each comes with the way down to it.
     let listed = favorites(&world, &ada).await;
     assert_eq!(listed.len(), 3);
-    assert_eq!(listed[0].path.len(), 1);
-    assert_eq!(listed[0].path[0].id, own);
+    let way = &listed[0].item.as_ref().unwrap().path;
+    assert_eq!(way.len(), 1);
+    assert_eq!(way[0].id, own);
     let gone = world
         .app
         .call(MeFavoriteDelete, &[&one])
@@ -554,7 +752,7 @@ async fn favorites_are_kept_in_order_and_a_favorite_put_again_is_moved() {
 }
 
 #[tokio::test]
-async fn a_node_the_caller_may_not_view_is_not_made_a_favorite_and_a_lost_one_is_not_listed() {
+async fn a_node_the_caller_may_not_view_is_not_made_a_favorite_and_a_lost_one_is_unavailable() {
     let world = World::new().await;
     let boss = person(&world, "boss").await;
     let dan = person(&world, "dan").await;
@@ -563,7 +761,8 @@ async fn a_node_the_caller_may_not_view_is_not_made_a_favorite_and_a_lost_one_is
     let web = make_project(&world, &boss, acme.base.id, "Web").await;
     assert_eq!(favor(&world, &dan, web.base.id, None).await, 204);
     assert_eq!(favorites(&world, &dan).await.len(), 1);
-    // Cut loose from the viewers, it drops from his list without a word.
+    // Cut loose from the viewers, it stays in his list as a shortcut that no longer opens for him, saying nothing of
+    // what it points to.
     sqlx::query(
         "INSERT INTO permission_rows (object_kind, object_id, page, profile, permission, inherit)
          VALUES ('node', $1, 'live', 'any', 'project.view', false)",
@@ -572,7 +771,11 @@ async fn a_node_the_caller_may_not_view_is_not_made_a_favorite_and_a_lost_one_is
     .execute(&world.db.pool)
     .await
     .unwrap();
-    assert!(favorites(&world, &dan).await.is_empty());
+    let lost = favorites(&world, &dan).await;
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].state, ShortcutTargetState::Unavailable);
+    assert!(lost[0].item.is_none());
+    assert!(!serde_json::to_string(&lost).unwrap().contains("Web"));
     let eve = person(&world, "eve").await;
     assert_eq!(favor(&world, &eve, acme.base.id, None).await, 403);
 }
@@ -731,7 +934,72 @@ async fn the_read_positions_of_the_callers_threads_are_listed_by_org() {
 }
 
 #[tokio::test]
-async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_person() {
+async fn catch_up_defaults_follow_the_installation_without_replacing_personal_choices() {
+    use orch_api_contract::admin::{AdminSettingSet, AdminSettingSetBody};
+    use orch_api_contract::auth::MetaGet;
+    let world = World::new().await;
+    let metadata = || world.app.call(MetaGet, &[]).send();
+    let first = serde_json::to_value(metadata().await.ok()).unwrap();
+    assert_eq!(
+        first["interface_defaults"]["catch_up_above_items"],
+        json!(20)
+    );
+    assert_eq!(
+        first["interface_defaults"]["catch_up_above_items_source"]["scope"],
+        json!("default")
+    );
+    let admin = places::admin(&world, "catchup-admin").await;
+    world
+        .app
+        .call(AdminSettingSet, &[&"interface.catch_up_above_items"])
+        .token(&admin.token)
+        .body(&AdminSettingSetBody {
+            value: json!(80),
+            locked: None,
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .ok();
+    let changed = serde_json::to_value(metadata().await.ok()).unwrap();
+    assert_eq!(
+        changed["interface_defaults"]["catch_up_above_items"],
+        json!(80)
+    );
+    assert_eq!(
+        changed["interface_defaults"]["catch_up_above_items_source"]["scope"],
+        json!("system")
+    );
+}
+
+#[tokio::test]
+async fn public_interface_metadata_uses_the_registered_catchup_default_and_later_system_value() {
+    let world = World::new().await;
+    let first = world
+        .app
+        .call(orch_api_contract::auth::MetaGet, &[])
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.interface_defaults.catch_up_above_items, Some(20));
+    world
+        .set_at(
+            orch_settings::Target::System,
+            orch_settings_contract::registry::keys::INTERFACE_CATCH_UP_ABOVE_ITEMS,
+            json!(37),
+        )
+        .await;
+    let later = world
+        .app
+        .call(orch_api_contract::auth::MetaGet, &[])
+        .send()
+        .await
+        .ok();
+    assert_eq!(later.interface_defaults.catch_up_above_items, Some(37));
+}
+
+#[tokio::test]
+async fn the_personal_interface_keeps_declared_values_whole_and_follows_the_person() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
     let bob = person(&world, "bob").await;
@@ -757,6 +1025,14 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
     );
     // The whole value is replaced.
     assert_eq!(set(&ada, "help", json!({ "closed": [] })).await.status, 204);
+    let reading = json!({
+        "kept_closed_tabs": 25,
+        "progress_delay_ms": 333,
+        "catch_up_above_items": 250,
+        "read_freshness_ms": { "lookup": 2000 },
+        "other_choice": "kept"
+    });
+    assert_eq!(set(&ada, "interface", reading.clone()).await.status, 204);
     let state = world
         .app
         .call(MeStateGet, &[])
@@ -766,7 +1042,8 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .ok();
     assert_eq!(state["help"], json!({ "closed": [] }));
     assert_eq!(state["layouts"]["wide"]["panes"], 3);
-    assert_eq!(state.len(), 2);
+    assert_eq!(state["interface"], reading);
+    assert_eq!(state.len(), 3);
     // Nobody else's.
     let other = world
         .app
@@ -776,6 +1053,18 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .await
         .ok();
     assert!(other.is_empty());
+    for invalid_reading in [
+        json!({ "kept_closed_tabs": -1 }),
+        json!({ "progress_delay_ms": "soon" }),
+        json!({ "catch_up_above_items": -1 }),
+        json!({ "catch_up_above_items": 1.5 }),
+        json!({ "catch_up_above_items": "later" }),
+        json!({ "read_freshness_ms": { "lookups": 2000 } }),
+        json!([]),
+    ] {
+        let refused = set(&ada, "interface", invalid_reading).await.problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    }
     // No other key, and no value over 64 KiB.
     let unknown = set(&ada, "theme", json!(1)).await.problem();
     assert_eq!(unknown.code, ErrorCode::RequestInvalid);
@@ -1206,7 +1495,7 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                 .code,
             ErrorCode::NotFound
         );
-        let kept:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM favorites WHERE user_id=$1 AND kind='document_container' AND id=$2),(SELECT count(*) FROM recents WHERE user_id=$1 AND kind='document_container' AND id=$2)")
+        let kept:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM shortcuts WHERE user_id=$1 AND node_id IS NULL AND kind='document_container' AND target_id=$2),(SELECT count(*) FROM recents WHERE user_id=$1 AND kind='document_container' AND id=$2)")
             .bind(reader.id()).bind(folder).fetch_one(&desk.world.db.pool).await.unwrap();
         assert_eq!(
             kept,
@@ -1258,12 +1547,14 @@ async fn personal_folder_identity_never_aliases_a_document_with_the_same_uuid() 
         ErrorCode::NotFound
     );
     let mut conn = desk.world.conn().await;
-    sqlx::query("INSERT INTO favorites(user_id,kind,id,position) VALUES($1,'document',$2,999)")
-        .bind(reader.id())
-        .bind(folder)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO shortcuts(user_id,kind,target_id,position) VALUES($1,'document',$2,999)",
+    )
+    .bind(reader.id())
+    .bind(folder)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
     hierarchy::touch_item_recent(
         &mut conn,
         reader.id(),

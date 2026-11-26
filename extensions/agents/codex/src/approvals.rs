@@ -106,6 +106,7 @@ fn option(id: &str, label: &str, style: OptionStyle, scope: Option<OptionScope>)
         scope,
         // No matcher of this harness is verified on a later request yet: nothing is offered for the thread.
         rule: None,
+        note: false,
     }
 }
 

@@ -21,6 +21,7 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { Textarea } from '@/ui/Textarea';
 import { SkillRefusal } from './Refusal';
+import { ApplicationTip } from '@/features/storage/Impact';
 
 type Way = 'upload' | 'directory' | 'git' | 'url' | 'new';
 
@@ -100,8 +101,6 @@ function SourceFields({ way, fields, disabled }: { way: Way; fields: ReturnType<
     <Input label={t('resourceDetails.skill.form.path')} value={fields.path} disabled={disabled} spellCheck={false} autoComplete="off" onChange={(event) => fields.setPath(event.target.value)} />
   </>;
   return <>
-    <Input label={t('resources.edit.name')} value={fields.name} maxLength={64} disabled={disabled} spellCheck={false} autoComplete="off" onChange={(event) => fields.setName(event.target.value)}
-      error={fields.name !== '' && !SKILL_NAME.test(fields.name.trim()) ? t('resourceDetails.skill.form.nameInvalid') : undefined} data-autofocus />
     <Textarea label={t('resources.listDescription')} value={fields.description} rows={3} maxLength={DESCRIPTION_MAX} disabled={disabled} onChange={(event) => fields.setDescription(event.target.value)} />
   </>;
 }
@@ -123,6 +122,9 @@ export function AddSkill({ onClose, onCreated }: { onClose: () => void; onCreate
   });
   return <EditDialog title={t('resourceDetails.skill.add')} submitLabel={t('common.add')} changed valid={home !== '' && fields.ready} pending={save.isPending} error={null}
     onSave={() => save.mutate()} onClose={() => { abort.current.abort(); onClose(); }}>
+    <Input label={t('resources.edit.name')} value={way === 'new' ? fields.name : ''} readOnly={way !== 'new'} placeholder={way === 'new' ? undefined : t('resourceDetails.skill.form.sourceName')}
+      maxLength={64} disabled={save.isPending} spellCheck={false} autoComplete="off" onChange={(event) => fields.setName(event.target.value)}
+      error={way === 'new' && fields.name !== '' && !SKILL_NAME.test(fields.name.trim()) ? t('resourceDetails.skill.form.nameInvalid') : undefined} data-autofocus={way === 'new' ? true : undefined} />
     <SegmentedControl<Way> label={t('resourceDetails.skill.form.from')} value={way} onValueChange={(next) => { setWay(next); save.reset(); }} startsKeyboard segments={[
       { value: 'upload', label: t('resourceDetails.skill.form.upload') },
       { value: 'git', label: t('resourceDetails.skill.form.git') },
@@ -154,6 +156,7 @@ export function AddVersion({ skill, onClose, onMade }: { skill: Skill; onClose: 
   });
   return <EditDialog title={t('resourceDetails.skill.addVersion', { name: skill.name })} submitLabel={t('common.add')} changed valid={fields.ready} pending={save.isPending} error={null}
     onSave={() => save.mutate()} onClose={() => { abort.current.abort(); onClose(); }}>
+    <Input label={t('resources.edit.name')} value={skill.name} readOnly />
     <SegmentedControl<Exclude<Way, 'new'>> label={t('resourceDetails.skill.form.from')} value={way} onValueChange={(next) => { setWay(next); save.reset(); }} startsKeyboard segments={[
       { value: 'upload', label: t('resourceDetails.skill.form.upload') },
       { value: 'git', label: t('resourceDetails.skill.form.git') },
@@ -162,6 +165,7 @@ export function AddVersion({ skill, onClose, onMade }: { skill: Skill; onClose: 
     ]} />
     <Hint id="skills" popover className="self-start" />
     <SourceFields way={way} fields={fields} disabled={save.isPending} />
+    <ApplicationTip target={{object:{kind:'skill',id:skill.id},model_id:null}} publication/>
     {save.error !== null && <SkillRefusal error={save.error} />}
   </EditDialog>;
 }

@@ -22,6 +22,7 @@
  * the "+" of an org, a project or a folder are the lists of `NodeMenu`, made only for the row that is
  * asked; a document's are a document's own.
  */
+import { PathLink as RoutedPathLink } from '@/shell/TrailLink';
 import { useGroupActions } from '@/features/chat/groupActions';
 import { linkTo } from '@/lib/links';
 import { Link } from '@tanstack/react-router';
@@ -37,7 +38,10 @@ import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { NodeContextMenu, NodeMakeButton, NodeMenuButton, useIsPending } from '@/features/navigation/NodeMenu';
 import { destinationsFor } from '@/features/org/Move';
 import { kindWord, PlaceLink, type PlaceRef, placeOfRow, placePath } from '@/features/navigation/places';
-import { loadMoreDocs, retryDocs } from '@/features/navigation/treeDocs';
+import { loadMoreTree } from '@/realtime/live';
+import { loadMoreDocs, loadMoreShortcuts, retryDocs, retryShortcuts } from '@/features/navigation/treeDocs';
+import { DRAGGED_SHORTCUT, ShortcutContextMenu, ShortcutLink, ShortcutMenuButton, type ShortcutTarget, useMoveShortcut, useShortcutActs } from '@/features/navigation/shortcuts';
+import type { Shortcut } from '@/api/shortcuts';
 import { buildRows, type ChatMark, type NavItem, nameOf, newLayoutMemory, type TreeView, visibleNodeSiblings } from '@/features/navigation/treeRows';
 import type { AdminAccess, TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
@@ -111,7 +115,7 @@ export const chatPath = (node: Pick<TreeNode, 'id' | 'kind' | 'address'>): strin
 function PathLink({ path, className, label, children }: { path: string; className: string; label?: string; children: ReactNode }) {
   const open = useOpenPath();
   return (
-    <a
+    <RoutedPathLink
       href={path}
       tabIndex={-1}
       className={className}
@@ -124,7 +128,7 @@ function PathLink({ path, className, label, children }: { path: string; classNam
       }}
     >
       {children}
-    </a>
+    </RoutedPathLink>
   );
 }
 
@@ -183,14 +187,30 @@ function useDropOnto(target: TreeNode) {
   const { t } = useTranslation();
   const held = useContext(TreeDropRef);
   const holds = target.kind === 'org' || target.kind === 'project';
+  const moveShortcut = useMoveShortcut();
+  // A shortcut is kept in an org, a project or a topic: one dropped on such a place is moved there at once, being no more than a pointer.
+  const keepsShortcuts = target.kind !== 'thread';
   return {
     onDragOver: (event: DragEvent) => {
+      if (keepsShortcuts && event.dataTransfer.types.includes(DRAGGED_SHORTCUT)) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        return;
+      }
       if (!event.dataTransfer.types.includes(DRAGGED_PLACE)) return;
       if (!holds && held?.current?.arrange === undefined) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
     },
     onDrop: (event: DragEvent) => {
+      const shortcut = event.dataTransfer.getData(DRAGGED_SHORTCUT);
+      if (shortcut !== '') {
+        event.preventDefault();
+        if (!keepsShortcuts) return;
+        const carried = JSON.parse(shortcut) as { id: string; name: string; from: string | null };
+        if (carried.from !== target.id) moveShortcut(carried, { id: target.id, name: target.name });
+        return;
+      }
       const carried = event.dataTransfer.getData(DRAGGED_PLACE);
       const drop = held?.current ?? null;
       if (carried === '' || drop === null) return;
@@ -360,6 +380,44 @@ function DocsRow({ nodeId, state }: { nodeId: string; state: 'loading' | 'failed
   );
 }
 
+/** A shortcut kept in a place: its target's icon with the arrow, its target's name, and its menu; it leads to the target. */
+function ShortcutTreeRow({ shortcut }: { shortcut: Shortcut }) {
+  return (
+    <>
+      <ShortcutLink shortcut={shortcut} className={ROW_LINK} />
+      <span className={ROW_BUTTONS}>
+        <ShortcutMenuButton shortcut={shortcut} skipTab />
+      </span>
+    </>
+  );
+}
+
+/** The line under a place's shortcuts: that they are on their way, that they could not be read, or that there are more. */
+function ShortcutsRow({ nodeId, state }: { nodeId: string; state: 'loading' | 'failed' | 'more' | 'loadingMore' }) {
+  const { t } = useTranslation();
+  if (state === 'loading' || state === 'loadingMore') {
+    return (
+      <span className="flex min-w-0 flex-1 items-center gap-2 text-text-muted">
+        <LoaderCircle className="animate-spin" aria-hidden />
+        <span className="truncate">{t('shortcuts.loading')}</span>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      className="flex min-w-0 flex-1 items-center gap-2 self-stretch text-left text-text-muted outline-none hover:text-text"
+      onClick={() => (state === 'failed' ? retryShortcuts(nodeId) : loadMoreShortcuts(nodeId))}
+    >
+      <span aria-hidden className="flex size-4 shrink-0 items-center justify-center text-text-subtle">
+        {state === 'failed' ? <RotateCw /> : <ChevronsDown />}
+      </span>
+      <span className="truncate underline underline-offset-2">{t(state === 'failed' ? 'shortcuts.retry' : 'shortcuts.more')}</span>
+    </button>
+  );
+}
+
 /** The list of a chat's row: where it leads, and its link. */
 function chatEntries(path: string, t: TFunction, open: (path: string) => void): MenuEntry[] {
   const copy = () => copyText(linkTo({ href: path }), t('common.linkCopied'));
@@ -372,9 +430,10 @@ function chatEntries(path: string, t: TFunction, open: (path: string) => void): 
 }
 
 /** A chat's row: its glyph, its name, what says it is unread, and its menu. A chat its reader does not follow is quiet, and still says when they are mentioned. */
-function ChatRow({ name, of, path, unread, mentions, quiet, adminAccess, actions }: { name: string; of: string; path: string; unread: boolean; mentions: number; quiet: boolean; adminAccess?: AdminAccess | null; actions?: MenuEntry[] }) {
+function ChatRow({ name, of, path, unread, mentions, quiet, adminAccess, actions, target }: { name: string; of: string; path: string; unread: boolean; mentions: number; quiet: boolean; adminAccess?: AdminAccess | null; actions?: MenuEntry[]; target: ShortcutTarget }) {
   const { t } = useTranslation();
   const open = useOpenPath();
+  const shortcuts = useShortcutActs(target);
   return (
     <>
       <PathLink path={path} className={ROW_LINK}>
@@ -392,7 +451,7 @@ function ChatRow({ name, of, path, unread, mentions, quiet, adminAccess, actions
         <Menu
           label={t('places.menu.of', { name: of })}
           align="end"
-          entries={actions ?? chatEntries(path, t, open)}
+          entries={[...(actions ?? chatEntries(path, t, open)), { type: 'separator', id: 'separator-shortcuts' }, ...shortcuts]}
           trigger={<IconButton size="sm" label={t('places.menu.more', { name: of })} icon={<Ellipsis aria-hidden />} tabIndex={-1} />}
         />
       </span>
@@ -406,22 +465,25 @@ function GroupRow({ item, path }: { item: Extract<NavItem, { type: 'group' }>; p
   const group = useGroupActions(item.chat, open);
   const name = item.chat.name ?? t('navigation.chat.group');
   const entries = [...group.entries, ...chatEntries(path, t, open).filter((entry) => !('id' in entry) || entry.id !== 'open')];
-  return <ChatRow name={name} of={name} path={path} unread={item.unread} mentions={item.mentions} quiet={item.quiet} adminAccess={adminAccessOf(item.chat)} actions={entries} />;
+  return <ChatRow name={name} of={name} path={path} unread={item.unread} mentions={item.mentions} quiet={item.quiet} adminAccess={adminAccessOf(item.chat)} actions={entries} target={{ kind: 'chat', id: item.chat.id, name }} />;
 }
 function GroupContextMenu({ item, path, children }: { item: Extract<NavItem, { type: 'group' }>; path: string; children: ReactElement }) {
   const { t } = useTranslation();
   const open = useOpenPath();
   const group = useGroupActions(item.chat, open);
-  const entries = [...group.entries, ...chatEntries(path, t, open).filter((entry) => !('id' in entry) || entry.id !== 'open')];
-  return <ContextMenu label={t('places.menu.of', { name: item.chat.name ?? t('navigation.chat.group') })} entries={entries}>{children}</ContextMenu>;
+  const name = item.chat.name ?? t('navigation.chat.group');
+  const shortcuts = useShortcutActs({ kind: 'chat', id: item.chat.id, name });
+  const entries = [...group.entries, ...chatEntries(path, t, open).filter((entry) => !('id' in entry) || entry.id !== 'open'), { type: 'separator', id: 'separator-shortcuts' } as const, ...shortcuts];
+  return <ContextMenu label={t('places.menu.of', { name })} entries={entries}>{children}</ContextMenu>;
 }
 
 /** Gives a chat's row its right-click menu: the same list as its "⋯". */
-function ChatContextMenu({ of, path, children }: { of: string; path: string; children: ReactElement }) {
+function ChatContextMenu({ of, path, target, children }: { of: string; path: string; target: ShortcutTarget; children: ReactElement }) {
   const { t } = useTranslation();
   const open = useOpenPath();
+  const shortcuts = useShortcutActs(target);
   return (
-    <ContextMenu label={t('places.menu.of', { name: of })} entries={chatEntries(path, t, open)}>
+    <ContextMenu label={t('places.menu.of', { name: of })} entries={[...chatEntries(path, t, open), { type: 'separator', id: 'separator-shortcuts' }, ...shortcuts]}>
       {children}
     </ContextMenu>
   );
@@ -549,6 +611,7 @@ function bring(id: string): void {
 }
 
 export interface NodeTreeProps {
+  orgId?:string;
   tree: OrgTree;
   /** The place the tree begins at: the root org, or the place its reader narrowed it to. */
   rootId: string;
@@ -574,7 +637,8 @@ export interface NodeTreeProps {
   onArrange?: (parentId: string, siblings: readonly string[], moved: string, before: string | null) => void;
 }
 
-export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, currentId, currentRow = null, locale, me, orgSlug = null, onShowThere, nothing, onArrange }: NodeTreeProps) {
+export function NodeTree({ tree, rootId, orgId, view, expanded, onExpandedChange, currentId, currentRow = null, locale, me, orgSlug = null, onShowThere, nothing, onArrange }: NodeTreeProps) {
+  const orgRoot=orgId??[...tree.nodes.values()].find((node)=>node.parent_id===null)?.id??rootId;
   const { t } = useTranslation();
   // What the last laying out was made from is kept: a row whose item did not change is not drawn again, and nodes that
   // did not move are not sorted again.
@@ -605,8 +669,14 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return <NodeRow item={item} />;
         case 'doc':
           return <DocRow doc={item.doc} me={me} />;
+        case 'children':
+          return <button type="button" disabled={item.state==='loading'||item.state==='loadingMore'} className="focus-inset text-sm text-text-muted underline" onClick={()=>loadMoreTree(orgRoot,item.nodeId)}>{t(item.state==='failed'?'common.tryAgain':item.state==='more'?'ui.pagination.more':'common.loading')}</button>;
         case 'docs':
           return <DocsRow nodeId={item.nodeId} state={item.state} />;
+        case 'shortcut':
+          return <ShortcutTreeRow shortcut={item.shortcut} />;
+        case 'shortcuts':
+          return <ShortcutsRow nodeId={item.nodeId} state={item.state} />;
         case 'chat':
           return (
             <ChatRow
@@ -618,6 +688,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
               unread={item.unread}
               mentions={item.mentions}
               quiet={item.quiet}
+              target={{ kind: 'chat', id: item.node.chat.id, name: t('navigation.chat.of', { name: item.node.name }) }}
             />
           );
         case 'groups':
@@ -642,7 +713,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return null;
       }
     },
-    [me, t, groupPath, onShow],
+    [me, t, groupPath, onShow,orgRoot],
   );
   // The whole row answers a right click, not only what it holds.
   const wrapRow = useCallback(
@@ -663,9 +734,11 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return <NodeContextMenu place={placeOfRow(item.node, item.folder)}>{element}</NodeContextMenu>;
         case 'doc':
           return <DocContextMenu doc={item.doc}>{element}</DocContextMenu>;
+        case 'shortcut':
+          return <ShortcutContextMenu shortcut={item.shortcut}>{element}</ShortcutContextMenu>;
         case 'chat':
           return (
-            <ChatContextMenu of={t('navigation.chat.of', { name: item.node.name })} path={chatPath(item.node)}>
+            <ChatContextMenu of={t('navigation.chat.of', { name: item.node.name })} path={chatPath(item.node)} target={{ kind: 'chat', id: item.node.chat.id, name: t('navigation.chat.of', { name: item.node.name }) }}>
               {element}
             </ChatContextMenu>
           );
@@ -675,8 +748,11 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
               {element}
             </GroupContextMenu>
           );
+        case 'children': return item.state==='more'||item.state==='failed'?pressed(()=>loadMoreTree(orgRoot,item.nodeId)):element;
         case 'docs':
           return item.state === 'more' ? pressed(() => loadMoreDocs(item.nodeId)) : item.state === 'failed' ? pressed(() => retryDocs(item.nodeId)) : element;
+        case 'shortcuts':
+          return item.state === 'more' ? pressed(() => loadMoreShortcuts(item.nodeId)) : item.state === 'failed' ? pressed(() => retryShortcuts(item.nodeId)) : element;
         case 'outside':
           return pressed(onShow);
         case 'groups':
@@ -684,7 +760,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return element;
       }
     },
-    [t, groupPath, onShow],
+    [t, groupPath, onShow,orgRoot],
   );
   // The row of the screen in view is the document's own where it stands in the tree, and its place's where it does not.
   const current = useMemo(() => (currentRow !== null && rows.some((row) => row.id === currentRow) ? currentRow : currentId), [currentRow, currentId, rows]);
