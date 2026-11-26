@@ -4,6 +4,7 @@
  * and pressing it goes to the thread with that item lit. A reader who may not read the timeline is
  * shown that an item was quoted and nothing of it.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { useQuery } from '@tanstack/react-query';
 import { MessageSquareQuote, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -76,7 +77,7 @@ export function QuotedItem({ threadId, itemId, onRemove }: QuotedItemProps) {
       ) : (
         <span className="flex min-w-0 flex-1 flex-col">
           {item.isSuccess && item.data.author !== null && <span className="px-2 pt-2"><UserChip user={item.data.author} size={24} thing={{ kind: 'thread', id: threadId, ...(item.data.turn_id === null ? {} : { anchor: { turn: item.data.turn_id } }) }} /></span>}
-        <a
+        <PathLink
           href={path}
           aria-label={t('chat.quote.open')}
           onClick={(event) => {
@@ -88,7 +89,7 @@ export function QuotedItem({ threadId, itemId, onRemove }: QuotedItemProps) {
         >
           <MessageSquareQuote size={16} aria-hidden className="mt-0.5 shrink-0 text-accent-text" />
           <span className="flex min-w-0 flex-col gap-1">{body}</span>
-        </a>
+        </PathLink>
         </span>
       )}
       {onRemove !== undefined && <IconButton size="sm" label={t('chat.quote.remove')} icon={<X aria-hidden />} onClick={onRemove} />}

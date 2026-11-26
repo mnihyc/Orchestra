@@ -1,4 +1,4 @@
-/** Selected rows are reviewed together but keep separate fences, progress, refusals, observed lost answers and Undo. */
+/** Selected rows are reviewed together for archive and move but keep separate fences, progress, refusals, observed lost answers and Undo; Delete is one act with one line. */
 import { expect, test, type Page } from '@playwright/test';
 import { ACME, scenario, signIn } from './support.ts';
 
@@ -34,11 +34,11 @@ test('a phone review names the archive work, reports a partial refusal and lost 
   await dialog.getByRole('button', { name: 'Apply to 3 ready places' }).click();
   const result = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
   await expect(result.getByText('Answer lost; outcome unknown', { exact: true })).toBeVisible();
-  await expect(result.getByText('Some rows did not succeed. Each result below stands on its own.', { exact: true })).toBeVisible();
+  await expect(result.getByText('Some places did not succeed. Each result below stands on its own.', { exact: true })).toBeVisible();
   const lost = result.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Migrate CI', exact: true }) });
   await lost.getByRole('button', { name: 'Read current state', exact: true }).click();
   await expect(lost).toContainText('Read only afterwards');
-  await result.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+  await result.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
   await expect(result.getByRole('heading', { name: 'Undo results' })).toBeVisible();
   expect(applied).toHaveLength(3);
   expect(undone).toEqual([ACME.fixLogin]);
@@ -63,20 +63,29 @@ test('a changed subtree is refused and only a new displayed review can be accept
   await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
 });
 
-test('a selected deletion keeps its own recovery group and the aggregate Undo restores only that group', async ({ page }) => {
+test('a selection is deleted in one act with no review, one line names a refusal, and its one Undo restores only what moved', async ({ page }) => {
   await signIn(page);
-  await select(page, ['Upgrade deps']);
+  await select(page, ['Fix login', 'Upgrade deps']);
+  const deleted: string[] = [];
+  const restored: string[] = [];
+  await page.route('**/api/v1/nodes/*', async (route) => {
+    if (route.request().method() !== 'DELETE') { await route.fallback(); return; }
+    const id = route.request().url().split('/').at(-1) ?? '';
+    deleted.push(id);
+    expect(route.request().postDataJSON() ?? {}).toEqual({});
+    if (id === ACME.fixLogin) await route.fulfill({ status: 403, json: { type: 'orch:error:authz.denied', code: 'authz.denied', status: 403, title: 'Permission changed', detail: 'This topic no longer permits deletion.', request_id: 'one-refusal' } });
+    else await route.fallback();
+  });
+  await page.route('**/api/v1/nodes/*/restore', async (route) => { restored.push(route.request().url().split('/').at(-2) ?? ''); expect(route.request().postDataJSON()).toMatchObject({ undo_delete: expect.any(String) }); await route.fallback(); });
   await page.getByRole('region', { name: 'Selected topics' }).getByRole('button', { name: 'Delete', exact: true }).click();
-  const review = page.getByRole('dialog', { name: 'Review selected places', exact: true });
-  await expect(review).toContainText('Who may bring it back');
-  await expect(review).toContainText('Gone for good');
-  await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
-  const results = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
-  await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
-  await results.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
-  await expect(results.getByRole('heading', { name: 'Undo results', exact: true })).toBeVisible();
-  await expect(results.getByText('Succeeded', { exact: true })).toHaveCount(2);
-  await results.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Review selected places', exact: true })).toHaveCount(0);
+  const notices = page.getByRole('region', { name: /^Notifications/ });
+  await expect(notices.getByText('Moved 1 of 2 to Trash', { exact: true })).toBeVisible();
+  await expect(notices.getByText(/^Not moved: Fix login/)).toBeVisible();
+  expect(deleted.sort()).toEqual([ACME.fixLogin, ACME.upgradeDeps].sort());
+  await notices.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(notices.getByText('“Upgrade deps” is back', { exact: true })).toBeVisible();
+  expect(restored).toEqual([ACME.upgradeDeps]);
   await expect(page.getByRole('checkbox', { name: 'Select Upgrade deps', exact: true })).toBeVisible();
 });
 
@@ -95,7 +104,7 @@ test('a selected move shows its destination and consequences and Undo returns th
   await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
   const result = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
   await expect(result.getByText('Succeeded', { exact: true })).toBeVisible();
-  await result.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+  await result.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
   await expect(result.getByText('Undone', { exact: true })).toBeVisible();
   expect(confirmations).toEqual([
     { parent_id: ACME.evals, expected_revision: expect.any(Number), preflight_id: expect.any(String) },
