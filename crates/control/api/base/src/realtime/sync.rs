@@ -11,10 +11,11 @@
 //! compares every subscribed feed with the number the database now holds.
 //!
 //! One task at a time reads for the subscribers of a source. It reads at once
-//! for the first announcement and then at most once in the gap (a fifth of a
-//! second, or a second while text grows in a thread), with everything that was
-//! announced meanwhile, so that a text that grows and is stored with each
-//! stretch is not read for every one of them.
+//! for an announcement, and when more was announced while it read, it reads
+//! again as soon as it is done, everything that was announced meanwhile at once:
+//! a frame leaves when what it carries was committed, and a burst of commits is
+//! one more read. A text that grows is stored at most once a second by the
+//! engine, which holds it in between, and its deltas carry it on at once.
 //!
 //! A reader that says where it is gets what it missed: `head` answers a
 //! subscription, and the first read for it takes it from there to the number
@@ -33,8 +34,6 @@ use crate::realtime::Entry;
 use crate::realtime::Fail;
 
 use crate::realtime::Inner;
-
-use crate::realtime::STREAMING_WINDOW;
 
 use crate::realtime::Source;
 
@@ -94,11 +93,16 @@ use std::sync::atomic::Ordering;
 
 use std::time::Duration;
 
-use tokio::time::Instant;
+use std::time::Instant;
 /// How long the listener waits before it listens again after it failed to:
 /// the database is down or restarting, and the sweep that follows its return
 /// makes up for what it did not hear.
 const LISTEN_RETRY: Duration = Duration::from_secs(1);
+
+/// Whole milliseconds of a duration, for the timing lines.
+pub(crate) fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Where a feed stands when somebody subscribes: its sequence, and how many
 /// rows are stamped above the number they hold.
@@ -229,11 +233,8 @@ impl Inner {
         let Some((after, upto)) = st.cursor.owed(target) else {
             return Ok(());
         };
-        // The current credential and shared authority gate stay pinned through projection
-        // and serialization; authority writers cannot commit halfway through this frame.
-        let Some(_identity) = super::watches::delivery_guard(self, sub.connection()).await? else {
-            return Ok(());
-        };
+        // read_rows refreshes the exact credential through key_reads::admit before any
+        // projection. The epoch and credential are checked again before queueing it below.
         let rows = self
             .read_rows(sub, after, upto, cache, sub.thread_scope(st))
             .await?;
@@ -329,67 +330,83 @@ impl Inner {
     /// again if the epoch moved, and each is sent what it is owed up to
     /// `target`. A subscriber that could not be served is left where it was,
     /// to be served by the next pass.
-    async fn pass(self: &Arc<Self>, source: Source, target: Seq) -> Result<(), Fail> {
+    async fn pass(
+        self: &Arc<Self>,
+        source: Source,
+        target: Seq,
+        announced: Option<Instant>,
+    ) -> Result<(), Fail> {
         let subs = self.subscribers_of(source);
         if subs.is_empty() {
             return Ok(());
         }
+        let began = Instant::now();
         let epoch = read_epoch(self).await?;
         let mut cache = Cache::default();
+        let readers = subs.len();
+        let (mut locked, mut read) = (Duration::ZERO, Duration::ZERO);
         for sub in subs {
+            let asked = Instant::now();
             let mut st = sub.state.lock().await;
+            locked = locked.max(asked.elapsed());
             if !st.open {
                 continue;
             }
-            match self.recheck(&sub, &mut st, epoch).await {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    tracing::warn!(%error, ?source, "the access of a subscription could not be asked again");
-                    continue;
-                }
-            }
-            if let Err(error) = self.deliver(&sub, &mut st, target, &mut cache).await {
-                tracing::warn!(%error, ?source, "rows could not be read for a subscription; the next pass reads them");
-            }
+            let feed = st.cursor.owed(target).map(|_| sub.feed());
+            let reading = Instant::now();
+            let work = self.pass_subscriber(&sub, &mut st, epoch, source, target, &mut cache);
+            self.traced_frame_sql(feed, sub.connection().user, "read", work)
+                .await;
+            read = read.max(reading.elapsed());
         }
+        // Where the time between an announcement and its frames went, for an operator who follows
+        // `orch_realtime::timing` at the debug level; the writer says when each frame was written.
+        tracing::debug!(
+            target: "orch_realtime::timing",
+            feed = ?source,
+            readers,
+            waited_ms = announced.map(|at| millis(began.saturating_duration_since(at))),
+            longest_lock_ms = millis(locked),
+            longest_read_ms = millis(read),
+            pass_ms = millis(began.elapsed()),
+            "a feed was read for its readers"
+        );
         Ok(())
     }
 
-    /// The work of one source: passes, spaced by the gap, for as long as
-    /// something is announced.
+    async fn pass_subscriber(
+        self: &Arc<Self>,
+        sub: &Arc<Subscription>,
+        state: &mut SubState,
+        epoch: i64,
+        source: Source,
+        target: Seq,
+        cache: &mut Cache,
+    ) {
+        match self.recheck(sub, state, epoch).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(%error,?source,"the access of a subscription could not be asked again");
+                return;
+            }
+        }
+        if let Err(error) = self.deliver(sub, state, target, cache).await {
+            tracing::warn!(%error,?source,"rows could not be read for a subscription; the next pass reads them");
+        }
+    }
+
+    /// The work of one source: passes, one after another and with no wait
+    /// between them, for as long as something is announced.
     async fn work(self: Arc<Self>, source: Source) {
         loop {
-            // The first read after a quiet time is at once; the next waits for
-            // the gap to be over, whichever task made the last. While text grows
-            // in a thread the gap is the second a row may be behind.
-            let wait = {
-                let registry = self.registry();
-                registry.sources.get(&source).and_then(|entry| {
-                    let growing = entry
-                        .streaming
-                        .is_some_and(|at| at.elapsed() < STREAMING_WINDOW);
-                    let gap = if growing {
-                        self.tuning.fanout_gap.max(self.tuning.stream_gap)
-                    } else {
-                        self.tuning.fanout_gap
-                    };
-                    entry.last.map(|at| at + gap)
-                })
-            };
-            if let Some(until) = wait {
-                tokio::select! {
-                    () = tokio::time::sleep_until(until) => {}
-                    () = self.stop.cancelled() => {}
-                }
-            }
-            let target = {
+            let (target, announced) = {
                 let mut registry = self.registry();
                 let Some(entry) = registry.sources.get_mut(&source) else {
                     return;
                 };
                 entry.dirty = false;
-                // Internal readers use the same per-source pacing and repair. This hint conveys
+                // Internal readers use the same per-source reads and repair. This hint conveys
                 // no rows or admission; each reader takes its own current operation snapshot.
                 let notified = entry.notified;
                 entry.changes.send_if_modified(|previous| {
@@ -399,7 +416,6 @@ impl Inner {
                     *previous = Some(notified);
                     true
                 });
-                entry.last = Some(Instant::now());
                 if entry.subs.is_empty() {
                     entry.running = false;
                     if entry.unused() {
@@ -407,9 +423,9 @@ impl Inner {
                     }
                     return;
                 }
-                entry.notified
+                (entry.notified, entry.announced_at.take())
             };
-            if let Err(error) = self.pass(source, target).await {
+            if let Err(error) = self.pass(source, target, announced).await {
                 tracing::warn!(%error, ?source, "a pass over the subscribers of a feed failed");
             }
             let mut registry = self.registry();
@@ -437,11 +453,26 @@ impl Inner {
     /// subscribers are read for, unless they all have read that far.
     pub(crate) fn announce(self: &Arc<Self>, source: Source, seq: Seq) {
         let mut registry = self.registry();
+        let stopping = match source {
+            Source::Thread(thread) => registry.stop_pending.contains(&thread),
+            _ => false,
+        };
         let Some(entry) = registry.sources.get_mut(&source) else {
             return;
         };
+        let progressed = seq > entry.notified;
         entry.notified = entry.notified.max(seq);
+        if progressed && entry.announced_at.is_none() {
+            entry.announced_at = Some(Instant::now());
+        }
         self.kick(entry, source);
+        drop(registry);
+        if stopping
+            && progressed
+            && let Source::Thread(thread) = source
+        {
+            super::thread_stops::changed(self, thread);
+        }
     }
 
     /// Looks again whether anybody has not read as far as was announced, for a
@@ -484,6 +515,7 @@ impl Inner {
     async fn listen_loop(self: Arc<Self>) {
         let channels = [
             sequences::THREAD_CHANNEL,
+            sequences::THREAD_STOP_CHANNEL,
             sequences::TOPIC_CHANNEL,
             sequences::TREE_CHANNEL,
             sequences::USER_CHANNEL,
@@ -550,6 +582,11 @@ impl Inner {
                     self.announce(Source::Thread(thread), seq);
                 }
             }
+            sequences::THREAD_STOP_CHANNEL => {
+                if let Some((thread, _)) = sequences::parse_payload(payload) {
+                    super::thread_stops::changed(self, thread);
+                }
+            }
             sequences::TOPIC_CHANNEL => {
                 if let Some((topic, seq)) = sequences::parse_payload(payload) {
                     self.announce(Source::Topic(topic), seq);
@@ -572,6 +609,20 @@ impl Inner {
                     self.tell_meta_changed(request_id)
                 }
                 Some(sequences::UserNotice::Event { users, event }) => {
+                    if matches!(
+                        event.get("what").and_then(serde_json::Value::as_str),
+                        Some(
+                            "read_state"
+                                | "continuation_read_state"
+                                | "subscription"
+                                | "chat_state"
+                                | "chat"
+                        )
+                    ) || event.get("what").and_then(serde_json::Value::as_str) == Some("state")
+                        && event.get("key").and_then(serde_json::Value::as_str) == Some("sidebar")
+                    {
+                        self.ephemeral.hierarchy_readers_changed(&users);
+                    }
                     self.tell_connections(&users, &event);
                 }
                 None => {}
@@ -616,7 +667,7 @@ impl Inner {
                 }
             }
             sequences::PRESENCE_CHANNEL => {
-                self.ephemeral.heard(payload);
+                self.ephemeral.heard(self, payload);
                 self.heard_presence(payload);
             }
             orch_db::queries::chats::CHAT_CHANNEL => {
@@ -719,8 +770,11 @@ impl Inner {
             );
             // The state lock orders projection after the reset, even when the epoch
             // watcher arrived first. Keep only this unprojected notice across a cut change.
-            let projected =
-                super::personal_changes::project(self, sub.connection(), event.clone()).await?;
+            let Some(projected) =
+                super::personal_changes::project(self, sub.connection(), event.clone()).await?
+            else {
+                return Ok(());
+            };
             #[cfg(any(test, feature = "test-support"))]
             super::epoch_handoff_tests::after_projection(super::epoch_handoff_tests::Cut::Personal)
                 .await;
@@ -832,6 +886,30 @@ impl Inner {
         let mut conn = self.db.acquire().await?;
         for (id, seq) in orch_db::queries::feeds::thread_seqs(&mut conn, &threads).await? {
             self.announce(Source::Thread(id), seq);
+        }
+        let stopping = orch_db::queries::threads::stopping_versions(&mut conn, &threads).await?;
+        let changed = {
+            let mut registry = self.registry();
+            let live: HashSet<_> = threads.iter().copied().collect();
+            registry
+                .stop_versions
+                .retain(|thread, _| live.contains(thread));
+            registry.stop_pending.retain(|thread| live.contains(thread));
+            stopping
+                .into_iter()
+                .filter_map(|(thread, version)| {
+                    let old = registry.stop_versions.entry(thread).or_default();
+                    if version > *old {
+                        *old = version;
+                        Some(thread)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for thread in changed {
+            super::thread_stops::changed(self, thread);
         }
         for (id, seq) in orch_db::queries::feeds::topic_seqs(&mut conn, &topics).await? {
             self.announce(Source::Topic(id), seq);

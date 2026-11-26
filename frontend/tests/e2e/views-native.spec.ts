@@ -63,7 +63,7 @@ test.describe('real workspace views', () => {
       await other.goto(`/thread/${walk.thread}`);
       await other.getByRole('button', { name: 'Layout', exact: true }).click();
       await other.getByRole('menuitem', { name, exact: true }).click();
-      await expect(other.getByRole('region', { name: 'Bottom', exact: true })).toBeVisible();
+      await expect(other.getByRole('region', { name: 'Bottom panel', exact: true })).toBeVisible();
 
       await previewFile(page, walk.file);
       await expect(page.getByRole('tab', { name: basename(walk.file), exact: true })).toBeVisible();

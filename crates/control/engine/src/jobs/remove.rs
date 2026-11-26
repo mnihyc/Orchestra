@@ -609,47 +609,80 @@ impl Phased for Removal {
         let Stop::Failed(failure) = why else {
             return Undone::Everything;
         };
+        match self.retain_retry(job, failure).await {
+            Ok(()) => Undone::Everything,
+            Err(error) => {
+                tracing::warn!(job = %job.id(), %error, "the cleanup retry could not be retained");
+                Undone::Partly("the cleanup retry could not be retained".to_owned())
+            }
+        }
+    }
+}
+
+impl Removal {
+    /// Freeze the actual schedule and its receipt together, under the job's current claim.
+    async fn retain_retry(&self, job: &Job, failure: &Failure) -> Result<(), EngineError> {
+        let mut tx = self.engine.inner.db.begin().await?;
+        job.lock_owned(&mut tx)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("the cleanup no longer holds its job claim"))?;
         let now = job.now();
         let config = self.engine.inner.config.hosting;
-        let Ok(mut conn) = self.engine.inner.db.acquire().await else {
-            return Undone::Partly("the database could not be reached".to_owned());
-        };
-        let failures = rows::failed_removals(&mut conn, self.environment, self.runtime)
-            .await
-            .unwrap_or(0)
-            + 1;
+        let failures = rows::failed_removals(&mut tx, self.environment, self.runtime).await? + 1;
         let pause = pause_after(
             failures,
             config.removal_first_pause,
             config.reaper_retry_max,
         );
-        let again = now + chrono::Duration::from_std(pause).unwrap_or_default();
+        let again = chrono::Duration::from_std(pause)
+            .ok()
+            .and_then(|span| now.checked_add_signed(span))
+            .ok_or_else(|| {
+                EngineError::unreadable("the cleanup retry is outside the supported time range")
+            })?;
         let detail = format!(
             "removing it failed ({} times): {}; it is tried again at {}",
             failures,
             failure.message,
             again.format("%Y-%m-%dT%H:%M:%SZ")
         );
-        match self.runtime {
-            Some(runtime) => {
-                let _ = rows::postpone_removal(&mut conn, runtime, &detail, again, now).await;
-            }
+        let scheduled = match self.runtime {
+            Some(runtime) => rows::postpone_removal(&mut tx, runtime, &detail, again, now).await?,
             None => {
-                let _ = rows::postpone_environment_removal(
-                    &mut conn,
+                let mut scheduled = rows::postpone_environment_removal(
+                    &mut tx,
                     self.environment,
                     &detail,
                     again,
                     now,
                 )
-                .await;
-                if let Ok(Some(runtime)) = rows::live_runtime(&mut conn, self.environment).await {
-                    let _ =
-                        rows::postpone_removal(&mut conn, runtime.id, &detail, again, now).await;
+                .await?;
+                if let Some(runtime) = rows::live_runtime(&mut tx, self.environment).await? {
+                    scheduled |=
+                        rows::postpone_removal(&mut tx, runtime.id, &detail, again, now).await?;
                 }
+                scheduled
             }
+        };
+        if !scheduled {
+            return Err(EngineError::unreadable(
+                "no remaining cleanup target accepted the retry",
+            ));
         }
-        Undone::Everything
+        orch_db::queries::jobs::merge_plan(
+            &mut tx,
+            job.id(),
+            &json!({"lifecycle_wait": {
+                "retry_eligible_at": orch_types::Time::new(again),
+                "last_attempt_at": orch_types::Time::new(now),
+                "reason_code": failure.code,
+                "observed_at": orch_types::Time::new(now)
+            }}),
+            now,
+        )
+        .await?;
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(())
     }
 }
 
