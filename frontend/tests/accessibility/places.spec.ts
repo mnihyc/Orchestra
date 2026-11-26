@@ -132,16 +132,11 @@ test('the dialogs that make and change places, open', async ({ page }) => {
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
+  // Delete asks nothing (it moves the place to the Trash with one line and Undo): the Trash is the dialog left to check.
   await page.goto(`/topic/${ACME.upgradeDeps}`);
   await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
-  await page.getByRole('menuitem', { name: 'Delete…' }).click();
-  await expect(page.getByRole('alertdialog', { name: /^Delete the topic Upgrade deps, in .+\?$/ })).toBeVisible();
-  await expectAccessibleInBothThemes(page);
-  await page.keyboard.press('Escape');
-
-  await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
-  await page.getByRole('menuitem', { name: 'Recently deleted…' }).click();
-  await expect(page.getByRole('dialog', { name: /^Recently deleted in the topic Upgrade deps, in / })).toBeVisible();
+  await page.getByRole('menuitem', { name: 'Trash…' }).click();
+  await expect(page.getByRole('dialog', { name: /^Trash in the topic Upgrade deps, in / })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 

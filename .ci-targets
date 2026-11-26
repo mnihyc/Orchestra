@@ -1,0 +1,6 @@
+web typecheck
+web lint
+web test
+web-e2e
+contracts
+clippy

@@ -224,6 +224,7 @@ async fn a_page_tells_what_its_reader_may_give_and_how_many_people_a_role_stands
         .call(PermissionPeopleList, &[&"nodes", &f.web])
         .token(&f.dan.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("role:{}:developer", f.web),
             limit: Some(200),
             cursor: None,
@@ -537,4 +538,54 @@ async fn somebody_who_holds_nothing_on_a_page_learns_nothing_by_asking_to_change
     .problem();
     assert_eq!(cut.code, ErrorCode::AuthzDenied);
     assert_eq!(cut.extra["required"], "access.manage");
+}
+
+#[tokio::test]
+async fn a_role_holder_name_search_finds_each_assignment_before_the_page_fills() {
+    let world = World::new().await;
+    let f = firm(&world).await;
+    let all = world
+        .app
+        .call(NodeRoleList, &[&f.web])
+        .token(&f.boss.token)
+        .send()
+        .await
+        .ok();
+    assert!(all.own.len() >= 2);
+    for row in all
+        .own
+        .iter()
+        .filter(|row| row.subject.user.is_some())
+        .take(2)
+    {
+        let name = row.subject.user.as_ref().unwrap().display_name.clone();
+        let mut pages = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = world
+                .app
+                .call(NodeRoleList, &[&f.web])
+                .token(&f.boss.token)
+                .query(&orch_api_contract::common::CollectionQuery {
+                    q: Some(name.clone()),
+                    limit: Some(1),
+                    cursor: cursor.take(),
+                })
+                .send()
+                .await
+                .ok();
+            assert!(page.own.len() <= 1);
+            pages.push(page.own.iter().map(|held| held.id).collect::<Vec<_>>());
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        // The searched holder's assignment fills the first page: the search applies before the limit.
+        assert_eq!(pages[0], vec![row.id]);
+        // A later page holds only another assignment the same words find (Developer contains "eve").
+        let later: Vec<_> = pages[1..].iter().flatten().collect();
+        assert!(!later.contains(&&row.id));
+        assert!(later.len() < all.own.len());
+    }
 }
