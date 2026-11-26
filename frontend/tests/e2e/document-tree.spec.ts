@@ -18,7 +18,7 @@ async function capture(page: Page, info: TestInfo, name: string) {
 
 test.beforeEach(async () => { await scenario(); });
 for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const) {
-  test(`document folders create and copy directly, preview deletion and restore at ${width}/${theme}`, async ({ page }, info) => {
+  test(`document folders create, copy and delete directly, and restore at ${width}/${theme}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const fixture = await documentTreeFixture(page);
     const errors: string[] = [];
@@ -57,8 +57,9 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await page.getByRole('link', { name: 'Experiments', exact: true }).click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Copy to…', exact: true }).click();
     dialog = page.getByRole('dialog', { name: 'Copy to…', exact: true });
-    await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Archive');
-    await page.getByRole('option').filter({ hasText: 'Archive' }).click();
+    await dialog.getByRole('combobox', { name: 'Destination', exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Archive');
+    await page.getByRole('treeitem').filter({ hasText: 'Archive' }).click();
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('Experiments copy');
     await capture(page, info, `folder-copy-${width}-${theme}`);
     await dialog.getByRole('button', { name: 'Copy', exact: true }).click();
@@ -69,20 +70,16 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     const copied = page.getByRole('link', { name: 'Experiments copy', exact: true });
     await expect(copied).toBeVisible(); await copied.click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-    dialog = page.getByRole('dialog', { name: 'Delete', exact: true });
-    await expect(dialog.getByText('Experiments copy/Appendix.md', { exact: true })).toBeVisible();
-    await expect(dialog.getByText('1 folder, 1 document, 2 attached files and 0 retained versions.', { exact: true })).toBeVisible();
-    await expect(dialog.getByText(/Recoverable until/)).toBeVisible();
-    expect(fixture.requests.filter((request) => request.path === '/document-tree/operations' && request.body?.command === 'delete')).toHaveLength(0);
-    await capture(page, info, `folder-delete-preview-${width}-${theme}`);
-    await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+    // Nothing is asked and no preview is read: the folder goes to the trash in one act, said in one line with Undo.
+    await expect(page.getByRole('dialog', { name: 'Delete', exact: true })).toHaveCount(0);
     await expect(copied).toHaveCount(0);
+    await expect(page.getByText('Moved “Experiments copy” to Trash', { exact: true })).toBeVisible();
+    await capture(page, info, `folder-deleted-${width}-${theme}`);
     const deletion = fixture.requests.filter((request) => request.path === '/document-tree/operations' && request.body?.command === 'delete');
     expect(deletion).toHaveLength(1);
-    const membership = deletion[0]?.body?.deletion_plan;
-    if (membership === undefined || membership === null || !('entries' in membership)) throw new Error('The fixture deletion must carry its full observed membership');
-    expect(membership.entries).toHaveLength(2);
-    await page.getByRole('radio', { name: 'Deleted', exact: true }).click();
+    expect(deletion[0]?.body).toMatchObject({ deletion_plan: null, items: [{ kind: 'container' }] });
+    expect(fixture.requests.filter((request) => request.path.endsWith('/preview'))).toHaveLength(0);
+    await page.getByRole('radio', { name: 'Trash', exact: true }).click();
     await expect(page.getByText('Experiments copy', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Restore', exact: true }).click();
     await expect(page.getByText('Experiments copy', { exact: true })).toHaveCount(0);
@@ -96,6 +93,34 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await writeFile(info.outputPath('folder-requests.json'), JSON.stringify(fixture.requests, null, 2));
   });
 }
+
+test('rows picked in a folder go to the trash in one act, with one line and one Undo', async ({ page }) => {
+  const fixture = await documentTreeFixture(page);
+  await signIn(page); await page.goto(`/documents/${TREE.node}`);
+  await expect(page.getByRole('link', { name: 'Research', exact: true })).toBeVisible();
+  // A box ticks one row; Shift with another ticks the rows between, as a file manager does.
+  await page.getByRole('checkbox', { name: 'Select Research', exact: true }).click();
+  await page.keyboard.down('Shift');
+  await page.getByRole('checkbox', { name: 'Select Archive', exact: true }).click();
+  await page.keyboard.up('Shift');
+  const bar = page.getByRole('toolbar', { name: 'Acts on the ticked rows' });
+  await expect(bar).toContainText('2 selected');
+  await bar.getByRole('button', { name: 'Delete', exact: true }).click();
+  const notices = page.getByRole('region', { name: /^Notifications/ });
+  await expect(notices.getByText(/^Moved “(Research|Archive)” and “(Research|Archive)” to Trash$/)).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Research', exact: true })).toHaveCount(0);
+  const operations = (command: string) => fixture.requests.filter((request) => request.path === '/document-tree/operations' && request.body?.command === command);
+  expect(operations('delete')).toHaveLength(1);
+  expect(operations('delete')[0]?.body).toMatchObject({ deletion_plan: null });
+  expect(operations('delete')[0]?.body?.items).toHaveLength(2);
+  expect(operations('delete')[0]?.body?.items).toEqual(expect.arrayContaining([{ kind: 'container', id: TREE.research }, { kind: 'container', id: TREE.archive }]));
+  expect(fixture.requests.filter((request) => request.path.endsWith('/preview'))).toHaveLength(0);
+  await notices.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(notices.getByText(/^“(Research|Archive)” and “(Research|Archive)” are back$/)).toBeVisible();
+  expect(operations('restore')).toHaveLength(1);
+  expect(operations('restore')[0]?.body?.items).toEqual(operations('delete')[0]?.body?.items);
+  await expect(page.getByRole('link', { name: 'Research', exact: true })).toBeVisible();
+});
 
 test('a folder-only deep link stays quiet, takes live names, and erases revoked content without opening its private node', async ({ page }, info) => {
   const fixture = await documentTreeFixture(page);
@@ -130,9 +155,6 @@ test('retained folder ancestors stay in inspection, including a live parent, wit
   await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Actions for Research', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Delete', exact: true });
-  await expect(dialog.getByText('Research/Experiments/Appendix.md', { exact: true })).toBeVisible();
-  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/inspect/document_container/${TREE.research}`));
   await page.getByText('Experiments', { exact: true }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Look at it', exact: true }).click();
@@ -186,17 +208,18 @@ test('selected-folder rename uses its parent and Move keeps its root scope while
   const folderChoice = dialog.getByRole('combobox', { name: 'Folder (optional)', exact: true });
   await folderChoice.fill('Other org');
   await expect.poll(() => fixture.requests.filter((request) => request.path === '/search/names').at(-1)?.query.includes(`org_id=${research.entry.root}`)).toBe(true);
-  await expect(page.getByRole('option').filter({ hasText: 'Other org folder' })).toHaveCount(0);
+  await expect(page.getByRole('treeitem').filter({ hasText: 'Other org folder' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Move', exact: true })).toBeDisabled();
   await folderChoice.fill('Archive');
-  await page.getByRole('option').filter({ hasText: 'Archive' }).click();
+  await page.getByRole('treeitem').filter({ hasText: 'Archive' }).click();
   await expect(dialog.getByRole('button', { name: 'Move', exact: true })).toBeEnabled();
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('link', { name: 'Experiments', exact: true }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Copy to…', exact: true }).click();
   dialog = page.getByRole('dialog', { name: 'Copy to…', exact: true });
-  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Other org');
-  await page.getByRole('option').filter({ hasText: 'Other org folder' }).click();
+  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Other org');
+  await page.getByRole('treeitem').filter({ hasText: 'Other org folder' }).click();
   await expect(dialog.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled();
   expect(fixture.requests.filter((request) => request.path.endsWith('/preview'))).toEqual([]);
 });

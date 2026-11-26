@@ -777,6 +777,14 @@ impl DockerDriver {
             kind: spec.kind,
         };
         if let Some(found) = self.daemon.container(&spec.name).await? {
+            if spec
+                .labels
+                .contains_key(orch_driver_contract::runtime::LABEL_BIRTH)
+            {
+                return Err(DriverError::InvalidSpec(
+                    "the requested birth requires a new unit; the existing container was left unchanged".into(),
+                ));
+            }
             if !is_unit(&found, &expected) {
                 return Err(DriverError::Internal(format!(
                     "a container named {} exists and is not the unit of this runtime",
