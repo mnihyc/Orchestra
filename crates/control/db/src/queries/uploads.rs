@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use orch_types::{Hash, Id};
 
 pub mod inventory;
+pub mod targets;
 
 /// Keeps an authorized personal reference in the upload or copy transaction.
 pub async fn remember(

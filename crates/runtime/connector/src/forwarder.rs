@@ -70,9 +70,7 @@ use crate::loopback::{Body, Endpoint, SessionBinding, text};
 use crate::roles::Services;
 use crate::roles::provider::{EndpointEntry, ProviderEntry, Providers};
 use crate::tunnels::TunnelServer;
-use crate::upstream::{
-    End, IDLE_TIMEOUT, Relay, Upstream, UpstreamError, UpstreamRequest, Watcher,
-};
+use crate::upstream::{End, Relay, Upstream, UpstreamError, UpstreamRequest, Watcher};
 use crate::usage::lease_denied;
 
 mod generation;
@@ -228,7 +226,7 @@ impl Protocols {
         mut self,
         translators: Vec<Arc<dyn translator::ProtocolTranslator>>,
     ) -> Self {
-        self.translators = translators;
+        self.translators.extend(translators);
         self
     }
 
@@ -676,19 +674,46 @@ impl Forwarder {
                 )
                 .await;
         }
-        self.forward(request, below_session, lease).await
+        self.forward(request, below_session, lease, None, None)
+            .await
+    }
+
+    /// Uses the same admission, credential presentation, conversion and usage path for one
+    /// controller-owned call. The native command's source owns the supplied lease and request.
+    pub(crate) async fn serve_relay(
+        self: &Arc<Self>,
+        request: Request<Full<Bytes>>,
+        lease: Arc<Lease>,
+        max_request_bytes: u64,
+        provider: Arc<ProviderEntry>,
+    ) -> Response<Body> {
+        let path = request.uri().path().to_owned();
+        self.forward(
+            request,
+            &path,
+            Some(lease),
+            Some(max_request_bytes),
+            Some(provider),
+        )
+        .await
     }
 
     #[allow(
         clippy::too_many_lines,
         reason = "the steps of a forwarded call are one sequence, read best in one place and in order"
     )]
-    async fn forward(
+    async fn forward<B>(
         self: &Arc<Self>,
-        request: Request<Incoming>,
+        request: Request<B>,
         below_session: &str,
         lease: Option<Arc<Lease>>,
-    ) -> Response<Body> {
+        public_request_limit: Option<u64>,
+        provider_override: Option<Arc<ProviderEntry>>,
+    ) -> Response<Body>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         let (parts, body) = request.into_parts();
         let entry = lease
             .as_ref()
@@ -747,7 +772,8 @@ impl Forwarder {
                 ),
             );
         }
-        let limit = usize::try_from(self.max_request_bytes).unwrap_or(usize::MAX);
+        let limit = usize::try_from(public_request_limit.unwrap_or(self.max_request_bytes))
+            .unwrap_or(usize::MAX);
         let body = match Limited::new(body, limit).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_) => {
@@ -831,7 +857,8 @@ impl Forwarder {
         }
 
         // 5. The provider and the endpoint that speaks the call's protocol.
-        let Some(provider) = self.providers.get(lease.provider_id()) else {
+        let Some(provider) = provider_override.or_else(|| self.providers.get(lease.provider_id()))
+        else {
             return self.refuse(
                 Some(entry),
                 Refusal::new(
@@ -902,20 +929,34 @@ impl Forwarder {
             let upstream = translator::UpstreamSide {
                 base_url: endpoint.base_url().to_string(),
                 options: serde_json::to_value(endpoint.options()).unwrap_or_default(),
+                model: lease.model_parameters(&model).cloned(),
+                output_tokens: provider.translation_output_tokens(),
+                session: Some(orch_types::Hash::of(lease.thread_id().as_bytes()).to_string()),
                 credential: (presenter == translator::Presenter::Translator
                     && provider.presenter().is_none())
                 .then(|| credential.clone())
                 .flatten(),
             };
             let translated = tokio::task::spawn_blocking(move || {
+                let response = conversion.response_for(&path, &sent_body, &upstream)?;
                 conversion
                     .translate_request(&path, sent_body, &upstream)
-                    .map(|request| (request, conversion.response_translator()))
+                    .map(|request| (request, response))
             })
             .await;
             let (request, response) = match translated {
                 Ok(Ok(result)) => result,
-                _ => {
+                Ok(Err(error)) => {
+                    return self.refuse(
+                        Some(entry),
+                        Refusal::new(
+                            StatusCode::BAD_REQUEST,
+                            code::PROTOCOL_NOT_SERVED,
+                            error.to_string(),
+                        ),
+                    );
+                }
+                Err(_) => {
                     return self.refuse(
                         Some(entry),
                         Refusal::new(
@@ -967,7 +1008,9 @@ impl Forwarder {
             method = translated_method;
             sent_path = request.path;
             sent_body = request.body;
-            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX)
+                > public_request_limit.unwrap_or(self.max_request_bytes)
+            {
                 return self.refuse(
                     Some(entry),
                     Refusal::new(
@@ -1019,6 +1062,35 @@ impl Forwarder {
         let model_parameters =
             self.declared_parameters(endpoint_protocol, endpoint, &model, model_parameters);
         let endpoint_entry = self.protocols.get(endpoint_protocol);
+        if public_request_limit.is_some() {
+            let checked = (|| {
+                let bindings = endpoint_entry.map_or_else(
+                    || orch_model_contract::features::builtin(endpoint_protocol),
+                    |entry| entry.protocol.request_features(),
+                );
+                let prepared = orch_model_contract::features::prepare(
+                    endpoint_protocol,
+                    &bindings,
+                    &model_parameters,
+                    &sent_body,
+                    lease.request_options(orch_model_contract::features::COMMON),
+                )
+                .map_err(|error| error.to_string())?;
+                orch_model_contract::parameters::check_relay_options(
+                    endpoint_protocol,
+                    prepared.model.as_ref(),
+                    prepared.body.as_ref(),
+                )
+                .map_err(str::to_owned)
+            })();
+            if let Err(reason) = checked {
+                return self.refuse(
+                    Some(entry),
+                    Refusal::new(StatusCode::BAD_REQUEST, code::REQUEST_REFUSED, reason),
+                );
+            }
+        }
+
         if !endpoint.options().params.is_empty() {
             let applied = match endpoint_entry {
                 Some(wire) => orch_model_contract::parameters::apply_request_for_model(
@@ -1045,7 +1117,9 @@ impl Forwarder {
                     );
                 }
             };
-            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX)
+                > public_request_limit.unwrap_or(self.max_request_bytes)
+            {
                 return self.refuse(
                     Some(entry),
                     Refusal::new(
@@ -1108,13 +1182,38 @@ impl Forwarder {
         }
         // Every final payload is checked after translation and every overlay, including translators
         // whose target format has no built-in implementation. A legacy lease cannot prove a ceiling.
-        sent_body = match orch_model_contract::parameters::outgoing_with_access_program(
-            endpoint_protocol,
-            &sent_path,
-            &model_parameters,
-            &sent_body,
-            lease.access_program(),
-        ) {
+        let finalized = (|| {
+            let common = lease.request_options(orch_model_contract::features::COMMON);
+            if let Some(common) = common {
+                orch_model_contract::parameters::thread::selected(
+                    orch_model_contract::features::COMMON,
+                    &model_parameters,
+                    common,
+                )
+                .map_err(str::to_owned)?;
+            }
+            let bindings = endpoint_entry.map_or_else(
+                || orch_model_contract::features::builtin(endpoint_protocol),
+                |entry| entry.protocol.request_features(),
+            );
+            let prepared = orch_model_contract::features::prepare(
+                endpoint_protocol,
+                &bindings,
+                &model_parameters,
+                &sent_body,
+                common,
+            )
+            .map_err(|error| error.to_string())?;
+            orch_model_contract::parameters::outgoing_with_access_program(
+                endpoint_protocol,
+                &sent_path,
+                prepared.model.as_ref(),
+                prepared.body.as_ref(),
+                lease.access_program(),
+            )
+            .map_err(str::to_owned)
+        })();
+        sent_body = match finalized {
             Ok(body) => Bytes::from(body),
             Err(reason) => {
                 self.denied(&lease, &model, code::REQUEST_REFUSED).await;
@@ -1124,7 +1223,9 @@ impl Forwarder {
                 );
             }
         };
-        if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+        if u64::try_from(sent_body.len()).unwrap_or(u64::MAX)
+            > public_request_limit.unwrap_or(self.max_request_bytes)
+        {
             return self.refuse(
                 Some(entry),
                 Refusal::new(
@@ -1491,6 +1592,7 @@ impl Forwarder {
         };
         let sent = self
             .upstream
+            .with_policy(provider.upstream_policy())
             .send(UpstreamRequest {
                 method,
                 url,
@@ -1502,7 +1604,7 @@ impl Forwarder {
             Ok(answer) => answer,
             Err(error) => {
                 let (status, label) = match error {
-                    UpstreamError::TimedOut(_) => {
+                    UpstreamError::TimedOut { .. } => {
                         (StatusCode::GATEWAY_TIMEOUT, code::UPSTREAM_TIMEOUT)
                     }
                     _ => (StatusCode::BAD_GATEWAY, code::UPSTREAM_UNREACHABLE),
@@ -1532,12 +1634,21 @@ impl Forwarder {
         let translated = converter.is_some();
         let body = match converter {
             Some(converter) => TranslatedRelay::new(
-                Relay::new(answer.body, Box::new(watcher), IDLE_TIMEOUT),
+                Relay::new(
+                    answer.body,
+                    Box::new(watcher),
+                    std::time::Duration::from_secs(provider.upstream_policy().idle_secs),
+                ),
                 converter,
                 Box::new(Unwatched),
             )
             .boxed(),
-            None => Relay::new(answer.body, Box::new(watcher), IDLE_TIMEOUT).boxed(),
+            None => Relay::new(
+                answer.body,
+                Box::new(watcher),
+                std::time::Duration::from_secs(provider.upstream_policy().idle_secs),
+            )
+            .boxed(),
         };
         let mut response = Response::new(body);
         *response.status_mut() = answer.status;
@@ -1753,6 +1864,7 @@ impl Forwarder {
         }
         let (status, _, body) = self
             .upstream
+            .with_policy(provider.upstream_policy())
             .fetch(
                 UpstreamRequest {
                     method,
@@ -1760,7 +1872,7 @@ impl Forwarder {
                     headers,
                     body: Bytes::new(),
                 },
-                crate::upstream::MAX_WHOLE_REPLY_BYTES,
+                provider.upstream_policy().whole_limit(),
             )
             .await?;
         self.note_key(provider, status).await;
@@ -1811,9 +1923,21 @@ impl Forwarder {
                 &call,
                 |protocol, options| completion_request(protocol, options, &request),
                 |protocol, body| {
-                    protocol
-                        .completion_text(body)
-                        .map_err(|_| "the upstream did not return a completed text answer")
+                    protocol.completion_text(body).map_err(|_| {
+                        // An answer the upstream cut short says why, in its own word.
+                        match protocol.completion_stopped(body) {
+                            Some(stop) => Unread {
+                                message: format!(
+                                    "the model stopped before its answer was whole: {}",
+                                    stop.reason
+                                ),
+                                stopped: Some(stop),
+                            },
+                            None => {
+                                Unread::from("the upstream did not return a completed text answer")
+                            }
+                        }
+                    })
                 },
                 None,
             )
@@ -1892,9 +2016,9 @@ impl Forwarder {
                     Ok((method, path, body))
                 },
                 |protocol, body| {
-                    protocol
-                        .embedding_vectors(body, inputs)
-                        .map_err(|_| "the upstream did not return one vector for each text")
+                    protocol.embedding_vectors(body, inputs).map_err(|_| {
+                        Unread::from("the upstream did not return one vector for each text")
+                    })
                 },
                 None,
             )
@@ -1921,7 +2045,7 @@ impl Forwarder {
             (Method, &'static str, Bytes),
             orch_link_contract::commands::CommandError,
         >,
-        read: impl FnOnce(&dyn WireProtocol, &Bytes) -> Result<T, &'static str>,
+        read: impl FnOnce(&dyn WireProtocol, &Bytes) -> Result<T, Unread>,
         stream_command: Option<Id>,
     ) -> Result<
         (T, ObservedUsage, orch_api_contract::usage::RequestTiming),
@@ -2154,13 +2278,10 @@ impl Forwarder {
                 None,
             )
         })?
-        .map_err(|_| {
+        .map_err(|why| {
             let cancelled=call.cancel.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
             failed(
-                CommandError::new(
-                    if cancelled {ErrorCode::Conflict} else {ErrorCode::Internal},
-                    if cancelled {"generation was stopped".to_owned()} else {format!("the {} upstream could not be reached",call.label)},
-                ),
+                if cancelled {CommandError::new(ErrorCode::Conflict,"generation was stopped")} else {crate::roles::provider::failure_of(&why)},
                 if cancelled {"stream_interrupted"} else {"provider_unreachable"},
                 None,
             )
@@ -2245,13 +2366,38 @@ impl Forwarder {
             }
             return Err(error);
         }
-        let answer = read(entry.protocol.as_ref(), &body).map_err(|message| {
-            failed(
-                CommandError::new(ErrorCode::Internal, message),
-                "harness_error",
-                None,
-            )
-        })?;
+        let answer = match read(entry.protocol.as_ref(), &body) {
+            Ok(answer) => answer,
+            Err(unread) => {
+                let mut error = CommandError::new(ErrorCode::Internal, unread.message);
+                let stopped = unread.stopped;
+                if let Some(stop) = &stopped {
+                    error = error.with_details(serde_json::json!({"failure": {
+                        "code": "harness_error", "reason": stop.reason,
+                        "output_limit": stop.output_limit, "retryable": false,
+                    }}));
+                }
+                let mut error = failed(error, "harness_error", None);
+                // An answer that was cut short was still paid for: what it used is counted.
+                if stopped.is_some() {
+                    let mut observer = orch_model_contract::declared_usage::configured(
+                        entry.protocol.usage_observer(),
+                        &native,
+                    );
+                    observer.observe(&body);
+                    if let Some(usage) = observer.usage()
+                        && let Some(details) = error.details.as_mut()
+                    {
+                        details["model_request"]["tokens"] = serde_json::json!(
+                            orch_api_contract::usage::RequestTokens::from(usage.tokens)
+                        );
+                        details["model_request"]["reported_service_tier"] =
+                            serde_json::json!(usage.service_tier);
+                    }
+                }
+                return Err(error);
+            }
+        };
         let mut observer = orch_model_contract::declared_usage::configured(
             entry.protocol.usage_observer(),
             &native,
@@ -2366,6 +2512,22 @@ impl Forwarder {
             },
         );
         Ok((answer, usage, timing))
+    }
+}
+
+/// Why the answer of a successful reply could not be read: the sentence the command fails with, and, for an
+/// answer that the upstream cut short, why it stopped.
+struct Unread {
+    message: String,
+    stopped: Option<orch_model_contract::protocol::CompletionStop>,
+}
+
+impl From<&'static str> for Unread {
+    fn from(message: &'static str) -> Self {
+        Self {
+            message: message.to_owned(),
+            stopped: None,
+        }
     }
 }
 

@@ -185,7 +185,8 @@ async fn a_large_discussion_job_resumes_after_one_committed_page_without_replayi
         .app
         .call(DocumentNoticeJobList, &[&doc.base.id])
         .token(&desk.ada.token)
-        .query(&orch_api_contract::common::PageQuery {
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: None,
             limit: Some(1),
             cursor: None,
         })
@@ -199,7 +200,8 @@ async fn a_large_discussion_job_resumes_after_one_committed_page_without_replayi
         .app
         .call(DocumentNoticeJobList, &[&doc.base.id])
         .token(&desk.ada.token)
-        .query(&orch_api_contract::common::PageQuery {
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: None,
             limit: Some(1),
             cursor: listed.next_cursor,
         })

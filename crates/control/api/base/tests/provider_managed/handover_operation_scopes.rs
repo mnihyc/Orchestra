@@ -4,7 +4,7 @@
 use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_engine::commands::Commands;
@@ -106,12 +106,13 @@ fn holder_rules(s: &Scene, provider: Id, actions: &[&str]) -> Vec<Json> {
 async fn key(s: &Scene, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Handover-return operation control",
             token_hash: &hash,
@@ -571,13 +572,9 @@ async fn busy_count_uses_its_own_read_bound_and_explicit_interrupt_keeps_existin
         .token(&s.ada.token)
         .body(&CreateThread {
             name: Some("Owned handover busy control".into()),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(s.on.agent, provider, None)),
             model: Some(MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("web".into()),
             ..CreateThread::default()
         })

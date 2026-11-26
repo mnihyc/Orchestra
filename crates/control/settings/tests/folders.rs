@@ -20,13 +20,24 @@ async fn of_two_projects_on_a_path_the_inner_one_is_nearer() {
     let folder = w.node("project", w.project, "Checkout").await;
     let cart = w.node("topic", folder, "Cart").await;
     let fix = w.node("thread", cart, "Fix").await;
-    w.set(Target::Node(w.project), keys::AGENT_MODEL, json!("model-a"))
-        .await;
-    w.set(Target::Node(folder), keys::AGENT_MODEL, json!("model-b"))
-        .await;
+    w.set(
+        Target::Node(w.project),
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"model-a"}),
+    )
+    .await;
+    w.set(
+        Target::Node(folder),
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"model-b"}),
+    )
+    .await;
 
     let at_cart = w.view(Place::Node(cart), keys::AGENT_MODEL).await;
-    assert_eq!(at_cart.value(), Some(&json!("model-b")));
+    assert_eq!(
+        at_cart.value(),
+        Some(&json!({"type":"offering","name":"model-b"}))
+    );
     assert_eq!(at_cart.resolved.source.scope, SourceScope::Project);
     assert_eq!(
         at_cart.resolved.source.node,
@@ -35,20 +46,23 @@ async fn of_two_projects_on_a_path_the_inner_one_is_nearer() {
     );
     assert_eq!(
         w.value(Place::Node(fix), keys::AGENT_MODEL).await,
-        Some(json!("model-b")),
+        Some(json!({"type":"offering","name":"model-b"})),
         "and so does a thread of that topic"
     );
     // A topic beside the folder takes the outer project's, and the folder itself its own.
     let login = w.view(Place::Node(w.topic), keys::AGENT_MODEL).await;
-    assert_eq!(login.value(), Some(&json!("model-a")));
+    assert_eq!(
+        login.value(),
+        Some(&json!({"type":"offering","name":"model-a"}))
+    );
     assert_eq!(login.resolved.source.node, Some(w.project));
     assert_eq!(
         w.value(Place::Node(folder), keys::AGENT_MODEL).await,
-        Some(json!("model-b"))
+        Some(json!({"type":"offering","name":"model-b"}))
     );
     assert_eq!(
         w.value(Place::Node(w.project), keys::AGENT_MODEL).await,
-        Some(json!("model-a")),
+        Some(json!({"type":"offering","name":"model-a"})),
         "what is set in a folder does not reach up"
     );
     // The folder takes its row away: the project's holds again.
@@ -57,7 +71,7 @@ async fn of_two_projects_on_a_path_the_inner_one_is_nearer() {
         .unwrap();
     assert_eq!(
         w.value(Place::Node(cart), keys::AGENT_MODEL).await,
-        Some(json!("model-a"))
+        Some(json!({"type":"offering","name":"model-a"}))
     );
 }
 

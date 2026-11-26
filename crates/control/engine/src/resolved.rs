@@ -75,8 +75,13 @@ pub async fn attribution(conn: &mut Conn, node: Id) -> Result<Attribution, Engin
 /// The settings of a thread's place that setting up a turn needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
+    /// Chosen native text output capture allowance for the session.
+    pub output_capture_bytes: u64,
     /// The model's routing name; none while no scope sets one.
     pub model: Option<String>,
+    /// Authored constraints retained separately from the effective offering of the current segment.
+    pub locked_model: Option<orch_settings_contract::thread_defaults::ModelDefault>,
+    pub locked_provider: Option<orch_provider_contract::pools::Target>,
     /// The effort the thread asks for.
     pub effort: Option<String>,
     /// The parameters of the agent, by key.
@@ -87,9 +92,12 @@ pub struct Resolved {
     pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// Whether background task completion may start an admitted continuation.
     pub background_wake: bool,
+    /// How long a native web action may remain without a reported end.
+    pub web_action_wait_secs: u64,
     /// Whether native image generation is explicitly enabled here.
     pub image_generation: Option<bool>,
     /// The features that are on, by name.
+    // The selected descriptor supplies shipped values when these explicit place choices are consumed.
     pub features: BTreeMap<String, bool>,
     /// The standing instructions scope by scope, outermost first, those that say nothing left out.
     pub standing: Vec<StandingPart>,
@@ -113,6 +121,10 @@ pub struct Resolved {
     pub binding_prefer: Vec<ArrangementType>,
     /// The arrangement types a scope allows; none while no scope limits them.
     pub binding_allowed: Option<Vec<ArrangementType>>,
+    /// Whether this place permits a translated model pairing.
+    pub translation_allowed: bool,
+    /// Actual place that supplied this policy, absent for the system/default.
+    pub translation_scope: Option<Id>,
     /// How many calls of Orch's tools the agent may make in a minute, as the guide to them says.
     pub tool_calls_per_minute: Option<i64>,
     /// How many announcements an hour the agent may send, as the tool guide says.
@@ -188,14 +200,16 @@ fn word<T: DeserializeOwned>(snapshot: &Snapshot, key: &str) -> Result<Option<T>
         .transpose()
 }
 
-/// The settings a thread runs with.
-pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> {
-    let wanted: Vec<&'static SettingDef> = [
+fn wanted() -> Result<Vec<&'static SettingDef>, EngineError> {
+    [
         keys::AGENT_MODEL,
+        keys::AGENT_DEFAULT_PROVIDER_ID,
         keys::AGENT_EFFORT,
         keys::AGENT_PARAMS,
         keys::AGENT_FEATURES,
         keys::THREADS_BACKGROUND_WAKE,
+        keys::THREADS_OUTPUT_CAPTURE_BYTES,
+        keys::AGENTS_WEB_ACTION_WAIT_SECS,
         keys::AGENTS_IMAGE_GENERATION,
         keys::AGENTS_PROMPT_CACHE_TTL,
         keys::AGENT_INSTRUCTIONS,
@@ -210,6 +224,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::COLLAB_ATTRIBUTION,
         keys::THREAD_CWD,
         keys::BINDING_PREFER,
+        keys::PROVIDERS_TRANSLATION,
         keys::BINDING_ALLOWED,
         keys::ORCH_TOOLS_CALLS_PER_MINUTE,
         keys::ORCH_TOOLS_SEARCH_QUERY_CHARS,
@@ -221,29 +236,140 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
     ]
     .into_iter()
     .map(def)
-    .collect::<Result<_, _>>()?;
+    .collect()
+}
+
+/// A pool-owned model is drawn once for the segment. Locked topic defaults keep their
+/// authored value, so the runtime reads the chosen offering from that segment's receipt.
+async fn retained_models(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<BTreeMap<Id, String>, EngineError> {
+    if threads.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows: Vec<(Id, String)> = sqlx::query_as(
+        "SELECT t.node_id, c.leaf #>> '{backend,offering,offering}' FROM threads t
+         JOIN segment_pool_bindings b ON b.segment_id=t.current_segment_id
+         JOIN pool_choices c ON c.id=b.choice_id
+         WHERE t.node_id=ANY($1) AND c.state='selected' AND c.leaf->>'kind'='model'
+           AND c.leaf #>> '{backend,offering,offering}' IS NOT NULL",
+    )
+    .bind(threads)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    Ok(rows.into_iter().collect())
+}
+
+fn inherits_model_pool(snapshot: &Snapshot) -> Result<bool, EngineError> {
+    Ok(snapshot
+        .resolve(def(keys::AGENT_MODEL)?)
+        .value
+        .as_ref()
+        .is_some_and(|value| {
+            value.get("type").and_then(Json::as_str) == Some("pool")
+                && value.get("kind").and_then(Json::as_str) == Some("model")
+        }))
+}
+
+/// The settings a thread runs with.
+pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> {
+    let wanted = wanted()?;
     let snapshot = Snapshot::load(conn, Place::Node(thread), Wanted::Keys(&wanted)).await?;
-    let attribution = attribution_of(&snapshot)?;
-    let mut resolved = Resolved {
-        model: value(&snapshot, keys::AGENT_MODEL)?,
-        effort: value(&snapshot, keys::AGENT_EFFORT)?,
-        params: value(&snapshot, keys::AGENT_PARAMS)?
+    let mut resolved = from_snapshot(&snapshot)?;
+    if inherits_model_pool(&snapshot)? {
+        resolved.model = retained_models(conn, &[thread]).await?.remove(&thread);
+    }
+    crate::calls::apply_override(conn, thread, &mut resolved).await?;
+    Ok(resolved)
+}
+
+/// The model patterns a place allows, read alone: the same value as [`load`]'s `models_allowed` (a call-recovery
+/// override changes a thread's model, effort and parameters, never what the place allows).
+pub async fn models_allowed(
+    conn: &mut Conn,
+    place: Id,
+) -> Result<Option<Vec<String>>, EngineError> {
+    let wanted = [def(keys::MODELS_ALLOWED)?];
+    let snapshot = Snapshot::load(conn, Place::Node(place), Wanted::Keys(&wanted)).await?;
+    value(&snapshot, keys::MODELS_ALLOWED)
+}
+
+/// The same current settings for a page, sharing native setting sources while
+/// retaining each thread's existing temporary call-recovery override checks.
+pub async fn load_many(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<BTreeMap<Id, Resolved>, EngineError> {
+    let wanted = wanted()?;
+    let keys = wanted.iter().map(|def| def.key).collect::<Vec<_>>();
+    let snapshots = orch_settings::snapshots_at_nodes(conn, threads, &keys).await?;
+    let mut result = BTreeMap::new();
+    let mut needing = Vec::new();
+    for (thread, snapshot) in &snapshots {
+        if inherits_model_pool(snapshot)? {
+            needing.push(*thread);
+        }
+    }
+    let mut retained = retained_models(conn, &needing).await?;
+    for (thread, snapshot) in snapshots {
+        let mut resolved = from_snapshot(&snapshot)?;
+        if let Some(model) = retained.remove(&thread) {
+            resolved.model = Some(model);
+        }
+        crate::calls::apply_override(conn, thread, &mut resolved).await?;
+        result.insert(thread, resolved);
+    }
+    Ok(result)
+}
+
+fn locked_value<T: DeserializeOwned>(
+    snapshot: &Snapshot,
+    key: &str,
+) -> Result<Option<T>, EngineError> {
+    let setting = snapshot.resolve(def(key)?);
+    match setting
+        .value
+        .filter(|value| setting.locked_by.is_some() && !value.is_null())
+    {
+        Some(value) => Ok(Some(serde_json::from_value(value)?)),
+        None => Ok(None),
+    }
+}
+
+fn from_snapshot(snapshot: &Snapshot) -> Result<Resolved, EngineError> {
+    let attribution = attribution_of(snapshot)?;
+    Ok(Resolved {
+        locked_model: locked_value(snapshot, keys::AGENT_MODEL)?,
+        locked_provider: locked_value(snapshot, keys::AGENT_DEFAULT_PROVIDER_ID)?,
+        output_capture_bytes: value(snapshot, keys::THREADS_OUTPUT_CAPTURE_BYTES)?
+            .unwrap_or(67_108_864),
+        model: value::<orch_settings_contract::thread_defaults::ModelDefault>(
+            snapshot,
+            keys::AGENT_MODEL,
+        )?
+        .and_then(|value| value.offering().map(str::to_owned)),
+        effort: value(snapshot, keys::AGENT_EFFORT)?,
+        params: value(snapshot, keys::AGENT_PARAMS)?
             .unwrap_or_else(|| Json::Object(serde_json::Map::new())),
         subagent_limits: orch_agent_contract::session::SubagentLimits {
-            at_once: value(&snapshot, keys::AGENTS_SUBAGENTS_AT_ONCE)?.unwrap_or(8),
-            depth: value(&snapshot, keys::AGENTS_SUBAGENT_DEPTH)?.unwrap_or(1),
+            at_once: value(snapshot, keys::AGENTS_SUBAGENTS_AT_ONCE)?.unwrap_or(8),
+            depth: value(snapshot, keys::AGENTS_SUBAGENT_DEPTH)?.unwrap_or(1),
         },
-        prompt_cache_ttl: value(&snapshot, keys::AGENTS_PROMPT_CACHE_TTL)?,
-        background_wake: value::<String>(&snapshot, keys::THREADS_BACKGROUND_WAKE)?.as_deref()
+        prompt_cache_ttl: value(snapshot, keys::AGENTS_PROMPT_CACHE_TTL)?,
+        background_wake: value::<String>(snapshot, keys::THREADS_BACKGROUND_WAKE)?.as_deref()
             != Some("off"),
-        image_generation: value::<String>(&snapshot, keys::AGENTS_IMAGE_GENERATION)?
+        web_action_wait_secs: value(snapshot, keys::AGENTS_WEB_ACTION_WAIT_SECS)?
+            .ok_or_else(|| EngineError::unreadable("the web action wait has no default"))?,
+        image_generation: value::<String>(snapshot, keys::AGENTS_IMAGE_GENERATION)?
             .map(|value| value == "on"),
-        features: value(&snapshot, keys::AGENT_FEATURES)?.unwrap_or_default(),
-        standing: standing_from(&snapshot)?,
-        memory: word(&snapshot, keys::AGENT_MEMORY)?.unwrap_or_default(),
-        messages: value(&snapshot, keys::AGENT_MESSAGES)?.unwrap_or_default(),
-        approval_mode: word(&snapshot, keys::APPROVAL_MODE)?.unwrap_or(ApprovalMode::OnRequest),
-        allowed_modes: value::<Vec<String>>(&snapshot, keys::APPROVAL_ALLOWED_MODES)?
+        features: value(snapshot, keys::AGENT_FEATURES)?.unwrap_or_default(),
+        standing: standing_from(snapshot)?,
+        memory: word(snapshot, keys::AGENT_MEMORY)?.unwrap_or_default(),
+        messages: value(snapshot, keys::AGENT_MESSAGES)?.unwrap_or_default(),
+        approval_mode: word(snapshot, keys::APPROVAL_MODE)?.unwrap_or(ApprovalMode::OnRequest),
+        allowed_modes: value::<Vec<String>>(snapshot, keys::APPROVAL_ALLOWED_MODES)?
             .map(|modes| {
                 modes
                     .into_iter()
@@ -258,21 +384,26 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
                     ApprovalMode::Bypass,
                 ]
             }),
-        sandbox_mode: word(&snapshot, keys::SANDBOX_MODE)?.unwrap_or(SandboxMode::Workspace),
-        models_allowed: value(&snapshot, keys::MODELS_ALLOWED)?,
+        sandbox_mode: word(snapshot, keys::SANDBOX_MODE)?.unwrap_or(SandboxMode::Workspace),
+        models_allowed: value(snapshot, keys::MODELS_ALLOWED)?,
         attribution,
-        cwd: value(&snapshot, keys::THREAD_CWD)?.unwrap_or_default(),
-        binding_prefer: types(&snapshot, keys::BINDING_PREFER)?.unwrap_or_default(),
-        binding_allowed: types(&snapshot, keys::BINDING_ALLOWED)?,
-        tool_calls_per_minute: value(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
-        announcements_per_hour: value(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
-        thread_messages_per_hour: value(&snapshot, keys::BROADCAST_THREAD_MESSAGES_PER_HOUR)?,
-        search_budgets: crate::tools::search_budgets::SearchBudgets::resolve(&snapshot)?,
-        broadcast_agent_options: value(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?
+        cwd: value(snapshot, keys::THREAD_CWD)?.unwrap_or_default(),
+        binding_prefer: types(snapshot, keys::BINDING_PREFER)?.unwrap_or_default(),
+        binding_allowed: types(snapshot, keys::BINDING_ALLOWED)?,
+        translation_allowed: value(snapshot, keys::PROVIDERS_TRANSLATION)?.unwrap_or(true),
+        translation_scope: snapshot
+            .resolve(def(keys::PROVIDERS_TRANSLATION)?)
+            .parts
+            .into_iter()
+            .find(|part| part.value == Json::Bool(false))
+            .and_then(|part| part.source.node),
+        tool_calls_per_minute: value(snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
+        announcements_per_hour: value(snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
+        thread_messages_per_hour: value(snapshot, keys::BROADCAST_THREAD_MESSAGES_PER_HOUR)?,
+        search_budgets: crate::tools::search_budgets::SearchBudgets::resolve(snapshot)?,
+        broadcast_agent_options: value(snapshot, keys::BROADCAST_AGENT_OPTIONS)?
             .unwrap_or_default(),
-    };
-    crate::calls::apply_override(conn, thread, &mut resolved).await?;
-    Ok(resolved)
+    })
 }
 
 fn types(snapshot: &Snapshot, key: &str) -> Result<Option<Vec<ArrangementType>>, EngineError> {

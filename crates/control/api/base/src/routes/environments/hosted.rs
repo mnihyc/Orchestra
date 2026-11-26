@@ -35,7 +35,7 @@ orch_api_base::api_family_callback! {
     slot __ApiCallback25a1104266, __API_CALLBACK_25A1104266, __api_set_25a1104266;
     base orch_api_base::routes::environments::hosted;
 
-    async fn create_with_prepared_initial<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: orch_api_contract::binding::NewEnvironment, arg4: Option<orch_engine::initial_files::Plan>) -> orch_api_base::middleware::requests::ApiResult<orch_engine::environments::Made>;
+    async fn create_with_prepared_initial<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: orch_api_contract::binding::NewEnvironment, arg4: Option<orch_engine::initial_files::Plan>, arg5: Option<orch_engine::binding::environment_pool::Recipe>) -> orch_api_base::middleware::requests::ApiResult<orch_engine::environments::Made>;
 }
 
 // ---------------------------------------------------------------- the fleet of a place

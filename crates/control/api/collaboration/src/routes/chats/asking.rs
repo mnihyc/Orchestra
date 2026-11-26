@@ -83,7 +83,7 @@ pub(super) async fn review(
         let row = thread_rows::thread(conn, *id)
             .await?
             .ok_or_else(ApiError::not_found)?;
-        let model = orch_settings::get::<String>(conn, Place::Node(*id), keys::AGENT_MODEL)
+        let model = orch_settings::thread_model(conn, Place::Node(*id))
             .await
             .map_err(ApiError::internal)?;
         let effort = orch_settings::get::<String>(conn, Place::Node(*id), keys::AGENT_EFFORT)

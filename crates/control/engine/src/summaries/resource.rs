@@ -1,6 +1,7 @@
 //! Native paragraph work. The original act, source selection and real completion journal stay
 //! separate from a reader's disposable capability preview. No transaction spans model IO.
 use super::{options, sources};
+use crate::resource_choice::ProviderSelection;
 use crate::{Engine, EngineError, operation_scope};
 use orch_api_contract::{
     routes::Endpoint,
@@ -18,16 +19,23 @@ use orch_types::{Hash, Id, Json, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod change;
 pub mod command;
 mod events;
+mod failure;
+pub mod pool;
+pub use change::{SourceChange, source_change};
 pub use events::node_event;
+pub use failure::Reason;
 mod route;
 mod run;
-pub use route::{preview_route, resolve_route};
+#[cfg(test)]
+mod tests;
+pub use route::{preview_route, resolve_backend_choice, resolve_route};
 mod defaults;
 pub use defaults::{ManualDefault, manual_default};
 
-fn refused() -> EngineError {
+pub(super) fn refused() -> EngineError {
     EngineError::BeforeEffect(Box::new(operation_scope::continuing::Error::Refused))
 }
 fn source_error(error: sources::SourceError) -> EngineError {
@@ -40,6 +48,7 @@ fn source_error(error: sources::SourceError) -> EngineError {
 
 /// Actual effect-free native operands, not an admission or a serializable permission.
 pub struct Selection {
+    member: Option<ProviderSelection>,
     /// Current text and all actual native source facts.
     pub material: sources::Material,
     /// Current target defaults and producer provenance.
@@ -48,6 +57,47 @@ pub struct Selection {
     pub config: Config,
 }
 impl Selection {
+    pub(super) fn selected_member(&self) -> Option<&ProviderSelection> {
+        self.member.as_ref().filter(|member| {
+            super::pool::matches_backend(member.selection().leaf, &self.config.backend)
+        })
+    }
+
+    /// Check the actual selected backend and its current grant for the acting principal.
+    pub async fn model_entry(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> Result<Option<Id>, EngineError> {
+        judge_model_at(
+            conn,
+            principal,
+            Some(self.material.identity.place()),
+            &self.config,
+            self.selected_member(),
+        )
+        .await?
+        .map_err(|_| refused())
+    }
+
+    /// Frozen choice facts for the actual accepting producer; these contain no acting authority.
+    pub fn backend_selection(&self) -> Result<Json, EngineError> {
+        Ok(serde_json::to_value(ModelSelection::configured(
+            &self.config,
+        ))?)
+    }
+
+    /// Catch-up keeps the person's selected range. A title follows the whole current chat;
+    /// its snapshot records the actual read position without turning it into a pinned range.
+    #[must_use]
+    pub fn pinned_range(&self) -> Option<SummaryChatRange> {
+        if matches!(self.material.identity.target(), SummaryTarget::Chat { .. }) {
+            self.material.range
+        } else {
+            None
+        }
+    }
+
     /// Canonical typed facts, including every contributing resource.
     pub fn facts(&self) -> Vec<operation_scope::sources::Facts<Role>> {
         let mut groups = BTreeMap::new();
@@ -66,6 +116,100 @@ impl Selection {
             operation_scope::sources::Facts::collection(Role::Inputs, groups.into_iter().collect()),
         ]
     }
+}
+
+/// The model task selected by the resource's actual native kind.
+#[must_use]
+pub fn field_for(target: SummaryTarget) -> orch_summarizer_contract::descriptor::SummaryField {
+    if matches!(target, SummaryTarget::ChatTitle { .. }) {
+        orch_summarizer_contract::descriptor::SummaryField::Title
+    } else {
+        orch_summarizer_contract::descriptor::SummaryField::Summary
+    }
+}
+
+/// The same owned prompt operands for a current proposal and the actual admitted execution.
+pub async fn request_for_selection(
+    conn: &mut Conn,
+    selected: &Selection,
+) -> Result<orch_summarizer_contract::summarizer::SummaryRequest, EngineError> {
+    let place = selected.material.identity.place();
+    let target = selected.material.identity.target();
+    let node = orch_db::queries::hierarchy::node(conn, place)
+        .await?
+        .ok_or_else(refused)?;
+    let named = matches!(
+        target,
+        SummaryTarget::Thread { .. } | SummaryTarget::Topic { .. }
+    );
+    Ok(orch_summarizer_contract::summarizer::SummaryRequest {
+        field: field_for(target),
+        node: orch_plugin_contract::refs::NodeRef {
+            id: place,
+            kind: serde_json::from_value(serde_json::json!(node.kind))?,
+            name: named.then(|| selected.material.title.clone()),
+            redacted: !named,
+        },
+        previous: String::new(),
+        activity: selected.material.activity.clone(),
+        tag_choices: Vec::new(),
+        limits: selected.policy.limits(),
+        config: serde_json::to_value(&selected.config)?,
+    })
+}
+
+/// Effect-free manual operands under the consuming read's actual source roles. No paid operation is captured.
+pub async fn preview_selection(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: SummaryTarget,
+    range: Option<SummaryChatRange>,
+    scope: &sources::ReadScope<'_>,
+    policy: options::Policy,
+    producer: &options::Producer,
+    member: Option<&ProviderSelection>,
+) -> Result<Selection, EngineError> {
+    let mut config = Config::read(&producer.config).map_err(|_| refused())?;
+    let identity = sources::identify(conn, target)
+        .await
+        .map_err(source_error)?;
+    judge_model_at(conn, principal, Some(identity.place()), &config, member)
+        .await?
+        .map_err(|_| refused())?;
+    config.context_tokens = policy.context_tokens.get();
+    config.context_tokens = super::budget::context_tokens(conn, &config, field_for(target)).await?;
+    let budget = orch_summarizer_model::context::resource_budget(
+        &config,
+        field_for(target),
+        &policy.limits(),
+    )
+    .map_err(|_| refused())?;
+    let material =
+        sources::materialize_with_plan(conn, principal, target, Some(scope), range, budget, None)
+            .await
+            .map_err(source_error)?;
+    Ok(Selection {
+        member: member.cloned(),
+        material,
+        policy,
+        config,
+    })
+}
+
+/// A prompt estimate and the same request output reservation as the model producer, never base-rate arithmetic.
+pub async fn proposal_budget(
+    conn: &mut Conn,
+    selected: &Selection,
+) -> Result<(u32, i64), EngineError> {
+    let request = request_for_selection(conn, selected).await?;
+    let (system, input) = orch_summarizer_model::prompts::render(&request, &selected.config);
+    let input = orch_summarizer_model::context::estimated_tokens(&system)
+        .saturating_add(orch_summarizer_model::context::estimated_tokens(&input));
+    let reasons = super::budget::reasons(conn, &selected.config).await?;
+    Ok((
+        input,
+        selected.config.output_reserve(request.field, reasons),
+    ))
 }
 
 /// Select under the consuming operation's common Read roles before materializing words.
@@ -92,6 +236,56 @@ pub async fn select_with_snapshot(
     now: Time,
     snapshot: Option<&Json>,
 ) -> Result<Selection, EngineError> {
+    let selected = model.map(ModelSelection::chosen);
+    select_with_backend_snapshot(
+        conn,
+        caller,
+        target,
+        range,
+        selected.as_ref(),
+        now,
+        snapshot,
+    )
+    .await
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSelection {
+    backend: orch_provider_contract::capabilities::BackendRef,
+    params: Json,
+}
+
+impl ModelSelection {
+    fn configured(config: &Config) -> Self {
+        Self {
+            backend: config.backend.clone(),
+            params: config.params.clone(),
+        }
+    }
+    fn chosen(model: &SummaryModelChoice) -> Self {
+        Self {
+            backend: model.backend.clone(),
+            params: model
+                .params
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
+        }
+    }
+    fn offering(&self) -> Result<&orch_provider_contract::capabilities::OfferingRef, EngineError> {
+        self.backend.offering.as_ref().ok_or_else(refused)
+    }
+}
+
+async fn select_with_backend_snapshot(
+    conn: &mut Conn,
+    caller: &Caller,
+    target: SummaryTarget,
+    range: Option<SummaryChatRange>,
+    model: Option<&ModelSelection>,
+    now: Time,
+    snapshot: Option<&Json>,
+) -> Result<Selection, EngineError> {
     let plan = operation_scope::Prepared::new(
         SummaryRefresh::ROUTE,
         summary_sources::RESOURCE_REFRESH.operation,
@@ -107,26 +301,41 @@ pub async fn select_with_snapshot(
         .await
         .map_err(source_error)?;
     let policy = options::resolve(conn, &identity).await?;
+    let mut member = None;
     let mut config = match policy
         .producer
         .as_ref()
         .filter(|producer| producer.kind == "model")
     {
-        Some(producer) => Config::read(&producer.config).map_err(|_| refused())?,
-        None if model.is_some() => serde_json::from_value(
-            serde_json::json!({"provider_id":model.map(|m|m.provider_id),"model_name":model.map(|m|&m.model)}),
-        )?,
+        Some(producer) => match (
+            Config::pool_id(&producer.config).map_err(|_| refused())?,
+            model,
+        ) {
+            (Some(id), None) => {
+                let (config, selected) =
+                    pool::preview(conn, &principal, identity.place(), &policy, target, id)
+                        .await?
+                        .ok_or_else(refused)?;
+                member = Some(selected);
+                Ok(config)
+            }
+            (Some(_), Some(model)) => {
+                Config::with_pool_options(&producer.config, model.backend.clone())
+            }
+            _ => Config::read(&producer.config),
+        }
+        .map_err(|_| refused())?,
+        None if model.is_some() => {
+            serde_json::from_value(serde_json::json!({"backend":model.map(|model|&model.backend)}))?
+        }
         None => return Err(refused()),
     };
     if let Some(model) = model {
-        config.provider_id = model.provider_id;
-        config.model_name = model.model.clone();
-        config.params = model
-            .params
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
+        config.backend = model.backend.clone();
+        config.params = model.params.clone();
     }
     config.context_tokens = policy.context_tokens.get();
+    let field = field_for(target);
     let previous = snapshot
         .map(sources::context_plan)
         .transpose()
@@ -138,14 +347,9 @@ pub async fn select_with_snapshot(
         }
         config.context_tokens = plan.budget.tokens;
     } else {
-        config.context_tokens = super::budget::context_tokens(conn, &config).await?;
+        config.context_tokens = super::budget::context_tokens(conn, &config, field).await?;
     }
     Config::read(&serde_json::to_value(&config)?).map_err(|_| refused())?;
-    let field = if matches!(target, SummaryTarget::ChatTitle { .. }) {
-        orch_summarizer_contract::descriptor::SummaryField::Title
-    } else {
-        orch_summarizer_contract::descriptor::SummaryField::Summary
-    };
     let budget = orch_summarizer_model::context::resource_budget(&config, field, &policy.limits())
         .map_err(|_| refused())?;
     if previous.as_ref().is_some_and(|plan| plan.budget != budget) {
@@ -164,13 +368,14 @@ pub async fn select_with_snapshot(
     .await
     .map_err(source_error)?;
     Ok(Selection {
+        member,
         material,
         policy,
         config,
     })
 }
 
-pub(super) fn completion_protocol(protocols: &[String]) -> Result<Option<String>, EngineError> {
+pub(crate) fn completion_protocol(protocols: &[String]) -> Result<Option<String>, EngineError> {
     let interfaces = orch_provider_contract::capabilities::protocol_interfaces()?;
     Ok(protocols
         .iter()
@@ -181,6 +386,18 @@ pub(super) fn completion_protocol(protocols: &[String]) -> Result<Option<String>
                     .is_some_and(|interface| interface.kind == "generation")
         })
         .cloned())
+}
+
+/// Recovery keeps the previous wire interface while the chosen provider still offers it.
+pub(crate) fn recovery_protocol(
+    protocols: &[String],
+    previous: &str,
+) -> Result<Option<String>, EngineError> {
+    if !previous.is_empty() && protocols.iter().any(|protocol| protocol == previous) {
+        Ok(Some(previous.to_owned()))
+    } else {
+        completion_protocol(protocols)
+    }
 }
 
 /// The native ordinary provider door, retaining this exact caller and its Use restrictions.
@@ -202,54 +419,180 @@ pub async fn model_entry(
     place: Id,
     config: &Config,
 ) -> Result<Option<Id>, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    model_entry_at(conn, principal, Some(place), config).await
+}
+
+async fn model_entry_at(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Option<Id>,
+    config: &Config,
+) -> Result<Option<Id>, EngineError> {
+    judge_model_at(conn, principal, place, config, None)
         .await?
-        .filter(|row| {
-            row.deleted_at.is_none()
-                && crate::providers::request_status_available(&row.status)
-                && !row.protocols.is_empty()
-        })
-        .ok_or_else(refused)?;
-    if completion_protocol(&provider.protocols)?.is_none() {
-        return Err(refused());
+        .map_err(|_| refused())
+}
+
+/// The same backend decision supplies the actual source's safe refusal reason.
+pub async fn judge_model(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Id,
+    config: &Config,
+) -> Result<Result<Option<Id>, Reason>, EngineError> {
+    judge_model_at(conn, principal, Some(place), config, None).await
+}
+
+/// The judgment of a model choice, once in a read that is deciding once (see [`super::once`]).
+pub(super) async fn judge_model_at(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Option<Id>,
+    config: &Config,
+    member: Option<&ProviderSelection>,
+) -> Result<Result<Option<Id>, Reason>, EngineError> {
+    // Loaned Use depends on the chosen path. A cached direct-provider decision cannot answer it.
+    if member.is_some() {
+        return judge_model_now(conn, principal, place, config, member).await;
     }
-    let model = resources::model(conn, config.provider_id, &config.model_name)
-        .await?
-        .filter(|row| row.enabled)
-        .ok_or_else(refused)?;
-    let effective = crate::resolved::load(conn, place).await?;
-    if effective.models_allowed.as_ref().is_some_and(|patterns| {
-        !crate::models::allowed_by(patterns, &config.model_name, &model.groups)
-    }) || crate::provider_policy::forbidden(conn, place, provider.id)
-        .await?
-        .is_some()
-    {
-        return Err(refused());
-    }
-    let policies = crate::access::resource_policies(conn, provider.id).await?;
-    let usable =
-        orch_authz::usable::usable(conn, principal, provider.id, Some(place), &policies).await?;
-    let orch_authz::usable::Usable::Yes(usable) = usable else {
-        return Err(refused());
+    let choice = super::once::ModelChoice {
+        caller: principal.caller().clone(),
+        place,
+        backend: serde_json::to_string(&config.backend)?,
+        params: serde_json::to_string(&config.params)?,
     };
-    let effort =
-        orch_provider_contract::calls::requested_effort(&config.params).map_err(|_| refused())?;
-    // One entry has to allow the model and the effort together.
-    if !usable.allows(&orch_authz::options::Wanted {
-        model: Some((&config.model_name, &model.groups)),
-        effort,
-        ..orch_authz::options::Wanted::default()
-    }) {
-        return Err(refused());
+    if let Some(known) = super::once::model(&choice) {
+        return Ok(known);
     }
-    let machine = provider.key_machine_id.ok_or_else(refused)?;
-    if !orch_db::queries::resources::machine(conn, machine)
+    let judged = judge_model_now(conn, principal, place, config, None).await?;
+    super::once::keep_model(choice, judged);
+    Ok(judged)
+}
+
+async fn judge_model_now(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Option<Id>,
+    config: &Config,
+    member: Option<&ProviderSelection>,
+) -> Result<Result<Option<Id>, Reason>, EngineError> {
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let program = config.backend.route == "summary.delegation";
+    let Some(provider) = resources::provider(conn, offering.provider).await? else {
+        return Ok(Err(Reason::ProviderGone));
+    };
+    if provider.deleted_at.is_some() {
+        return Ok(Err(Reason::ProviderGone));
+    }
+    if !program && !crate::providers::request_status_available(&provider.status) {
+        return Ok(Err(Reason::ProviderNotReady));
+    }
+    if program {
+        if crate::tools::capability_service::delegation::backend_state(
+            conn,
+            &orch_provider_contract::builtins::BuiltinSources::default(),
+            "summary",
+            &config.backend,
+        )
         .await?
-        .is_some_and(|machine| machine.online)
-    {
-        return Err(refused());
+        .is_err()
+        {
+            return Ok(Err(Reason::NoInterface));
+        }
+    } else if provider.protocols.is_empty() || completion_protocol(&provider.protocols)?.is_none() {
+        return Ok(Err(Reason::NoInterface));
     }
-    Ok(usable.entry)
+    let Some(model) = resources::model(conn, offering.provider, &offering.offering)
+        .await?
+        .filter(|model| model.enabled)
+    else {
+        return Ok(Err(Reason::ModelOff));
+    };
+    let (_, purpose) = orch_provider_contract::models::composed_model_with_purpose(
+        &model.model_name,
+        &model.parameters,
+        &model.groups,
+        &model.option_layers,
+        None,
+    )?;
+    if !purpose.supports_purpose(orch_provider_contract::models::ModelPurpose::Generation) {
+        return Ok(Err(Reason::NoInterface));
+    }
+    if let Some(place) = place {
+        let allowed = crate::resolved::models_allowed(conn, place).await?;
+        if allowed.as_ref().is_some_and(|patterns| {
+            !crate::models::allowed_by(patterns, &offering.offering, &model.groups)
+        }) {
+            return Ok(Err(Reason::ModelNotAllowed));
+        }
+        if crate::provider_policy::forbidden(conn, place, provider.id)
+            .await?
+            .is_some()
+        {
+            return Ok(Err(Reason::ProviderForbidden));
+        }
+    }
+    let entry = if let (Some(member), Some(node)) = (member, place) {
+        let Some(contribution) = super::pool::contribution(
+            conn,
+            principal,
+            node,
+            member,
+            &config.backend,
+            Some(&config.params),
+        )
+        .await?
+        else {
+            return Ok(Err(Reason::NotAllowed));
+        };
+        contribution.member_entry()
+    } else {
+        let policies = crate::access::resource_policies(conn, provider.id).await?;
+        let usable =
+            match orch_authz::usable::usable(conn, principal, provider.id, place, &policies).await?
+            {
+                orch_authz::usable::Usable::Yes(usable) => usable,
+                orch_authz::usable::Usable::Unavailable(_) => {
+                    return Ok(Err(Reason::ProviderNotReady));
+                }
+                orch_authz::usable::Usable::KeptToItsOwner | orch_authz::usable::Usable::No => {
+                    return Ok(Err(Reason::NotAllowed));
+                }
+            };
+        let Ok(effort) = orch_provider_contract::calls::requested_effort(&config.params) else {
+            return Ok(Err(Reason::EffortNotOffered));
+        };
+        let wanted = orch_authz::options::Wanted {
+            purpose: orch_access_contract::permissions::UsagePurpose::Summary,
+            model: Some((&offering.offering, &model.groups)),
+            effort,
+            ..orch_authz::options::Wanted::default()
+        };
+        if !usable.allows(&wanted) {
+            let without_effort = orch_authz::options::Wanted {
+                effort: None,
+                ..wanted
+            };
+            return Ok(Err(if usable.allows(&without_effort) {
+                Reason::EffortNotOffered
+            } else {
+                Reason::ModelNotAllowed
+            }));
+        }
+        usable.entry
+    };
+    if !program {
+        let Some(machine) = provider.key_machine_id else {
+            return Ok(Err(Reason::NoKeeper));
+        };
+        if !orch_db::queries::resources::machine(conn, machine)
+            .await?
+            .is_some_and(|machine| machine.online)
+        {
+            return Ok(Err(Reason::KeeperOffline));
+        }
+    }
+    Ok(Ok(entry))
 }
 
 /// Immutable accepted native work. No lease, credential secret or successful admission is
@@ -260,10 +603,13 @@ pub struct Work {
     origin: CapturedOperation,
     http: Option<operation_scope::http_origin::HttpOrigin>,
     request: Id,
+    call: Id,
     target: SummaryTarget,
     issuer: Option<Id>,
     payer: Id,
-    model: SummaryModelChoice,
+    selected: ModelSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_pool: Option<Id>,
     config: Config,
     policy: Hash,
     source: Json,
@@ -276,7 +622,12 @@ impl std::fmt::Debug for Work {
     }
 }
 impl Work {
-    /// Capture only after complete native admission; the body cannot supply this origin.
+    pub(crate) fn prompt_governors(&self) -> (Id, Option<Id>, &[SummaryTarget]) {
+        (self.request, self.issuer, &self.refs)
+    }
+
+    /// Capture a provisional source plan under the accepted operation's complete factual binding.
+    /// Its continuing frame still restores raw identity and all current gates before any effect.
     pub fn capture(
         request: &rows::Request,
         principal: &Principal,
@@ -306,30 +657,54 @@ impl Work {
         if http.as_ref().is_some_and(|http| http.origin() != &origin) {
             return Err(refused());
         }
+        selected
+            .config
+            .offering()
+            .map_err(EngineError::unreadable)?;
+        let frozen: ModelSelection = serde_json::from_value(
+            request
+                .accepted_source
+                .get("selection")
+                .cloned()
+                .ok_or_else(refused)?,
+        )?;
+        if frozen != ModelSelection::configured(&selected.config) {
+            return Err(refused());
+        }
         Ok(Self {
             origin,
             http,
             request: request.id,
+            call: request.call_id,
             target: selected.material.identity.target(),
             issuer: request.requested_by,
             payer: principal.caller().user(),
-            model: SummaryModelChoice {
-                provider_id: selected.config.provider_id,
-                model: selected.config.model_name.clone(),
-                params: Some(selected.config.params.clone()),
-            },
+            selected: frozen,
+            model_pool: request
+                .accepted_source
+                .get("model_pool")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?,
             config: selected.config.clone(),
             policy: selected.policy.fingerprint,
             source: selected.material.snapshot.clone(),
             refs: selected.material.source_refs.clone(),
-            range: selected.material.range,
+            range: selected.pinned_range(),
         })
     }
+    pub(crate) fn model_pool(&self) -> Option<Id> {
+        self.model_pool
+    }
+
     pub(crate) fn issuer(&self) -> Option<Id> {
         self.issuer
     }
     pub(crate) fn request(&self) -> Id {
         self.request
+    }
+    pub(crate) fn call(&self) -> Id {
+        self.call
     }
     pub(crate) fn context_tokens(&self) -> u32 {
         self.config.context_tokens
@@ -337,10 +712,32 @@ impl Work {
     /// Fallback candidates retain this original caller/source and get a fresh provider binding.
     pub(crate) fn candidate(&self, request: &ProviderComplete) -> Self {
         let mut work = self.clone();
-        work.model = SummaryModelChoice {
-            provider_id: request.provider_id,
-            model: request.model_name.clone(),
-            params: request.params.clone(),
+        work.selected.backend.offering = Some(orch_provider_contract::capabilities::OfferingRef {
+            provider: request.provider_id,
+            offering: request.model_name.clone(),
+        });
+        work.selected.params = request
+            .params
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        work
+    }
+    fn selected_candidate(&self, selected: ModelSelection) -> Self {
+        let mut work = self.clone();
+        work.selected = selected;
+        work
+    }
+    pub(crate) fn program_candidate(
+        &self,
+        request: &orch_summarizer_model::CompletionRequest,
+    ) -> Self {
+        let mut work = self.clone();
+        work.selected = ModelSelection {
+            backend: request.backend.clone(),
+            params: request
+                .params
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
         };
         work
     }
@@ -366,23 +763,7 @@ impl Work {
         conn: &mut Conn,
         clock: &dyn orch_types::Clock,
     ) -> Result<operation_scope::continuing::Frame<command::Source>, EngineError> {
-        if let Some(http) = &self.http {
-            if http.origin() != &self.origin {
-                return Err(refused());
-            }
-            return http
-                .prepare::<command::Source>(conn, clock, self.clone())
-                .await
-                .map_err(command::frame_error);
-        }
-        operation_scope::continuing::prepare::<command::Source>(
-            conn,
-            clock,
-            &self.origin,
-            self.clone(),
-        )
-        .await
-        .map_err(command::frame_error)
+        self.read_frame(conn, clock).await
     }
     pub(crate) fn bind_command(
         &self,
@@ -425,11 +806,15 @@ impl Work {
 
 /// Hold only the native source/settings/provider footprint on the caller's short transaction.
 pub async fn lock_selection(conn: &mut Conn, selected: &Selection) -> Result<(), EngineError> {
+    let offering = selected
+        .config
+        .offering()
+        .map_err(EngineError::unreadable)?;
     command::lock_sources(
         conn,
         selected.material.identity.target(),
         &selected.material.source_refs,
-        selected.config.provider_id,
+        offering.provider,
     )
     .await
 }

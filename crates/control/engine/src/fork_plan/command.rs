@@ -401,6 +401,13 @@ impl Measurement {
             .as_u64()
             .ok_or_else(|| EngineError::unreadable("the native count lost its allowance"))?;
         let work = WorkReport {
+            timeout_policy: row
+                .plan
+                .get("timeout_policy")
+                .cloned()
+                .filter(|value| !value.is_null())
+                .map(serde_json::from_value)
+                .transpose()?,
             files_total: None,
             bytes_total: None,
             job_id: self.job,

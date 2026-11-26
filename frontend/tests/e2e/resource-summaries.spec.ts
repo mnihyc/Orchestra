@@ -228,19 +228,19 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await expect.poll(() => paid).toBe(1);
     await expect(box.locator('[data-summary-text]')).toHaveText('Completed summary for document.');
     await info.attach('explicit refresh remains available', { body: await box.screenshot(), contentType: 'image/png' });
-    // EN: Help → Articles → State reference → SummaryState → read the meaning of the scheduled wait.
-    // 中文：帮助 → 文章 → 状态参考 → SummaryState → 阅读已安排等待状态的含义。
+    // EN: Help → Articles → State reference → Summaries → read the meaning of the scheduled wait.
+    // 中文：帮助 → 文章 → 状态参考 → 摘要 → 阅读已安排等待状态的含义。
     const referenceTitle = locale === 'en' ? 'State reference' : '状态参考';
     const meaning = locale === 'en'
-      ? 'An update waits until its minimum interval or recovery delay ends; previous text remains readable.'
-      : '更新正在等待最短间隔或恢复延迟结束，原有文字仍可阅读。';
+      ? 'You can read the previous summary while the update waits for its next allowed start time.'
+      : '更新正在等待下一次允许的启动时间，你可以先阅读原有摘要。';
     await page.goto('/help');
     await page.getByRole('tab', { name: new RegExp(t('help.parts.articles')) }).click();
     await page.getByRole('button', { name: referenceTitle, exact: true }).click();
     await page.goto('/help/state-reference#summarystate');
     const reference = page.getByRole('region', { name: referenceTitle, exact: true });
-    await expect(reference.getByRole('heading', { name: 'SummaryState', exact: true })).toBeInViewport();
-    const row = reference.getByRole('row').filter({ hasText: 'state:SummaryState.scheduled' });
+    await expect(reference.getByRole('heading', { name: locale === 'en' ? 'Summaries' : '摘要', exact: true })).toBeInViewport();
+    const row = reference.getByRole('row').filter({ has: page.locator('a[href="#state:SummaryState.scheduled"]', { hasText: t('summaryBox.state.scheduled') }) });
     await expect(row).toBeVisible();
     await expect(row.getByRole('cell').nth(1)).toHaveText(meaning);
     expect(paid).toBe(1);

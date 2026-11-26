@@ -24,11 +24,7 @@ use rig::{MODEL, Scene};
 use serde_json::json;
 
 fn binding(scene: &Scene) -> CreateThreadBinding {
-    CreateThreadBinding {
-        agent_id: scene.on.agent,
-        provider_id: scene.on.provider,
-        arrangement: None,
-    }
+    CreateThreadBinding::provider(scene.on.agent, scene.on.provider, None)
 }
 
 #[tokio::test]
@@ -43,7 +39,7 @@ async fn a_temporary_environment_records_its_creating_thread_in_the_same_thread_
     let body = CreateThread {
         binding: Some(binding(&scene)),
         model: Some(MODEL.to_owned()),
-        environment: Some(EnvironmentChoice::Use(scene.on.environment)),
+        environment: Some(EnvironmentChoice::existing(scene.on.environment)),
         ..CreateThread::default()
     };
     let first = scene
@@ -141,7 +137,7 @@ async fn a_named_thread_keeps_its_name_from_automation_and_an_unnamed_one_is_new
         .body(&CreateThread {
             binding: Some(binding(&s)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()
@@ -162,7 +158,7 @@ async fn what_the_request_leaves_out_comes_from_the_topic_when_the_caller_may_us
         .set_at(
             Target::Node(topic),
             "agent.default_provider_id",
-            json!(s.on.provider),
+            json!({"type":"single","resource":{"kind":"provider","id":s.on.provider}}),
         )
         .await;
     s.rig
@@ -175,7 +171,11 @@ async fn what_the_request_leaves_out_comes_from_the_topic_when_the_caller_may_us
         .await;
     s.rig
         .world
-        .set_at(Target::Node(topic), "agent.model", json!(MODEL))
+        .set_at(
+            Target::Node(topic),
+            "agent.model",
+            json!({"type":"offering","name":MODEL}),
+        )
         .await;
     sqlx::query("INSERT INTO settings (node_id,key,value) VALUES ($1,'env.default_id',to_jsonb($2::uuid::text)) ON CONFLICT (node_id,key) DO UPDATE SET value=excluded.value")
         .bind(topic)
@@ -227,7 +227,7 @@ async fn a_caller_who_lacks_what_the_thread_runs_on_is_refused_with_everything_m
         .body(&CreateThread {
             binding: Some(binding(&s)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()
@@ -328,7 +328,7 @@ async fn a_person_given_start_threads_alone_can_create_and_own_a_thread() {
         .body(&CreateThread {
             binding: Some(binding(&s)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()
@@ -353,7 +353,7 @@ async fn a_thread_made_private_is_its_makers_alone() {
             access: Some(ThreadAccess::Preset(AccessPreset::Private)),
             binding: Some(binding(&s)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()
@@ -393,7 +393,7 @@ async fn a_model_and_an_effort_must_be_ones_the_provider_lists() {
                 binding: Some(binding(&s)),
                 model: Some(model.to_owned()),
                 effort: effort.map(str::to_owned),
-                environment: Some(EnvironmentChoice::Use(s.on.environment)),
+                environment: Some(EnvironmentChoice::existing(s.on.environment)),
                 ..CreateThread::default()
             });
         async move { call.send().await }
@@ -409,6 +409,44 @@ async fn a_model_and_an_effort_must_be_ones_the_provider_lists() {
 }
 
 #[tokio::test]
+async fn a_thread_can_start_with_a_generation_model_and_explains_why_an_embedding_model_cannot() {
+    let s = Scene::new().await;
+    let request = CreateThread {
+        binding: Some(binding(&s)),
+        model: Some(MODEL.to_owned()),
+        environment: Some(EnvironmentChoice::existing(s.on.environment)),
+        ..CreateThread::default()
+    };
+    for purpose in ["embedding", "generation"] {
+        sqlx::query("UPDATE provider_models SET parameters=parameters || $3 WHERE provider_id=$1 AND model_name=$2")
+            .bind(s.on.provider)
+            .bind(MODEL)
+            .bind(json!({"purposes":[purpose]}))
+            .execute(s.rig.db.pool()).await.unwrap();
+        let result = s
+            .rig
+            .world
+            .app
+            .call(ThreadCreate, &[&s.tree.topic.base.id])
+            .token(&s.ada.token)
+            .body(&request)
+            .send()
+            .await;
+        if purpose == "embedding" {
+            let refusal = result.problem();
+            assert_eq!(refusal.code, ErrorCode::ModelNotAllowed);
+            assert_eq!(refusal.extra["reason"], "generation_unsupported");
+            assert_eq!(refusal.extra["model"], MODEL);
+        } else {
+            assert_eq!(
+                result.ok().into_full().unwrap().model.as_deref(),
+                Some(MODEL)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn an_input_sent_with_the_thread_starts_it_at_once() {
     let s = Scene::new().await;
     let made = s
@@ -420,7 +458,7 @@ async fn an_input_sent_with_the_thread_starts_it_at_once() {
         .body(&CreateThread {
             binding: Some(binding(&s)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             first_input: Some(FirstInput {
                 content: vec![ContentPart::Text {
                     text: "Begin".to_owned(),
@@ -452,7 +490,7 @@ async fn creating_a_thread_does_not_offer_an_instruction_file_write() {
         .call(ThreadCreate, &[&s.tree.topic.base.id])
         .token(&s.ada.token)
         .raw_body(
-            &json!({"binding":binding(&s),"model":MODEL,"environment":{"use":s.on.environment},
+            &json!({"binding":binding(&s),"model":MODEL,"environment":orch_api_contract::binding::EnvironmentChoice::existing(s.on.environment),
             "instruction_file":{"text":"Be brief.","expected":"none"}}),
         )
         .send()
@@ -486,7 +524,7 @@ async fn an_unmanageable_environment_and_an_invalid_new_environment_are_refused(
             });
         async move { call.send().await }
     };
-    let missing_one = make(EnvironmentChoice::Use(orch_types::new_id()))
+    let missing_one = make(EnvironmentChoice::existing(orch_types::new_id()))
         .await
         .problem();
     assert_eq!(missing_one.code, ErrorCode::EnvironmentUnavailable);
@@ -528,7 +566,7 @@ async fn a_directory_stays_in_the_workspace_and_an_archived_topic_takes_no_threa
         .token(&s.ada.token)
         .body(&CreateThread {
             binding: Some(binding(&s)),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("../elsewhere".to_owned()),
             ..CreateThread::default()
         })
@@ -557,7 +595,7 @@ async fn a_directory_stays_in_the_workspace_and_an_archived_topic_takes_no_threa
         .token(&s.ada.token)
         .body(&CreateThread {
             binding: Some(binding(&s)),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             ..CreateThread::default()
         })
         .send()
@@ -583,4 +621,355 @@ async fn a_thread_is_made_in_a_topic_and_nowhere_else() {
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::NotFound);
+}
+#[tokio::test]
+async fn a_new_thread_uses_its_environment_pool_once_even_when_the_request_is_replayed() {
+    use orch_api_contract::pools::PoolCreate;
+    use orch_provider_contract::pools::{Kind, Leaf, Target as ResourceTarget};
+
+    let scene = Scene::new().await;
+    let leaf = Leaf::Environment {
+        id: scene.on.environment,
+    };
+    let pool = scene.rig.world.app.call(PoolCreate, &[]).token(&scene.ada.token)
+        .raw_body(&json!({
+            "name": "Thread environments", "description": "", "home_id": scene.ada.person.personal_org, "access": "only_me",
+            "definition": {
+                "kind": "environment", "enabled": true, "policy": {"type": "round_robin"},
+                "lend_members": false, "config": {}, "members": [{
+                    "id": orch_types::new_id(), "enabled": true, "rule": {"type": "single", "resource": &leaf}
+                }]
+            }
+        })).send().await.ok();
+    let target = ResourceTarget::Pool {
+        id: pool.id,
+        kind: Kind::Environment,
+    };
+    let mut body = serde_json::to_value(CreateThread {
+        binding: Some(binding(&scene)),
+        model: Some(MODEL.to_owned()),
+        ..CreateThread::default()
+    })
+    .unwrap();
+    body["environment"] = json!({"use": &target});
+    use orch_api_contract::binding::{NodeBindingOptionsGet, NodeBindingOptionsGetQuery};
+    let options = scene
+        .rig
+        .world
+        .app
+        .call(NodeBindingOptionsGet, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .query(&NodeBindingOptionsGetQuery {
+            environment_pool_id: Some(pool.id),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        options
+            .environments
+            .iter()
+            .any(|row| row.environment.id == scene.on.environment)
+    );
+    let mut invalid = body.clone();
+    invalid["directory"] = json!("../../outside");
+    let refused = scene
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .raw_body(&invalid)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    let draws: i64 = sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE target=$1")
+        .bind(json!(&target))
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        draws, 0,
+        "setup and refused creation must leave the pool untouched"
+    );
+    let key = orch_types::new_id().to_string();
+    let mut previous = None;
+    for _ in 0..2 {
+        let made = scene
+            .rig
+            .world
+            .app
+            .call(ThreadCreate, &[&scene.tree.topic.base.id])
+            .token(&scene.ada.token)
+            .header("Idempotency-Key", &key)
+            .raw_body(&body)
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap();
+        assert_eq!(
+            made.environment.as_ref().map(|env| env.id),
+            Some(scene.on.environment)
+        );
+        if let Some(id) = previous {
+            assert_eq!(made.base.id, id);
+        }
+        if previous.is_none() {
+            sqlx::query("UPDATE pools SET definition=jsonb_set(definition,'{enabled}','false'),revision=revision+1 WHERE id=$1")
+                .bind(pool.id).execute(scene.rig.db.pool()).await.unwrap();
+        }
+        previous = Some(made.base.id);
+    }
+    let refused = scene
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .header("Idempotency-Key", &orch_types::new_id().to_string())
+        .raw_body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::EnvironmentNoneUsable);
+    let leaves: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT leaf FROM pool_choices WHERE target=$1 AND state='selected'")
+            .bind(json!(target))
+            .fetch_all(&scene.rig.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(leaves, vec![json!(leaf)]);
+}
+
+#[tokio::test]
+async fn a_thread_keeps_the_model_pool_member_and_fixed_agent_on_creation_replay() {
+    use orch_api_contract::pools::PoolCreate;
+
+    let scene = Scene::new().await;
+    let leaf = json!({"kind":"model","backend":{"route":"generation.model","offering":{
+        "provider":scene.on.provider,"offering":MODEL},"config":{}}});
+    let pool = scene.rig.world.app.call(PoolCreate, &[]).token(&scene.ada.token)
+        .raw_body(&json!({
+            "name":"Thread models","description":"","home_id":scene.ada.person.personal_org,"access":"only_me",
+            "definition":{"kind":"model","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,
+                "config":{},"members":[{"id":orch_types::new_id(),"enabled":true,"rule":{"type":"single","resource": &leaf}}]}
+        })).send().await.ok();
+    let target = json!({"type":"pool","kind":"model","id":pool.id});
+    let topic = scene.tree.topic.base.id;
+    let key = orch_types::new_id().to_string();
+    let create = json!({
+        "binding":{"agent_id":scene.on.agent,"target": &target},
+        "environment": EnvironmentChoice::existing(scene.on.environment),
+        "effort":"high"
+    });
+    let mut accepted = None;
+    for _ in 0..2 {
+        let made = scene
+            .rig
+            .world
+            .app
+            .call(ThreadCreate, &[&topic])
+            .token(&scene.ada.token)
+            .header("Idempotency-Key", &key)
+            .raw_body(&create)
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap();
+        let binding = made.binding.as_ref().unwrap();
+        assert_eq!(binding.agent.id, scene.on.agent);
+        assert_eq!(binding.provider.id, scene.on.provider);
+        assert_eq!(made.model.as_deref(), Some(MODEL));
+        assert_eq!(made.effort.as_deref(), Some("high"));
+        if let Some(original) = accepted {
+            assert_eq!(made.base.id, original);
+        } else {
+            accepted = Some(made.base.id);
+            let selected: orch_types::Id = sqlx::query_scalar(
+                "SELECT b.choice_id FROM segment_pool_bindings b JOIN segments s ON s.id=b.segment_id WHERE s.thread_id=$1",
+            )
+            .bind(made.base.id)
+            .fetch_one(scene.rig.db.pool())
+            .await
+            .unwrap();
+            for (index, words) in ["First pool message", "Second pool message"]
+                .iter()
+                .enumerate()
+            {
+                scene
+                    .say(
+                        &scene.ada,
+                        made.base.id,
+                        words,
+                        orch_api_contract::threads::Delivery::Queue,
+                        words,
+                    )
+                    .await
+                    .ok();
+                let started = scene.rig.turn_start(made.base.id, index).await;
+                scene
+                    .rig
+                    .say(made.base.id, rig::turn_began(started.turn_id))
+                    .await;
+                scene
+                    .rig
+                    .say(
+                        made.base.id,
+                        rig::turn_ended(
+                            started.turn_id,
+                            orch_link_contract::events::TurnOutcome::Completed,
+                        ),
+                    )
+                    .await;
+                scene.rig.wait_turn(started.turn_id, "completed").await;
+                let admitted: Vec<orch_types::Id> = sqlx::query_scalar(
+                    "SELECT DISTINCT choice_id FROM pool_attempt_scopes WHERE attempt_id=$1",
+                )
+                .bind(started.turn_id)
+                .fetch_all(scene.rig.db.pool())
+                .await
+                .unwrap();
+                assert_eq!(admitted, [selected]);
+            }
+
+            // Editing today's policy cannot change the rule reported for either completed turn.
+            sqlx::query("UPDATE pools SET definition=jsonb_set(definition,'{policy}', $2),revision=revision+1 WHERE id=$1")
+                .bind(pool.id).bind(json!({"type":"ordered"})).execute(scene.rig.db.pool()).await.unwrap();
+            let receipt: orch_types::Id =
+                sqlx::query_scalar("SELECT read_id FROM pool_choices WHERE id=$1")
+                    .bind(selected)
+                    .fetch_one(scene.rig.db.pool())
+                    .await
+                    .unwrap();
+            places::give_role(
+                &scene.rig.world,
+                made.base.id,
+                &scene.cai,
+                "viewer",
+                &scene.ada,
+            )
+            .await;
+            for reader in [&scene.ada, &scene.cai] {
+                let page = scene
+                    .rig
+                    .world
+                    .app
+                    .call(orch_api_contract::threads::ThreadTurnList, &[&made.base.id])
+                    .token(&reader.token)
+                    .query(&orch_api_contract::threads::ThreadHistoryListQuery::default())
+                    .send()
+                    .await
+                    .ok();
+                assert_eq!(page.turns.len(), 2);
+                for turn in page.turns {
+                    let wire = serde_json::to_value(turn).unwrap();
+                    if reader.id() == scene.ada.id() {
+                        assert_eq!(
+                            wire["pool_choice"],
+                            json!({
+                                "pool_id":pool.id, "pool_name":"Thread models", "choice_id":receipt,
+                                "member":MODEL, "policy":{"type":"round_robin"}
+                            })
+                        );
+                    } else {
+                        assert!(
+                            wire.get("pool_choice").is_none(),
+                            "a thread reader cannot see the maker's private pool"
+                        );
+                    }
+                }
+            }
+
+            sqlx::query("UPDATE pools SET definition=jsonb_set(definition,'{enabled}','false'),revision=revision+1 WHERE id=$1")
+                .bind(pool.id).execute(scene.rig.db.pool()).await.unwrap();
+        }
+    }
+    let draws: Vec<(orch_types::Id, serde_json::Value)> = sqlx::query_as(
+        "SELECT actor_id,leaf FROM pool_choices WHERE target=$1 AND state='selected'",
+    )
+    .bind(&target)
+    .fetch_all(scene.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(draws, vec![(scene.ada.id(), leaf)]);
+}
+
+#[tokio::test]
+async fn a_topic_can_supply_the_model_or_provider_pool_for_a_new_thread() {
+    use orch_api_contract::{pools::PoolCreate, settings::NodeSettingSet};
+    for (kind, key) in [
+        ("model", "agent.model"),
+        ("provider", "agent.default_provider_id"),
+    ] {
+        let scene = Scene::new().await;
+        let topic = scene.tree.topic.base.id;
+        let leaf = if kind == "model" {
+            json!({"kind":"model","backend":{"route":"generation.model","offering":{
+                "provider":scene.on.provider,"offering":MODEL},"config":{}}})
+        } else {
+            json!({"kind":"provider","id":scene.on.provider})
+        };
+        let pool = scene.rig.world.app.call(PoolCreate,&[]).token(&scene.ada.token).raw_body(&json!({
+            "name":"Topic default","description":"","home_id":scene.ada.person.personal_org,"access":"only_me",
+            "definition":{"kind":kind,"enabled":true,"policy":{"type":"ordered"},"lend_members":false,
+            "config":{},"members":[{"id":orch_types::new_id(),"enabled":true,"rule":{"type":"single","resource":leaf}}]}
+        })).send().await.ok();
+        let target = json!({"type":"pool","kind":kind,"id":pool.id});
+        scene
+            .rig
+            .world
+            .set_at(
+                Target::Node(topic),
+                "agent.default_agent_id",
+                json!(scene.on.agent),
+            )
+            .await;
+        scene
+            .rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&topic, &key])
+            .token(&scene.ada.token)
+            .raw_body(&json!({"value":target,"locked":true}))
+            .send()
+            .await
+            .ok();
+        let request = CreateThread {
+            environment: Some(EnvironmentChoice::existing(scene.on.environment)),
+            model: (kind == "provider").then(|| MODEL.to_owned()),
+            ..Default::default()
+        };
+        let idempotency = orch_types::new_id().to_string();
+        let mut accepted = None;
+        for _ in 0..2 {
+            let made = scene
+                .rig
+                .world
+                .app
+                .call(ThreadCreate, &[&topic])
+                .token(&scene.ada.token)
+                .header("Idempotency-Key", &idempotency)
+                .body(&request)
+                .send()
+                .await
+                .ok()
+                .into_full()
+                .unwrap();
+            let binding = made.binding.unwrap();
+            assert_eq!(
+                (binding.provider.id, binding.agent.id),
+                (scene.on.provider, scene.on.agent)
+            );
+            assert_eq!(made.model.as_deref(), Some(MODEL));
+            assert_eq!(*accepted.get_or_insert(made.base.id), made.base.id);
+        }
+        let used: Vec<orch_types::Id> = sqlx::query_scalar(
+            "SELECT b.choice_id FROM segment_pool_bindings b JOIN segments s ON s.id=b.segment_id JOIN pool_choices c ON c.id=b.choice_id WHERE s.thread_id=$1 AND c.target=$2 AND c.actor_id=$3 AND c.state='selected'",
+        ).bind(accepted.unwrap()).bind(&target).bind(scene.ada.id()).fetch_all(scene.rig.db.pool()).await.unwrap();
+        assert_eq!(used.len(), 1);
+    }
 }

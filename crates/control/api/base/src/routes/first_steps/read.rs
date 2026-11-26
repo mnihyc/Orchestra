@@ -407,13 +407,9 @@ pub async fn observe(
             .any(|held| held == permission)
     };
     let mut provider_ids = rows::providers(conn, id).await?;
-    let default = orch_settings::get::<Id>(
-        conn,
-        orch_settings::Place::Node(id),
-        orch_settings_contract::registry::keys::AGENT_DEFAULT_PROVIDER_ID,
-    )
-    .await
-    .map_err(ApiError::internal)?;
+    let default = orch_settings::thread_provider(conn, orch_settings::Place::Node(id))
+        .await
+        .map_err(ApiError::internal)?;
     if let Some(default) = default
         && !provider_ids.contains(&default)
     {

@@ -34,6 +34,7 @@ async fn put(
         .call(NodeSettingSet, &[&node, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -122,9 +123,15 @@ async fn a_writer_chooses_only_a_model_and_an_effort_they_may_run_on_the_threads
     .await
     .unwrap();
 
-    let refused = put(&s, &s.eve, thread, "agent.model", json!("fake-2"))
-        .await
-        .problem();
+    let refused = put(
+        &s,
+        &s.eve,
+        thread,
+        "agent.model",
+        json!({"type":"offering","name":"fake-2"}),
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(missing_permissions(&refused), ["provider.use"]);
     assert_eq!(
@@ -138,9 +145,15 @@ async fn a_writer_chooses_only_a_model_and_an_effort_they_may_run_on_the_threads
         .ok();
 
     // The provider's owner may run every model of it.
-    put(&s, &s.ada, thread, "agent.model", json!("fake-2"))
-        .await
-        .ok();
+    put(
+        &s,
+        &s.ada,
+        thread,
+        "agent.model",
+        json!({"type":"offering","name":"fake-2"}),
+    )
+    .await
+    .ok();
     assert_eq!(model_of(&s, thread).await.as_deref(), Some("fake-2"));
 
     // The org names the second model for its threads; taking the thread's own model back would
@@ -150,21 +163,33 @@ async fn a_writer_chooses_only_a_model_and_an_effort_they_may_run_on_the_threads
         &s.ada,
         s.tree.org.base.id,
         "agent.model",
-        json!("fake-2"),
+        json!({"type":"offering","name":"fake-2"}),
     )
     .await
     .ok();
-    put(&s, &s.ada, thread, "agent.model", json!(MODEL))
-        .await
-        .ok();
+    put(
+        &s,
+        &s.ada,
+        thread,
+        "agent.model",
+        json!({"type":"offering","name":MODEL}),
+    )
+    .await
+    .ok();
     let refused = take_back(&s, &s.eve, thread, "agent.model").await.problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(model_of(&s, thread).await.as_deref(), Some(MODEL));
 
     // A model that nobody may run here is refused as such, whoever writes it.
-    let refused = put(&s, &s.ada, thread, "agent.model", json!("fake-9"))
-        .await
-        .problem();
+    let refused = put(
+        &s,
+        &s.ada,
+        thread,
+        "agent.model",
+        json!({"type":"offering","name":"fake-9"}),
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::ModelNotAllowed);
     assert_eq!(refused.extra["reason"], "model");
 }
@@ -207,6 +232,7 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         .call(NodeSettingSet, &[&project, &"chat.enabled"])
         .token(&rules)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,

@@ -199,7 +199,7 @@ async fn mend_it(world: &World, thread: Id, cause: &Cause) {
         ("binding", _) => world.exec("UPDATE threads SET agent_id = (SELECT id FROM agents), provider_id = (SELECT id FROM providers)").await,
         ("agent", _) => world.exec("UPDATE agents SET disabled = false").await,
         ("provider", _) => world.exec("UPDATE providers SET status = 'ready', status_detail = NULL").await,
-        ("model", "not_set") => world.set(thread, keys::AGENT_MODEL, json!(common::MODEL)).await,
+        ("model", "not_set") => world.set(thread, keys::AGENT_MODEL, json!({"type":"offering","name":common::MODEL})).await,
         ("model", "disabled_on_provider") => world.exec("UPDATE provider_models SET enabled = true").await,
         ("model", "unlisted_effort") => world.unset(thread, keys::AGENT_EFFORT).await,
         ("model", _) => world.unset(world.topic, keys::MODELS_ALLOWED).await,

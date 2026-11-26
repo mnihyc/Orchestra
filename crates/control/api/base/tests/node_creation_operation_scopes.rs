@@ -15,7 +15,7 @@ use http::{Request, StatusCode};
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::{ErrorCode, MAX_JSON_BYTES};
 use orch_api_contract::nodes::{NodeGet, ProjectChildCreate, ProjectCreate, TopicCreate};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{access, hierarchy, identity, transaction_guard};
@@ -105,9 +105,9 @@ struct Key {
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
-    let hash = token_hash(&secret);
     let id = new_id();
+    let secret = new_api_token(id);
+    let hash = token_hash(&secret);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -641,8 +641,8 @@ async fn first_thread_creation_checks_thread_authority_and_preserves_scoped_rece
     let token=key(world,scene.ada.id(),vec![json!({"target":{"kind":"project","id":project,"reach":"subtree"},
         "resources":["topic"],"allow":[{"operation":"TopicCreate.with_thread","actions":["write","read"]}]})]).await;
     let body = json!({"name":"Topic with ordinary first thread","first_thread":{
-        "binding":{"agent_id":scene.on.agent,"provider_id":scene.on.provider},
-        "model":rig::MODEL,"environment":{"use":scene.on.environment}
+        "binding":{"agent_id":scene.on.agent,"target":{"type":"single","resource":{"kind":"provider","id":scene.on.provider}}},
+        "model":rig::MODEL,"environment":orch_api_contract::binding::EnvironmentChoice::existing(scene.on.environment)
     }});
     let before = counts(world).await;
     let turns = scene.rig.commands.issued_of("turn.start");

@@ -1,3 +1,4 @@
+import { providerTarget } from '@/lib/resourceTargets';
 /** A visible Defaults opening supplies only its independently admitted, current-reader projections. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ApiError, client, RENEW_BEFORE_END_MS } from '@/api/client';
@@ -22,7 +23,7 @@ const node = world.places.node(ada, ACME.fixLogin);
 const target = { kind: 'node', id: node.id } as const;
 const providerId = '00000000-0000-4000-8022-000000000001';
 let cache: LiveQueryClient, calls: URL[], native: NodeChatOpening, metadata: NodeDefaultsOpening;
-const row: ResolvedSetting = { key: 'agent.default_provider_id', value: providerId, own: null,
+const row: ResolvedSetting = { key: 'agent.default_provider_id', value: providerTarget(providerId), own: null,
   source: { scope: 'system', node: null }, locked_by: null, writable: true, parts: [] };
 
 function adopt(person = ada) { client.adopt({ access_token: 'synthetic-defaults-reader', access_expires_at: new Date(Date.now() + RENEW_BEFORE_END_MS + 60_000).toISOString(), user: person.me }); }

@@ -1,5 +1,7 @@
 //! Display registrations reuse browser windows and keep adopted passwords off public reports.
 
+#[cfg(target_os = "linux")]
+pub mod desktop;
 pub mod rfb;
 pub mod windows;
 
@@ -95,6 +97,7 @@ pub struct Displays {
     root: PathBuf,
     windows: Arc<Windows>,
     reports: Reports,
+    managed: bool,
     allowed: AtomicBool,
     adopted: Mutex<BTreeMap<Id, Arc<Registration>>>,
     owned_stops: Mutex<BTreeMap<Id, CancellationToken>>,
@@ -116,6 +119,7 @@ impl Displays {
             root,
             windows,
             reports,
+            managed,
             allowed: AtomicBool::new(managed),
             adopted: Mutex::new(BTreeMap::new()),
             owned_stops: Mutex::new(BTreeMap::new()),
@@ -201,6 +205,36 @@ impl Displays {
     ) -> Result<DisplayAdoptResult, DisplayError> {
         self.require_allowed()?;
         let target = rfb::Endpoint::parse(endpoint, &self.root)?;
+        self.adopt_target(id, endpoint.to_owned(), target, password)
+            .await
+    }
+
+    /// Only a connected machine can share its own accessible desktop.
+    pub async fn share_desktop(
+        self: &Arc<Self>,
+        id: Id,
+    ) -> Result<DisplayAdoptResult, DisplayError> {
+        self.require_allowed()?;
+        if self.managed {
+            return Err(DisplayError::Unsupported);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(desktop) = desktop::Desktop::discover(self.windows.launcher()) {
+            return self
+                .adopt_target(id, desktop.name(), rfb::Endpoint::Desktop(desktop), None)
+                .await;
+        }
+        let _ = id;
+        Err(DisplayError::Unsupported)
+    }
+
+    async fn adopt_target(
+        self: &Arc<Self>,
+        id: Id,
+        endpoint: String,
+        target: rfb::Endpoint,
+        password: Option<Vec<u8>>,
+    ) -> Result<DisplayAdoptResult, DisplayError> {
         let ports = self
             .ports
             .read()
@@ -216,8 +250,8 @@ impl Displays {
         let authenticated =
             rfb::authenticate(&target, password.as_ref().map(|p| p.0.as_slice())).await?;
         let (name, geometry) = rfb::describe(authenticated).await?;
-        self.require_allowed()?;
         let mut adopted = self.adopted.lock().await;
+        self.require_allowed()?;
         if let Some(previous) = adopted.insert(
             id,
             Arc::new(Registration {
@@ -236,6 +270,7 @@ impl Displays {
             self.monitor_adopted(id, registration);
         }
         Ok(DisplayAdoptResult {
+            endpoint,
             service: format!("rfb/{id}"),
             name,
             geometry: Some(geometry),
@@ -328,6 +363,10 @@ impl Displays {
     }
 
     fn monitor_adopted(self: &Arc<Self>, id: Id, registration: Arc<Registration>) {
+        #[cfg(target_os = "linux")]
+        if matches!(registration.target, rfb::Endpoint::Desktop(_)) {
+            return;
+        }
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             // Five seconds matches process liveness without retaining an extra viewer or a picture.
