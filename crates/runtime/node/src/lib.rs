@@ -43,3 +43,6 @@ pub mod tool_checks;
 pub mod tools;
 pub mod volumes;
 mod work;
+
+/// Isolated native program placement and physical recovery facts.
+pub mod program_work;

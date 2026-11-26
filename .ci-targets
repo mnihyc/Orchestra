@@ -1,0 +1,2 @@
+test -p orch-connector --test program -- platform_observations::a_connected_machine_completes_a_turn_with_its_own_registered_agent_program
+test -p orch-connector --test program -- platform_observations::a_machine_reviews_its_native_build_before_it_serves_a_shared_directory
