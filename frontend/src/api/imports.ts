@@ -61,12 +61,12 @@ export function startImport(node: string, request: ImportRequest): Promise<Job> 
 }
 
 /** The caller's imports, newest first. */
-export const myImportsQuery = () => infiniteQueryOptions({
-  queryKey: importKeys.mine(),
+export const myImportsQuery = (q = '') => infiniteQueryOptions({
+  queryKey: [...importKeys.mine(), q],
   gcTime: 0,
   initialPageParam: null as string | null,
   queryFn: ({ pageParam, signal }): Promise<{ items: ImportLine[]; next_cursor: string | null }> => ok(api.GET('/me/imports', {
-    params: { query: { limit: IMPORT_PAGE, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+    params: { query: { limit: IMPORT_PAGE, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
   })),
   getNextPageParam: (last) => last.next_cursor,
   maxPages: 1,
@@ -83,11 +83,11 @@ export async function importForJob(job: string, signal?: AbortSignal): Promise<I
 }
 
 /** The names of the files an import was made from, a page at a time and only when they are looked at. */
-export const importFileNamesQuery = (id: string, pageSize: number) => infiniteQueryOptions({
-  queryKey: [...importKeys.one(id), 'files', pageSize] as const,
+export const importFileNamesQuery = (id: string, pageSize: number, q = '') => infiniteQueryOptions({
+  queryKey: [...importKeys.one(id), 'files', pageSize, q] as const,
   initialPageParam: null as string | null,
   queryFn: ({ pageParam, signal }): Promise<{ items: string[]; next_cursor: string | null }> => ok(api.GET('/imports/{id}/files', {
-    params: { path: { id }, query: { limit: pageSize, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+    params: { path: { id }, query: { limit: pageSize, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
   })),
   getNextPageParam: (last) => last.next_cursor,
 });

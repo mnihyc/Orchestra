@@ -45,7 +45,7 @@ test('Diagnostics names its Manage requirement without requesting raw frames for
   page.on('request', (request) => { if (new URL(request.url()).pathname.endsWith('/raw')) requested.push(request.url()); });
   await openThread(page, PEOPLE.vera);
   await showView(page, /^Diagnostics$/);
-  await expect(page.getByText('Managing this thread is required to read its diagnostics.')).toBeVisible();
+  await expect(page.getByText('You need permission to manage this thread to read its diagnostics.')).toBeVisible();
   expect(requested).toEqual([]);
 });
 

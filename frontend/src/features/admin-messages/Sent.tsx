@@ -1,4 +1,5 @@
 /** One sent-list section beside the same composer in organization and system administration. */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Megaphone } from 'lucide-react';
 import { useState } from 'react';
@@ -8,6 +9,8 @@ import type { AdminMessageSummary } from '@/generated/api-types';
 import { formatNumber } from '@/lib/format';
 import { Section } from '@/shell/Page';
 import { PeopleCount } from '@/ui/AvatarStack';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
@@ -24,17 +27,18 @@ import { messageReadRefused } from './current';
 export function MessagesSection({ scope }: { scope: MessageScope }) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
+  const search=useCollectionSearch(`sent-messages:${scope.kind==='org'?scope.id:'system'}`);
   // The list is the last part of its page: it is read when it comes into view, when focus enters the section, or when its composer is
   // opened, not with the page. Until then it is the shape of two rows that keeps its place: nothing is loading, so nothing says so.
   const [anchor, seen, see] = useSeen();
-  const list = useInfiniteQuery({ ...sentMessagesQuery(scope.kind === 'org' ? scope.id : null), enabled: seen || open });
+  const list = useInfiniteQuery({ ...sentMessagesQuery(scope.kind === 'org' ? scope.id : null,search.q), enabled: seen || open });
   const refused = messageReadRefused(list.error);
   const rows = refused ? [] : list.data?.pages.flatMap((page) => page.items) ?? [];
   const columns: Column<AdminMessageSummary>[] = [
     { id: 'title', header: t('adminMessages.title'), cell: (row, shown) => {
       const senderShown = shown.has('sender'), timeShown = shown.has('time');
       return <div className="flex min-w-0 flex-col gap-1">
-      <a className={`${linkClasses} min-w-0 truncate`} title={row.title} href={`/messages/${encodeURIComponent(row.id)}`}>{row.title}</a>
+      <PathLink className={`${linkClasses} min-w-0 truncate`} title={row.title} href={`/messages/${encodeURIComponent(row.id)}`}>{row.title}</PathLink>
       {!senderShown && <UserChip user={row.sender} />}
       {!timeShown && <RelativeTime at={row.created_at} className="text-sm text-text-muted" />}
     </div>; } },
@@ -44,7 +48,8 @@ export function MessagesSection({ scope }: { scope: MessageScope }) {
   ];
   return <div className="contents" onFocusCapture={see}><Section id="administrator-messages" title={t('adminMessages.messages')} action={<Button icon={<Megaphone aria-hidden />} onClick={() => setOpen(true)}>{t(scope.kind === 'org' ? 'adminMessages.messageMembers' : 'adminMessages.messageEveryone')}</Button>}>
     <div ref={anchor} className="flex flex-col gap-3">
-      {list.isPending ? <SkeletonRows read={list} rows={2} quiet={list.fetchStatus === 'idle'} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t('adminMessages.empty')} /> : <div className={list.isError ? 'opacity-60' : undefined}><Table label={t('adminMessages.sent')} columns={columns} rows={rows} rowKey={(row) => row.id} /></div>}
+      <CollectionSearch name={t('adminMessages.sent')} {...search}/>
+      {list.isPending ? <SkeletonRows read={list} rows={2} quiet={list.fetchStatus === 'idle'} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t(search.q===''?'adminMessages.empty':'ui.collection.none')} /> : <div className={list.isError ? 'opacity-60' : undefined}><Table virtual label={t('adminMessages.sent')} columns={columns} rows={rows} rowKey={(row) => row.id} /></div>}
       {list.isError && rows.length > 0 && <ErrorState compact error={list.error} onRetry={() => void list.refetch()} />}
       <Pagination hasMore={!refused && list.hasNextPage} loading={list.isFetchingNextPage} error={!refused && list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       {open && <MessageComposer scope={scope} onClose={() => setOpen(false)} />}

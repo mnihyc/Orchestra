@@ -57,7 +57,7 @@ vi.mock('@/shell/admission', async (original) => ({
   admissionMetaQuery: (await import('@/api/auth')).metaQuery,
 }));
 
-vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null) => ({ queryKey: ['reader-shared', cursor], queryFn: () => Promise.resolve({ items: calls.emptyShared ? [] : [home()], next_cursor: null, partial: false }) }) }));
+vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null, q = '', kind?: string) => ({ queryKey: ['reader-shared', cursor, q, kind], queryFn: () => Promise.resolve({ items: calls.emptyShared || kind !== undefined && kind !== 'org' || q !== '' && !home().name.includes(q) ? [] : [home()], next_cursor: null, partial: false }) }) }));
 vi.mock('@/api/usage', async (original) => ({ ...await original<typeof UsageApi>(),
   usageQuery: (params: UsageParams) => ({ queryKey: ['reader-usage', params], queryFn: (): Promise<UsageAnalytics> => {
     // The populated breakdown needs real activity; a zero-use board correctly omits that picker.
@@ -71,10 +71,10 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>
   orgBySlugQuery: (slug: string) => ({ queryKey: ['reader-org', slug], queryFn: () => Promise.resolve(department()) }),
 }));
 vi.mock('@/api/access', async (original) => ({ ...await original<typeof AccessApi>(),
-  holderSearchQuery: (...args: unknown[]) => { calls.holders(...args); return { queryKey: ['reader-holders', ...args], queryFn: () => Promise.resolve(holderRows()) }; },
+  holderPickerQuery: (...args: unknown[]) => { calls.holders(...args); return { queryKey: ['reader-holders', ...args], initialPageParam: null, queryFn: () => Promise.resolve(holderRows()), getNextPageParam: () => undefined }; },
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
-vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: vi.fn() }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/shell/Page', async (original) => ({ ...await original<typeof PageModule>(), boxClasses: '', Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
   PageHeader: ({ title, lead, actions }: { title: string; lead?: ReactNode; actions?: ReactNode }) => <header><h1>{title}</h1>{lead}{actions}</header>,
@@ -82,10 +82,10 @@ vi.mock('@/shell/Page', async (original) => ({ ...await original<typeof PageModu
   Section: ({ title, lead, children }: { title: string; lead?: ReactNode; children: ReactNode }) => <section><h2>{title}</h2>{lead}{children}</section>,
 }));
 vi.mock('@/ui/Table', () => ({ Table: <Row extends { id: string },>({ rows, columns }: { rows: Row[]; columns: Column<Row>[] }) => <ul>{rows.map((row) => <li key={row.id}>{columns.map((column) => <div key={column.id}>{column.cell(row, new Set(columns.map((one) => one.id)))}</div>)}</li>)}</ul> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null, useKnownPlaces: () => new Map(), useNameTrees: () => new Map() }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null, useKnownPlaces: () => new Map(), useNameTrees: () => new Map() }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
 
 const appearance = useAppearance.getState();
 const finderBefore = useFinder.getState();
@@ -135,10 +135,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(screen.getAllByRole('combobox')).toHaveLength(1);
     await userEvent.click(source);
     await userEvent.click(await screen.findByRole('option', { name: 'Acme / Research' }));
-    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', '00000000-0000-4000-8000-000000000002', home().id, false));
+    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', '00000000-0000-4000-8000-000000000002', home().id, false, ['group', 'role']));
     await userEvent.click(source);
     await userEvent.click(screen.getByRole('option', { name: i18n.t('access.candidates.thisPlace', { place: 'Repair login' }) }));
-    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', 'actual-topic', home().id, false));
+    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', 'actual-topic', home().id, false, ['group', 'role']));
     expect(picker.container).not.toHaveTextContent('current');
   });
 

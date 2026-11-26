@@ -69,6 +69,12 @@ export function ArticleView({ article, heading, onArticle, onScreen, onBack, vis
       const section = article.headings.find((one) => one.level === Number(element.tagName.slice(1)) && slugOf(one.text) === slugOf(element.textContent));
       element.id = section?.id ?? slugOf(element.textContent);
     }
+    if (article.id === 'state-reference') {
+      for (const link of root.querySelectorAll<HTMLAnchorElement>('td:first-child > a[href^="#state:"]')) {
+        const row = link.closest('tr');
+        if (row !== null) row.id = link.hash.slice(1);
+      }
+    }
     if (target !== null) root.querySelector<HTMLElement>(`[id="${CSS.escape(target)}"]`)?.scrollIntoView({ block: 'start' });
     else root.scrollTop = 0;
   }, [article.id, article.headings, article.translations, text, heading, visit]);
@@ -77,6 +83,11 @@ export function ArticleView({ article, heading, onArticle, onScreen, onBack, vis
     const link = (event.target as HTMLElement).closest('a[href]');
     if (link === null || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
     const href = link.getAttribute('href') ?? '';
+    if (article.id === 'state-reference' && href.startsWith('#state:')) {
+      event.preventDefault();
+      onArticle(article.id, href.slice(1));
+      return;
+    }
     // A schema is a static artifact of this build; let its link open the asset, not a router screen.
     if (Object.values(article.files ?? {}).includes(href)) {
       link.setAttribute('target', '_blank');

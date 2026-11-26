@@ -1,15 +1,16 @@
 /** Service-token acts update their own list and retake only the shown account's derived count. */
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { expect, it, vi } from 'vitest';
+import { createApiClient } from '@/api/client';
 import { applyChanges, findAct } from '@/api/acts';
 import { serviceAccountsKey, serviceTokensKey } from '@/api/directory';
-import type { ApiTokenInfo, ServiceAccount, TokenCreated } from '@/generated/api-types';
+import type { ApiTokenInfo, ServiceAccountPage, TokenCreated } from '@/generated/api-types';
 import { ACME, id } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 
 for (const shown of [true, false]) it(`deletes an account with its list ${shown ? 'shown' : 'hidden'} without reading another org`, async () => {
   const world = new World(), person = world.people.get('ada')!;
-  const accounts = () => structuredClone(world.settings.handle(person, 'GET', `/orgs/${ACME.org}/service-accounts`, new URLSearchParams(), {})!.body as ServiceAccount[]);
+  const accounts = () => structuredClone((world.settings.handle(person, 'GET', `/orgs/${ACME.org}/service-accounts`, new URLSearchParams(), {})!.body as ServiceAccountPage).items);
   const account = accounts()[0]!;
   const cache = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
   const key = serviceAccountsKey(ACME.org), otherKey = serviceAccountsKey('another-org');
@@ -31,7 +32,7 @@ for (const shown of [true, false]) it(`deletes an account with its list ${shown 
 for (const remove of [false, true]) for (const shown of [true, false]) it(`${remove ? 'revokes' : 'creates'} a service token with its account ${shown ? 'shown' : 'hidden'}, without reading another org`, async () => {
   const world = new World();
   const person = world.people.get('ada')!;
-  const accounts = () => world.settings.handle(person, 'GET', `/orgs/${ACME.org}/service-accounts`, new URLSearchParams(), {})!.body as ServiceAccount[];
+  const accounts = () => (world.settings.handle(person, 'GET', `/orgs/${ACME.org}/service-accounts`, new URLSearchParams(), {})!.body as ServiceAccountPage).items;
   const account = accounts()[0]!;
   const subject = account.user.id;
   const create = () => world.settings.handle(person, 'POST', `/service-accounts/${subject}/tokens`, new URLSearchParams(), { name: 'ci', proof: { password: person.password }, scopes: ['*'] })!.body as TokenCreated;
@@ -67,4 +68,42 @@ for (const remove of [false, true]) for (const shown of [true, false]) it(`${rem
     expect(cache.getQueryData(otherKey)).toEqual(other);
     expect(readOther).not.toHaveBeenCalled();
   } finally { stopOther(); stopAccount?.(); stopTokens(); cache.clear(); }
+});
+
+it('shows the new service key in the open list when the client reports a safe creation receipt', async () => {
+  const subject = id(0x73, 1);
+  const info: ApiTokenInfo = { id: id(0x74, 1), name: 'Build reader', created_at: '2026-11-01T00:00:00Z',
+    expires_at: null, last_used_at: null, node: null, scopes: [], rules: [] };
+  const client = createApiClient({ baseUrl: 'http://orch.test/api/v1',
+    fetch: () => Promise.resolve(Response.json({ token: 'fixture-once', already_created: false, info }, { status: 201 })) });
+  const cache = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
+  const key = serviceTokensKey(subject), other = serviceTokensKey('another-account');
+  cache.setQueryData(key, []); cache.setQueryData(other, []);
+  let finishReads!: () => void;
+  const pendingReads = new Promise<void>((resolve) => { finishReads = resolve; });
+  const read = vi.fn(async () => { await pendingReads; return [info]; });
+  const readOther = vi.fn(() => Promise.resolve([]));
+  const accountKey = serviceAccountsKey(ACME.org);
+  const accounts = [{ user: { id: subject }, token_count: 0 }];
+  cache.setQueryData(accountKey, accounts);
+  const readAccounts = vi.fn(async () => { await pendingReads; return [{ user: { id: subject }, token_count: 1 }]; });
+  const stopAccounts = new QueryObserver(cache, { queryKey: accountKey, queryFn: readAccounts }).subscribe(() => undefined);
+  const stop = new QueryObserver(cache, { queryKey: key, queryFn: read }).subscribe(() => undefined);
+  const stopOther = new QueryObserver(cache, { queryKey: other, queryFn: readOther }).subscribe(() => undefined);
+  const unsubscribe = client.onAct(async (act) => {
+    expect(act.answer).toEqual({ token_id: info.id, already_created: false });
+    await applyChanges(findAct(act.method, act.path, act)!.changes, cache);
+  });
+  try {
+    const accepted = client.api.POST('/service-accounts/{id}/tokens', { params: { path: { id: subject } }, body: { name: info.name, rules: [] } });
+    await vi.waitFor(() => {
+      expect(read).toHaveBeenCalledOnce();
+      expect(readAccounts).toHaveBeenCalledOnce();
+    });
+    finishReads();
+    await accepted;
+    expect(cache.getQueryData(key)).toEqual([info]);
+    expect(read).toHaveBeenCalledOnce();
+    expect(readOther).not.toHaveBeenCalled();
+  } finally { finishReads(); unsubscribe(); stop(); stopOther(); stopAccounts(); cache.clear(); }
 });
