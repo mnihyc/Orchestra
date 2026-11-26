@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web-e2e tests/e2e/tabs-overflow.spec.ts --project=chromium --retries=1

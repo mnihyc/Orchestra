@@ -5,6 +5,7 @@
  * feed how far the person's Inbox has got (`inbox`) and sends its rows to the connections that follow it (`listeners`).
  */
 import type { Part, Person, Subscriber } from './world.ts';
+import type { PersonalRevision } from '../../src/generated/api-types.ts';
 
 /** One connection that follows a person's feed, and the number of the last row of the Inbox it was sent. */
 export interface Listening {
@@ -23,13 +24,21 @@ export interface InboxView {
 
 export class UserFeed implements Part {
   private listening: Listening[] = [];
+  private changes = new Map<string, number>();
+  private broadcasts = 0;
   /** The Inbox the feed carries the rows of: put there by the world once it has both. */
   inbox: InboxView | null = null;
   /** Capture native row baselines before an admitted connection can observe later writes. */
   onJoin?: (listener: Listening) => void;
 
+  /** A native shell cut is captured before projecting its fields, even with no live reader. */
+  revision(username: string): PersonalRevision {
+    return { personal: this.changes.get(username) ?? 0, inbox: this.inbox?.seq(username) ?? 0, meta: 0, authority: this.broadcasts };
+  }
+
   /** An event for the person's own feed. */
   tell(username: string, data: Record<string, unknown>): void {
+    this.changes.set(username, (this.changes.get(username) ?? 0) + 1);
     for (const feed of this.listening) {
       if (feed.username === username) feed.subscriber.send({ op: 'event', id: feed.id, feed: 'user', data });
     }
@@ -37,6 +46,8 @@ export class UserFeed implements Part {
 
   /** An event for every connection that follows a feed, or for those of some people. */
   tellAll(data: Record<string, unknown>, users?: readonly string[]): void {
+    if (users === undefined) this.broadcasts += 1;
+    else for (const username of new Set(users)) this.changes.set(username, (this.changes.get(username) ?? 0) + 1);
     for (const feed of this.listening) {
       if (users === undefined || users.includes(feed.username)) feed.subscriber.send({ op: 'event', id: feed.id, feed: 'user', data });
     }
@@ -69,7 +80,7 @@ export class UserFeed implements Part {
       const joined: Listening = { subscriber, id, username, person, last: reload ? seq : (since ?? seq) };
       this.onJoin?.(joined);
       this.listening.push(joined);
-      subscriber.send({ op: 'subscribed', id, feed: 'user', seq, mode: reload ? 'reload' : 'delta' });
+      subscriber.send({ op: 'subscribed', id, feed: 'user', seq, mode: reload ? 'reload' : 'delta', personal_revision: this.revision(username) });
       if (!reload && since !== null && since < seq && this.inbox !== null) {
         subscriber.send({ op: 'sync', id, feed: 'user', prev: since, seq, data: this.inbox.missed(username, since) });
         joined.last = seq;

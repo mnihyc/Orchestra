@@ -8,6 +8,8 @@ summary: Inspect resources and choices with their reported facts, sources and un
 
 # Read resource cards and choices
 
+This page shows how to look at a resource or a choice with the facts reported about it, where they come from, and why something is unavailable.
+
 ## Inspect a choice
 
 A resource name opens the same card wherever you meet it. Hover or focus the
@@ -27,7 +29,7 @@ about the next turn. Read [the measurements](speed-first-output-and-errors.md#wh
 before comparing models.
 
 A host shows capacity, declared use, available storage and whether it takes
-new work. An environment shows its host, threads, shells and reported process,
+new work. An environment shows its host, threads, terminals and reported process,
 CPU, memory and disk use. Declared capacity and current consumption are separate
 figures. Read the observation time before treating an old value as current.
 

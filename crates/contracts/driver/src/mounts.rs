@@ -58,6 +58,9 @@ pub struct MountLayer {
 /// One mount to attach, as a runtime is asked to be made with it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct MountSpec {
+    /// The resource whose actual attachment this is; identity only, never an authorization grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<Id>,
     /// The mount's name.
     pub name: String,
     /// Whether the location is a directory or a volume.

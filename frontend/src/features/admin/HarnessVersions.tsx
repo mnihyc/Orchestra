@@ -17,6 +17,7 @@ import { VersionChoiceControl, resolvedBuild, versionChoice, type VersionChoice 
 import { UpdateDialog, type UpdateTargets } from '@/features/fleet/UpdateDialog';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { Dialog } from '@/ui/Dialog';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { Table } from '@/ui/Table';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { formatNumber } from '@/lib/format';
@@ -76,6 +77,7 @@ export function HarnessVersions({ kinds, builds, title, catalogue, knownBuilds, 
     const rest = Object.fromEntries(Object.entries(all).filter(([named]) => named !== kind));
     change.save.mutate({ value: next.use === 'shipped' ? rest : { ...rest, [kind]: next } });
   };
+  const useRows=(usage.data ?? []).filter((row) => showing !== null && row.kind === showing.kind && row.version === showing.version).flatMap((row) => [...row.environments.map((environment) => ({ id: environment.id, subject: { kind: 'environment' as const, environment } })), ...row.providers.map((provider) => ({ id: provider.id, subject: { kind: 'provider' as const, provider } }))]);
   return (
     <div className="flex flex-col gap-2" data-harness-versions>
       {kinds.map((kind) => {
@@ -92,14 +94,14 @@ export function HarnessVersions({ kinds, builds, title, catalogue, knownBuilds, 
           <div key={kind} className="flex flex-wrap items-end gap-2" data-harness-version={kind}>
             <VersionChoiceControl kind={kind} label={title(kind)} catalogue={catalogue?.(kind)} choice={choice} builds={known.data} target={{ kind: 'system' }} disabled={!change.writable} onFetch={onFetch} onFollow={onFollow} onChange={(next) => write(kind, next)} />
             <span className="flex min-w-0 flex-wrap items-center gap-2 text-sm" aria-label={t('programVersions.resolved', { name: title(kind) })}>{resolved.length === 0 ? t('programVersions.unavailable') : resolved.map((build) => <span key={`${build.os}/${build.arch}`} className="flex min-w-0 flex-wrap items-center gap-2"><span className="min-w-0 wrap-anywhere font-mono">{build.version}</span>{platforms.length > 1 && <span className="text-text-muted">{build.os}/{build.arch}</span>}<BuildStatus build={build} name={title(kind)} catalogue={catalogue?.(kind)} /></span>)}</span>
-            {usage.isPending ? <SkeletonRows read={usage} rows={1} /> : used.map((row) => {
+            {usage.isPending ? <SkeletonRows read={usage} rows={1} /> : <CompleteCollection label={t('programVersions.running')} items={used} textOf={(row)=>row.version} scroll>{(page)=><div className="flex flex-wrap gap-2">{page.map((row) => {
               const environments=t('programVersions.environmentCount',{count:row.environments.length,number:formatNumber(row.environments.length,locale)});
               const providers=t('programVersions.runtimeCount',{count:row.providers.length,number:formatNumber(row.providers.length,locale)});
               const label=t('programVersions.usage',{version:row.version,environments,providers});
               return <Tooltip key={row.version} content={label}><Button size="sm" variant="ghost" className="min-w-0 max-w-full" aria-label={label} onClick={() => setShowing({ kind, version: row.version })}>
                 <span className="min-w-0 max-w-(--field-narrow) truncate">{row.version}</span><span className="min-w-0 wrap-anywhere whitespace-normal text-left">· {environments} · {providers}</span>
               </Button></Tooltip>;
-            })}
+            })}</div>}</CompleteCollection>}
             {environments.length + providers.length > 0 && <Button size="sm" disabled={change.pending} onClick={() => setUpdating({ environments, providers })}>{t('programVersions.updateAvailable', { units: updateUnits(environments.length, providers.length, locale, t) })}</Button>}
           </div>
         );
@@ -107,7 +109,7 @@ export function HarnessVersions({ kinds, builds, title, catalogue, knownBuilds, 
       {usage.error !== null && <ErrorAlert error={usage.error} />}
       <SettingChangeStatus change={change} />
       <Dialog open={showing !== null} onOpenChange={(open) => !open && setShowing(null)} title={showing === null ? t('programVersions.running') : <span className="wrap-anywhere">{title(showing.kind)} {showing.version}</span>} footer={<Button onClick={() => setShowing(null)}>{t('common.close')}</Button>}>
-        <Table label={t('programVersions.running')} rows={(usage.data ?? []).filter((row) => showing !== null && row.kind === showing.kind && row.version === showing.version).flatMap((row) => [...row.environments.map((environment) => ({ id: environment.id, subject: { kind: 'environment' as const, environment } })), ...row.providers.map((provider) => ({ id: provider.id, subject: { kind: 'provider' as const, provider } }))])} rowKey={(row) => row.id} columns={[{ id: 'unit', header: t('programVersions.unit'), cell: (row) => <ResourceChip subject={row.subject} /> }]} />
+        <CompleteCollection label={t('programVersions.running')} items={useRows} textOf={(row)=>row.subject.kind==='environment'?row.subject.environment.name:row.subject.provider.name}>{(rows)=><Table virtual label={t('programVersions.running')} rows={rows} rowKey={(row)=>row.id} columns={[{id:'unit',header:t('programVersions.unit'),cell:(row)=><ResourceChip subject={row.subject}/>}]}/>}</CompleteCollection>
       </Dialog>
       {updating !== null && <UpdateDialog targets={updating} onClose={() => setUpdating(null)} />}
     </div>

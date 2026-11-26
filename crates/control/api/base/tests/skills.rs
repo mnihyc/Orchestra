@@ -14,6 +14,8 @@ mod thread_history_scope;
 mod creation_replays;
 #[path = "skills/read_scopes.rs"]
 mod read_scopes;
+#[path = "skills/session_outcome.rs"]
+mod session_outcome;
 
 use crate::support::FullSkillVersionReply as _;
 use futures::FutureExt as _;
@@ -61,6 +63,7 @@ async fn upload(world: &World, by: &Who, name: &str, bytes: &[u8]) -> Hash {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: name.to_owned(),
             media_type: None,
@@ -80,6 +83,8 @@ async fn upload(world: &World, by: &Who, name: &str, bytes: &[u8]) -> Hash {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
         .blob
 }
 

@@ -33,10 +33,12 @@
 
 #![forbid(unsafe_code)]
 
+mod antigravity;
 pub mod approvals;
 pub mod client;
 pub mod descriptor;
 pub mod extensions;
+mod google_login;
 pub mod launch;
 pub mod mapper;
 pub mod process;
@@ -145,12 +147,74 @@ fn raw_tap(sink: EventSink, thread: ThreadId, segment: Id) -> FrameTap {
         move |direction: Direction, frame: &Json| -> futures::future::BoxFuture<'static, bool> {
             let mut payload = frame.clone();
             redact(&mut payload);
+            let mut spans = Vec::new();
+            if direction.name() == "out"
+                && frame.get("method").and_then(Json::as_str) == Some("session/prompt")
+            {
+                spans.extend(
+                    ["agent_message_chunk", "agent_thought_chunk"]
+                        .into_iter()
+                        .map(|kind| orch_agent_contract::events::NativeTraceText {
+                            start: true,
+                            stream: kind.into(),
+                            pointer: None,
+                            end: false,
+                        }),
+                );
+            }
+            let update = frame.pointer("/params/update");
+            let kind = update
+                .and_then(|update| update.get("sessionUpdate"))
+                .and_then(Json::as_str);
+            if let Some(kind @ ("agent_message_chunk" | "agent_thought_chunk")) = kind {
+                spans.push(orch_agent_contract::events::NativeTraceText {
+                    start: update.is_some_and(|update| {
+                        crate::extensions::committed_attempt(update).is_some()
+                    }),
+                    stream: kind.into(),
+                    pointer: Some("/params/update/content/text".into()),
+                    end: update.is_some_and(|update| {
+                        crate::extensions::committed_attempt(update).is_some()
+                    }),
+                });
+            }
+            if frame.pointer("/result/stopReason").is_some() {
+                spans.extend(
+                    ["agent_message_chunk", "agent_thought_chunk"]
+                        .into_iter()
+                        .map(|kind| orch_agent_contract::events::NativeTraceText {
+                            start: false,
+                            stream: kind.into(),
+                            pointer: None,
+                            end: true,
+                        }),
+                );
+            }
+            let complete = direction.name() == "out"
+                || frame.get("result").is_some()
+                || frame.get("error").is_some()
+                || matches!(
+                    kind,
+                    Some(
+                        "agent_message_chunk"
+                            | "agent_thought_chunk"
+                            | "tool_call"
+                            | "tool_call_update"
+                            | "plan"
+                            | "available_commands_update"
+                            | "current_mode_update"
+                            | "usage_update"
+                            | "session_info_update"
+                    )
+                );
             let sink = sink.clone();
             Box::pin(async move {
                 sink.session(
                     thread,
                     segment,
                     SessionEvent::RawFrame(RawFrame {
+                        text: spans,
+                        text_complete: complete,
                         direction: direction.name().to_owned(),
                         payload,
                     }),
@@ -178,6 +242,7 @@ struct Shared {
     home_root: PathBuf,
     learned: Learned,
     sessions: Mutex<HashMap<ThreadId, Arc<Session>>>,
+    google_verified: Mutex<Option<bool>>,
 }
 
 /// The adapter of an agent program that speaks the Agent Client Protocol.
@@ -189,6 +254,7 @@ pub struct AcpAdapter {
     /// The companion plugin's file, which each session of the program is given in its home.
     plugin: Option<Arc<[u8]>>,
     running: Option<Running>,
+    google_login: Option<google_login::Flow>,
 }
 
 impl std::fmt::Debug for AcpAdapter {
@@ -263,6 +329,7 @@ impl AcpAdapter {
             clock,
             plugin,
             running: None,
+            google_login: None,
         }
     }
 
@@ -298,6 +365,9 @@ impl AcpAdapter {
     }
 
     async fn teardown(&mut self) {
+        if let Some(flow) = self.google_login.take() {
+            flow.cancel().await;
+        }
         if let Some(running) = self.running.take() {
             let sessions: Vec<Arc<Session>> = lock(&running.shared.sessions)
                 .drain()
@@ -656,13 +726,17 @@ impl AgentAdapter for AcpAdapter {
         }
         if let Some(running) = &self.running
             && running.start == start
-            && running.shared.learned.initialized.protocol_version == wire::PROTOCOL_VERSION
         {
             return Ok(running.started.clone());
         }
         self.teardown().await;
         let program = Arc::clone(&self.program);
         let binary = binary_of(&start, &program)?;
+        if program.kind == "antigravity" && start.home.is_none() {
+            return Err(unsupported(
+                "Antigravity requires a dedicated provider home",
+            ));
+        }
         let home_root = start
             .home
             .clone()
@@ -740,9 +814,11 @@ impl AgentAdapter for AcpAdapter {
             home_root,
             learned,
             sessions: Mutex::new(HashMap::new()),
+            google_verified: Mutex::new(None),
         });
         let _ = sink
             .emit(AdapterEvent::Status(HarnessStatus {
+                home: None,
                 status: HarnessState::Online,
                 detail: None,
                 harness_version: Some(version),
@@ -804,6 +880,7 @@ impl AgentAdapter for AcpAdapter {
         if let Some(sink) = sink {
             let _ = sink
                 .emit(AdapterEvent::Status(HarnessStatus {
+                    home: None,
                     status: HarnessState::Offline,
                     detail: None,
                     harness_version: None,
@@ -827,6 +904,14 @@ impl AgentAdapter for AcpAdapter {
         let shared = Arc::clone(self.live()?);
         let program = Arc::clone(&self.program);
         let settings = &spec.settings;
+        if program.kind == "antigravity"
+            && (!matches!(spec.provider, ProviderAccess::Native {provider_id} if provider_id == shared.start.provider_id)
+                || settings.arrangement != ArrangementType::Together)
+        {
+            return Err(unsupported(
+                "Antigravity uses its own provider's Google sign-in on the machine running the workspace",
+            ));
+        }
         if let Some(reading) = settings.side_reading {
             return Err(unsupported(format!(
                 "{} has no declared side-conversation mode for {reading:?}",
@@ -859,7 +944,7 @@ impl AgentAdapter for AcpAdapter {
         launch::prepare_home(&home)?;
         let tap = settings.raw_events.then(|| {
             raw_tap(
-                shared.env.sink.clone(),
+                shared.env.sink.for_opening(spec.opening_id),
                 settings.thread_id,
                 settings.segment_id,
             )
@@ -922,7 +1007,7 @@ impl AgentAdapter for AcpAdapter {
             None
         };
         let mut import_report = None;
-        let (method, params, native) = match settings.mode {
+        let (method, mut params, native) = match settings.mode {
             SessionMode::New => (
                 wire::agent::SESSION_NEW,
                 json!({ "cwd": settings.cwd, "mcpServers": servers, "_meta": meta }),
@@ -999,11 +1084,40 @@ impl AgentAdapter for AcpAdapter {
                 )
             }
         };
+        if program.kind == antigravity::KIND {
+            // Only send the system prompt extension when this agent offers it.
+            // Orch's internal bridge metadata belongs to its companion plugin.
+            if let Some(fields) = params.as_object_mut() {
+                fields.remove("_meta");
+                if !settings.instructions.is_empty()
+                    && capabilities
+                        .meta
+                        .as_ref()
+                        .and_then(|v| v.pointer("/antigravity/systemPrompt/append"))
+                        .and_then(Json::as_bool)
+                        == Some(true)
+                {
+                    fields.insert(
+                        "_meta".into(),
+                        json!({"antigravity":{"systemPrompt":{"append":settings.instructions}}}),
+                    );
+                }
+            }
+        }
         let answer = launched
             .rpc
             .call_within(method, params, OPEN_TIMEOUT)
             .await
-            .map_err(|error| launched.explain(error))?;
+            .map_err(|error| {
+                if program.kind == antigravity::KIND
+                    && matches!(&error, rpc::RpcError::Remote { code: -32000, .. })
+                {
+                    *lock(&shared.google_verified) = Some(false);
+                    AdapterError::LoginRequired
+                } else {
+                    launched.explain(error)
+                }
+            })?;
         let acp_id = match &native {
             Some(native) => native.clone(),
             None => answer
@@ -1021,6 +1135,7 @@ impl AgentAdapter for AcpAdapter {
             while launched.incoming.try_recv().is_ok() {}
         }
         let session = Session::new(Parts {
+            opening_id: spec.opening_id,
             env: Arc::clone(&shared.env),
             thread_id: settings.thread_id,
             segment_id: settings.segment_id,
@@ -1031,6 +1146,7 @@ impl AgentAdapter for AcpAdapter {
             stderr: launched.stderr.clone(),
             learned,
             mapper: MapperConfig {
+                output_capture_bytes: settings.output_capture_bytes,
                 thread_id: settings.thread_id,
                 segment_id: settings.segment_id,
                 program: Arc::clone(&program),
@@ -1070,10 +1186,12 @@ impl AgentAdapter for AcpAdapter {
         let _ = shared
             .env
             .sink
+            .for_opening(spec.opening_id)
             .session(
                 settings.thread_id,
                 settings.segment_id,
                 SessionEvent::SessionOpened(SessionOpenedEvent {
+                    opening_id: spec.opening_id,
                     native_session_ref: acp_id.clone(),
                     resumed,
                 }),
@@ -1084,6 +1202,7 @@ impl AgentAdapter for AcpAdapter {
             .env
             .sink
             .emit(AdapterEvent::Status(HarnessStatus {
+                home: None,
                 status: HarnessState::Online,
                 detail: None,
                 harness_version: Some(shared.learned.version.clone()),
@@ -1091,12 +1210,104 @@ impl AgentAdapter for AcpAdapter {
             }))
             .await;
         Ok(SessionOpened {
+            mcp: Some(spec.mcp.clone()),
             native_session_ref: acp_id,
             resumed,
             import_report,
             instruction_sources: instruction_sources(&spec, &program),
             approval_reviewer: None,
         })
+    }
+
+    async fn login(
+        &mut self,
+        request: orch_agent_contract::login::LoginRequest,
+    ) -> Result<(), AdapterError> {
+        let shared = Arc::clone(self.live()?);
+        if request.method != antigravity::METHOD
+            || !antigravity::offered(self.kind, &shared.learned.initialized)
+        {
+            return Err(unsupported("this provider sign-in method"));
+        }
+        if let Some(flow) = self.google_login.take() {
+            flow.cancel().await;
+        }
+        self.google_login = Some(google_login::Flow::start(shared).await?);
+        Ok(())
+    }
+
+    async fn login_input(
+        &mut self,
+        values: orch_agent_contract::login::LoginValues,
+    ) -> Result<(), AdapterError> {
+        self.google_login
+            .as_mut()
+            .ok_or_else(|| AdapterError::NotFound("no Google sign-in is waiting".into()))?
+            .answer(values)
+    }
+
+    async fn cancel_login(&mut self) -> Result<(), AdapterError> {
+        if self.kind != antigravity::KIND {
+            return Err(unsupported("native_provider"));
+        }
+        if let Some(flow) = self.google_login.take() {
+            flow.cancel().await;
+        }
+        Ok(())
+    }
+
+    async fn discover_models(
+        &mut self,
+    ) -> Result<Vec<orch_agent_contract::discovery::ModelSuggestion>, AdapterError> {
+        if self.kind != antigravity::KIND {
+            return Err(unsupported("model_discovery"));
+        }
+        let shared = self.live()?;
+        antigravity::verified_models(shared).await
+    }
+
+    async fn provider_facts(
+        &mut self,
+    ) -> Result<orch_agent_contract::facts::ProviderFacts, AdapterError> {
+        if self.kind != antigravity::KIND {
+            return Err(unsupported("provider_facts"));
+        }
+        Ok(orch_agent_contract::facts::ProviderFacts {
+            // Only a new authenticated ACP reply can verify the credential.
+            credential: lock(&self.live()?.google_verified).map(|accepted| {
+                orch_agent_contract::facts::CredentialFacts {
+                    method: Some(antigravity::METHOD.into()),
+                    yields: if accepted {
+                        orch_agent_contract::facts::CredentialYield::Login
+                    } else {
+                        orch_agent_contract::facts::CredentialYield::None
+                    },
+                    expires_at: None,
+                    issued_at: None,
+                }
+            }),
+            ..Default::default()
+        })
+    }
+
+    async fn logout(&mut self) -> Result<(), AdapterError> {
+        self.cancel_login().await?;
+        let shared = self.live()?;
+        if !shared
+            .learned
+            .initialized
+            .agent_capabilities
+            .auth
+            .as_ref()
+            .is_some_and(|auth| auth["logout"].is_object())
+        {
+            return Err(unsupported("this Antigravity CLI did not offer ACP logout"));
+        }
+        let sessions: Vec<_> = lock(&shared.sessions).drain().map(|(_, s)| s).collect();
+        futures::future::join_all(sessions.iter().map(|s| s.close())).await;
+        antigravity::logout(shared).await?;
+        *lock(&shared.google_verified) = Some(false);
+        Ok(())
     }
 
     async fn close_session(&mut self, thread: ThreadId) -> Result<(), AdapterError> {
@@ -1114,6 +1325,19 @@ impl AgentAdapter for AcpAdapter {
 
     async fn steer(&mut self, steer: TurnSteer) -> Result<(), AdapterError> {
         self.session(steer.thread_id)?.steer(steer).await
+    }
+
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let shared = Arc::clone(&self.running.as_ref()?.shared);
+        Some(Arc::new(move |thread, turn| {
+            let session = lock(&shared.sessions).get(&thread).cloned();
+            Box::pin(async move {
+                session
+                    .ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?
+                    .interrupt(turn)
+                    .await
+            })
+        }))
     }
 
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
