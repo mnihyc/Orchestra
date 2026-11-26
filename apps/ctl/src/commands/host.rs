@@ -121,9 +121,15 @@ impl Host {
         if config.database.url.is_empty() {
             return Err(HostError::NoDatabase);
         }
-        let db = Db::connect(&config.database.url, CONNECTIONS)
-            .await
-            .map_err(HostError::Connect)?;
+        let db = Db::connect_with_limits(
+            &config.database.url,
+            CONNECTIONS,
+            std::time::Duration::from_millis(config.database.slow_statement_ms),
+            std::time::Duration::from_millis(config.database.slow_acquire_ms),
+            orch_db::pool::Limits::background(&config.database),
+        )
+        .await
+        .map_err(HostError::Connect)?;
         let mut conn = db.acquire().await.map_err(HostError::Connect)?;
         if upkeep::applied_schema_version(&mut conn).await?.is_none() {
             return Err(HostError::NoSchema);

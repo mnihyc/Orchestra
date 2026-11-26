@@ -2,7 +2,7 @@
 
 use super::*;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 
 pub(super) async fn scoped_native_uses(
@@ -44,7 +44,7 @@ pub(super) async fn scoped_native_uses(
         let scope:KeyScope=serde_json::from_value(serde_json::json!({"rules":[{"target":{"kind":"environment","id":target,"reach":"self"},"allow":[{"operation":operation,"actions":actions}]}]})).unwrap();
         assert!(scope.validate().is_empty());
         let id = new_id();
-        let secret = new_token(API_TOKEN_PREFIX);
+        let secret = new_api_token(id);
         let now = world.clock.now();
         identity::create_api_token_scoped(
             &mut world.db.acquire().await.unwrap(),

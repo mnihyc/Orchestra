@@ -1,0 +1,1 @@
+web-e2e tests/e2e/folders.spec.ts tests/e2e/org-home-work.spec.ts tests/e2e/places.spec.ts

@@ -23,6 +23,7 @@ fn machine_problem(error: &CommandError, doing: Doing) -> ApiError {
     };
     let problem = match error.code.as_str() {
         "not_found" | "ignored" => ApiError::not_found(),
+        "files.reach_denied" => ApiError::new(ErrorCode::FileReachDenied, detail),
         "conflict" => match doing {
             Doing::Writing => ApiError::new(ErrorCode::ConflictStaleRevision, detail),
             Doing::Making | Doing::Renaming | Doing::Copying | Doing::Removing => {

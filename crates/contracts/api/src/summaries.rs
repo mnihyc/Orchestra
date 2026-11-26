@@ -173,15 +173,13 @@ impl SummaryTarget {
     }
 }
 
-/// A person's optional API model choice, checked against current Use and allowed lists.
+/// A person's exact backend choice, checked against current source Use and allowed lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryModelChoice {
-    /// Actual provider identity.
-    pub provider_id: Id,
-    /// Its exact enabled model.
-    pub model: String,
-    /// Provider-bounded options in that model's existing interface.
+    /// The complete selected route, sign-in, model and adapter placement.
+    pub backend: orch_provider_contract::capabilities::BackendRef,
+    /// Options supported by that backend and bounded by its current grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Json>,
 }
@@ -364,7 +362,7 @@ pub struct SummaryProjection {
     pub inspecting: bool,
     /// Existing readable paragraph, or no paragraph for this currently readable source.
     pub text: Option<String>,
-    /// Stored producer facts; provider and offering remain subject to optional current provider Read.
+    /// The recorded producer. A key needs provider Read on this operation for model and account names.
     pub producer: Option<SummaryProducerView>,
     /// Actual last successful publication, if any.
     pub updated_at: Option<Time>,
@@ -441,7 +439,7 @@ pub enum SummaryState {
     NoSummarizer,
 }
 
-/// A readable producer identity, with private provider/offering details omitted independently.
+/// The producer identity visible to this reader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SummaryProducerView {
     /// Installed producer kind, independent of a vendor.
@@ -450,8 +448,19 @@ pub struct SummaryProducerView {
     pub title: String,
     /// Only when current Read permits this provider's identity.
     pub provider: Option<ProviderView>,
-    /// Only when current Read permits this offering's identity.
+    /// The admitted model. On resource summaries a key needs provider Read on the consuming operation.
     pub offering: Option<String>,
+}
+
+/// Actual delegated execution facts, each disclosed under its own current Read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SummaryProgramView {
+    /// The ordinary helper, only when its current page is readable.
+    pub helper_id: Option<Id>,
+    /// Its actual owner, disclosed with the readable helper.
+    pub actor: Option<orch_plugin_contract::refs::UserRef>,
+    /// The actual sign-in, only when its current provider metadata is readable.
+    pub provider: Option<ProviderView>,
 }
 
 /// Why no default model is available for a person's explicit refresh.
@@ -472,6 +481,10 @@ pub enum SummaryWaitReason {
     Interval,
     /// An existing call rule reserved a later retry.
     Recovery,
+    /// An explicit automatic-work reserve needs a current applicable provider observation.
+    UsageMeasurement,
+    /// The chosen reserve leaves the remaining plan capacity for other work.
+    PlanReserve,
     /// Eligible work is waiting for its native worker.
     Queue,
 }
@@ -503,8 +516,20 @@ pub struct SummarySnapshot {
     pub text: Option<String>,
     /// Safe producer facts.
     pub producer: Option<SummaryProducerView>,
+    /// The retained native work; absence makes no claim about an API price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<SummaryProgramView>,
     /// Coverage of currently readable stored input, without provider/configuration details.
     pub input: Option<orch_plugin_contract::refs::SummaryInputFacts>,
+    /// Captured output facts of this readable paragraph, never reconstructed from later defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_facts: Option<crate::summary_facts::SummaryResultFacts>,
+    /// Retained actual latest attempt, separate from the paragraph it may have left unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt: Option<crate::summary_facts::SummaryAttemptFacts>,
+    /// Effect-free current manual proposal; choosing it never enables automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_proposal: Option<crate::summary_facts::SummaryRefreshProposal>,
     /// Manual availability; never enables or writes an automatic producer setting.
     pub manual_problem: Option<SummaryManualProblem>,
     /// Actual reason and eligibility time of accepted pending work.
@@ -524,6 +549,19 @@ pub struct SummarySnapshot {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_explicit_summary_choice_keeps_its_backend_placement_and_options() {
+        let backend = json!({
+            "route":"summary.delegation",
+            "offering":{"provider":"00000000-0000-0000-0000-000000000001","offering":"native-text"},
+            "config":{"environment_id":"00000000-0000-0000-0000-000000000002","helper_topic_id":"00000000-0000-0000-0000-000000000003"},
+            "x_selected":{"revision":"retained"}
+        });
+        let value = json!({"backend":backend,"params":{"effort":"low"}});
+        let selected: SummaryModelChoice = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(selected).unwrap(), value);
+    }
 
     #[test]
     fn batch_read_declares_its_own_collections_and_optional_provider_read_without_paid_write() {

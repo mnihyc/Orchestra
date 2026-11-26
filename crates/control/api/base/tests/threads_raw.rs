@@ -30,6 +30,8 @@ const KEY: [u8; 32] = [7; 32];
 
 fn frame(direction: &str, payload: Value) -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 0,
         direction: direction.to_owned(),
         payload,
@@ -462,7 +464,7 @@ async fn a_frame_that_cannot_be_masked_is_dropped_and_never_kept_whole() {
 async fn a_frame_larger_than_may_be_kept_is_kept_as_a_note_of_what_it_was() {
     let s = Scene::new().await;
     let (thread, segment) = started(&s).await;
-    let big = "x".repeat(orch_engine::raw_events::FRAME_MAX_BYTES + 10);
+    let big = "x".repeat(orch_engine::raw_events::DEFAULT_FRAME_BYTES + 10);
     s.rig
         .say(thread, frame("out", json!({ "file": big })))
         .await;
@@ -494,4 +496,41 @@ async fn a_session_is_opened_asking_for_the_frames_of_the_harness() {
         .collect();
     assert!(!opened.is_empty());
     assert!(opened.iter().all(|open| open.raw_events));
+}
+
+#[tokio::test]
+async fn diagnostic_search_finds_older_masked_frames_before_the_page_limit() {
+    let s = Scene::new().await;
+    let (thread, segment) = started(&s).await;
+    for n in 1..=13 {
+        s.rig
+            .say(
+                thread,
+                frame(
+                    if n == 1 { "out" } else { "in" },
+                    json!({"text":if n == 1 { "older special result" } else { "newer frame" }}),
+                ),
+            )
+            .await;
+    }
+    wait_for(&s, thread, segment, 13).await;
+    let page = s
+        .rig
+        .world
+        .app
+        .call(ThreadRawList, &[&thread])
+        .token(&s.ada.token)
+        .query(&ThreadRawListQuery {
+            segment_id: segment,
+            q: Some("special".into()),
+            direction: Some(RawDirection::ToHarness),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.events.iter().map(|row| row.n).collect::<Vec<_>>(), [1]);
+    assert!(!page.has_older);
+    assert_eq!(page.next_before, None);
 }
