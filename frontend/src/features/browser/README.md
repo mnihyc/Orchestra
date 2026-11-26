@@ -20,7 +20,7 @@ seed one before its HTTP capability facts arrive. Malformed later support cannot
 Environment Tools keeps its section navigation outside each selected content boundary, so a failed
 browser view leaves Terminal, Ports and the other tools reachable. Regression sources cover the
 actual EnvironmentScreen/query, cold and warm feed shapes, Retry/Look again and picture faults in
-EN/ZH and both themes; executable/rendered proof belongs to the integrator.
+EN/ZH and both themes.
 
 Not built: the small picture on the tool's row, the warning mark on the view's tab (the workbench's tabs
 carry no mark yet), the picker of the environment's files for a request (a path is typed), and saying that
@@ -32,5 +32,6 @@ draw real JPEGs made there; the real server has not been tried from here.
 - `Front.tsx`: one browser in front: bar, tabs, picture, people, what a page asks.
 - `Browsers.tsx`: the list, the ways of being off, the profiles' dialogs, and the one in front.
 - `OpenDialog.tsx`: "Open a browser…" and joining.
-- `View.tsx`: the view's registration beside a thread, the Ports entry and the tool row's Open.
+- `View.tsx` registers the view beside a thread and supplies the Ports entry.
+- `../timeline/tools/Orch.tsx` opens the browser or display named in a recorded tool result.
 - `store.ts`: what other screens ask of the Browser and VNC views.

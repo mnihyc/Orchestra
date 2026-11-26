@@ -9,8 +9,8 @@
 //! template that names `fast` is never quietly given the default. **A volume that a running unit stands on is
 //! not removed**: the unit would lose the ground it works on. Removing what is not there is done.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, Weak};
+use orch_connector_core::storage_locks::StorageLocks;
+use std::sync::Arc;
 
 use orch_driver_contract::driver::DriverError;
 use orch_driver_contract::runtime::LABEL_SYSTEM;
@@ -25,55 +25,6 @@ use crate::storages::Storages;
 /// The longest a volume's name may be: what a file name may be, since a driver may keep a volume as a
 /// directory of that name.
 const NAME_LONGEST: usize = 255;
-
-/// `None` fences the name across drivers; `Some` holds a particular driver's volume.
-type VolumeKey = (Option<String>, String);
-
-/// Reclaim a small page on each lookup instead of scanning all concurrent volume locks.
-/// One lookup adds at most one entry, so a 32-entry sweep also catches up with retired names.
-const LOCK_SWEEP_BATCH: usize = 32;
-
-#[derive(Default)]
-struct VolumeHolds {
-    entries: BTreeMap<VolumeKey, Weak<tokio::sync::Mutex<()>>>,
-    after: Option<VolumeKey>,
-}
-
-impl VolumeHolds {
-    fn serial(&mut self, key: VolumeKey) -> Arc<tokio::sync::Mutex<()>> {
-        use std::ops::Bound::{Excluded, Unbounded};
-        let mut page: Vec<_> = self
-            .entries
-            .range((self.after.as_ref().map_or(Unbounded, Excluded), Unbounded))
-            .take(LOCK_SWEEP_BATCH)
-            .map(|(key, _)| key.clone())
-            .collect();
-        if page.is_empty() {
-            page = self
-                .entries
-                .keys()
-                .take(LOCK_SWEEP_BATCH)
-                .cloned()
-                .collect();
-        }
-        self.after = page.last().cloned();
-        for old in page {
-            if self
-                .entries
-                .get(&old)
-                .is_some_and(|serial| serial.strong_count() == 0)
-            {
-                self.entries.remove(&old);
-            }
-        }
-        if let Some(serial) = self.entries.get(&key).and_then(Weak::upgrade) {
-            return serial;
-        }
-        let serial = Arc::new(tokio::sync::Mutex::new(()));
-        self.entries.insert(key, Arc::downgrade(&serial));
-        serial
-    }
-}
 
 /// Whether `name` can be the name of a volume: letters, digits and `_`, `.`, `-`, starting with a letter or a
 /// digit. That is what the Docker daemon takes, and it keeps a name from reaching outside a directory.
@@ -96,7 +47,7 @@ pub struct Volumes {
     drivers: Arc<DriverHost>,
     storages: Arc<Storages>,
     ledger: Arc<Ledger>,
-    locks: Mutex<VolumeHolds>,
+    locks: StorageLocks,
 }
 
 impl std::fmt::Debug for Volumes {
@@ -114,7 +65,7 @@ impl Volumes {
             drivers,
             storages,
             ledger,
-            locks: Mutex::new(VolumeHolds::default()),
+            locks: StorageLocks::default(),
         }
     }
 
@@ -124,15 +75,7 @@ impl Volumes {
     }
 
     async fn hold_in(&self, driver: Option<&str>, name: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let serial = {
-            let mut locks = self
-                .locks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let key = (driver.map(str::to_owned), name.to_owned());
-            locks.serial(key)
-        };
-        serial.lock_owned().await
+        self.locks.hold(driver, name).await
     }
 
     /// Holds a volume name while a unit checks its predecessors and starts.
@@ -409,36 +352,5 @@ mod tests {
         ] {
             assert!(!is_volume_name(bad), "{bad:?}");
         }
-    }
-}
-
-#[cfg(test)]
-mod scale_tests {
-    use super::*;
-
-    #[test]
-    fn a_million_volume_lock_names_keep_only_a_bounded_sweep_page_beyond_live_locks() {
-        const LIVE: usize = 1000;
-        const NAMES: usize = 1_000_000;
-        let mut table = VolumeHolds::default();
-        let live: Vec<_> = (0..LIVE)
-            .map(|index| table.serial((None, format!("live-{index:04}"))))
-            .collect();
-        let bound = LIVE + LIVE.div_ceil(LOCK_SWEEP_BATCH - 1) + LOCK_SWEEP_BATCH + 2;
-        let mut peak = 0;
-        for index in 0..NAMES {
-            drop(table.serial((None, format!("retired-{index:07}"))));
-            peak = peak.max(table.entries.len());
-            assert!(
-                table.entries.len() <= bound,
-                "dead lock names grew to {}",
-                table.entries.len()
-            );
-        }
-        for (index, held) in live.iter().enumerate() {
-            let again = table.serial((None, format!("live-{index:04}")));
-            assert!(Arc::ptr_eq(held, &again), "a live fence was replaced");
-        }
-        assert!(peak <= bound);
     }
 }

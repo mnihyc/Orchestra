@@ -76,7 +76,9 @@ export function useDirectoryPage(request: Omit<DocumentDirectoryRequest, 'cursor
       } else if (frame.op === 'resync') {
         generation += 1;
         subscription?.unsubscribe();
-        if (frame.reload === true) retireDocumentDirectory(cache, selection, reader);
+        // The next subscription reads the directory again whole: the page shown stays until its snapshot replaces it,
+        // and a delayed read of the former one never lands; the pages nobody shows are let go.
+        if (frame.reload === true) retireDocumentDirectory(cache, selection, reader, undefined, { shown: documentDirectoryKey(selection) });
         subscribe();
       } else if (frame.op === 'error' || frame.op === 'closed' && frame.reason !== 'unsubscribed') {
         const denied = frame.op === 'error' ? frame.code === 'forbidden' : frame.reason === 'revoked';

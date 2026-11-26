@@ -139,6 +139,7 @@ async fn an_approval_that_waits_for_the_person_is_counted_in_the_second_counter(
                         style: OptionStyle::Allow,
                         scope: Some(OptionScope::Once),
                         rule: None,
+                        note: false,
                     },
                     ApprovalOption {
                         id: "deny".to_owned(),
@@ -146,6 +147,7 @@ async fn an_approval_that_waits_for_the_person_is_counted_in_the_second_counter(
                         style: OptionStyle::Deny,
                         scope: None,
                         rule: None,
+                        note: false,
                     },
                 ],
             },
@@ -317,4 +319,101 @@ async fn visible_thread_frames_quiet_only_the_authors_success_and_leaving_restor
         1,
         "a subscription without visibility is not watching"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_retention_is_global_to_the_reader_and_not_the_loaded_unread_page() {
+    let rig = Rig::with_time_held().await;
+    let (other, _) = rig.person("boundary-other").await;
+    let now = rig.clock.now();
+    let mut conn = rig.pool.acquire().await.unwrap();
+    for (user, days, read) in [
+        (rig.ada, 80, true),
+        (rig.ada, 2, false),
+        (other, 800, false),
+    ] {
+        let n = announce(
+            &mut conn,
+            &NewNotification {
+                user_id: user,
+                kind: "milestone",
+                node_id: None,
+                thread_id: None,
+                approval_id: None,
+                chat_id: None,
+                title: "Boundary",
+                body: "",
+                data: &json!({}),
+                dedupe_key: &format!("boundary:{user}:{days}"),
+                at: orch_types::Time::new(now - chrono::Duration::days(days)).get(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if read {
+            sqlx::query("UPDATE notifications SET read_at=$2 WHERE id=$1")
+                .bind(n.id)
+                .bind(now)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+    }
+    drop(conn);
+    let url = format!(
+        "http://{}/api/v1/notifications?unread=true&limit=1",
+        rig.server.addr
+    );
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .get(&url)
+        .bearer_auth(&rig.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["retention"]["days"], 90);
+    assert_eq!(
+        first["retention"]["actual_oldest_retained"],
+        json!(orch_types::Time::new(now - chrono::Duration::days(80)))
+    );
+    let mut conn = rig.pool.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "retention.inbox_days",
+        &orch_db::queries::settings::Stored {
+            value: &json!(30),
+            locked: false,
+            by: Some(rig.ada),
+            at: now,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let changed: Value = client
+        .get(&url)
+        .bearer_auth(&rig.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(changed["retention"]["days"], 30);
+    assert_eq!(
+        changed["retention"]["actual_oldest_retained"],
+        first["retention"]["actual_oldest_retained"]
+    );
+    assert_eq!(
+        changed["retention"]["expires_before"],
+        json!(orch_types::Time::new(now - chrono::Duration::days(30)))
+    );
+    rig.server.stop().await;
 }

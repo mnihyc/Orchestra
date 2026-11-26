@@ -129,7 +129,7 @@ export function options(more: Partial<StartOptions> = {}): StartOptions {
   const summary = { custom: false, from: null, interact: [], manage: [], view: [] };
   return {
     viewer_default: {value:false,source:{scope:'default',node:null}},
-    defaults: { provider_id: 'p1', agent_id: 'a1', model_name: 'm1', effort: null, locked: false },
+    defaults: { provider_id: 'p1', agent_id: 'a1', model_name: 'm1', effort: null, locks: { provider: false, agent: false, model: false, effort: false } },
     providers: [provider('p1'), provider('p2')],
     environments: [environment('e1', { isDefault: true }), environment('e2')],
     environment_default: 'shared',

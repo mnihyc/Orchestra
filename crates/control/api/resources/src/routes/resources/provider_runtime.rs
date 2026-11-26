@@ -83,6 +83,7 @@ pub fn mount(registry: &mut Registry) {
 fn job_ref(job: &JobRow) -> JobRef {
     let (progress, _) = orch_engine::jobs::runner::read_progress(job);
     JobRef {
+        clone: None,
         id: job.id,
         kind: job.kind.clone(),
         state: match job.state.as_str() {
@@ -360,7 +361,7 @@ pub(crate) async fn runtime_views(
                         .and_then(|r| r.machine_id)
                         .and_then(|id| versions.get(&id))
                         .map(String::as_str),
-                    orch_engine::updates::CONNECTOR_MINIMUM,
+                    ctx.app.link.connector_minimum(),
                 ),
                 updates,
                 last_active_at: runtime
@@ -369,6 +370,9 @@ pub(crate) async fn runtime_views(
                 idle_stop_at: idle_stop_at.map(Time::new),
                 renew_at: renew_at.map(Time::new),
                 job: job.map(job_ref),
+                // The page says system reasons in the reader's language, including whether the host has
+                // confirmed a forced stop, and keeps the host's own words for its failures.
+                detail: runtime.and_then(|runtime| runtime.state_detail.clone()),
             },
         );
     }
@@ -385,16 +389,36 @@ pub(super) fn refused(error: RuntimeError) -> ApiError {
         ),
         RuntimeError::Unavailable(why) => ApiError::new(
             ErrorCode::ProviderUnavailable,
-            format!("its runtime cannot be started or stopped now: {why}"),
+            format!("Its runtime cannot be started or stopped now: {why}."),
         ),
         RuntimeError::Busy(running) => ApiError::new(
             ErrorCode::ThreadNotIdle,
             "turns run on this provider; stop them first, or say to interrupt them",
         )
         .with("running", running),
+        RuntimeError::Held(hold) => {
+            // The screen says the sentence of the reason in the reader's language, with the work and the step; the
+            // English one in `detail` is for the log and for a client that has no catalogue.
+            let mut error = ApiError::new(
+                ErrorCode::ProviderUnavailable,
+                format!(
+                    "Its runtime cannot be started or stopped now: {}.",
+                    hold.sentence()
+                ),
+            )
+            .with("reason", hold.why.word())
+            .with("can_force", hold.why.can_force());
+            if let Some(work) = hold.work {
+                error = error.with("work", work);
+            }
+            if let Some(step) = &hold.step {
+                error = error.with("step", step);
+            }
+            error
+        }
         RuntimeError::Host(why) => ApiError::new(
             ErrorCode::ProviderUnavailable,
-            format!("the host could not stop its runtime: {why}"),
+            format!("The runtime's host could not do it: {why}"),
         ),
         RuntimeError::Internal(error) => ApiError::engine(error),
     }
@@ -417,23 +441,70 @@ async fn start(ctx: Ctx, (): (), _body: api::ProviderStartStopBody) -> ApiResult
 
 /// Stops a managed provider's runtime by hand and keeps it with its `state` volume: refused while a
 /// turn runs on the provider, unless the request says to interrupt it.
-async fn stop(ctx: Ctx, (): (), body: api::ProviderStartStopBody) -> ApiResult<Provider> {
+async fn stop(
+    ctx: Ctx,
+    (): (),
+    body: api::ProviderStartStopBody,
+) -> ApiResult<api::ProviderStopResponse> {
     let id = ctx.id("id")?;
-    let (ctx, tx, principal) = super::begin_mutation(&ctx).await?;
-    ctx.app
-        .engine
-        .stop_provider_runtime_in(
-            tx,
-            &principal,
-            &crate::sign_in::origin(&ctx),
-            id,
-            body.interrupt.unwrap_or(false),
-        )
+    let (ctx, mut tx, principal) = super::begin_mutation(&ctx).await?;
+    let caller = orch_engine::commands::provider_unit::admit(&mut tx, principal.caller(), id)
         .await
-        .map_err(refused)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    show(&ctx, &mut conn, &principal, id).await
+        .map_err(ApiError::engine)?;
+    let principal = orch_authz::Principal::load(&mut tx, caller, principal.now())
+        .await
+        .map_err(orch_engine::EngineError::from)
+        .map_err(ApiError::engine)?;
+    let captured =
+        orch_authz::CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let http =
+        crate::key_operations::native::http_origin::capture_operation(&ctx, &mut tx, &captured)
+            .await?;
+    let accepted = principal.caller().clone();
+    http.scope(ctx.app.engine.stop_provider_runtime_forced_in(
+        tx,
+        &principal,
+        &crate::sign_in::origin(&ctx),
+        id,
+        body.interrupt.unwrap_or(false),
+        body.force.unwrap_or(false),
+    ))
+    .await
+    .map_err(refused)?;
+    let receipt = api::ProviderStopResponse::Receipt(api::ProviderStopReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        provider_id: id,
+    });
+    crate::key_operations::publication::receipt(&ctx, &receipt)?;
+    let projection = ctx.clone();
+    let provider = crate::key_operations::completed_projection::run(&ctx, async {
+        let mut reading = ctx.app.db.begin_snapshot().await?;
+        let provider = super::provider_projection::read(
+            &ctx,
+            &mut reading,
+            &accepted,
+            id,
+            move |conn, reader, prepared| {
+                Box::pin(async move {
+                    match prepared {
+                        Some(prepared) => {
+                            super::providers::show_prepared(&projection, conn, reader, prepared)
+                                .await
+                        }
+                        None => super::providers::show(&projection, conn, reader, id).await,
+                    }
+                })
+            },
+        )
+        .await?;
+        reading.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(provider)
+    })
+    .await?;
+    Ok(match provider {
+        Some(provider) => api::ProviderStopResponse::full(provider),
+        None => receipt,
+    })
 }
 
 /// What a refusal to bring a credential home is to the caller.
@@ -450,5 +521,42 @@ pub(super) fn not_home(error: ReturnError) -> ApiError {
         .with("running", running),
         ReturnError::Failed(why) => ApiError::new(ErrorCode::CredentialReturnFailed, why),
         ReturnError::Internal(error) => ApiError::engine(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch_engine::provider_runtime::{Hold, HoldWhy};
+
+    fn word<'a>(error: &'a ApiError, member: &str) -> Option<&'a str> {
+        error
+            .problem
+            .extra
+            .get(member)
+            .and_then(serde_json::Value::as_str)
+    }
+
+    #[test]
+    fn a_hold_is_answered_with_its_word_the_work_and_the_step_and_whether_forcing_changes_it() {
+        let own = refused(RuntimeError::Held(Hold::own_work(
+            "update",
+            "replace".to_owned(),
+        )));
+        assert_eq!(own.problem.code, ErrorCode::ProviderUnavailable);
+        assert_eq!(word(&own, "reason"), Some("own_work"));
+        assert_eq!(word(&own, "work"), Some("update"));
+        assert_eq!(word(&own, "step"), Some("replace"));
+        assert_eq!(
+            own.problem.extra.get("can_force"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let other = refused(RuntimeError::Held(Hold::of(HoldWhy::OtherWork)));
+        assert_eq!(word(&other, "reason"), Some("other_work"));
+        assert_eq!(
+            other.problem.extra.get("can_force"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert!(other.problem.extra.get("work").is_none());
     }
 }

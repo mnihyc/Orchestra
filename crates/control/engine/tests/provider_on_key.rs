@@ -306,6 +306,164 @@ async fn a_second_turn_opens_its_own_lease_and_does_not_start_the_provider_again
     assert_eq!(leases, 2);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_turn_whose_open_session_refuses_its_new_model_connection_opens_the_session_again_and_starts()
+ {
+    use orch_link_contract::commands::SessionMode;
+    let world = World::on_a_key(KEY).await;
+    let thread = world.thread("Later turns").await;
+    let ada = Caller::session(world.ada);
+    world
+        .engine()
+        .submit_input(&ada, thread, queued("First"))
+        .await
+        .unwrap();
+    world.run_turn(thread, 0, "One.").await;
+    world.wait_ran(CommandKind::LeaseClose, 1).await;
+    world.wait_state(thread, "idle").await;
+
+    // The program keeps its session but does not take the second lease's connection in place: what the connector
+    // answered on the install once the first lease's model member had been withdrawn at that turn's end.
+    world.refuse(
+        CommandKind::SessionOpen,
+        vec![CommandError::new(
+            ErrorCode::Conflict,
+            "the accepted model transport was superseded or closed",
+        )],
+    );
+    world
+        .engine()
+        .submit_input(&ada, thread, queued("Second"))
+        .await
+        .unwrap();
+    // The second turn starts as the first did: its session is opened again, with the connection of its own lease.
+    let second = world.run_turn(thread, 1, "Two.").await;
+    world.wait_ran(CommandKind::LeaseClose, 2).await;
+    let opens: Vec<_> = world
+        .seen
+        .of_kind(CommandKind::SessionOpen)
+        .into_iter()
+        .map(|command| {
+            let Command::SessionOpen(open) = command else {
+                unreachable!()
+            };
+            open
+        })
+        .collect();
+    assert_eq!(
+        opens.iter().filter(|open| open.transport_only).count(),
+        1,
+        "the connection was asked for in place once: {}",
+        session_open_evidence(&world)
+    );
+    let full: Vec<_> = opens.iter().filter(|open| !open.transport_only).collect();
+    assert_eq!(full.len(), 2, "{}", session_open_evidence(&world));
+    assert_eq!(full[1].mode, SessionMode::Resume);
+    assert_eq!(full[1].segment_id, full[0].segment_id);
+    let lease: Option<Id> = world
+        .scalar("SELECT lease_id FROM turns WHERE id = $1", second.turn_id)
+        .await;
+    let lease = lease.expect("the second turn has a lease of its own");
+    assert!(
+        serde_json::to_string(&full[1].provider)
+            .unwrap()
+            .contains(&lease.to_string()),
+        "the session is opened again with the second lease's connection"
+    );
+    // A person changed nothing, so nothing on the thread says that the session was opened again.
+    let reopened = world
+        .count(
+            "SELECT count(*) FROM items WHERE thread_id = $1 AND kind = 'marker' AND payload::text LIKE '%session_reopened%'",
+            thread,
+        )
+        .await;
+    assert_eq!(reopened, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_turn_whose_open_session_the_link_no_longer_holds_live_opens_the_session_again_and_starts()
+ {
+    let world = World::on_a_key(KEY).await;
+    let thread = world.thread("Closed since").await;
+    let ada = Caller::session(world.ada);
+    world
+        .engine()
+        .submit_input(&ada, thread, queued("First"))
+        .await
+        .unwrap();
+    world.run_turn(thread, 0, "One.").await;
+    world.wait_ran(CommandKind::LeaseClose, 1).await;
+    world.wait_state(thread, "idle").await;
+
+    // The link's record of the open session says that it is no longer live (it was closed since): the new
+    // connection cannot be admitted in place. The start once asked for it again without end, at "Getting a
+    // credential".
+    world
+        .exec(&format!(
+            "UPDATE native_session_states SET delivered_resources = jsonb_set(delivered_resources, '{{tool_admission,live}}', 'false'::jsonb) WHERE thread_id = '{thread}'"
+        ))
+        .await;
+    world
+        .engine()
+        .submit_input(&ada, thread, queued("Second"))
+        .await
+        .unwrap();
+    // The second turn opens its session again, with the connection of its own lease, and starts.
+    world.run_turn(thread, 1, "Two.").await;
+    world.wait_ran(CommandKind::LeaseClose, 2).await;
+    let full = world
+        .seen
+        .of_kind(CommandKind::SessionOpen)
+        .into_iter()
+        .filter(|command| matches!(command, Command::SessionOpen(open) if !open.transport_only))
+        .count();
+    assert_eq!(full, 2, "{}", session_open_evidence(&world));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_turn_whose_session_cannot_take_its_new_model_connection_or_be_opened_again_fails_with_the_programs_words()
+ {
+    let world = World::on_a_key(KEY).await;
+    let thread = world.thread("Refused twice").await;
+    let ada = Caller::session(world.ada);
+    world
+        .engine()
+        .submit_input(&ada, thread, queued("First"))
+        .await
+        .unwrap();
+    world.run_turn(thread, 0, "One.").await;
+    world.wait_ran(CommandKind::LeaseClose, 1).await;
+    world.wait_state(thread, "idle").await;
+
+    let refusal = CommandError::new(ErrorCode::Conflict, "the program is not taking sessions");
+    world.refuse(
+        CommandKind::SessionOpen,
+        vec![refusal.clone(), refusal.clone()],
+    );
+    let sent = world
+        .engine()
+        .submit_input(&ada, thread, queued("Second"))
+        .await
+        .unwrap();
+    // The in-place connection and the new opening were both refused: the start ends, saying so, and is not retried
+    // without end as if the database were down.
+    world.wait_state(thread, "blocked").await;
+    let error: Option<String> = world
+        .scalar(
+            "SELECT error::text FROM turns WHERE thread_id = $1 ORDER BY ordinal DESC LIMIT 1",
+            thread,
+        )
+        .await;
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("the program is not taking sessions")),
+        "{error:?}"
+    );
+    assert_eq!(world.ran(CommandKind::TurnStart), 1);
+    assert_ne!(world.input_state(sent.input.id).await.0, "delivered");
+}
+
 // ---------------------------------------------------------------- the key on a machine of its own
 
 use common::Added;
@@ -460,6 +618,65 @@ async fn a_provider_whose_machine_is_away_blocks_its_threads_and_they_go_on_when
         .await;
     assert_eq!(status, "ready");
     assert_eq!(keeper.seen.of_kind(CommandKind::ProviderStart).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_online_flag_cannot_spend_an_input_while_the_key_keeper_has_no_session() {
+    let world = World::on_a_key(KEY).await;
+    let keeper = keep_the_key_elsewhere(&world).await;
+    let thread = world.thread("Waiting for the key keeper").await;
+    world.hub.set_api_down(true);
+    world.hub.disconnect(keeper.id);
+    world.wait_for_presence_words(keeper.id, 2).await;
+    assert!(world.hub.session_of(keeper.id).is_none());
+    assert!(world.hub.session_of(world.machine_id).is_some());
+
+    // Reproduce a missed disconnect while the harness remains reachable.
+    world.set_machine_online(keeper.id, true).await;
+    world
+        .exec(&format!(
+            "UPDATE providers SET status='ready' WHERE id='{}'",
+            world.provider
+        ))
+        .await;
+    let sent = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Read the file"))
+        .await
+        .unwrap();
+    world.wait_blocked(thread, "provider_unavailable").await;
+    common::eventually("the provider shows the missing keeper", || async {
+        world
+            .scalar::<String>("SELECT status FROM providers WHERE id=$1", world.provider)
+            .await
+            == "offline"
+    })
+    .await;
+    assert_eq!(world.input_state(sent.input.id).await.0, "pending");
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
+            .await,
+        0
+    );
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM leases WHERE thread_id=$1", thread)
+            .await,
+        0
+    );
+    assert!(world.ordered().is_empty());
+
+    world.hub.set_api_down(false);
+    world.run_turn(thread, 0, "The file contents").await;
+    assert_eq!(keeper.seen.of_kind(CommandKind::LeaseOpen).len(), 1);
+    assert_eq!(world.ran(CommandKind::TurnStart), 1);
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
+            .await,
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

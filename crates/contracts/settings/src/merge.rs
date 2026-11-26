@@ -387,6 +387,19 @@ fn number_cmp(one: &Json, other: &Json) -> Option<std::cmp::Ordering> {
     one.as_f64()?.partial_cmp(&other.as_f64()?)
 }
 
+/// Whether a schema-valid value would loosen an explicit numeric ceiling.
+/// Use the same exact decimal ordering and unbounded spellings as resolution.
+#[must_use]
+pub fn exceeds_ceiling(def: &SettingDef, proposed: &Json, ceiling: &Json) -> bool {
+    if def.merge != Merge::Min || ceiling.is_null() || def.zero_means_no_limit() && is_zero(ceiling)
+    {
+        return false;
+    }
+    proposed.is_null()
+        || def.zero_means_no_limit() && is_zero(proposed)
+        || number_cmp(proposed, ceiling).is_some_and(|order| order.is_gt())
+}
+
 fn bound<'r, 'a, N>(
     def: &SettingDef,
     default: Option<Json>,
@@ -518,15 +531,29 @@ mod tests {
         // EN: system Ask models A/B > org tries C or reverses B/A; only parent
         // identities survive, in system order. Remove A to choose B as default.
         // 中文：系统允许 A/B > 组织尝试 C 或改为 B/A；只能保留父级允许项及顺序，移除 A 才能默认 B。
-        let first = json!({"provider_id":new_id(),"model":"first"});
-        let second = json!({"provider_id":new_id(),"model":"second"});
-        let extra = json!({"provider_id":new_id(),"model":"extra"});
+        let offering = json!({"provider":new_id(),"offering":"shared"});
+        let first =
+            json!({"backend":{"route":"provider.generate","offering":offering,"config":null}});
+        let second = json!({"backend":{"route":"ask.delegation","offering":offering,"config":{"environment_id":new_id()}}});
+        let extra = json!({"backend":{"route":"ask.delegation","offering":offering,"config":{"environment_id":new_id()}}});
         let parent = json!([first, second]);
-        let child = json!([second, first, extra]);
+        let child = crate::registry::canonical_value(
+            keys::ASK_MODELS,
+            &json!([second, {"backend":{"route":"provider.generate","offering":offering}}, extra]),
+        );
         let node = new_id();
         let definition = def(keys::ASK_MODELS);
         assert_eq!(definition.class, Class::Policy);
         assert_eq!(definition.merge, Merge::Intersect);
+        assert!(crate::registry::validate_at(keys::ASK_MODELS, Scope::System, &parent).is_ok());
+        assert!(
+            crate::registry::validate_at(
+                keys::ASK_MODELS,
+                Scope::Org,
+                &json!([{"backend":{"route":"ask.delegation"}}])
+            )
+            .is_err()
+        );
         assert_eq!(
             resolve(
                 definition,

@@ -21,6 +21,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use orch_types::Hash;
 
+use crate::lifetime::{Lifetimes, Publication, Retirement};
 use crate::range::{BlobMeta, ByteRange, ResolvedRange};
 
 /// Content as a stream of pieces; the error of a piece ends the stream.
@@ -62,14 +63,55 @@ pub enum BlobError {
     Io(String),
 }
 
-/// What storing content did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A physical publication receipt. Keep it until metadata has taken custody of its bytes.
+/// Dropping the receipt lets reference-checked retirement proceed; it does not itself delete data.
+#[derive(Clone)]
 pub struct Stored {
     /// The blob.
     pub meta: BlobMeta,
-    /// Whether this write made it; `false` when it was there already (or another writer made it first).
+    /// Whether this write created it.
     pub created: bool,
+    _publication: Option<Publication>,
 }
+
+impl Stored {
+    /// Ends physical publication after metadata has committed its custody, keeping the copyable description.
+    pub fn into_meta(self) -> BlobMeta {
+        self.meta
+    }
+    /// The result produced under a store's checked publication guard.
+    pub fn new(meta: BlobMeta, created: bool) -> Self {
+        Self {
+            meta,
+            created,
+            _publication: None,
+        }
+    }
+    fn held(mut self, publication: Publication) -> Self {
+        self._publication = Some(publication);
+        self
+    }
+}
+impl std::ops::Deref for Stored {
+    type Target = BlobMeta;
+    fn deref(&self) -> &Self::Target {
+        &self.meta
+    }
+}
+impl std::fmt::Debug for Stored {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stored")
+            .field("meta", &self.meta)
+            .field("created", &self.created)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for Stored {
+    fn eq(&self, other: &Self) -> bool {
+        self.meta == other.meta && self.created == other.created
+    }
+}
+impl Eq for Stored {}
 
 /// What reading a blob gives: the blob, which of its bytes, and those bytes.
 pub struct BlobRead {
@@ -93,6 +135,9 @@ impl std::fmt::Debug for BlobRead {
 /// One implementation, used by `orch-api`, which owns the store.
 #[async_trait]
 pub trait BlobStore: Send + Sync + 'static {
+    /// The same coordinator is returned by every handle and forwarding wrapper of this store.
+    fn lifetimes(&self) -> &Lifetimes;
+
     /// Stores `content` under `hash`, after checking that it hashes to it and, where `size` is stated, that
     /// it has that many bytes. A wrong one is refused and leaves nothing. A blob that is there already is
     /// not an error: the store keeps one, and `created` is `false`.
@@ -101,6 +146,28 @@ pub trait BlobStore: Send + Sync + 'static {
         hash: &Hash,
         size: Option<i64>,
         content: ByteStream,
+    ) -> Result<Stored, BlobError> {
+        let publication = self.lifetimes().publishing(*hash).await?;
+        let stored = self.put_held(hash, size, content, &publication).await?;
+        Ok(stored.held(publication))
+    }
+
+    /// Protects existing physical content until its caller records the reference it promised to use.
+    async fn existing(&self, hash: &Hash) -> Result<Option<Stored>, BlobError> {
+        let publication = self.lifetimes().publishing(*hash).await?;
+        Ok(self
+            .size(hash)
+            .await?
+            .map(|size| Stored::new(BlobMeta { hash: *hash, size }, false).held(publication)))
+    }
+
+    /// Implements physical publication under the guard acquired by `put`.
+    async fn put_held(
+        &self,
+        hash: &Hash,
+        size: Option<i64>,
+        content: ByteStream,
+        publication: &Publication,
     ) -> Result<Stored, BlobError>;
 
     /// Reads a blob, whole or the range asked for. A range that holds no byte of it is
@@ -114,7 +181,13 @@ pub trait BlobStore: Send + Sync + 'static {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError>;
 
     /// Removes the blob. `true` if it was there; removing one that is not is no error.
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError>;
+    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
+        let retirement = self.lifetimes().retiring(*hash).await?;
+        self.delete_held(hash, &retirement).await
+    }
+
+    /// Removes physical bytes while the caller retains exclusion through its metadata recheck.
+    async fn delete_held(&self, hash: &Hash, retirement: &Retirement) -> Result<bool, BlobError>;
 }
 
 /// The path of a blob below the store's root: `blobs/<hex[0:2]>/<hex[2:4]>/<hex>`. The first two pairs of
@@ -208,17 +281,24 @@ mod tests {
     /// A store in memory: the least that keeps the contract.
     #[derive(Default)]
     struct Memory {
+        lifetimes: Lifetimes,
         blobs: Mutex<BTreeMap<Hash, Bytes>>,
     }
 
     #[async_trait]
     impl BlobStore for Memory {
-        async fn put(
+        fn lifetimes(&self) -> &crate::lifetime::Lifetimes {
+            &self.lifetimes
+        }
+
+        async fn put_held(
             &self,
             hash: &Hash,
             size: Option<i64>,
             content: ByteStream,
+            publication: &crate::lifetime::Publication,
         ) -> Result<Stored, BlobError> {
+            publication.check(self.lifetimes(), hash)?;
             let mut verifier = Verifier::new(*hash, size);
             let mut all = Vec::new();
             let mut content = content;
@@ -234,7 +314,7 @@ mod tests {
                 .unwrap()
                 .insert(*hash, Bytes::from(all))
                 .is_none();
-            Ok(Stored { meta, created })
+            Ok(Stored::new(meta, created))
         }
         async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
             let blobs = self.blobs.lock().unwrap();
@@ -265,7 +345,12 @@ mod tests {
                 .get(hash)
                 .map(|content| i64::try_from(content.len()).unwrap()))
         }
-        async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
+        async fn delete_held(
+            &self,
+            hash: &Hash,
+            retirement: &crate::lifetime::Retirement,
+        ) -> Result<bool, BlobError> {
+            retirement.check(self.lifetimes(), hash)?;
             Ok(self.blobs.lock().unwrap().remove(hash).is_some())
         }
     }
@@ -300,6 +385,7 @@ mod tests {
             block_on(store.get(&hash, Some(ByteRange::From { start: 12 }))).unwrap_err(),
             BlobError::RangeNotSatisfiable { size: 12 }
         );
+        drop(stored);
         assert_eq!(block_on(store.delete(&hash)), Ok(true));
         assert_eq!(
             block_on(store.delete(&hash)),

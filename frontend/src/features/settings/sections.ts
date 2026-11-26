@@ -16,7 +16,7 @@ export function isTopicSection(value: unknown): value is TopicSection {
   return typeof value === 'string' && (TOPIC_SECTIONS as readonly string[]).includes(value);
 }
 
-/** destinations remains an addressed alias; the org's actual navigation offers Outside only once. */
+/** destinations remains an addressed alias; the org's actual navigation offers its channels only once. */
 export function orgSections(flat = false): readonly (typeof ORG_SECTIONS)[number][] {
   return ORG_SECTIONS.filter((section) => section !== 'destinations' && (section !== 'departments' || !flat));
 }
