@@ -45,9 +45,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let secret = orch_api_core::middleware::authentication::new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -92,6 +90,7 @@ impl Scene {
             .call(EnvironmentMcpImportCreate, &[&env])
             .token(&c.admin.token)
             .body(&EnvironmentMcpImportCreateBody {
+                origin: None,
                 source: "codex".into(),
                 scope: McpScope::User,
                 name: "search".into(),

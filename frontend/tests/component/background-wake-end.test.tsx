@@ -10,7 +10,7 @@ import { show } from './support';
 
 vi.mock('@/api/background', () => ({ fetchBackground: vi.fn(), endBackground: vi.fn() }));
 vi.mock('@/api/forks', () => ({ jobQuery: (id: string) => ({ queryKey: ['job', id], queryFn: () => Promise.reject(new Error('No job was requested')) }), isOver: () => false }));
-vi.mock('@/realtime/live', () => ({ socket: { status: { getState: () => ({ phase: 'ready' }), subscribe: () => () => undefined } } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { status: { getState: () => ({ phase: 'ready' }), subscribe: () => () => undefined } } }));
 
 const command: BackgroundCommand = { id: 'reviewed-native-end', segment_id: 'origin-segment', turn_id: null, item_id: null, command: 'Build web',
   command_truncated: false, cwd: null, cwd_redacted: false, place: 'environment', since: null, cpu_percent: null, memory_bytes: null };
@@ -86,8 +86,8 @@ it.each(['en', 'zh-CN'] as const)('uses the same captured review and explicit En
   const confirmation = await screen.findByRole('alertdialog', { name: i18n.t('running.confirmTitle') });
   expect(within(confirmation).getByText(i18n.t('running.confirmDetail', { count: 1 }))).toBeVisible();
   expect(confirmation).toHaveTextContent(locale === 'en'
-    ? 'Orch sends no model prompt; the harness may tell the model the work ended.'
-    : 'Orch 不会向模型发送提示；运行程序仍可能通知模型任务已结束。');
+    ? 'Orch sends no model prompt; the agent program may tell the model the work ended.'
+    : 'Orch 不会向模型发送提示；智能体程序仍可能通知模型任务已结束。');
   await userEvent.click(within(confirmation).getByRole('button', { name: i18n.t('running.confirm', { count: 1 }) }));
   expect(endBackground).toHaveBeenCalledWith('thread-background', { list_ref: 'fresh-caller-review', command_ids: [command.id] }, expect.any(String));
 });
