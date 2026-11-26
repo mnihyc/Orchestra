@@ -91,6 +91,7 @@ pub(crate) async fn worded(conn: &mut Conn, preview: Preview) -> ApiResult<api::
     )
     .unwrap_or(i64::MAX);
     Ok(api::PagePreview {
+        server_host_use: None,
         owner_reads: None,
         pages: preview.pages,
         orgs: preview.orgs,
@@ -139,6 +140,12 @@ pub async fn page(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult<api::Pag
     )
     .await
     .map_err(ApiError::internal)?;
+    let server_host = match named.thing {
+        things::Thing::Other(object) => {
+            crate::server_host_use::Before::take(&mut tx, &principal, object, &body).await?
+        }
+        _ => None,
+    };
     let previewed: Result<Preview, ChangeError> = async {
         match named.thing {
             things::Thing::Node(_) => {
@@ -169,6 +176,9 @@ pub async fn page(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult<api::Pag
     .await;
     let mut answer = answered(&mut tx, previewed).await;
     if let Ok(answer) = &mut answer {
+        if let Some(before) = server_host {
+            answer.server_host_use = before.disclosure(&mut tx, &principal).await?;
+        }
         answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
     }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended
@@ -200,6 +210,8 @@ pub async fn node_defaults(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult
         true,
     )
     .await?;
+    let server_hosts =
+        crate::server_host_use::Before::defaults(&mut tx, &principal, Some(id), &body).await?;
     let before = Before::take(
         &mut tx,
         &principal,
@@ -224,6 +236,7 @@ pub async fn node_defaults(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult
     let mut answer = answered(&mut tx, previewed).await;
     if let Ok(answer) = &mut answer {
         answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
+        answer.server_host_use = server_hosts.disclosure(&mut tx, &principal).await?;
     }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended
     // without being committed.
@@ -249,6 +262,8 @@ pub async fn admin_defaults(
         &("system-defaults", &body),
     )
     .await?;
+    let server_hosts =
+        crate::server_host_use::Before::defaults(&mut tx, &principal, None, &body).await?;
     let before = Before::take(
         &mut tx,
         &principal,
@@ -259,6 +274,7 @@ pub async fn admin_defaults(
     .map_err(ApiError::internal)?;
     let mut trial = access::begin_trial(&mut tx).await?;
     let mut owner_reads = None;
+    let mut server_host_use = None;
     let previewed: Result<Preview, ChangeError> = async {
         pages::change(
             &mut trial,
@@ -279,6 +295,10 @@ pub async fn admin_defaults(
             .disclosure(&ctx.app, &mut trial)
             .await
             .map_err(|error| ChangeError::Engine(orch_authz::Error::Stored(error.to_string())))?;
+        server_host_use = server_hosts
+            .disclosure(&mut trial, &principal)
+            .await
+            .map_err(|error| ChangeError::Engine(orch_authz::Error::Stored(error.to_string())))?;
         Ok(preview)
     }
     .await;
@@ -286,6 +306,7 @@ pub async fn admin_defaults(
     let mut answer = answered(&mut tx, previewed).await;
     if let Ok(answer) = &mut answer {
         answer.owner_reads = owner_reads;
+        answer.server_host_use = server_host_use;
     }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended
     // without being committed.

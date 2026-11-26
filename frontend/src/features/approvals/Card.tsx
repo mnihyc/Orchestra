@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 
 import { approvalOutcome } from '@/features/approvals/current';
 import type { Approval, ApprovalKind, RequestDecisionStatus, UserRef } from '@/generated/api-types';
+import { ApprovalDeliveryFacts, approvalDeliveryFragment } from '@/features/approvals/DeliveryFacts';
 import { capabilityName } from '@/features/resources/capabilityWords';
 import { useNodePath } from '@/realtime/stores/tree';
 import { Badge } from '@/ui/Badge';
@@ -129,6 +130,7 @@ export function DecisionStatus({approval,source,line}:{approval:Approval;source?
     {at !== null && <><span aria-hidden>·</span><RelativeTime at={at} /></>}
     {note!==undefined&&note!==null&&note!==''&&<span className="wrap-anywhere">{note}</span>}
     {application?.state==='failed'&&application.reason&&<span className="wrap-anywhere text-danger">{application.reason}</span>}
+    {approval !== undefined && approvalDeliveryFragment(approval,t) !== null && <span>{approvalDeliveryFragment(approval,t)}</span>}
   </span>;
 }
 
@@ -204,6 +206,8 @@ export function CardFrame({
           <Title className="text-base font-semibold wrap-anywhere text-text">{subject}</Title>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
             <Requester approval={approval} placed={placed} />
+            {approval.state==='pending' && (approval.expires_at!==null ? <span className="inline-flex items-center gap-1 text-text-muted"><span>{t('approvals.decisionUntil')}</span><RelativeTime at={approval.expires_at}/></span>
+              : approval.kind==='harness' ? <span className="text-text-muted">{t('approvals.whileAgentWaits')}</span> : null)}
             {where !== null && (approval.thread_id === null ? (
                   <span className="text-text-muted">{where}</span>
                 ) : (
@@ -254,7 +258,7 @@ export function DecidedCard({ approval, meanwhile = false, children }: { approva
           {t('approvals.quick.alreadyDecided')}
         </p>
       )}
-      {open && <div className="flex flex-col gap-2 text-sm text-text-muted">{children}</div>}
+      {open && <div className="flex flex-col gap-2 text-sm text-text-muted">{children}<ApprovalDeliveryFacts approval={approval} /></div>}
     </section>
   );
 }

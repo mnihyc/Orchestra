@@ -1,7 +1,7 @@
 /** Readers see one failure for repeated attempts and one owner for the next action. */
 import { describe, expect, it } from 'vitest';
 import type { Item, Thread, Turn } from '@/generated/api-types';
-import { failureGroup, hiddenFailureItem, manualFailureActions } from '@/features/timeline/failures';
+import { failureGroup, hiddenFailureItem, manualFailureActions, sameFailure, turnFailureWords } from '@/features/timeline/failures';
 import { buildRows } from '@/features/timeline/rows';
 import { EMPTY_VIEW, viewFromRows } from '@/realtime/stores/thread';
 import { errorItem, turn, userMessage } from '../doubles/thread-rows';
@@ -20,13 +20,38 @@ const view = (turns: Turn[], items: Item[] = [], blocked = false) => viewFromRow
 }, false);
 
 describe('failure ownership', () => {
+  it('keeps each recorded native attempt visible when Diagnostics is requested', () => {
+    const ended = failed('failed', 1);
+    const errors = [native('attempt-one', ended.id), native('attempt-two', ended.id)];
+    const rows = buildRows(view([ended], errors), { detail: 'diagnostics', hideHistory: false, meId: null });
+    expect(rows.flatMap((row) => row.kind === 'item' ? [row.id] : [])).toEqual(['attempt-one', 'attempt-two']);
+    expect(rows.at(-1)).toMatchObject({ kind: 'footer', turnId: ended.id });
+  });
+
+  it.each([
+    ['MCP servers', 'mcp_server_failed', 'mcp_startup', 'server'],
+    ['managed settings', 'harness_diverged', 'managed_setting', 'setting'],
+  ])('keeps failures of different %s separate in the same turn', (_label, code, change, member) => {
+    const notice = (id: string, subject: string): Extract<Item, { kind: 'error' }> => {
+      const item = errorItem(id, 'The native program reported a failure', { code, turn: 'done' });
+      if (item.kind !== 'error') throw new Error('The fixture is a notice');
+      return { ...item, payload: { ...item.payload, details: { change, [member]: subject } } };
+    };
+    const first = notice('first-notice', 'first');
+    const second = notice('second-notice', 'second');
+    const held = view([turn('done', { ordinal: 1, inputId: 'input', state: 'completed' })], [first, second]);
+    expect(hiddenFailureItem(held, first)).toBe(false);
+    expect(hiddenFailureItem(held, second)).toBe(false);
+    expect(sameFailure(first.payload, second.payload)).toBe(false);
+  });
+
   it('uses the terminal footer once and counts native repeated attempts even without their finer refusal reason', () => {
     const ended = failed('failed', 1);
     const errors = [native('attempt-one', ended.id), native('attempt-two', ended.id)];
     const held = view([ended], errors);
     expect(errors.every((item) => hiddenFailureItem(held, item))).toBe(true);
     expect(failureGroup(held, ended)).toEqual({ owner: ended.id, attempts: 2 });
-    expect(buildRows(held, { detail: 'steps', hideHistory: false, foldOpened: new Set(), meId: null })).toEqual([{ kind: 'footer', key: 'footer:failed', turnId: 'failed' }]);
+    expect(buildRows(held, { detail: 'normal', hideHistory: false, meId: null })).toEqual([{ kind: 'footer', key: 'footer:failed', turnId: 'failed' }]);
   });
 
   it('groups the same failure across derived continuations but keeps an independently authored failure separate', () => {
@@ -73,5 +98,26 @@ describe('failure ownership', () => {
     const held = view([ended]);
     expect(manualFailureActions({ ...held, hasNewer: true }, ended)).toBe(false);
     expect(manualFailureActions({ ...held, thread: { ...held.thread!, current_turn_id: 'new-native-turn' } }, ended)).toBe(false);
+  });
+});
+
+describe('a failed agent program', () => {
+  it('folds the program\'s own error into the turn\'s one failure instead of a second generic row', () => {
+    const ended: Turn = { ...turn('program-failed', { ordinal: 1, inputId: 'asked', state: 'failed' }),
+      error: { code: 'harness_error', message: 'The agent program could not finish its work.', retryable: false, incomplete: false, window: null, said: null, resets_at: null } };
+    const reported = errorItem('program-error', 'line 3: "footer.tsx" is not a directive', { turn: ended.id, code: 'fake.script' });
+    const held = view([ended], [reported]);
+    expect(hiddenFailureItem(held, reported)).toBe(true);
+    const rows = buildRows(held, { detail: 'normal', hideHistory: false, meId: null });
+    expect(rows.flatMap((row) => row.kind === 'item' ? [row.id] : [])).not.toContain('program-error');
+    expect(turnFailureWords(held, ended)).toEqual(['line 3: "footer.tsx" is not a directive']);
+  });
+
+  it('keeps a notice the program raised beside its failure as a failure of its own', () => {
+    const ended: Turn = { ...turn('program-failed', { ordinal: 1, inputId: 'asked', state: 'failed' }),
+      error: { code: 'harness_error', message: 'The agent program could not finish its work.', retryable: false, incomplete: false, window: null, said: null, resets_at: null } };
+    const notice = errorItem('mcp-notice', 'The server did not start', { turn: ended.id, code: 'mcp_server_failed' });
+    expect(hiddenFailureItem(view([ended], [notice]), notice)).toBe(false);
+    expect(turnFailureWords(view([ended], [notice]), ended)).toEqual([]);
   });
 });
