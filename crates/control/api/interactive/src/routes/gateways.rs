@@ -45,7 +45,11 @@ use orch_link_contract::gateways::GatewaySelection;
 use orch_link_contract::gateways::GatewayStatusReport;
 
 use orch_link_contract::gateways::TunnelPlan;
+
+#[path = "gateways/public_addresses.rs"]
+mod public_addresses;
 pub fn mount(registry: &mut Registry) {
+    public_addresses::mount(registry);
     registry
         .on_with_operation(
             api::GatewayCatalogueGet,
@@ -246,7 +250,8 @@ async fn machine(ctx: Ctx, (): (), (): ()) -> ApiResult<api::ConnectorGatewaySta
 async fn thread(ctx: Ctx, (): (), (): ()) -> ApiResult<api::ThreadTunnelGatewayStatus> {
     let id = ctx.id("thread_id")?;
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let status = thread_in(&ctx, &mut tx, id).await?;
+    let principal = authorization::principal(&ctx, &mut tx).await?;
+    let status = thread_in(&ctx, &mut tx, &principal, id).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(status)
 }
@@ -255,12 +260,12 @@ async fn thread(ctx: Ctx, (): (), (): ()) -> ApiResult<api::ThreadTunnelGatewayS
 pub(crate) async fn thread_in(
     ctx: &Ctx,
     conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
     id: orch_types::Id,
 ) -> ApiResult<api::ThreadTunnelGatewayStatus> {
-    let principal = authorization::principal(ctx, conn).await?;
     let view = orch_authz::nodes::check_named(
         conn,
-        &principal,
+        principal,
         id,
         authorization::VIEW,
         orch_authz::Act::Use,

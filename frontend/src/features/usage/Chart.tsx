@@ -11,7 +11,7 @@ import type uPlot from 'uplot';
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { formatMeasure, formatScale } from '@/features/usage/figures';
+import { formatMeasure, scaleLabels } from '@/features/usage/figures';
 import { assignSlots, type Bars, REST_SLOT, SLOTS } from '@/features/usage/series';
 import type { Measure } from '@/features/usage/search';
 import { useAppearance } from '@/lib/appearance';
@@ -57,6 +57,28 @@ const READOUT_GAP = 12;
 /** How wide a bar is of the room its bucket has, and the widest it gets, in pixels: a bar leaves a little air on either side. */
 const BAR_SHARE = 0.78;
 const BAR_WIDEST_PX = 56;
+/** The narrowest a bar is drawn, in pixels: a week of hours on a phone leaves each under two, and a lone hour would not be seen. */
+export const BAR_NARROWEST_PX = 3;
+/** uPlot's bar size: the share of its bucket, the widest and the narrowest. */
+export const BAR_SIZE: [number, number, number] = [BAR_SHARE, BAR_WIDEST_PX, BAR_NARROWEST_PX];
+/** The width of the line of the surface between two stacks of a bar, in pixels. */
+const DIVIDER_PX = 1;
+
+/** Whether uPlot's bars leave out the dividing line of these bars: where the line would take half of a bar as uPlot measures it
+ * (the narrowest step between two buckets, less its gap when that gap is a pixel or more; uPlot 1.6's bars, `strokeWidth >= barWid / 2`),
+ * in canvas pixels at `pixelRatio`. uPlot then fills each bar with the line's colour instead of its own. */
+export function dividerLeftOut(self: Pick<uPlot, 'data' | 'valToPos'>, pixelRatio: number): boolean {
+  const xs = self.data[0];
+  let step = Infinity;
+  for (let at = 1; at < xs.length; at += 1) {
+    const here = xs[at], before = xs[at - 1];
+    if (here === undefined || before === undefined) continue;
+    step = Math.min(step, Math.abs(self.valToPos(here, 'x', true) - self.valToPos(before, 'x', true)));
+  }
+  if (!Number.isFinite(step)) return false;
+  const gap = step * (1 - BAR_SHARE);
+  return Math.round(DIVIDER_PX * pixelRatio) >= (step - (gap < 1 ? 0 : gap)) / 2;
+}
 
 /** Token hatching repeats at the same four-pixel spacing as the shared part bar. */
 const TOKEN_PATTERN_TILE = 4;
@@ -147,13 +169,17 @@ interface Hover {
   fromKeyboard: boolean;
 }
 
-function formatters(locale: string, bucket: Bars['bucket'], spanMs: number) {
+/** The words of the time scale (`tick`, for a stamp in seconds) and of the readout (`reading`, in milliseconds), in UTC. */
+export function timeWords(locale: string, bucket: Bars['bucket'], spanMs: number) {
   const make = (options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat(locale, { ...options, timeZone: 'UTC' });
-  const tick =
-    bucket === 'hour' ? make({ hour: 'numeric', minute: '2-digit' }) : bucket === 'month' ? make({ month: 'short', year: '2-digit' }) : spanMs > 400 * 86_400_000 ? make({ month: 'short', year: 'numeric' }) : make({ month: 'short', day: 'numeric' });
+  const day = make({ month: 'short', day: 'numeric' });
+  const hour = make({ hour: 'numeric', minute: '2-digit' });
+  const other = bucket === 'month' ? make({ month: 'short', year: '2-digit' }) : spanMs > 400 * 86_400_000 ? make({ month: 'short', year: 'numeric' }) : day;
+  // Hours name the day where one starts ("Nov 17", "6:00 AM", "12:00 PM"), so that a span of several days does not read "12:00 AM" at every day.
+  const tick = (stamp: number) => (bucket === 'hour' && stamp % 86_400 !== 0 ? hour : other).format(new Date(stamp * 1000));
   const reading =
     bucket === 'hour' ? make({ dateStyle: 'medium', timeStyle: 'short' }) : bucket === 'month' ? make({ month: 'long', year: 'numeric' }) : make({ weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
-  return { tick: (stamp: number) => tick.format(new Date(stamp * 1000)), reading: (ms: number) => reading.format(new Date(ms)) };
+  return { tick, reading: (ms: number) => reading.format(new Date(ms)) };
 }
 
 export function UsageChart({ label, bars, measure, onSelect, stale = false, height = DEFAULT_HEIGHT, className, empty, onColors }: UsageChartProps) {
@@ -209,7 +235,7 @@ export function UsageChart({ label, bars, measure, onSelect, stale = false, heig
     let cancelled = false;
     const build = (UPlot: typeof uPlot) => {
       const colors = readColors(element);
-      const words = formatters(locale, bars.bucket, spanMs);
+      const words = timeWords(locale, bars.bucket, spanMs);
       const endLabel = words.tick((last + lastWidth) / 1000);
       const barsPath = UPlot.paths.bars;
       let widestSeen = AXIS_PADDING + 24;
@@ -287,7 +313,7 @@ export function UsageChart({ label, bars, measure, onSelect, stale = false, heig
             grid: { stroke: colors.grid, width: 1 },
             ticks: { show: false },
             border: { show: false },
-            values: (_chart, splits) => splits.map((value) => formatScale(value, measure, locale)),
+            values: (_chart, splits) => scaleLabels(splits, measure, locale),
             size: (self, values, _axisIndex, cycle) => {
               if (cycle > 1) return widestSeen;
               widestSeen = labelRoom(self, values, 'right') + AXIS_PADDING;
@@ -304,10 +330,12 @@ export function UsageChart({ label, bars, measure, onSelect, stale = false, heig
             return {
               label: stack?.label ?? '',
               fill: stack?.look===undefined ? ink : tokenPattern(element,stack.look,ink),
-              // A line of the surface between two stacks, so that neighbours are told apart by more than their colour.
-              stroke: colors.surface,
-              width: 1,
-              paths: barsPath === undefined ? undefined : barsPath({ size: [BAR_SHARE, BAR_WIDEST_PX], radius: 0 }),
+              // A line of the surface between two stacks, so that neighbours are told apart by more than their colour. Where a bar is too
+              // narrow for that line (a week of hours on a phone), uPlot leaves the line out and fills the bar with the line's colour, which
+              // would be the surface and draw nothing: there the line is the bar's own colour.
+              stroke: (self) => dividerLeftOut(self, UPlot.pxRatio) ? ink : colors.surface,
+              width: DIVIDER_PX,
+              paths: barsPath === undefined ? undefined : barsPath({ size: BAR_SIZE, radius: 0 }),
               points: { show: false },
             };
           }),
@@ -403,7 +431,7 @@ export function UsageChart({ label, bars, measure, onSelect, stale = false, heig
     setHover(null);
   };
 
-  const words = useMemo(() => formatters(locale, bars.bucket, spanMs), [locale, bars.bucket, spanMs]);
+  const words = useMemo(() => timeWords(locale, bars.bucket, spanMs), [locale, bars.bucket, spanMs]);
   const readoutSide = hover !== null && width > 0 && hover.left > width / 2 ? 'right' : 'left';
   const rows = useMemo(() => sampleRows(bars.xs.length, bars.xs.length), [bars.xs.length]);
   const overallHighs=!showParts ? bars.stacks[0]?.highs : undefined;

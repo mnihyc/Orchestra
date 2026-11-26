@@ -187,16 +187,17 @@ async fn private_group_names_and_members_stay_hidden_and_visibility_changes_need
     );
 }
 async fn key(room: &Room, rule: Value) -> String {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let scope: orch_access_contract::key_scope::KeyScope =
         serde_json::from_value(json!({"rules":[rule]})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.cai.id(),
             name: "Public join fixture",
             token_hash: &token_hash(&secret),
@@ -310,5 +311,63 @@ async fn self_join_rechecks_privacy_after_the_actual_chat_row_wait() {
             .iter()
             .any(|row| row.user_id == room.cai.id() && row.is_in());
         assert_eq!(joined, !private);
+    }
+}
+
+#[tokio::test]
+async fn a_conversation_name_search_finds_either_end_before_its_page_fills() {
+    let room = Room::new().await;
+    for index in 0..13 {
+        room.group(
+            &room.bea,
+            &[&room.gus],
+            Some(&format!("Release {index:02}")),
+        )
+        .await;
+    }
+    for name in ["Release 00", "Release 12"] {
+        let page = room
+            .world
+            .app
+            .call(OrgChatList, &[&room.root])
+            .token(&room.bea.token)
+            .query(&OrgChatListQuery {
+                q: Some(name.into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].base.name.as_deref(), Some(name));
+        assert!(page.next_cursor.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_group_roster_search_uses_disclosed_people_before_its_page_fills() {
+    let room = Room::new().await;
+    let made = room
+        .group(&room.bea, &[&room.cai, &room.gus], Some("Roster"))
+        .await;
+    let members = made.members.as_ref().unwrap();
+    for person in members {
+        let page = room
+            .world
+            .app
+            .call(ChatGet, &[&made.base.id])
+            .token(&room.bea.token)
+            .query(&orch_api_contract::chats::ChatGetQuery {
+                members_q: Some(person.display_name.clone()),
+                members_limit: Some(1),
+                members_cursor: None,
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.members.as_ref().unwrap().len(), 1);
+        assert_eq!(page.members.as_ref().unwrap()[0].id, person.id);
+        assert!(page.members_next_cursor.is_none());
     }
 }
