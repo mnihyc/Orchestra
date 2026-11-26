@@ -6,13 +6,13 @@ import { ADMIN_PAGE_SIZE } from '@/api/admin';
 import type { AdminMessage, AdminMessageCreateBody, AdminMessageCreateResponse, AdminMessageListResponse } from '@/generated/api-types';
 
 export const sentMessagesKey = (org: string | null) => ['admin-messages', org ?? 'system'] as const;
-export const sentMessagesQuery = (org: string | null) => infiniteQueryOptions({
+export const sentMessagesQuery = (org: string | null, q='') => infiniteQueryOptions({
   ...(org === null ? ADMIN_QUERY : {}),
-  queryKey: sentMessagesKey(org),
+  queryKey: [...sentMessagesKey(org),q],
   initialPageParam: null as string | null,
   queryFn: ({ pageParam, signal }): Promise<AdminMessageListResponse> => org === null
-    ? ok(api.GET('/admin/messages', { params: { query: { limit: ADMIN_PAGE_SIZE, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal }))
-    : ok(api.GET('/orgs/{id}/messages', { params: { path: { id: org }, query: { limit: ADMIN_PAGE_SIZE, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal })),
+    ? ok(api.GET('/admin/messages', { params: { query: { limit: ADMIN_PAGE_SIZE,...(q===''?{}:{q}), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal }))
+    : ok(api.GET('/orgs/{id}/messages', { params: { path: { id: org }, query: { limit: ADMIN_PAGE_SIZE,...(q===''?{}:{q}), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal })),
   getNextPageParam: (page) => page.next_cursor,
 });
 

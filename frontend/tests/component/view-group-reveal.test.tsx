@@ -162,3 +162,39 @@ it.each(['en', 'zh-CN'] as const)('shows the final two complete rows without tra
     expect(body.scrollTop).toBe(91);
   } finally { await setLocale('en'); }
 });
+
+it.each([8, 20])('keeps the active view in sight after scroll restoration with %i tabs', (count) => {
+  const tabIds = Array.from({ length: count }, (_, index) => String(index));
+  const active = tabIds[count - 1]!;
+  show(<ViewGroup label="Open views" activeId={active} tabIds={tabIds} tabElementId={elementId} panelId="content"
+    tabInfo={tabIds.map((id) => ({ id, title: id, onSelect: vi.fn(), onClose: vi.fn() }))}
+    renderTab={(id, state) => <ViewTab id={elementId(id)} panelId="content" title={id} icon={null}
+      active={state.active} tabbable={state.tabbable} menu={[]} onSelect={vi.fn()} onClose={vi.fn()} />}>
+    <input aria-label="Draft" defaultValue="Keep writing" />
+  </ViewGroup>);
+  const strip = screen.getByRole('tablist');
+  const height = 36, rows = Math.ceil(count / 3);
+  Object.defineProperties(strip, { clientWidth: { value: 420 }, clientHeight: { value: height * 2 }, scrollHeight: { value: height * rows } });
+  vi.spyOn(strip, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 36, 420, 2 * height));
+  const whole = screen.getByRole('tab', { selected: true }).parentElement!;
+  vi.spyOn(whole, 'getBoundingClientRect').mockImplementation(() => new DOMRect(140, 36 + (rows - 1) * height - strip.scrollTop, 140, height));
+  const input = screen.getByRole('textbox');
+  input.focus();
+  act(() => currentObserver().deliver());
+  // History can restore an earlier offset after React has measured the selected row.
+  strip.scrollTop = 0;
+  fireEvent.scroll(strip);
+  const viewport = strip.getBoundingClientRect();
+  expect(whole.getBoundingClientRect().bottom).toBeLessThanOrEqual(viewport.bottom);
+  expect(whole.getBoundingClientRect().top).toBeGreaterThanOrEqual(viewport.top);
+  expect(input).toHaveFocus();
+
+  fireEvent.wheel(strip, { deltaY: -100 });
+  strip.scrollTop = 0;
+  fireEvent.scroll(strip);
+  expect(strip.scrollTop).toBe(0);
+  fireEvent.pointerDown(input);
+  expect(whole.getBoundingClientRect().bottom).toBeLessThanOrEqual(viewport.bottom);
+  expect(input).toHaveValue('Keep writing');
+  expect(input).toHaveFocus();
+});

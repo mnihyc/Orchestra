@@ -12,7 +12,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::access::{HolderSearch, HolderSearchQuery};
 use orch_api_contract::directory::{OrgGroupCreate, OrgGroupCreateBody};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
@@ -27,11 +27,12 @@ fn rule(operation: &str, action: &str, kind: &str, id: Id) -> Json {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Holder selection fixture",
             token_hash: &token_hash(&secret),
@@ -235,7 +236,7 @@ async fn holder_account_scope_filters_before_thirty_and_membership_is_not_accoun
     .base
     .id;
     let mut people = Vec::new();
-    // The existing native holder window is thirty; the last allowed account is beyond it.
+    // Only the last matching account is in reach, even with a one-row result page.
     for index in 0..31 {
         let person = places::person(&world, &format!("holder-window-{index:02}")).await;
         places::join(&world, org, org, &person, "viewer", &owner).await;
@@ -250,6 +251,7 @@ async fn holder_account_scope_filters_before_thirty_and_membership_is_not_accoun
     .await;
     let query = HolderSearchQuery {
         q: "holder-window".into(),
+        limit: Some(1),
         org_id: Some(org),
         place_id: Some(org),
         ..Default::default()

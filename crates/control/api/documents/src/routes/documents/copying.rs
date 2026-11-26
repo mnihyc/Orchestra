@@ -175,12 +175,13 @@ impl effects::Effect for Copies {
                     );
                 }
             }
+            let options = crate::routes::document_tree::options(ctx, conn).await?;
             let prepared = document_tree_domain::prepare_document_copy_material_in(
                 conn,
                 document_tree_domain::Actor::Person(&principal),
                 subjects,
                 principal.now(),
-                crate::routes::document_tree::options(ctx),
+                options,
             )
             .await;
             let prepared = crate::routes::document_tree::result(conn, prepared).await?;
@@ -233,12 +234,13 @@ impl effects::ApplyOwned for Copies {
             let changed = !prepared.is_replay();
             let id = prepared.id();
             let deadline = before.deadline();
+            let options = crate::routes::document_tree::options(ctx, &mut tx).await?;
             let receipt = document_tree_domain::apply_document_copy_in(
                 &mut tx,
                 document_tree_domain::Actor::Person(principal),
                 prepared,
                 principal.now(),
-                crate::routes::document_tree::options(ctx),
+                options,
                 move || before.check(),
             )
             .await?;

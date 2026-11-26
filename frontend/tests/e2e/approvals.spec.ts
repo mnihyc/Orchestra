@@ -182,7 +182,7 @@ test('requests sent together are one card with a row for each thing, decided one
   // The quick grant keeps narrower permissions, expiry and notes behind Other….
   await first.getByRole('button', { name: 'Other…', exact: true }).click();
   await row(together, provider.id).getByRole('button', { name: 'Other…', exact: true }).click();
-  await expect(first.getByText("Open a shell in the environment where the thread runs, as that environment's user.")).toBeVisible();
+  await expect(first.getByText("Open a terminal in the environment where the thread runs, as that environment's user.")).toBeVisible();
   for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) {
     await page.setViewportSize({ width, height: 900 });
     await page.emulateMedia({ colorScheme: theme });
@@ -335,5 +335,5 @@ test('an empty list says what it is, in each tab', async ({ page }) => {
   await page.getByRole('tab', { name: 'Requested by me' }).click();
   await expect(page.getByText('You have asked for nothing').first()).toBeVisible();
   await page.getByRole('tab', { name: 'History' }).click();
-  await expect(page.getByText('Nothing was decided yet')).toBeVisible();
+  await expect(page.getByText('Nothing has been decided yet')).toBeVisible();
 });

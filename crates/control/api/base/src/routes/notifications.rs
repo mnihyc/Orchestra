@@ -40,3 +40,6 @@ pub mod inbox;
 
 #[path = "notifications/person.rs"]
 pub mod person;
+
+#[path = "notifications/operations.rs"]
+pub mod operations;

@@ -12,6 +12,18 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use orch_types::{Hash, Id, Revision, Seq, Time};
 
+/// Captured origin of a nonsecret running configuration value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationOrigin {
+    /// The compiled default, with no explicit file or environment override.
+    Compiled,
+    /// An explicit file member, even when it equals the compiled default.
+    File,
+    /// An environment override actually applied at startup.
+    Environment,
+}
+
 /// Browser HTTP and the existing public protocol paths.
 pub const BROWSER_BASE_PATH: &str = "/api/v1";
 /// Account-key business HTTP and origin-bound key continuations.
@@ -24,6 +36,12 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const CSRF_HEADER: &str = "x-orch-csrf";
 /// The header by which a creating request is made safe to repeat.
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
+/// The header that carries the token of a human check, on the requests that a person without a session makes and
+/// the system asks a check of.
+pub const HUMAN_CHECK_HEADER: &str = "x-human-check";
+/// What a page puts in [`HUMAN_CHECK_HEADER`] in place of a token when the service's widget could not be loaded in its
+/// browser. It is a claim and nothing more: the server looks for itself before it lets the request pass.
+pub const HUMAN_CHECK_UNLOADED: &str = "unloaded";
 /// The cookie that holds a browser's session.
 pub const SESSION_COOKIE: &str = "orch_session";
 /// The cookie by which a browser its person signed in from is known.
@@ -45,8 +63,8 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const fn is_false(value: &bool) -> bool {
     !*value
 }
-/// The size of one piece of an upload.
-pub const UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// Shipped default maximum piece; actual accepted limits are in the session reply.
+pub const UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(test)]
 mod listed_tests {
@@ -176,7 +194,7 @@ pub struct TicketCreateReceipt {
 
 /// One page of a list that can grow. The order is stated by each list and
 /// is stable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "{T}Page")]
 pub struct Page<T> {
     /// The entries of this page.
@@ -319,8 +337,62 @@ pub struct PageQuery {
     pub cursor: Option<String>,
 }
 
+/// A named collection, searched and read without a fixed total-result cutoff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionQuery {
+    /// Words in this collection's disclosed labels or record text; no minimum length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 when absent, any positive u32 when supplied.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// The opaque continuation returned by this same collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Selects one visible child directory of an otherwise complete resource read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChildCollectionQuery {
+    /// Which native child directory to page; omission keeps the complete resource read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    /// Words in the chosen directory's disclosed text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Positive entries per page; fifty by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continuation of the same resource, child directory and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl ChildCollectionQuery {
+    /// The selected directory uses the ordinary named-page vocabulary.
+    #[must_use]
+    pub fn page(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// Flattened URL query members arrive as strings; JSON callers retain the same numeric vocabulary.
-fn query_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn query_u32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Number {
@@ -411,6 +483,7 @@ macro_rules! error_codes {
 
 error_codes! {
     RequestInvalid = 400, "request.invalid", "The request is not valid";
+    RequestTooEarly = 425, "request.too_early", "Wait for the secure connection before this action";
     RequestValueRefused = 422, "request.value_refused", "A value is not one that can be kept";
     AdminRiskNotAcknowledged = 400, "admin.risk_not_acknowledged", "The risk was not acknowledged";
     EnvironmentNoneUsable = 400, "environment.none_usable", "No environment can be used";
@@ -438,8 +511,10 @@ error_codes! {
     SharingExternalForbidden = 403, "sharing.external_forbidden", "Somebody from outside may not be named here";
     ProviderSubscriptionNotAllowed = 403, "provider.subscription_not_allowed", "Subscriptions of this harness are not allowed here";
     ProviderNotAllowed = 403, "provider.not_allowed", "The provider is not allowed here";
+    ProviderRelayUnavailable = 403, "provider.relay_unavailable", "Provider Relay is unavailable";
     ProviderSubscriptionNotShared = 403, "provider.subscription_not_shared", "A subscription of this harness stays with its owner";
     WorkspaceRemoteWriteDisabled = 403, "workspace.remote_write_disabled", "Files are not written from here";
+    FileReachDenied = 403, "files.reach_denied", "Outside allowed file reach";
     PolicyRemoteWriteDisabled = 403, "policy.remote_write_disabled", "This machine keeps file writes off";
     TerminalNotAllowed = 403, "terminal.not_allowed", "A shell is not allowed here";
     BrowserNotAllowed = 403, "browser.not_allowed", "Browsers are not allowed here";
@@ -472,7 +547,12 @@ error_codes! {
     AccessLocked = 409, "access.locked", "This row is locked above";
     PolicyNotDelegated = 409, "policy.not_delegated", "The machine keeps these keys to itself";
     ConflictStaleRevision = 409, "conflict.stale_revision", "It was changed meanwhile";
+    ConflictConcurrentChange = 409, "conflict.concurrent_change", "A concurrent change interrupted the operation";
     ConflictExists = 409, "conflict.exists", "It exists already";
+    PublicAddressBusy = 409, "public_address.busy", "Another public address change is being prepared";
+    PublicAddressUnverified = 409, "public_address.unverified", "The browser origin could not be verified";
+    PublicAddressMismatch = 409, "public_address.mismatch", "The browser origin does not prove this installation";
+    PublicAddressFrontendNotReady = 409, "public_address.frontend_not_ready", "The frontend certificate is not ready";
     ConflictIdempotencyMismatch = 409, "conflict.idempotency_mismatch", "The key was used for another request";
     ConflictConfirmationRequired = 409, "conflict.confirmation_required", "Confirm before going on";
     NodeArchived = 409, "node.archived", "It is archived";
@@ -516,7 +596,7 @@ error_codes! {
     PreflightExpired = 409, "preflight.expired", "The plan is out of date";
     ResourceInUse = 409, "resource.in_use", "It is still in use";
     AdminLastAdmin = 409, "admin.last_admin", "The last admin stays";
-    UploadOffset = 409, "upload.offset", "The piece does not continue the upload";
+    UploadOffset = 409, "upload.offset", "The upload is incomplete or conflicts with received bytes";
     RouteNotReady = 409, "route.not_ready", "The route cannot reach its person yet";
     ExportTooLarge = 409, "export.too_large", "The archive would be larger than the place allows";
     ExportTooMany = 409, "export.too_many", "The archive would hold more things than the place allows";
@@ -526,6 +606,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";
@@ -534,6 +615,11 @@ error_codes! {
     WorkspaceSourceFailed = 422, "workspace.source_failed", "The source could not be prepared";
     GitFailed = 422, "git.failed", "Git refused the requested operation";
     AuthLocked = 423, "auth.locked", "Too many wrong tries";
+    HumanCheckRequired = 403, "human_check.required", "A human check is needed";
+    HumanCheckFailed = 403, "human_check.failed", "The human check was not passed";
+    HumanCheckExpired = 403, "human_check.expired", "The human check has run out or was used";
+    HumanCheckUnavailable = 503, "human_check.unavailable", "The human check cannot be reached";
+    HumanCheckEdgeBlocked = 409, "human_check.edge_blocked", "The web edge does not let pages reach the service";
     RateLimited = 429, "rate_limited", "Too many requests";
     Internal = 500, "internal", "Something went wrong";
     SourceOffline = 503, "source.offline", "The machine is offline";
@@ -555,6 +641,53 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// The native database phase whose own deadline expired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseWaitPhase {
+    /// Waiting for a connection from the pool.
+    Acquire,
+    /// PostgreSQL cancelled a statement because its statement deadline expired.
+    Statement,
+    /// PostgreSQL ended a transaction left idle past its deadline.
+    IdleTransaction,
+}
+
+/// Safe facts captured from a known native timeout, belonging to this failed request alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DatabaseWait {
+    /// The native phase, never inferred from a generic error or cancellation code.
+    pub phase: DatabaseWaitPhase,
+    /// The applied deadline in milliseconds; null when the original pool profile was not reported.
+    pub applied_limit_ms: Option<u64>,
+    /// The answering service; currently `api`, without a database address or configuration value.
+    pub service: String,
+    /// The request identifier of this occurrence; not a resource or database identifier.
+    pub occurrence_id: String,
+}
+
+/// The native reason a proven own browser session can no longer continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEndCause {
+    /// Its recorded idle deadline passed.
+    Expired,
+    /// Its recorded revocation ended it.
+    Revoked,
+    /// Its person is unavailable; no unrecorded account-change instant is implied.
+    AccountUnavailable,
+}
+
+/// An observed end, attached only after matching this request's retained browser credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionEnd {
+    /// The actual native gate, without private identity or credential information.
+    pub cause: SessionEndCause,
+    /// The stored ending instant, when one exists; a later observation is never substituted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_if_known: Option<Time>,
+}
+
 /// An error, as it is answered: `application/problem+json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[error("{code}: {detail}")]
@@ -572,6 +705,12 @@ pub struct Problem {
     pub detail: String,
     /// The request this answers, as in the `X-Request-Id` header.
     pub request_id: String,
+    /// The request's own known native database timeout, absent for every other failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_wait: Option<Box<DatabaseWait>>,
+    /// A safe own-session observation; absent for unknown credentials and automation keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_end: Option<Box<SessionEnd>>,
     /// What the code adds, member by member.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Json>,
@@ -589,6 +728,8 @@ impl Problem {
             status: code.status(),
             detail: detail.into(),
             request_id: String::new(),
+            database_wait: None,
+            session_end: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -636,18 +777,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn flattened_pagination_accepts_url_numeric_strings_without_changing_json_numbers_or_bounds()
+    fn storage_search_and_its_page_size_round_trip_as_flat_query_fields()
     -> Result<(), serde_json::Error> {
-        let url: crate::storage::StorageQuery =
-            serde_json::from_value(json!({"scope":"system","limit":"200"}))?;
-        assert_eq!(url.page.limit, Some(MAX_LIMIT));
-        assert_eq!(url.page.limit(), MAX_LIMIT);
-        let numeric: PageQuery = serde_json::from_value(json!({"limit":200}))?;
-        assert_eq!(numeric, url.page);
-        assert_eq!(serde_json::to_value(&numeric)?, json!({"limit":200}));
+        let query: crate::storage::StorageQuery = serde_json::from_value(json!({
+            "scope": "system", "q": "image", "limit": "501", "cursor": "after"
+        }))?;
+        assert_eq!(query.page.q.as_deref(), Some("image"));
+        assert_eq!(query.page.limit, Some(501));
+        assert_eq!(query.page.cursor.as_deref(), Some("after"));
+        let numeric = json!({"scope":"system","q":"image","limit":501,"cursor":"after"});
+        assert_eq!(serde_json::to_value(&query)?, numeric);
+        assert_eq!(
+            serde_json::from_value::<crate::storage::StorageQuery>(numeric)?,
+            query
+        );
         let absent: crate::storage::StorageQuery =
             serde_json::from_value(json!({"scope":"system"}))?;
-        assert_eq!(absent.page.limit(), DEFAULT_LIMIT);
+        assert_eq!(absent.page, CollectionQuery::default());
         for invalid in [
             json!("-1"),
             json!("1.5"),
