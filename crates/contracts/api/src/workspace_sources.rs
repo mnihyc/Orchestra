@@ -281,3 +281,60 @@ pub const THREAD_SNAPSHOT_LIST: Declaration<SnapshotListSource> = Declaration {
         },
     ],
 };
+
+/// The actual Environment of one immediate native file operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSource {
+    Environment,
+    MachineNames,
+}
+
+macro_rules! file_source {
+    ($($name:ident = $operation:literal;)+) => { $(
+        pub const $name: Declaration<FileSource> = Declaration {
+            operation: $operation,
+            bindings: &[Binding { source: FileSource::Environment, target: TargetResolver::PermissionObject,
+                usage: FacetUsage::Required, cardinality: Cardinality::One }],
+        };
+    )+ };
+}
+file_source! {
+    FILE_LIST = "EnvironmentFileList";
+    FILE_STAT = "EnvironmentFileStat";
+    FILE_CONTENT = "EnvironmentFileContentGet";
+    FILE_PREVIEW = "EnvironmentFilePreviewGet";
+    FILE_FETCH = "EnvironmentFileFetch";
+    FILE_WRITE = "EnvironmentFileContentPut";
+    FILE_RENAME = "EnvironmentFileRename";
+    FILE_DELETE = "EnvironmentFileDelete";
+    FILE_SEARCH = "EnvironmentFileSearch";
+    FILE_ARCHIVE = "EnvironmentArchiveList";
+    FILE_ARCHIVE_READ = "EnvironmentArchiveEntryGet";
+    FILE_GIT_STATUS = "EnvironmentGitStatusGet";
+    FILE_GIT_DIFF = "EnvironmentGitDiffGet";
+}
+
+/// A deferred upload retains the same actual Environment and optional machine-name source.
+pub const FILE_UPLOAD: Declaration<FileSource> = Declaration {
+    operation: "EnvironmentUploadWrite",
+    bindings: &[
+        Binding {
+            source: FileSource::Environment,
+            target: TargetResolver::PermissionObject,
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::One,
+        },
+        Binding {
+            source: FileSource::Environment,
+            target: TargetResolver::Resolved("upload_job_environment"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::One,
+        },
+        Binding {
+            source: FileSource::MachineNames,
+            target: TargetResolver::ResolvedCollection("job_machine_names"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+    ],
+};

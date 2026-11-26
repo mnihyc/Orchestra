@@ -1,0 +1,3 @@
+# n41-defaults control: the cases that failed on wt/n41-defaults bf829fe091 (run 45894274007), on the unchanged trunk
+test -p orch-engine --lib -- summaries::resource::tests::a_paid_subscription_summary_is_recovered_before_fresh_model_use_after_a_crash
+test -p orch-engine --test forks -- a_switch_to_another_environment_keeps_the_session_moves_the_files_and_schedules_the_empty_one_it_left_for_removal creator_provision::a_committed_wake_cannot_be_adopted_by_the_existing_target_retainer creator_provision::an_existing_target_wake_retains_the_real_fork_source_and_original_unit environment_switch::switching_out_of_a_machine_directory_never_promises_to_remove_an_old_unit

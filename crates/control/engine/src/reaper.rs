@@ -74,6 +74,8 @@ impl Engine {
     async fn reap(&self) -> Result<(), EngineError> {
         self.schedule_agent_history(false);
         self.reap_paid_service_commands(REAP_BATCH).await?;
+        self.close_idle_program_sessions(self.inner.clock.now())
+            .await?;
         self.reap_temporary_environments().await?;
         self.purge_due_kept().await?;
         self.finish_stale_stops().await?;
@@ -98,14 +100,24 @@ impl Engine {
             )
         };
         let mut queued = false;
+        // One removal that cannot be queued (a row it cannot read, a refused write) is named and left for the next
+        // sweep; the others due behind it are queued now.
         for environment in environments {
-            queued |= self.queue_removal(now, environment, None).await?;
+            match self.queue_removal(now, environment, None).await {
+                Ok(done) => queued |= done,
+                Err(error) => {
+                    tracing::warn!(%error, %environment, "this due environment removal could not be queued; the others go on and it is tried at the next sweep");
+                }
+            }
         }
         for runtime in retired {
             if let Some(environment) = runtime.environment_id {
-                queued |= self
-                    .queue_removal(now, environment, Some(runtime.id))
-                    .await?;
+                match self.queue_removal(now, environment, Some(runtime.id)).await {
+                    Ok(done) => queued |= done,
+                    Err(error) => {
+                        tracing::warn!(%error, %environment, runtime = %runtime.id, "this retired unit's removal could not be queued; the others go on and it is tried at the next sweep");
+                    }
+                }
             }
         }
         if queued {

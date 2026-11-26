@@ -1188,7 +1188,8 @@ async fn a_tag_a_topic_carries_stays_when_it_is_moved_and_only_a_tag_that_is_add
         .token(&a.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed.iter().map(|tag| tag.id).collect::<Vec<_>>(),
         vec![guide]

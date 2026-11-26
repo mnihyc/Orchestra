@@ -809,10 +809,14 @@ pub(crate) async fn prepare_reached_for_thread(
     input: Option<&threads::InputRow>,
 ) -> ApiResult<PreparedReached> {
     let author = input.map_or(Some(principal.user()), |input| input.author_id);
-    let shown = match engine::ask_for_thread(conn, thread, author)
-        .await
-        .map_err(ApiError::internal)?
-    {
+    let ask = if ctx.ordinary_browser_opening() && !rows::may_cover_thread(conn, thread).await? {
+        None
+    } else {
+        engine::ask_for_thread(conn, thread, author)
+            .await
+            .map_err(ApiError::internal)?
+    };
+    let shown = match ask {
         Some(ask) => engine::covering(conn, &ask, ctx.now)
             .await
             .map_err(ApiError::internal)?

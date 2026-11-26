@@ -1,3 +1,4 @@
+import { CompleteCollection } from '@/ui/CompleteCollection';
 /** Enable reviews the existing waiting queue before making a resource available again. */
 import { useMutation, useQueries } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -76,10 +77,10 @@ export function ResourceEnableReview({ resources, onClose }: { resources: readon
     pending={enable.isPending} error={enable.error} disabled={rows.length === 0 || rows.some(({key, impact}) => !accepted.has(key) && (impact === undefined || !impact.isSuccess || impact.data.stopping))} onConfirm={() => enable.mutate()}>
     <div className="flex min-w-0 flex-col gap-3">
       {rows.every(({impact})=>impact?.isSuccess===true) && <Checkbox label={t('resourceImpact.runWaiting')} checked={runWaiting} onCheckedChange={setRunWaiting} disabled={enable.isPending} />}
-      {single ? rows.map((row) => <div key={row.key} className="flex min-w-0 flex-col gap-2">{effects(row)}</div>) : <Table label={t('resources.act.enable')} boundedIdentity rows={rows} rowKey={(row) => row.key} columns={[
+      {single ? rows.map((row) => <div key={row.key} className="flex min-w-0 flex-col gap-2">{effects(row)}</div>) : <CompleteCollection label={t('resources.act.enable')} items={rows} textOf={({resource})=>resource.name}>{(page)=><Table label={t('resources.act.enable')} boundedIdentity rows={page} rowKey={(row) => row.key} columns={[
         {id:'name',header:t('resources.listName'),grow:true,cell:({resource})=>{const subject=resourceSubjectOf(resource.target.object,resource.name);return subject===null?<span className="truncate" title={resource.name}>{resource.name}</span>:<ResourceName subject={subject} hint={false} />;}},
         {id:'waiting',header:t('resourceImpact.names'),cell:(row)=><div className="flex min-w-0 flex-col gap-2">{effects(row)}</div>},
-      ]} />}
+      ]} />}</CompleteCollection>}
       <ArticleGuideLink article="pause-and-switch" heading="enable" title={t('resourceImpact.guide')} />
     </div>
   </ConfirmDialog>;
