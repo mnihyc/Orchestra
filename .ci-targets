@@ -1,0 +1,4 @@
+# Control on next: the Claude Code programs that replay recorded conversations, as they stand before this branch
+test -p orch-adapter-claude-code --test managed_readback
+test -p orch-adapter-claude-code --test upgrade_compatibility
+test -p orch-adapter-claude-code --test upgrade_tolerance

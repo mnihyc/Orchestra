@@ -687,9 +687,21 @@ pub enum McpScope {
     Directory,
 }
 
+/// The actual provider/profile process that discovered a native configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct McpProfile {
+    /// Its provider.
+    pub provider_id: Id,
+    /// Its agent profile.
+    pub agent_id: Id,
+}
+
 /// An MCP server that a harness has configured on a machine, reported by name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct McpFound {
+    /// Assigned by the hosting connector; adapters leave this association absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<McpProfile>,
     /// Identity of the transport, launch/address and variable names, excluding all variable values and secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_fingerprint: Option<Hash>,

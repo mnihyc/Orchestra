@@ -268,7 +268,13 @@ pub(super) async fn create(ctx: &Ctx, body: ForkCreateBody) -> ApiResult<Job> {
     let state = rows::state(&mut tx, provider)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let captured =
+        orch_authz::CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let source =
+        crate::key_operations::native::http_origin::capture_operation(&ctx, &mut tx, &captured)
+            .await?;
     let operation = notifications::NotificationOperation {
+        actor: principal.user(),
         id: body.preflight_id,
         kind: "provider_recover".into(),
         name: state.name,
@@ -289,6 +295,11 @@ pub(super) async fn create(ctx: &Ctx, body: ForkCreateBody) -> ApiResult<Job> {
     )
     .await
     .map_err(crate::routes::environments::updates::refused)?;
+    ctx.app
+        .engine
+        .retain_provider_recovery_source(&mut tx, &row, &source)
+        .await
+        .map_err(ApiError::engine)?;
     notifications::attach_operation(&mut tx, &[row.id], &operation, ctx.now)
         .await
         .map_err(ApiError::internal)?;
