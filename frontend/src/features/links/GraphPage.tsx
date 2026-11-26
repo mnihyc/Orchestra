@@ -16,6 +16,10 @@ import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Skeleton } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { Switch } from '@/ui/Switch';
+import { useDeviceChoiceGroups } from '@/ui/DeviceChoiceFacts';
+import { FactDisclosureBody } from '@/ui/FactDisclosure';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 
 /** What the address holds of the graph. */
 export interface GraphSearch {
@@ -51,16 +55,28 @@ function kindsOf(text: string | undefined): Kind[] {
 
 export function GraphPage({ documentId, search, onSearch }: { documentId: string; search: GraphSearch; onSearch: (change: GraphSearch) => void }) {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const document = useQuery(documentQuery(documentId));
   const name = document.data?.title ?? '';
   // The last choices are where the next visit begins, as for any list; what the address names is what this visit shows.
-  const [storedDepth, rememberDepth] = useViewChoice<number>('links', 'graph-depth', 1);
-  const [storedKinds, rememberKinds] = useViewChoice<string>('links', 'graph-kinds', '');
-  const [storedMeaning, rememberMeaning] = useViewChoice<boolean>('links', 'graph-meaning', false);
+  const [storedDepth, rememberDepth, depthReceipt] = useViewChoice<number>('links', 'graph-depth', 1);
+  const [storedKinds, rememberKinds, kindsReceipt] = useViewChoice<string>('links', 'graph-kinds', '');
+  const [storedMeaning, rememberMeaning, meaningReceipt] = useViewChoice<boolean>('links', 'graph-meaning', false);
   const asked = search.depth ?? storedDepth;
   const depth = asked === 2 || asked === 3 ? asked : 1;
   const kinds = kindsOf(search.kinds ?? storedKinds);
   const meaning = search.meaning ?? storedMeaning;
+  const depthFacts = useDeviceChoiceGroups(depthReceipt === undefined ? undefined : { ...depthReceipt, effective: depth, origin: search.depth !== undefined ? 'address' : depth !== storedDepth ? 'default' : depthReceipt.origin,
+    saved_choice_availability: typeof depthReceipt.saved === 'number' && ![1, 2, 3].includes(depthReceipt.saved) ? 'unavailable' : depthReceipt.saved_choice_availability }, formatNumber(depth, locale), typeof depthReceipt?.saved === 'number' && [1, 2, 3].includes(depthReceipt.saved) ? formatNumber(depthReceipt.saved, locale) : undefined);
+  const kindWords = (value: string) => kindsOf(value).map((kind) => t(`links.kinds.${kind}`)).join(' · ');
+  const kindsFacts = useDeviceChoiceGroups(kindsReceipt === undefined ? undefined : { ...kindsReceipt, effective: kinds, origin: search.kinds !== undefined ? 'address' : kindsReceipt.origin }, kindWords(search.kinds ?? storedKinds), typeof kindsReceipt?.saved === 'string' ? kindWords(kindsReceipt.saved) : undefined);
+  const meaningFacts = useDeviceChoiceGroups(meaningReceipt === undefined ? undefined : { ...meaningReceipt, effective: meaning, origin: search.meaning !== undefined ? 'address' : meaningReceipt.origin }, t(meaning ? 'common.on' : 'common.off'), typeof meaningReceipt?.saved === 'boolean' ? t(meaningReceipt.saved ? 'common.on' : 'common.off') : undefined);
+  const deviceGroups = [
+    ...depthFacts.groups.map((group) => ({ ...group, key: 'graph-depth', title: t('links.graph.depth') })),
+    ...kindsFacts.groups.map((group) => ({ ...group, key: 'graph-kinds', title: t('links.graph.kinds') })),
+    ...meaningFacts.groups.map((group) => ({ ...group, key: 'graph-meaning', title: t('links.graph.meaning') })),
+  ];
+  const deviceFragment = depthFacts.fragment ?? kindsFacts.fragment ?? meaningFacts.fragment;
   const options: GraphOptions = { depth, kinds, meaning, center: search.center ?? null };
   const read = useQuery(graphQuery(documentId, options));
   const height = useGraphHeight();
@@ -85,8 +101,10 @@ export function GraphPage({ documentId, search, onSearch }: { documentId: string
           segments={[{ value: '1', name: '1' }, { value: '2', name: '2' }, { value: '3', name: '3' }]} />
       </div>
       <Menu label={t('links.graph.kinds')} align="start" trigger={<Button size="sm">{t('links.graph.kinds')}<ChevronDown aria-hidden className="size-4" /></Button>}
+        facts={<FactDisclosureBody groups={deviceGroups} />}
         entries={KINDS.map((kind) => ({ type: 'check' as const, id: kind, label: t(`links.kinds.${kind}`), checked: kinds.includes(kind), onCheckedChange: (on: boolean) => setKind(kind, on) }))} />
       <Switch label={t('links.graph.meaning')} checked={meaning} onCheckedChange={(on) => { rememberMeaning(on); onSearch({ meaning: on }); }} />
+      {deviceFragment !== undefined && <span className="text-sm text-text-muted">{deviceFragment}</span>}
       {search.center !== undefined && <Button size="sm" variant="ghost" onClick={() => onSearch({ center: undefined })}>{t('links.graph.current')}</Button>}
     </div>
     {read.isPending ? <div aria-busy="true" style={{ height }}><Skeleton className="h-full w-full" /></div>

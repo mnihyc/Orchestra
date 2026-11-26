@@ -1,3 +1,4 @@
+import { PathLink } from '@/shell/TrailLink';
 import { duplicateEntries } from '@/features/duplicate/target';
 import { threadCapabilities } from '@/features/thread/cached';
 /** Permission-aware node actions, as a row's context menu and its "⋯".
@@ -540,8 +541,8 @@ export function NodeActionButtons({ entries, label, className }: { entries: read
       const name = choiceName(entry);
       const off = typeof entry.disabled === 'string';
       return [<Tooltip key={entry.id} content={typeof entry.disabled === 'string' ? entry.disabled : entry.description}>
-        <Button size="sm" variant={entry.danger ? 'danger-ghost' : 'ghost'} icon={entry.icon} blocked={off} asChild={entry.href !== undefined && !off} onClick={entry.onSelect}>
-          {entry.href !== undefined && !off ? <a href={entry.href}>{name}</a> : name}
+        <Button size="sm" variant={entry.danger ? 'danger-ghost' : 'ghost'} icon={entry.icon} blocked={off} asChild={entry.href !== undefined && !off} onClick={entry.href === undefined ? entry.onSelect : undefined}>
+          {entry.href !== undefined && !off ? <PathLink href={entry.href}>{name}</PathLink> : name}
         </Button>
       </Tooltip>];
     })}

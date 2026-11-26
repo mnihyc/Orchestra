@@ -16,12 +16,7 @@ mod linux {
 
     use anyhow::{Context, bail};
     use nix::libc;
-    use serde::{Deserialize, Serialize};
-
-    /// A versioned, length-delimited metadata stream; file bytes follow their header without buffering.
-    const MAGIC: &[u8] = b"ORCH-VOLUME-1\n";
-    /// Linux xattrs and paths are much smaller; this also bounds a corrupt archive's metadata allocation.
-    const HEADER_MAX: usize = 4 * 1024 * 1024;
+    use orch_driver_contract::volume_stream::{Entry, HEADER_MAX, Kind, MAGIC};
 
     /// The link accepts at most one update a second; counters remain independent of tree size.
     const REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -103,38 +98,6 @@ mod linux {
             && parts[1].as_bytes() == b"file-states"
             && (parts[2].as_bytes().starts_with(b"source-credential-")
                 || parts[2].as_bytes().starts_with(b".tmp"))
-    }
-
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Kind {
-        Directory,
-        File,
-        Link,
-        HardLink,
-        Character,
-        Block,
-        Fifo,
-        Socket,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Entry {
-        path: Vec<u8>,
-        kind: Kind,
-        size: u64,
-        uid: u32,
-        gid: u32,
-        mode: u32,
-        atime: i64,
-        atime_ns: i64,
-        mtime: i64,
-        mtime_ns: i64,
-        link: Option<Vec<u8>>,
-        major: u64,
-        minor: u64,
-        xattrs: Vec<(Vec<u8>, Vec<u8>)>,
     }
 
     fn name(path: &Path) -> anyhow::Result<CString> {

@@ -6,6 +6,7 @@
  * or, in its place, the bar of a selection being made, or the sentence that says why the reader may not
  * write here. The chat is followed only while it is on screen.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { ChatSummaries } from '@/features/summaries/ChatSummaries';
 import { messageReferenceText } from '@/features/chat/messageReference';
 import { Lock, MessageSquareOff, Search } from 'lucide-react';
@@ -20,13 +21,16 @@ import { useStore } from 'zustand';
 
 import { fetchMessages } from '@/api/chats';
 import { client } from '@/api/client';
+import { attachToChat } from '@/lib/uploads';
+import { useUploads } from '@/lib/useUploads';
 import { setReadPosition } from '@/api/people';
 import { ChatPeople } from '@/features/people/ChatPeople';
 import { discard, pin, read, remove, toggleReaction } from '@/features/chat/acts';
 import { Bell } from '@/features/chat/Bell';
 import { ChatContext, type ChatContextValue, type MessageActions, usePeople } from '@/features/chat/context';
-import { Composer } from '@/features/chat/Composer';
-import { type Quote, partsOfDraft, useDraft } from '@/features/chat/draft';
+import { Composer, type ComposerProps } from '@/features/chat/Composer';
+import { type Draft, type Quote, partsOfDraft, useDraft } from '@/features/chat/draft';
+import type { NamedMention } from '@/features/people/pending';
 import { GroupHeading } from '@/features/chat/GroupHeading';
 import { GroupMenu } from '@/features/chat/GroupMenu';
 import { ChatMenu } from '@/features/export/ChatMenu';
@@ -44,7 +48,7 @@ import { SelectionBar, useSelection } from '@/features/forward/Selection';
 import { linkTo } from '@/lib/links';
 import type { Chat } from '@/api/chat-contract';
 import type { ChatMessage, SearchHit } from '@/generated/api-types';
-import { chatWriter, refreshChatStates, reloadChat, useChatEntry, useChatFeed, useChatState, useChatStates, useChatStore } from '@/realtime/stores/chat';
+import { chatWriter, refreshChatStates, reloadChat, useChatEntry, useChatFeed, useChatState, useChatStates, useChatStore, useLatestSeq } from '@/realtime/stores/chat';
 import { IconButton } from '@/ui/IconButton';
 import { Avatar } from '@/ui/Avatar';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -76,7 +80,7 @@ export interface ChatViewProps {
    */
   heading?: 'name' | 'kind' | 'none';
   /** Told which quotes to put in the composer; the view hands over a function that adds them. */
-  onReady?: (api: { quote: (quotes: readonly Quote[]) => void; focus: () => void }) => void;
+  onReady?: (api: { quote: (quotes: readonly Quote[]) => void; mention: (mention: NamedMention) => boolean; focus: () => void }) => void;
 }
 
 /** Whether the page is in front of its reader: a tab behind another counts nothing as read. */
@@ -90,11 +94,12 @@ function usePageVisible(): boolean {
   return visible;
 }
 
-export function ChatView({ chatId, shown = true, message = null, actions, scope, heading = 'name', onReady }: ChatViewProps) {
+export function ChatView(props: ChatViewProps) {
+  const { chatId, shown = true } = props;
+  const reader = useStore(client.session, (session) => session.readerVersion);
   const { t } = useTranslation();
   useChatFeed(chatId, shown);
   const entry = useChatEntry(chatId);
-  const state = useChatState(chatId, entry.chat?.my ?? null);
 
   // The server ended the subscription: the reader may no longer read it, or it is gone. What was on screen is not left standing.
   if (entry.closed !== null) {
@@ -108,18 +113,26 @@ export function ChatView({ chatId, shown = true, message = null, actions, scope,
       />
     );
   }
-  if (entry.chat === null) {
-    if (entry.error !== null) {
-      return <ErrorState compact className="h-full" error={entry.error} title={t('chat.couldNotLoad')} onRetry={() => reloadChat(chatId)} />;
-    }
-    return <SkeletonRows rows={6} className="p-4" />;
+  if (entry.chat === null && entry.error !== null) {
+    return <ErrorState compact className="h-full" error={entry.error} title={t('chat.couldNotLoad')} onRetry={() => reloadChat(chatId)} />;
   }
+  // A feed reload temporarily drops the server's rows. Keep this reader's local file
+  // until the chat returns, the view closes, or the replacement denies sending.
+  return <ChatWithDraft key={JSON.stringify([reader, chatId, entry.chat?.can.send === false])} {...props} chat={entry.chat} />;
+}
+
+function ChatWithDraft({ chat, chatId, shown = true, message = null, actions, scope, heading = 'name', onReady }: ChatViewProps & { chat: Chat | null }) {
+  const state = useChatState(chatId, chat?.my ?? null);
+  const draft = useDraft(chatId, chat?.can.send === true, shown);
+  const uploads = useUploads(chatId, (blob, signal) => attachToChat(chatId, blob, signal), draft.addAttachment);
+  if (chat === null) return <SkeletonRows rows={6} className="p-4" />;
   // The position the reader had read to when they opened the chat is kept for as long as it stays open:
   // the line of the new messages must not vanish as they read.
   return (
     <OpenChat
-      key={chatId}
-      chat={entry.chat}
+      chat={chat}
+      draft={draft}
+      uploads={uploads}
       shown={shown}
       message={message}
       actions={actions}
@@ -133,6 +146,8 @@ export function ChatView({ chatId, shown = true, message = null, actions, scope,
 
 function OpenChat({
   chat,
+  draft,
+  uploads,
   shown,
   message,
   actions,
@@ -142,6 +157,8 @@ function OpenChat({
   onReady,
 }: {
   chat: Chat;
+  draft: Draft;
+  uploads: ComposerProps['uploads'];
   shown: boolean;
   message: string | null;
   actions: ReactNode;
@@ -155,13 +172,14 @@ function OpenChat({
   const me = useStore(client.session, (state) => state.userId);
   const entry = useChatEntry(chat.id);
   const state = useChatState(chat.id, chat.my);
+  const latestMessage = useLatestSeq(chat.id);
   const people = usePeople(entry);
   const visible = usePageVisible();
   const [readTo] = useState(opened);
   const [summaryRange] = useState(() => ({ after: Math.max(0, Math.min(opened ?? 0, chat.last_message_seq)), through: chat.last_message_seq }));
   const selection = useSelection(entry.order);
-  const draft = useDraft(chat.id, chat.can.send, shown);
   const addQuotes = draft.addQuotes;
+  const appendMention = draft.appendMention;
   const input = useRef<HTMLTextAreaElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -285,9 +303,14 @@ function OpenChat({
   useEffect(() => {
     onReady?.({
       quote: (quotes) => addQuotes(quotes),
+      mention: (mention) => {
+        if (!chat.can.send || draft.ready !== true || appendMention === undefined) return false;
+        appendMention(mention);
+        return true;
+      },
       focus: () => { if (input.current !== null) input.current.focus(); else root.current?.focus(); },
     });
-  }, [onReady, addQuotes]);
+  }, [onReady, addQuotes, appendMention, chat.can.send, draft.ready]);
 
   // Leaving with a message that was not sent asks first.
   useEffect(() => {
@@ -358,12 +381,12 @@ function OpenChat({
 
         <AdminReachNotice of={chat.can.admin_access?.place} private={privateAdminAccess(chat.can.admin_access)} object={{ kind: 'chat', id: chat.id }} />
 
-        <ChatSummaries id={chat.id} range={summaryRange} named={chat.name !== null} shown={shown} />
+        <ChatSummaries id={chat.id} range={summaryRange} named={chat.name !== null} shown={shown} hasMessages={Math.max(chat.last_message_seq, latestMessage) > 0} />
         {find.bar}
 
         <ChatPeople chat={chat} me={me} />
         {markedUnread && <p role="status" className="border-b border-border bg-accent-subtle px-3 py-1 text-xs text-text-muted">{t('people.markedUnread')}</p>}
-        {askedThread !== null && <p role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1 text-xs text-text-muted"><span>{t('people.asked', { agent: askedThread.agent, thread: askedThread.name })}</span><a href={`/thread/${askedThread.id}`} className="text-accent-text underline">{t('people.openThread')}</a></p>}
+        {askedThread !== null && <p role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1 text-xs text-text-muted"><span>{t('people.asked', { agent: askedThread.agent, thread: askedThread.name })}</span><PathLink href={`/thread/${askedThread.id}`} className="text-accent-text underline">{t('people.openThread')}</PathLink></p>}
         <MessageList
           entry={entry}
           onRestore={partsOfDraft(draft).length > 0 ? undefined : (sent) => { draft.restore?.(sent.parts,sent.replyTo,sent.mentionNames ?? []); discard(chat.id,sent.clientId); requestAnimationFrame(() => input.current?.focus()); }}
@@ -409,12 +432,12 @@ function OpenChat({
             }
           />
         ) : chat.can.send ? (
-          <Composer chat={chat} draft={draft} replyingTo={replyingTo} inputRef={input} placeholder={placeholder} onEditLast={() => mine && acts.edit(mine)} onAsk={(thread, agent, source) => {
+          <Composer chat={chat} draft={draft} uploads={uploads} replyingTo={replyingTo} inputRef={input} placeholder={placeholder} onEditLast={() => mine && acts.edit(mine)} onAsk={(thread, agent, source) => {
             setAskDestination({ key:`thread:${thread.id}`, kind:'thread', threadId:thread.id, label:thread.name ?? t('people.privateThread'), detail:agent });
             setForwarding(forwardSource(chat, [source]));
           }} />
         ) : (
-          <Notice chat={chat} personName={other?.display_name ?? label} />
+          <ChatWriteNotice chat={chat} personName={other?.display_name ?? label} />
         )}
       </div>
 
@@ -468,14 +491,14 @@ function forwardSource(chat: Chat, messages: readonly ChatMessage[]): ForwardSou
 }
 
 /** In place of the composer: why the reader may not write here. */
-function Notice({ chat, personName }: { chat: Chat; personName: string }) {
+export function ChatWriteNotice({ chat, personName }: { chat: Chat; personName: string }) {
   const { t } = useTranslation();
   const reason = chat.can.reason;
   const text =
     reason === 'archived'
         ? t('chat.notice.archived')
         : reason === 'disabled'
-          ? t('chat.notice.disabled', { kind: t(`chat.kind.${chat.node?.kind ?? 'topic'}`) })
+          ? chat.kind==='group'?t('chat.notice.groupDisabled'):chat.kind==='direct'?t('chat.notice.directDisabled'):t('chat.notice.disabled', { kind: t(`chat.kind.${chat.node?.kind ?? 'topic'}`) })
           : reason === 'closed'
             ? t('chat.notice.closed', { name: personName })
             : t('chat.notice.readOnly');
