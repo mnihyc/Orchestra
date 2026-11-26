@@ -147,6 +147,7 @@ pub(crate) async fn present(
         .map(|row| {
             let (progress, _) = orch_engine::jobs::runner::read_progress(row);
             JobRef {
+                clone: None,
                 id: row.id,
                 kind: row.kind.clone(),
                 state: match row.state.as_str() {

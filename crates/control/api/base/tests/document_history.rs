@@ -609,6 +609,140 @@ async fn a_list_of_versions_is_paged_newest_first_with_the_open_span_on_the_firs
 // ---------------------------------------------------------------- how much is kept
 
 #[tokio::test]
+async fn retention_uses_the_whole_history_while_pages_authors_and_current_allowances_change() {
+    let desk = Desk::new().await;
+    let ines = desk.member("ines", "interactor").await;
+    desk.world
+        .set_at(Target::Node(desk.topic), "docs.versions_kept", json!(9))
+        .await;
+    desk.world
+        .set_at(
+            Target::Node(desk.project),
+            "docs.history_max_bytes",
+            json!(1048576),
+        )
+        .await;
+    let made = desk.make(&desk.ada, "Handbook").await;
+    let blocks = desk.paragraphs(&desk.ada, made.base.id, &["first"]).await;
+    let mut latest = blocks[0].clone();
+    for number in 1..=3 {
+        desk.world.advance(Duration::seconds(WINDOW_SECS + 1));
+        let by = if number % 2 == 1 { &ines } else { &desk.ada };
+        latest = desk
+            .write(
+                by,
+                made.base.id,
+                vec![rewrite(&latest, &format!("revision {number}"))],
+            )
+            .await
+            .ok()
+            .blocks[0]
+            .clone();
+    }
+    let oldest = {
+        let mut conn = desk.world.db.pool.acquire().await.unwrap();
+        history::get(&mut conn, made.base.id, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_at
+    };
+    let read = |author: Option<String>, cursor: Option<String>| {
+        let call = desk
+            .world
+            .app
+            .call(DocumentVersionList, &[&made.base.id])
+            .token(&desk.ada.token)
+            .query(&DocumentVersionListQuery {
+                author,
+                cursor,
+                limit: Some(2),
+                ..DocumentVersionListQuery::default()
+            });
+        async move { call.send().await.ok() }
+    };
+    let first = read(None, None).await;
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|entry| entry.version)
+            .collect::<Vec<_>>(),
+        [None, Some(3)]
+    );
+    let first_json = serde_json::to_value(&first).unwrap();
+    let retention = &first_json["retention"];
+    assert!(
+        retention.is_object(),
+        "a loaded page is not a retention boundary"
+    );
+    assert_eq!(
+        retention["global_oldest_restorable"],
+        json!(orch_types::Time::new(oldest))
+    );
+    assert_eq!(retention["effective_version_allowance"], 9);
+    assert_eq!(retention["byte_allowance"], 1048576);
+    assert_eq!(retention["version_source"]["node"]["id"], json!(desk.topic));
+    assert_eq!(retention["byte_source"]["node"]["id"], json!(desk.project));
+    let filtered = serde_json::to_value(read(Some(ines.id().to_string()), None).await).unwrap();
+    assert_eq!(filtered["retention"], *retention);
+    let second = serde_json::to_value(read(None, first.next_cursor.clone()).await).unwrap();
+    assert_eq!(second["retention"], *retention);
+    desk.world
+        .set_at(Target::Node(desk.topic), "docs.versions_kept", json!(4))
+        .await;
+    desk.world.advance(Duration::seconds(1));
+    let current = serde_json::to_value(read(None, None).await).unwrap();
+    assert_eq!(current["retention"]["effective_version_allowance"], 4);
+    assert_eq!(
+        current["retention"]["global_oldest_restorable"],
+        retention["global_oldest_restorable"]
+    );
+    assert_ne!(
+        current["retention"]["measured_at"],
+        retention["measured_at"]
+    );
+    assert_eq!(
+        retention["effective_version_allowance"], 9,
+        "a later setting edit cannot rewrite the earlier observation"
+    );
+    let stranger = desk.stranger("sam").await;
+    let refused = desk
+        .world
+        .app
+        .call(DocumentVersionList, &[&made.base.id])
+        .token(&stranger.token)
+        .query(&DocumentVersionListQuery::default())
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    assert!(!refused.extra.contains_key("retention"));
+}
+
+#[tokio::test]
+async fn an_empty_history_reports_a_known_empty_boundary_and_its_real_default_sources() {
+    let desk = Desk::new().await;
+    let made = desk.make(&desk.ada, "Unwritten").await;
+    let page = desk
+        .world
+        .app
+        .call(DocumentVersionList, &[&made.base.id])
+        .token(&desk.ada.token)
+        .query(&DocumentVersionListQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(page.items.is_empty());
+    let page = serde_json::to_value(page).unwrap();
+    assert!(page["retention"].is_object());
+    assert!(page["retention"]["global_oldest_restorable"].is_null());
+    assert_eq!(page["retention"]["effective_version_allowance"], 200);
+    assert_eq!(page["retention"]["version_source"]["scope"], "default");
+    assert_eq!(page["retention"]["byte_source"]["scope"], "default");
+}
+
+#[tokio::test]
 async fn a_history_keeps_no_more_versions_than_the_place_says_and_the_oldest_go_first() {
     let desk = Desk::new().await;
     desk.world

@@ -1,4 +1,6 @@
 /** The existing dialog, picker and people card keep each native copy as one deliberate act. */
+import type * as SearchApi from '@/api/search';
+import { namedPlace, placeNamePage } from './picker-name-fixture';
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
@@ -23,7 +25,14 @@ import { treeNode } from '../doubles/tree-node';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ judge: vi.fn<typeof Destinations.judgeCopyDestinations>(), copy: vi.fn<typeof Copies.duplicate>(), document: vi.fn<typeof Copies.duplicateDocument>(),
-  preview: vi.fn<typeof Copies.previewChatDuplicate>(), recipients: vi.fn<typeof Loss.moreOperationRecipients>(), tree: vi.fn<typeof Nodes.fetchTree>(), navigate: vi.fn<(options: { href: string }) => Promise<void>>(), current: vi.fn<() => boolean>() }));
+  preview: vi.fn<typeof Copies.previewChatDuplicate>(), recipients: vi.fn<typeof Loss.moreOperationRecipients>(), tree: vi.fn<typeof Nodes.fetchTreePage>(), navigate: vi.fn<(options: { href: string }) => Promise<void>>(), current: vi.fn<() => boolean>() }));
+vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), pickerNamesQuery: (search: SearchApi.NameSearch) => {
+  const places = ([['source-org','Source'],['other-org','Other org']] as const).flatMap(([id,name]) => {
+    const root = namedPlace(id, 'org', name);
+    return [root, namedPlace(id+'-topic','topic','A topic',root)];
+  });
+  return placeNamePage(search, places);
+} }));
 vi.mock('@/api/loss', async (original) => ({ ...await original<typeof Loss>(), moreOperationRecipients: calls.recipients }));
 vi.mock('@/api/duplicates', async (original) => ({ ...await original<typeof Copies>(), duplicate: calls.copy, duplicateDocument: calls.document, previewChatDuplicate: calls.preview }));
 vi.mock('@/api/resourceLibrary', async (original) => ({ ...await original<typeof Library>(), sameLibraryReader: () => calls.current() }));
@@ -31,7 +40,7 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
 vi.mock('@/api/copyDestinations', async (original) => ({ ...await original<typeof Destinations>(),
   copyDestinationsQuery: (request: Destinations.CopyDestinationsRequest, reader: readonly unknown[]) => ({ queryKey: ['copy-destinations', reader, request], queryFn: ({ signal }: { signal: AbortSignal }) => calls.judge(request, signal), retry: false, gcTime: 0 }),
 }));
-vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), fetchTree: calls.tree,
+vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), fetchTreePage: calls.tree,
   orgsQuery: { queryKey: ['copy-orgs'], queryFn: () => Promise.resolve([org('source-org', 'source', 'Source', userRef(me(1, 'reader', 'Reader'))), org('other-org', 'other', 'Other org', userRef(me(1, 'reader', 'Reader')))]) } }));
 const previous = client.session.getState();
 beforeEach(() => {
@@ -53,7 +62,7 @@ afterEach(async () => { cleanup(); useDuplicateHost.getState().close(); client.s
 const target = { kind: 'provider', id: 'source', name: 'Provider', revision: 7 } as const;
 async function chooseOther(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  await user.click(await screen.findByRole('option', { name: 'Other org' }));
+  await user.click(await screen.findByRole('treeitem', { name: 'Other org' }));
 }
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`keeps a missing native setup observation unknown after a completed copy (${locale})`, async () => {
@@ -98,10 +107,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await setLocale(locale); const user = userEvent.setup(); show(<DuplicateDialog target={target} onClose={() => undefined} />);
     await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
     await waitFor(() => {
-      const topic = screen.getByRole('option', { name: 'Other org / A topic' });
+      const topic = screen.getByRole('treeitem', { name: 'Other org / A topic' });
       expect(topic).toHaveAttribute('aria-disabled', 'true'); expect(topic).toHaveTextContent(i18n.t('duplicate.causes.destination_creation'));
     });
-    await user.click(screen.getByRole('option', { name: 'Other org' }));
+    await user.click(screen.getByRole('treeitem', { name: 'Other org' }));
     await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
     await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('provider', 'source', { expected_revision: 7, destination: { kind: 'node', id: 'other-org' } }, expect.any(String), {}));
   });
@@ -134,6 +143,8 @@ it('a lost answer retries the same act key and never borrows source configuratio
 });
 it('a changed deliberate destination/name gets a different act identity', async () => {
   calls.copy.mockRejectedValue(new NetworkError('failed')); const user = userEvent.setup(); show(<DuplicateDialog target={target} onClose={() => undefined} />);
+  const name = screen.getByRole('textbox', { name: new RegExp(i18n.t('duplicate.name')) });
+  expect(name.compareDocumentPosition(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   await chooseOther(user); await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
   await screen.findByRole('alert'); await user.type(screen.getByRole('textbox', { name: new RegExp(i18n.t('duplicate.name')) }), 'Separate provider');
   await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));

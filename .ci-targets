@@ -1,0 +1,4 @@
+test -p orch-engine --test provider_on_key
+test -p orch-engine --test background_wake
+test -p orch-engine --test background_wake_native
+test -p orch-engine --test failures

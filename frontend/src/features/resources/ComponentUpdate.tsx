@@ -19,11 +19,16 @@ export function updatePending(update: ComponentUpdate | null | undefined): boole
 
 function version(value: string): string { return value.startsWith('v') ? value : `v${value}`; }
 
+function pendingLabel(update: ComponentUpdate) {
+  if (update.status === 'queued') return update.automatic ? 'componentUpdates.automatic' : 'componentUpdates.pending';
+  return update.automatic ? 'componentUpdates.automaticUpdating' : 'componentUpdates.updating';
+}
+
 /** Names stay first in a row; this follows them at every width. */
 export function UpdateMark({ update }: { update: ComponentUpdate | null | undefined }) {
   const { t } = useTranslation();
   if (update === null || update === undefined) return null;
-  if (updatePending(update)) return <span role="status" className="text-sm text-text-muted">{t('componentUpdates.updating')}</span>;
+  if (updatePending(update)) return <span role="status" className="text-sm text-text-muted">{t(pendingLabel(update))}</span>;
   if (update.detail !== null && (update.status === 'refused' || update.status === 'failed')) {
     return <span role="status" className="text-sm wrap-anywhere text-text-muted">{update.detail}</span>;
   }
@@ -34,11 +39,10 @@ export function UpdateMark({ update }: { update: ComponentUpdate | null | undefi
 export function UpdateNotice({ update, action }: { update: ComponentUpdate | null | undefined; action: Act | null }) {
   const { t } = useTranslation();
   if (update === null || update === undefined || (!update.behind && !updatePending(update))) return null;
-  return <InlineAlert tone="warning" title={updatePending(update) ? t('componentUpdates.updating') : t('componentUpdates.versions', {
+  return <InlineAlert tone="warning" title={updatePending(update) ? t(pendingLabel(update)) : t('componentUpdates.versions', {
     recommended: version(update.recommended_version), running: version(update.running_version),
   })}>
     <div className="flex flex-col items-start gap-2">
-      <p>{t('componentUpdates.idle')}</p>
       {update.detail !== null && <p role="status" className="wrap-anywhere">{update.detail}</p>}
       {action !== null && <Button size="sm" {...(action.admin === undefined ? {} : {admin:action.admin})} pending={action.pending ?? false} disabled={action.disabled !== false && action.disabled !== undefined} onClick={action.run}>{action.label}</Button>}
       {typeof action?.disabled === 'string' && <p>{action.disabled}</p>}
@@ -59,11 +63,12 @@ export function useComponentUpdateAct(): (target: Target) => Act | null {
   });
   return (target) => {
     if (target.update === null || target.update === undefined || (!target.update.behind && !updatePending(target.update))) return null;
-    const pending = updatePending(target.update) || (request.isPending && request.variables.id === target.id);
+    const pending = (updatePending(target.update) && !target.update.automatic) || (request.isPending && request.variables.id === target.id);
+    const label = t(pending ? updatePending(target.update) ? pendingLabel(target.update) : 'componentUpdates.updating' : 'componentUpdates.action');
     return {
       ...(target.admin === undefined ? {} : {admin:target.admin}),
-      id: 'update-now', label: t(pending ? 'componentUpdates.updating' : 'componentUpdates.action'), icon: <Download aria-hidden />,
-      description: t('componentUpdates.idle'), disabled: !target.manage ? t('resources.act.manageRequired') : pending ? t('componentUpdates.updating') : !target.online ? t('componentUpdates.offline') : false,
+      id: 'update-now', label, icon: <Download aria-hidden />,
+      description: t(target.online ? 'componentUpdates.idle' : 'componentUpdates.offline'), disabled: !target.manage ? t('resources.act.manageRequired') : pending ? label : false,
       pending, run: () => { if (target.manage) request.mutate(target); },
     };
   };

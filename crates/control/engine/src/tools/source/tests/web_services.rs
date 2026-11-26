@@ -1238,6 +1238,14 @@ async fn a_managed_tool_keeps_the_first_proxy_deadline_across_replay_and_refuses
 -> Proof {
     let scene = configured().await?;
     let first_deadline = Time::new(scene.world.clock.now() + chrono::Duration::seconds(20));
+    let opening = orch_testkit::doubles::sessions::first_turn_opening(
+        scene.world.pool.pool(),
+        scene.source.thread_id,
+        scene.source.segment_id,
+        scene.start.turn_id,
+    )
+    .await?
+    .ok_or("the original proxy call opening is absent")?;
     let stream = Stream::Session {
         thread_id: scene.source.thread_id,
         segment_id: scene.source.segment_id,
@@ -1245,7 +1253,8 @@ async fn a_managed_tool_keeps_the_first_proxy_deadline_across_replay_and_refuses
     scene
         .world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &Event::OrchToolCall(OrchToolCall {
                 deadline: Some(first_deadline),
@@ -1276,7 +1285,8 @@ async fn a_managed_tool_keeps_the_first_proxy_deadline_across_replay_and_refuses
     scene
         .world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &Event::OrchToolCall(OrchToolCall {
                 deadline: Some(Time::new(
@@ -1296,7 +1306,8 @@ async fn a_managed_tool_keeps_the_first_proxy_deadline_across_replay_and_refuses
     scene
         .world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &Event::OrchToolCall(OrchToolCall {
                 deadline: Some(Time::new(
@@ -1534,7 +1545,7 @@ async fn extra_service_provider(scene: &Scene, name: &str, owner: Id) -> Proof<I
     Ok(provider)
 }
 fn route_candidate(provider: Id) -> Json {
-    json!({"provider_id":provider,"model":"","params":{},"route":{"route":"web_search.service-api","offering":{"provider":provider,"offering":OFFERING}}})
+    json!({"target":{"type":"single","resource":{"kind":"model","backend":{"route":"web_search.service-api","offering":{"provider":provider,"offering":OFFERING},"config":{}}}},"params":{}})
 }
 fn native_service_error(code: &str) -> CommandError {
     let mut error = CommandError::new(ErrorCode::Conflict, "synthetic pre-request service refusal");
