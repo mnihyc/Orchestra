@@ -17,6 +17,7 @@ import type { Template } from '@/generated/api-types';
 import { Input } from '@/ui/Input';
 import { Switch } from '@/ui/Switch';
 import { toast } from '@/ui/Toast';
+import { ApplicationTip } from '@/features/storage/Impact';
 
 export interface EditTemplateProps {
   template: Template;
@@ -79,6 +80,7 @@ export function EditTemplate({ template, only, onClose }: EditTemplateProps) {
         <>
           <Input label={t('resources.edit.description')} optional value={description} disabled={save.isPending} onChange={(event) => setDescription(event.target.value)} autoComplete="off" />
           <Switch name={t('templates.modeChoices.enabled.name')} description={t('templates.modeChoices.enabled.description')} checked={on} disabled={save.isPending} onCheckedChange={setOn} />
+          {onChanged&&<ApplicationTip target={{object:{kind:'template',id:template.id},model_id:null}} kind={on?'enable':'disable'}/>}
         </>
       )}
     </EditDialog>

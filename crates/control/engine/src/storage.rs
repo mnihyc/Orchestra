@@ -276,24 +276,56 @@ pub fn dimension_key(row: &KeptRecord, by: StorageDimension, at: Time) -> String
 /// Applies report filters after permissions, so figures and records cover the same visible set.
 #[must_use]
 pub fn matches(row: &KeptRecord, query: &StorageQuery, at: Time) -> bool {
-    query.resource_id.is_none_or(|id| {
-        let same = |resource: orch_access_contract::decisions::ObjectRef| {
-            resource.id == id && query.resource_kind.is_none_or(|kind| kind == resource.kind)
-        };
-        row.resource.is_some_and(same)
-            || (query.resource_kind == Some(orch_access_contract::permissions::ObjectKind::Host)
-                && row.host.as_ref().is_some_and(|host| host.id == id))
-            || row.facts.as_ref().is_some_and(|facts| {
+    let searched = query.page.q.as_deref().is_none_or(|q| {
+        if q.trim().is_empty() {
+            return true;
+        }
+        let mut text = vec![row.name.clone(), word(&row.kind), word(&row.why)];
+        if let Some(place) = &row.place
+            && !place.redacted
+        {
+            text.extend(place.name.clone());
+        }
+        if let Some(host) = &row.host {
+            text.push(host.name.clone());
+        }
+        if let Some(machine) = &row.machine {
+            text.push(machine.name.clone());
+        }
+        if let Some(owner) = &row.owner {
+            text.push(format!("{} {}", owner.display_name, owner.username));
+        }
+        if let Some(facts) = &row.facts {
+            text.extend(
                 facts
                     .dependents
                     .iter()
-                    .flat_map(|group| &group.visible)
-                    .any(|dependent| dependent.object.is_some_and(same))
-            })
-    }) && query
-        .host
-        .as_deref()
-        .is_none_or(|key| dimension_key(row, StorageDimension::Host, at) == key)
+                    .flat_map(|group| group.visible.iter().map(|row| row.name.clone())),
+            );
+        }
+        orch_db::queries::search::Query::parse(q).matches(&text.join(" "))
+    });
+    searched
+        && query.resource_id.is_none_or(|id| {
+            let same = |resource: orch_access_contract::decisions::ObjectRef| {
+                resource.id == id && query.resource_kind.is_none_or(|kind| kind == resource.kind)
+            };
+            row.resource.is_some_and(same)
+                || (query.resource_kind
+                    == Some(orch_access_contract::permissions::ObjectKind::Host)
+                    && row.host.as_ref().is_some_and(|host| host.id == id))
+                || row.facts.as_ref().is_some_and(|facts| {
+                    facts
+                        .dependents
+                        .iter()
+                        .flat_map(|group| &group.visible)
+                        .any(|dependent| dependent.object.is_some_and(same))
+                })
+        })
+        && query
+            .host
+            .as_deref()
+            .is_none_or(|key| dimension_key(row, StorageDimension::Host, at) == key)
         && query
             .place
             .as_deref()

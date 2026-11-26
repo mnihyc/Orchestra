@@ -16,7 +16,7 @@ export function EnvironmentSettings({ environment, wantedKey }: { environment: E
   const lifecycle=descriptor.lifecycle === 'unit' || descriptor.lifecycle === 'attach' ? descriptor.lifecycle : null;
   return (
     <div id="environment-settings">
-      <UnitConfiguration compact wantedKey={wantedKey} pool="environment" id={environment.id} placement={environment.placement} runtime={environment.runtime_changes}
+      <UnitConfiguration compact wantedKey={wantedKey} pool="environment" id={environment.id} placement={environment.placement}
         lifecycle={lifecycle} resourceSupport={descriptor.resource_limits} commands={{supported:commands.supported === true,reason:typeof commands.reason === 'string' ? commands.reason : null}}
         afterUp={typeof afterUp==='boolean'?afterUp:null}
         templateId={environment.template?.id} jobId={environment.job?.id} failureDetail={environment.status_detail} place={{ name: environment.name, owner: environment.owner, access: environment.access, kind: null }} />

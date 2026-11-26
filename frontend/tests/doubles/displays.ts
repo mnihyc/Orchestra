@@ -15,6 +15,8 @@ import { ACME, RUNS_ON, userRef } from './fixtures.ts';
 import { type Answer, type Part, type Person, Refusal, type World } from './world.ts';
 
 const TICKET_MS = 30_000;
+const LOOPBACK_PORT = 5901;
+const RFB_GREETING = Buffer.from('RFB 003.008\n', 'latin1');
 /** The size the fake draws: small, so that a whole update in raw pixels stays light for a test. */
 const FRAME = { width: 320, height: 200 } as const;
 /** The close code that carries why a display's socket ended, as the real server sends it. */
@@ -58,6 +60,7 @@ export class DisplaysWorld implements Part {
   readonly world: World;
   private places = new Map<string, { off: Off; servers: { name: string; path: string; version: string | null }[]; windowManager: string | null }>();
   private displays = new Map<string, Kept>();
+  private portUses = new Map<string, { ticket: string; expires: number }>();
   private tickets = new Map<string, { display: string; user: string; control: boolean; expires: number }>();
 
   constructor(world: World) {
@@ -70,6 +73,7 @@ export class DisplaysWorld implements Part {
     this.places.clear();
     this.displays.clear();
     this.tickets.clear();
+    this.portUses.clear();
     const xvnc = [{ name: 'Xvnc', path: '/usr/bin/Xvnc', version: '1.14.1' }];
     this.places.set(RUNS_ON.workspace, { off: null, servers: xvnc, windowManager: 'openbox' });
     this.places.set(RUNS_ON.docsCheckout, { off: 'environment_offline', servers: xvnc, windowManager: null });
@@ -112,6 +116,13 @@ export class DisplaysWorld implements Part {
   }
 
   handle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {
+    if (method === 'POST' && path === `/environments/${RUNS_ON.sandbox}/ports/${LOOPBACK_PORT}/use`) {
+      const target = this.world.ports.port(person, RUNS_ON.sandbox, LOOPBACK_PORT);
+      if (!target.can.enter || body.transport !== 'tcp' || body.opening_id !== null) throw new Refusal(403, 'authz.denied', 'personal TCP entry is required');
+      const id = randomUUID(), ticket = randomUUID(), expires = Date.now() + TICKET_MS;
+      this.portUses.set(id, { ticket, expires });
+      return { status: 201, body: { id, environment_id: RUNS_ON.sandbox, port: LOOPBACK_PORT, transport: 'tcp', opening_id: null, ticket, ticket_expires_at: new Date(expires).toISOString() } };
+    }
     let found: RegExpExecArray | null;
     if ((found = /^\/environments\/([^/]+)\/displays$/.exec(path)) !== null) {
       const environmentId = found[1] ?? '';
@@ -126,6 +137,12 @@ export class DisplaysWorld implements Part {
       if (method === 'POST') {
         this.may(person, environmentId, 'vnc.manage');
         if (place.off !== null) throw new Refusal(403, 'vnc.not_allowed', 'displays are off here', { reason: place.off });
+        if (typeof body.attach === 'object' && body.attach !== null && 'port' in body.attach) {
+          if (environmentId !== RUNS_ON.sandbox || body.attach.port !== LOOPBACK_PORT) throw new Refusal(404, 'not_found', 'no RFB server on that port');
+          const peer = this.add(environmentId, 'Loopback desktop', 'announced', userRef(person.me), null, null, null);
+          peer.row.endpoint = `127.0.0.1:${LOOPBACK_PORT}`;
+          return { status: 201, body: this.rowOf(peer, true) };
+        }
         if (place.servers.length === 0) throw new Refusal(403, 'vnc.not_allowed', 'nothing here serves a display', { reason: 'unsupported' });
         const taken = [...this.displays.values()].filter((kept) => kept.row.environment.id === environmentId && kept.row.x_display !== null).length;
         const xDisplay = `:${taken + 1}`;
@@ -193,6 +210,16 @@ export class DisplaysWorld implements Part {
 
   // ---------------------------------------------------------------- the socket, as RFB 3.8
 
+  probePort(socket: WebSocket, useId: string, ticket: string): void {
+    const use = this.portUses.get(useId);
+    if (use?.ticket !== ticket || use.expires <= Date.now()) {
+      socket.close(CLOSE_WITH_REASON, 'revoked');
+      return;
+    }
+    this.portUses.delete(useId);
+    socket.send(RFB_GREETING, { binary: true });
+  }
+
   attach(socket: WebSocket, displayId: string, ticketValue: string): void {
     const ticket = this.tickets.get(ticketValue);
     this.tickets.delete(ticketValue);
@@ -208,7 +235,7 @@ export class DisplaysWorld implements Part {
     }
     const client: Client = { socket, person, control: ticket.control, stage: 'version', pending: Buffer.alloc(0), format: SERVER_FORMAT, waiting: false, seen: -1 };
     kept.clients.add(client);
-    socket.send(Buffer.from('RFB 003.008\n', 'latin1'), { binary: true });
+    socket.send(RFB_GREETING, { binary: true });
     socket.on('message', (data) => {
       client.pending = Buffer.concat([client.pending, Buffer.from(data as Buffer)]);
       this.read(kept, client);

@@ -45,6 +45,52 @@ test('a display Orch opened shows its line for programs, one an agent announced 
   expect(listed.find((display) => display.name === 'emulator')?.clients).toBeGreaterThan(0);
 });
 
+async function sandboxPort(page: Page, person: Parameters<typeof signIn>[1]) {
+  const environment = RUNS_ON.sandbox;
+  const scene = await page.request.post(`${DOUBLE}/__double/ports/set`, { data: { environment, scene: 'empty' } });
+  expect(scene.ok()).toBe(true);
+  await signIn(page, person);
+  await page.goto(`/resources/environments/${environment}?tab=ports`);
+  await page.getByRole('spinbutton', { name: 'Port number' }).fill('5901');
+  await page.getByRole('button', { name: 'Show port', exact: true }).click();
+  const port = page.getByTestId('port-5901');
+  await expect(port).toBeVisible();
+  return port;
+}
+
+test('a person with Ports access alone cannot open the RFB port as a display', async ({ page }) => {
+  const port = await sandboxPort(page, PEOPLE.ada);
+  await expect(port.getByRole('button', { name: 'Check for display' })).toHaveCount(0);
+  await expect(port.getByRole('button', { name: 'Open as display' })).toHaveCount(0);
+});
+
+test('a person opens a verified RFB port and watches its framebuffer without taking control', async ({ page }) => {
+  const environment = RUNS_ON.sandbox;
+  const port = await sandboxPort(page, PEOPLE.grace);
+  await expect(port.getByRole('button', { name: 'Open as display' })).toHaveCount(0);
+  await port.getByRole('button', { name: 'Check for display' }).click();
+  const create = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === `/api/v1/environments/${environment}/displays`);
+  await port.getByRole('button', { name: 'Open as display' }).click();
+  expect((await create).postDataJSON()).toEqual({ attach: { port: 5901 } });
+
+  const canvas = await drawn(page);
+  const listed = await control<{ id: string; clients: number; origin: string }[]>('/list', { environment });
+  expect(listed).toEqual([expect.objectContaining({ clients: 1, origin: 'announced' })]);
+  await expect(page.locator('[data-vnc-viewer="watching"]')).toBeVisible();
+  // The peer paints a blue title bar at (43, 45) and moves it when its picture changes.
+  const pixel = () => canvas.evaluate(element => {
+    const context = (element as HTMLCanvasElement).getContext('2d');
+    return Array.from(context?.getImageData(43, 45, 1, 1).data ?? []).slice(0, 3);
+  });
+  await expect.poll(pixel).toEqual([40, 80, 160]);
+  await control('/change', { display: listed[0]!.id });
+  // At the same coordinates the exposed desktop is the peer's RGB gradient.
+  await expect.poll(pixel).toEqual([34, 90, 57]);
+  await canvas.click();
+  await page.keyboard.type('x');
+  expect((await control<Received[]>('/received', { display: listed[0]!.id })).filter(entry => entry.kind === 4 || entry.kind === 5)).toEqual([]);
+});
+
 test('watching sends no key and no pointer; Work in it sends them', async ({ page }) => {
   await open(page);
   const canvas = await drawn(page);

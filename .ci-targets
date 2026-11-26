@@ -1,0 +1,5 @@
+test -p orch-api-core --features test-support --test kvnc_core -- a_manager_attaches_a_loopback_server_and_a_viewer_watches_without_its_password --exact
+web typecheck
+web lint
+web test -- tests/component/port-display.test.tsx tests/component/vnc-view.test.tsx tests/unit/vnc-viewer.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts
+web-e2e tests/e2e/vnc.spec.ts --project=chromium --grep "a person opens a verified RFB port|a person with Ports access alone"
