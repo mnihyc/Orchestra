@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+test -p orch-adapter-claude-code

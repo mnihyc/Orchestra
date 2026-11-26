@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** Share opened from a selection of several things: the same short form headed "Access to 3 threads", naming the people on each page they may give on, listing the pages it skips with who can change them, and telling each person once about all of them.
  *
  * Naming people on several things is the same change made on each of their pages: one request for each
@@ -17,7 +18,6 @@ import { ShareConsequences } from '@/features/access/ShareConsequences';
 import { applyShares, canUndoShare, inverseShare, type ShareReview, type ShareResult } from '@/features/access/shareReview';
 import type { AccessChoice, PermissionPage } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
-import { Combobox } from '@/ui/Combobox';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { DateField } from '@/ui/DateField';
@@ -178,7 +178,7 @@ export function ShareSeveralDialog({ targets, open, onClose }: { targets: readon
       <div className="flex flex-col gap-4 py-2">
         {prepared === null && <div className="flex flex-wrap items-start gap-2">
           {candidates.placePicker}
-          <Combobox
+          <CandidatePicker candidates={candidates}
             label={t('access.add.label')}
             hideLabel
             placeholder={t('access.add.placeholder')}
@@ -256,7 +256,7 @@ export function ShareSeveralDialog({ targets, open, onClose }: { targets: readon
             {result.error !== undefined && <ErrorAlert error={result.error} />}
             {result.state === 'uncertain' && <InlineAlert tone="warning">{t('placeReview.uncertainAbout')}</InlineAlert>}
             {(result.state === 'uncertain' || result.state === 'refused' || result.state === 'observed') && <Button size="sm" pending={reading === result.review.target.id} onClick={() => void reconcile(result)}>{t('placeReview.readAgain')}</Button>}
-            {result.observed !== undefined && <section><p>{t('shareReview.observed', { revision: result.observed.revision })}</p><ul>{result.observed.rows.map((row) => <li key={`${row.permission}:${row.profile}`}><code>{row.permission}</code>{row.entries.map((entry) => <HolderView key={entry.id} holder={entry.holder} target={result.review.target} />)}</li>)}</ul></section>}
+            {result.observed !== undefined && <section><p>{t('shareReview.observed')}</p><ul>{result.observed.rows.map((row) => <li key={`${row.permission}:${row.profile}`}><code>{row.permission}</code>{row.entries.map((entry) => <HolderView key={entry.id} holder={entry.holder} target={result.review.target} />)}</li>)}</ul></section>}
           </li>)}
         </ul>
         {inverses !== null && <section aria-label={t('placeReview.undoTitle')}><h3>{t('placeReview.undoTitle')}</h3><ul>{inverses.map((row) => <li key={row.target.id}><TargetName target={row.target} />{row.error === undefined ? <p>{t('placeReview.succeeded')}</p> : <><ErrorAlert error={row.error} /><Button size="sm" pending={reading === row.target.id} onClick={() => { const result = combined.find((result) => result.review.target.id === row.target.id); if (result !== undefined) void reconcile(result); }}>{t('placeReview.readAgain')}</Button></>}</li>)}</ul></section>}

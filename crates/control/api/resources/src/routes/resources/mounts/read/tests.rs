@@ -9,8 +9,6 @@ use super::*;
 
 use crate::middleware::authentication::ACCESS_TOKEN_PREFIX;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
 use crate::middleware::authentication::new_token;
 
 use crate::middleware::authentication::token_hash;
@@ -182,11 +180,12 @@ enum Origin {
 }
 
 async fn credential(world: &World, user: Id, mount: Id, origin: Origin) -> String {
-    let secret = new_token(if matches!(origin, Origin::Session) {
-        ACCESS_TOKEN_PREFIX
+    let credential = orch_types::new_id();
+    let secret = if matches!(origin, Origin::Session) {
+        new_token(ACCESS_TOKEN_PREFIX)
     } else {
-        API_TOKEN_PREFIX
-    });
+        crate::middleware::authentication::new_api_token(credential)
+    };
     let hash = token_hash(&secret);
     let end = world.now() + chrono::Duration::seconds(1);
     if matches!(origin, Origin::Session) {
@@ -211,7 +210,7 @@ async fn credential(world: &World, user: Id, mount: Id, origin: Origin) -> Strin
         identity::create_api_token_scoped(
             &mut *world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: credential,
                 user_id: user,
                 name: "Native read cut",
                 token_hash: &hash,
@@ -256,7 +255,7 @@ async fn mount_fixture(world: &World, owner: &crate::places::Who) -> Id {
 
 fn reader(world: &World) -> TestApp {
     let mut registry = Registry::new();
-    read::register::<NativeCut, _, _>(&mut registry, MountGet, MountList);
+    read::register_children::<NativeCut, _, _>(&mut registry, MountGet, MountList);
     TestApp::over(world.app.app.clone(), world.app.clock.clone(), registry)
 }
 
@@ -284,9 +283,9 @@ async fn snapshot_get_prepares_its_native_projection_once_for_each_http_credenti
             reached.load(Ordering::SeqCst),
             match origin {
                 Origin::Session | Origin::Legacy => 1,
-                Origin::Scoped => 3,
+                Origin::Scoped => 2,
             },
-            "scoped publication also rechecks its retained source before and after bookkeeping"
+            "scoped publication rechecks its retained source once"
         );
     }
 }
@@ -305,7 +304,7 @@ async fn a_declared_snapshot_reader_cannot_return_content_without_its_actual_rea
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _caller: &'a orch_authz::Caller,
-        (): (),
+        _query: orch_api_contract::common::ChildCollectionQuery,
         (): (),
     ) -> crate::registry::OptionalOperationFuture<'a> {
         Box::pin(async { panic!("entry must not run the snapshot producer") })
@@ -321,7 +320,7 @@ async fn a_declared_snapshot_reader_cannot_return_content_without_its_actual_rea
         .await
         .ok();
     let mut registry = Registry::new();
-    registry.on_snapshot_read_with_optional_operation(MountGet, unopened, move |_, (), ()| {
+    registry.on_snapshot_read_with_optional_operation(MountGet, unopened, move |_, _query, ()| {
         let item = item.clone();
         async move { Ok::<_, ApiError>(item) }
     });
@@ -453,7 +452,7 @@ async fn native_get_context_uses_actual_session_mode_and_the_same_principal_time
         .await
         .unwrap();
     let mut registry = Registry::new();
-    read::register::<NativeCut, _, _>(&mut registry, MountGet, MountList);
+    read::register_children::<NativeCut, _, _>(&mut registry, MountGet, MountList);
     let app = registry
         .into_router_for(orch_api_contract::surface::HttpSurface::Browser)
         .with_state(world.app.app.clone());
@@ -486,7 +485,9 @@ async fn native_get_context_uses_actual_session_mode_and_the_same_principal_time
                     AND query LIKE $2 AND $1=ANY(pg_blocking_pids(pid)))",
             )
             .bind(blocker_pid)
-            .bind("%FOR KEY SHARE OF u FOR SHARE OF s, a%")
+            .bind(crate::testing::current_identity_query_pattern(
+                orch_api_contract::surface::HttpSurface::Browser,
+            ))
             .fetch_one(&world.db.pool)
             .await
             .unwrap();

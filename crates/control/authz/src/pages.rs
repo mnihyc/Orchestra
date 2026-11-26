@@ -165,6 +165,16 @@ impl<'p> Setup<'p> {
         target: Target,
         policy: Policy,
     ) -> Result<Setup<'p>, Error> {
+        Self::load_for(conn, principal, target, policy, None).await
+    }
+
+    async fn load_for(
+        conn: &mut Conn,
+        principal: &'p Principal,
+        target: Target,
+        policy: Policy,
+        resource_rows: Option<ObjectKind>,
+    ) -> Result<Setup<'p>, Error> {
         let (graph, site, resource) = match target {
             Target::Live(node) | Target::Defaults(PlaceRef::Node(node)) => {
                 let graph = Graph::load(conn, &[node]).await?;
@@ -211,7 +221,6 @@ impl<'p> Setup<'p> {
             ),
         };
         let sites: Vec<Site> = site.iter().cloned().collect();
-        let everything: Vec<Permission> = Permission::ALL.to_vec();
         let mut extra = vec![page];
         if let Some(place) = site
             .as_ref()
@@ -219,8 +228,31 @@ impl<'p> Setup<'p> {
         {
             extra.push(PageRef::defaults_of(PlaceRef::Node(place.id)));
         }
-        let frame =
-            Frame::load_with(conn, principal, policy, graph, &sites, &extra, &everything).await?;
+        let frame = if let Some(kind) = resource_rows {
+            // The list shows defaults and their holders. It has no participation fields.
+            let permissions: Vec<_> = kind.permissions().collect();
+            Frame::load_prepared(
+                conn,
+                principal,
+                policy,
+                graph,
+                (&sites, &extra, &[]),
+                &permissions,
+                Some(&[]),
+            )
+            .await?
+        } else {
+            Frame::load_with(
+                conn,
+                principal,
+                policy,
+                graph,
+                &sites,
+                &extra,
+                Permission::ALL,
+            )
+            .await?
+        };
         Ok(Setup {
             frame,
             site,
@@ -272,26 +304,64 @@ impl<'p> Setup<'p> {
     }
 }
 
-/// Reads the page `target` for display, for the caller. The caller has
-/// checked that they may see what the page is of: `node.view` on the node,
-/// and on a place for its defaults.
-pub async fn read(
+/// The sharing rows of one resource kind at a home, with the places needed to name their holders.
+pub struct ResourceDefaults {
+    /// Applicable rows in catalogue order.
+    pub rows: Vec<RowView>,
+    /// The home’s root org, used to qualify holder names.
+    pub root: Option<Id>,
+    /// Where a role without an explicit place is held.
+    pub role_place: Option<Id>,
+}
+
+/// The caller has checked that they may view this home. The resource list displays just its
+/// applicable defaults, using the same chains, locks and giving rights as the full editor.
+pub async fn resource_defaults(
     conn: &mut Conn,
     principal: &Principal,
-    target: Target,
-    policy: Policy,
-) -> Result<PageView, Error> {
-    let setup = Setup::load(conn, principal, target, policy).await?;
-    let writable = !setup.ways_to_change().is_empty();
+    home: Id,
+    kind: ObjectKind,
+) -> Result<ResourceDefaults, Error> {
+    let setup = Setup::load_for(
+        conn,
+        principal,
+        Target::Defaults(PlaceRef::Node(home)),
+        Policy::default(),
+        Some(kind),
+    )
+    .await?;
     let giving = Giving::of(
         &setup.frame,
         setup.site.as_ref(),
         setup.page.page,
         Acting::Ordinary,
     );
-    let now = principal.now();
+    let rows = permission_rows(
+        &setup,
+        &giving,
+        !setup.ways_to_change().is_empty(),
+        principal.now(),
+        Some(kind),
+    );
+    Ok(ResourceDefaults {
+        rows,
+        root: setup.site.as_ref().and_then(|site| site.root),
+        role_place: setup.site.as_ref().and_then(|site| site.role_place),
+    })
+}
+
+fn permission_rows(
+    setup: &Setup<'_>,
+    giving: &Giving<'_, '_>,
+    writable: bool,
+    now: Time,
+    kind: Option<ObjectKind>,
+) -> Vec<RowView> {
     let mut rows = Vec::new();
     for (permission, profile) in setup.page_of.rows() {
+        if kind.is_some_and(|kind| !permission.exists_on(kind)) {
+            continue;
+        }
         let chain = setup.chain(permission, profile);
         let stored = match setup.page.page {
             PageKind::Live => setup
@@ -330,6 +400,28 @@ pub async fn read(
             locked,
         });
     }
+    rows
+}
+
+/// Reads the page `target` for display, for the caller. The caller has
+/// checked that they may see what the page is of: `node.view` on the node,
+/// and on a place for its defaults.
+pub async fn read(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: Target,
+    policy: Policy,
+) -> Result<PageView, Error> {
+    let setup = Setup::load(conn, principal, target, policy).await?;
+    let writable = !setup.ways_to_change().is_empty();
+    let giving = Giving::of(
+        &setup.frame,
+        setup.site.as_ref(),
+        setup.page.page,
+        Acting::Ordinary,
+    );
+    let now = principal.now();
+    let rows = permission_rows(&setup, &giving, writable, now, None);
     let changed = rows.iter().any(|row| {
         (!row.inherit && !setup.follows_nothing()) || !row.entries.is_empty() || row.lock_set_here
     });
@@ -467,7 +559,7 @@ pub enum ChangeError {
         owner: Id,
     },
     /// An entry that names somebody from outside the root tree, new or given a new end, would run
-    /// beyond the bound of its place (`sharing.external_max_days`): it has no end, or a later one.
+    /// beyond the bound of its place (`sharing.external_max_minutes`): it has no end, or a later one.
     #[error("an entry for somebody from outside would run beyond the bound of its place")]
     ExternalLifetime {
         /// The latest end it may have, counted from now.
@@ -1439,6 +1531,8 @@ async fn places_not_seen(
         (WhereKind::Environment, Permission::EnvironmentView),
         (WhereKind::Host, Permission::HostView),
         (WhereKind::Machine, Permission::MachineView),
+        (WhereKind::EnvironmentPool, Permission::PoolView),
+        (WhereKind::HostPool, Permission::PoolView),
     ] {
         let ids: Vec<Id> = asked
             .iter()
@@ -1494,14 +1588,19 @@ fn exceeds_what_the_giver_holds(
     if resource.kind != ResourceKind::Provider || setup.owns_or_administers() {
         return Ok(Beyond::Within);
     }
-    let mut written: Vec<(String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
+    let mut written: Vec<(Permission, String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
     for (index, row) in checked.rows.iter().enumerate() {
-        if row.permission != Permission::ProviderUse {
+        if !row.permission.has_provider_options() {
             continue;
         }
         for (entry, added) in row.add.iter().enumerate() {
             if let Options::ProviderUse(options) = &added.options {
-                written.push((format!("rows[{index}].add[{entry}]"), options, None));
+                written.push((
+                    row.permission,
+                    format!("rows[{index}].add[{entry}]"),
+                    options,
+                    None,
+                ));
             }
         }
         for (entry, update) in row.update.iter().enumerate() {
@@ -1517,27 +1616,30 @@ fn exceeds_what_the_giver_holds(
                 continue;
             };
             written.push((
+                row.permission,
                 format!("rows[{index}].update[{entry}]"),
                 options,
                 Some(before),
             ));
         }
     }
-    let wider: Vec<(&String, &ProviderUse)> = written
+    let wider: Vec<(Permission, &String, &ProviderUse)> = written
         .iter()
-        .filter(|(_, options, before)| {
+        .filter(|(_, _, options, before)| {
             !before.as_ref().is_some_and(|before| options.within(before))
         })
-        .map(|(path, options, _)| (path, *options))
+        .map(|(permission, path, options, _)| (*permission, path, *options))
         .collect();
     if wider.is_empty() {
         return Ok(Beyond::Within);
     }
-    let Ok(Ok(held)) = crate::usable::access(&setup.frame, resource, site, None, false) else {
-        return Ok(Beyond::NoUse);
-    };
     let mut named: Vec<(String, EntryMember)> = Vec::new();
-    for (path, options) in wider {
+    for (permission, path, options) in wider {
+        let Ok(Ok(held)) =
+            crate::usable::access_for(&setup.frame, resource, site, None, false, permission)
+        else {
+            return Ok(Beyond::NoUse);
+        };
         let nearest = held
             .each
             .iter()
@@ -1563,6 +1665,10 @@ fn exceeds_what_the_giver_holds(
 /// a sentence a client reads as it is; the screen has the same words in each language.
 fn beyond_sentence(member: EntryMember) -> (&'static str, &'static str) {
     match member {
+        EntryMember::Purposes => (
+            "purposes",
+            "allows more uses than any one entry of yours does",
+        ),
         EntryMember::Models => (
             "models",
             "allows more models than any one entry of yours does",
@@ -1759,19 +1865,21 @@ pub async fn change_by_share_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send
     origin: &audit::Origin,
     before_effect: F,
 ) -> Result<Outcome, ChangeFailure<E>> {
-    change_with_fence(
-        conn,
-        principal,
-        target,
-        change,
-        policy,
-        None,
-        EntrySource::Page,
-        share_inside,
-        Acting::Share,
-        origin,
-        before_effect,
-    )
+    page_phase(|| {
+        change_with_fence(
+            conn,
+            principal,
+            target,
+            change,
+            policy,
+            None,
+            EntrySource::Page,
+            share_inside,
+            Acting::Share,
+            origin,
+            before_effect,
+        )
+    })
     .await
 }
 
@@ -1962,6 +2070,12 @@ async fn change_with(
     .map_err(native_change_failure)
 }
 
+/// Construct each page phase outside the stack frame polling its caller.
+#[inline(never)]
+fn page_phase<F: std::future::Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the same native page inputs plus the entry owner's one-shot boundary"
@@ -1983,10 +2097,152 @@ where
     F: FnOnce() -> Result<(), E> + Send,
     E: Send,
 {
-    let (setup, manages, checked, owners_after, locked_above, rows_now, entries_now, revision_before, page_key, by, now, actor) = async {
+    let PreparedPageChange {
+        setup,
+        manages,
+        checked,
+        owners_after,
+        locked_above,
+        rows_now,
+        entries_now,
+        revision_before,
+        page_key,
+        actor,
+    } = page_phase(|| {
+        prepare_page_change(
+            conn,
+            principal,
+            target,
+            change,
+            policy,
+            resource_policy,
+            acting,
+        )
+    })
+    .await
+    .map_err(ChangeFailure::Native)?;
+    let now = principal.now();
+    let by = principal.user();
+    let mut writer = Writer {
+        before_effect: Some(before_effect),
+        page_key: page_key.clone(),
+        defaults: setup.page.page == PageKind::Defaults,
+        node: setup
+            .site
+            .as_ref()
+            .filter(|site| site.kind.node().is_some())
+            .map(|site| site.id),
+        object: match target {
+            Target::Resource(object) => Some(object),
+            _ => None,
+        },
+        root: setup.site.as_ref().and_then(|site| site.root),
+        by,
+        now: now.get(),
+        origin,
+        actor,
+        thing: setup
+            .site
+            .as_ref()
+            .map_or_else(|| "the system".to_owned(), |site| site.name.clone()),
+        names: Names {
+            known: HashMap::new(),
+            graph: setup.frame.graph(),
+            root: setup.site.as_ref().and_then(|site| site.root),
+            role_place: setup.site.as_ref().and_then(|site| site.role_place),
+        },
+        rows_now,
+        entries_now,
+        changed: false,
+        overridden: false,
+        source,
+        share_inside,
+        conn,
+    };
+    let all_rows = setup.page_of.rows();
+    let mut skipped = Vec::new();
+    match checked.whole {
+        Some(pages::Whole::Private) => {
+            skipped = writer.make_private(&all_rows, &locked_above).await?
+        }
+        Some(pages::Whole::Reset) => skipped = writer.reset(&locked_above).await?,
+        None => {}
+    }
+    if let (Some(after), Some(site)) = (&owners_after, &setup.site) {
+        writer.owners(site.id, site.first_owner, after).await?;
+    }
+    for row in &checked.rows {
+        writer
+            .flags(row.permission, row.profile, row.inherit, row.locked)
+            .await?;
+        for entry in &row.add {
+            let r#override = !writer.defaults
+                && entry.holder == (Holder::User { id: by })
+                && setup.site.as_ref().is_some_and(|site| {
+                    decisions::is_override(&manages, &setup.frame.ways(site, row.permission))
+                });
+            writer
+                .add(row.permission, row.profile, entry, r#override)
+                .await?;
+        }
+        for update in &row.update {
+            writer.update(row.permission, row.profile, update).await?;
+        }
+        for id in &row.remove {
+            writer.remove(row.permission, row.profile, *id).await?;
+        }
+    }
+    let (changed, r#override) = (writer.changed, writer.overridden);
+    if !changed {
+        return Ok(Outcome {
+            changed: false,
+            revision: revision_before,
+            epoch: access::epoch(conn).await?,
+            r#override: false,
+            skipped,
+        });
+    }
+    let count = access::count_page_change(conn, &page_key, Some(by), now.get()).await?;
+    let epoch = access::bump_epoch(conn).await?;
+    if let Target::Resource(object) = target
+        && object.kind == ObjectKind::DocumentContainer
+    {
+        orch_db::queries::documents::containers::touch(conn, object.id, now.get()).await?;
+    }
+    Ok(Outcome {
+        changed: true,
+        revision: count + 1,
+        epoch,
+        r#override,
+        skipped,
+    })
+}
+
+/// Facts read under the change lock, retained up to the first mutating statement.
+struct PreparedPageChange<'p> {
+    setup: Setup<'p>,
+    manages: Vec<Through>,
+    checked: pages::CheckedChange,
+    owners_after: Option<pages::OwnersAfter>,
+    locked_above: HashMap<(Permission, Profile), PlaceRef>,
+    rows_now: HashMap<(Permission, Profile), (bool, bool)>,
+    entries_now: Vec<StoredEntry>,
+    revision_before: i64,
+    page_key: PageKey,
+    actor: String,
+}
+
+async fn prepare_page_change<'p>(
+    conn: &mut Conn,
+    principal: &'p Principal,
+    target: Target,
+    change: &PageChange,
+    policy: Policy,
+    resource_policy: Option<&ResourcePolicy>,
+    acting: Acting,
+) -> Result<PreparedPageChange<'p>, ChangeError> {
     lock_change_target(conn, target).await?;
     let setup = Setup::load(conn, principal, target, policy).await?;
-    let now = principal.now();
     let by = principal.user();
 
     let orgs: &[Id] = setup.site.as_ref().map_or(&[], |site| site.orgs.as_slice());
@@ -2079,8 +2335,7 @@ where
             resource.kind == ResourceKind::Provider && shared.keeps_to_its_owner(resource)
         })
         && checked.rows.iter().any(|row| {
-            row.permission == Permission::ProviderUse
-                && (!row.add.is_empty() || !row.update.is_empty())
+            row.permission.has_provider_options() && (!row.add.is_empty() || !row.update.is_empty())
         })
     {
         return Err(ChangeError::SubscriptionNotShared);
@@ -2360,6 +2615,67 @@ where
         }
     }
 
+    // File entries narrow the giver's current act and geometry, including this credential's usable shell.
+    if setup
+        .resource
+        .as_ref()
+        .is_some_and(|resource| resource.kind == ResourceKind::Environment)
+        && !setup.owns_or_administers()
+        && let Some(site) = &setup.site
+    {
+        let held = crate::file_reach::in_frame(&setup.frame, site)?;
+        let bound = crate::file_reach::machine_bound(conn, site.id).await?;
+        let terminal =
+            held.terminal && crate::file_reach::terminal_available(conn, site.id, bound).await?;
+        let held = held.resolved(terminal, bound);
+        let mut faults = Vec::new();
+        for (index, row) in checked.rows.iter().enumerate() {
+            let allowed = match row.permission {
+                Permission::FilesView => held.view,
+                Permission::FilesManage => held.manage,
+                Permission::PortsView => {
+                    Some(if crate::file_reach::port_machine_in(&setup.frame, site)? {
+                        orch_access_contract::permissions::FileReach::Machine
+                    } else {
+                        orch_access_contract::permissions::FileReach::Roots
+                    })
+                }
+                _ => continue,
+            };
+            for (entry, added) in row.add.iter().enumerate() {
+                if let Options::Files(options) = &added.options
+                    && !allowed.is_some_and(|reach| options.reach <= reach)
+                {
+                    faults.push(FieldError {
+                        path: format!("rows[{index}].add[{entry}].options.reach"),
+                        message: "allows more than your current reach".to_owned(),
+                    });
+                }
+            }
+            for (entry, update) in row.update.iter().enumerate() {
+                let Some(Options::Files(options)) = &update.options else {
+                    continue;
+                };
+                let before = entries_now
+                    .iter()
+                    .find(|stored| stored.entry.id == update.entry)
+                    .map(|stored| crate::options::read(stored.permission, &stored.entry))
+                    .transpose()?;
+                let narrowing =
+                    matches!(before, Some(Options::Files(before)) if options.within(&before));
+                if !narrowing && !allowed.is_some_and(|reach| options.reach <= reach) {
+                    faults.push(FieldError {
+                        path: format!("rows[{index}].update[{entry}].options.reach"),
+                        message: "allows more than your current reach".to_owned(),
+                    });
+                }
+            }
+        }
+        if !faults.is_empty() {
+            return Err(ChangeError::Invalid(faults));
+        }
+    }
+
     // What an entry in the Use row of a provider names is held to what its giver holds, whether the
     // entry is new or changed: one rule for adding and for editing. An entry may always be narrowed.
     if let Some(site) = &setup.site {
@@ -2428,6 +2744,44 @@ where
         }
     }
 
+    let owners_after =
+        page_phase(|| validate_page_entries(conn, &setup, &checked, &entries_now, named_rows))
+            .await?;
+
+    // Resolve the audit name before the writer can perform its first effect.
+    let actor = {
+        let mut names = Names {
+            known: HashMap::new(),
+            graph: setup.frame.graph(),
+            root: setup.site.as_ref().and_then(|site| site.root),
+            role_place: setup.site.as_ref().and_then(|site| site.role_place),
+        };
+        names.user(conn, by).await?
+    };
+    Ok(PreparedPageChange {
+        setup,
+        manages,
+        checked,
+        owners_after,
+        locked_above,
+        rows_now,
+        entries_now,
+        revision_before,
+        page_key,
+        actor,
+    })
+}
+
+/// Check the proposed holders, ownership and entry edits against the locked page.
+async fn validate_page_entries(
+    conn: &mut Conn,
+    setup: &Setup<'_>,
+    checked: &pages::CheckedChange,
+    entries_now: &[StoredEntry],
+    named_rows: usize,
+) -> Result<Option<pages::OwnersAfter>, ChangeError> {
+    let by = setup.frame.principal().user();
+    let now = setup.frame.principal().now();
     let mut faults: Vec<FieldError> = Vec::new();
 
     // A selected group or place is named only while its source place remains visible.
@@ -2577,18 +2931,18 @@ where
                     .ways(site, Permission::AccessExternal)
                     .is_empty()
             {
-                return Err(outside(conn, &setup, site).await?);
+                return Err(outside(conn, setup, site).await?);
             }
         }
         if let (Some(after), Some(site)) = (&owners_after, &setup.site)
             && external::any_outside(conn, root, &after.add).await?
         {
-            return Err(outside(conn, &setup, site).await?);
+            return Err(outside(conn, setup, site).await?);
         }
     }
 
     // An entry that names somebody from outside the root tree runs no longer than the bound of its
-    // place (`sharing.external_max_days`, counted from now): a new one without an end or with a later
+    // place (`sharing.external_max_minutes`, counted from now): a new one without an end or with a later
     // one is refused with the latest end it may have and the place that sets the bound, and so is one
     // given a new end beyond it. An admin who names themself is no outsider to what they administer.
     if let Some(site) = &setup.site
@@ -2674,112 +3028,7 @@ where
     if !faults.is_empty() {
         return Err(ChangeError::Invalid(faults));
     }
-
-    // Everything fits: make the change.
-    let actor = {
-        let mut names = Names {
-            known: HashMap::new(),
-            graph: setup.frame.graph(),
-            root: setup.site.as_ref().and_then(|site| site.root),
-            role_place: setup.site.as_ref().and_then(|site| site.role_place),
-        };
-        names.user(conn, by).await?
-    };
-    Ok::<_, ChangeError>((setup, manages, checked, owners_after, locked_above, rows_now, entries_now, revision_before, page_key, by, now, actor))
-    }.await.map_err(ChangeFailure::Native)?;
-    let mut writer = Writer {
-        before_effect: Some(before_effect),
-        page_key: page_key.clone(),
-        defaults: setup.page.page == PageKind::Defaults,
-        node: setup
-            .site
-            .as_ref()
-            .filter(|site| site.kind.node().is_some())
-            .map(|site| site.id),
-        object: match target {
-            Target::Resource(object) => Some(object),
-            _ => None,
-        },
-        root: setup.site.as_ref().and_then(|site| site.root),
-        by,
-        now: now.get(),
-        origin,
-        actor,
-        thing: setup
-            .site
-            .as_ref()
-            .map_or_else(|| "the system".to_owned(), |site| site.name.clone()),
-        names: Names {
-            known: HashMap::new(),
-            graph: setup.frame.graph(),
-            root: setup.site.as_ref().and_then(|site| site.root),
-            role_place: setup.site.as_ref().and_then(|site| site.role_place),
-        },
-        rows_now,
-        entries_now,
-        changed: false,
-        overridden: false,
-        source,
-        share_inside,
-        conn,
-    };
-    let all_rows = setup.page_of.rows();
-    let mut skipped = Vec::new();
-    match checked.whole {
-        Some(pages::Whole::Private) => {
-            skipped = writer.make_private(&all_rows, &locked_above).await?
-        }
-        Some(pages::Whole::Reset) => skipped = writer.reset(&locked_above).await?,
-        None => {}
-    }
-    if let (Some(after), Some(site)) = (&owners_after, &setup.site) {
-        writer.owners(site.id, site.first_owner, after).await?;
-    }
-    for row in &checked.rows {
-        writer
-            .flags(row.permission, row.profile, row.inherit, row.locked)
-            .await?;
-        for entry in &row.add {
-            let r#override = !writer.defaults
-                && entry.holder == (Holder::User { id: by })
-                && setup.site.as_ref().is_some_and(|site| {
-                    decisions::is_override(&manages, &setup.frame.ways(site, row.permission))
-                });
-            writer
-                .add(row.permission, row.profile, entry, r#override)
-                .await?;
-        }
-        for update in &row.update {
-            writer.update(row.permission, row.profile, update).await?;
-        }
-        for id in &row.remove {
-            writer.remove(row.permission, row.profile, *id).await?;
-        }
-    }
-    let (changed, r#override) = (writer.changed, writer.overridden);
-    if !changed {
-        return Ok(Outcome {
-            changed: false,
-            revision: revision_before,
-            epoch: access::epoch(conn).await?,
-            r#override: false,
-            skipped,
-        });
-    }
-    let count = access::count_page_change(conn, &page_key, Some(by), now.get()).await?;
-    let epoch = access::bump_epoch(conn).await?;
-    if let Target::Resource(object) = target
-        && object.kind == ObjectKind::DocumentContainer
-    {
-        orch_db::queries::documents::containers::touch(conn, object.id, now.get()).await?;
-    }
-    Ok(Outcome {
-        changed: true,
-        revision: count + 1,
-        epoch,
-        r#override,
-        skipped,
-    })
+    Ok(owners_after)
 }
 
 async fn outside(conn: &mut Conn, setup: &Setup<'_>, site: &Site) -> Result<ChangeError, Error> {

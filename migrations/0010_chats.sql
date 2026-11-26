@@ -38,6 +38,8 @@ CREATE INDEX chats_group_home_idx ON chats (home_id, id) WHERE kind = 'group';
 CREATE INDEX chats_summary_source_idx ON chats (id)
     WHERE (kind = 'node' OR (kind = 'group' AND visibility = 'public')) AND last_message_seq > 0;
 
+CREATE INDEX chats_node_destinations_idx ON chats (org_id, COALESCE(last_message_at, created_at) DESC, id DESC) WHERE kind = 'node';
+
 CREATE INDEX chats_org_idx ON chats USING btree (org_id, last_message_at DESC) WHERE (kind <> 'node'::text);
 
 CREATE INDEX related_chats_recent_idx ON chats USING btree (COALESCE(last_message_at, created_at) DESC, id);

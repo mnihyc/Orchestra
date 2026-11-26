@@ -1,4 +1,6 @@
 /** Usage shares the authorized name locator: recents on focus and search across accessible scopes. */
+import type { NameSearch } from '@/api/search';
+import { pickerNamePage } from './picker-name-fixture';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
@@ -10,7 +12,7 @@ import { show } from './support';
 import { i18n } from '@/i18n';
 
 const reads = vi.hoisted(() => ({ names: vi.fn<(query: string) => Promise<NameHit[]>>() }));
-vi.mock('@/api/search', () => ({ namesQuery: ({ q }: { q: string }) => ({ queryKey: ['scope-names', q], queryFn: () => reads.names(q) }) }));
+vi.mock('@/api/search', () => ({ pickerNamesQuery: (s: NameSearch) => pickerNamePage(s, () => reads.names(s.q)) }));
 const hit = (id: string, kind: 'org' | 'project', name: string, path: NameHit['path'] = []): NameHit => ({ home_path: [],
   id, kind, name, path, address: null, avatar: null, archived: false, color: null, custom_color: null, owner: null,
   recent: true, tag: null, thread_attention: null, username: null,
