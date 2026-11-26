@@ -16,7 +16,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::{
     DestinationDelete, DestinationTest, DestinationUpdate, DestinationUpdateBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_db::queries::notifications::channels::{self as rows, NewDestination, owner};
@@ -225,7 +225,7 @@ async fn issue(s: &Scene, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.world.conn().await,
         &NewApiToken {

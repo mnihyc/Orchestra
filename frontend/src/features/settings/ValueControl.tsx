@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { SIZE_UNITS, type Shape, type UnavailableChoice, bytesOf, emptyOf, isUnit, sizeParts, words } from '@/features/settings/settingsModel';
 import { SettingChoiceContext } from '@/features/settings/choiceCopy';
+import { approvalUnavailableWords } from '@/features/composer/approvalAvailability';
 import { choiceOption, settingChoice } from '@/i18n/choices';
 import { Button } from '@/ui/Button';
 import { Checkbox, CheckboxList } from '@/ui/Checkbox';
@@ -23,6 +24,7 @@ import { Select } from '@/ui/Select';
 import { ChoiceLocator } from '@/ui/ChoiceLocator';
 import { Switch } from '@/ui/Switch';
 import { Textarea } from '@/ui/Textarea';
+import type { ChoiceInheritance } from '@/ui/InheritedChoice';
 import type { SettingDef as SettingWithText } from '@/generated/api-types';
 
 /** How many characters a text may have before it is edited in a box of several lines. */
@@ -33,6 +35,8 @@ const PASTE_SHARE_DEFAULT = 25;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export interface ValueControlProps {
+  inheritance?: ChoiceInheritance | undefined;
+  readOnly?: boolean;
   display?: SettingWithText['display'];
   shape: Shape;
   value: unknown;
@@ -55,11 +59,13 @@ export interface ValueControlProps {
   memberDisplay?: (name: string) => SettingWithText['display'];
   /** Show a structured text or numeric field's own label when its containing row cannot name that field. */
   showLabel?: boolean;
+  /** A value a place above holds: the other value could not apply here, so it is offered disabled with this reason. */
+  held?: { value: boolean; reason: string } | undefined;
 }
 
 // ---------------------------------------------------------------- whole numbers
 
-function IntControl({ shape, value, onChange, onEdited, label, disabled, error, display, placeholder, showLabel }: ValueControlProps & { shape: Extract<Shape, { type: 'int' }> }) {
+function IntControl({ shape, value, onChange, onEdited, label, disabled, readOnly, error, display, placeholder, showLabel }: ValueControlProps & { shape: Extract<Shape, { type: 'int' }> }) {
   const { t } = useTranslation();
   const bytes = shape.unit === 'bytes';
   const held = typeof value === 'number' ? value : null;
@@ -89,6 +95,7 @@ function IntControl({ shape, value, onChange, onEdited, label, disabled, error, 
         value={off ? t('common.off') : text}
         placeholder={placeholder}
         disabled={disabled}
+        readOnly={readOnly}
         error={error}
         fieldClassName="w-[10rem]"
         onFocus={() => setFocused(true)}
@@ -104,7 +111,7 @@ function IntControl({ shape, value, onChange, onEdited, label, disabled, error, 
           label={t('settings.editor.sizeUnit', { name: label })}
           hideLabel
           value={size}
-          disabled={disabled}
+          disabled={disabled === true || readOnly === true}
           fieldClassName="w-[7rem]"
           onValueChange={(unit) => {
             setSize(unit);
@@ -124,6 +131,14 @@ function IntControl({ shape, value, onChange, onEdited, label, disabled, error, 
 // ---------------------------------------------------------------- lists
 
 interface VisibleChoice { value: string; name: string; description?: string; disabled?: boolean }
+
+/** How many columns of `ch` a text takes: a wide (CJK) character takes two. */
+function textColumns(text: string): number {
+  let columns = 0;
+  for (const character of text) columns += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/u.test(character) ? 2 : 1;
+  return columns;
+}
+
 function schemaChoices(values: readonly string[], unavailable: readonly UnavailableChoice[] | undefined, key: string | null, word: (value: string) => string, t: TFunction): VisibleChoice[] {
   const choices: VisibleChoice[] = values.map((value) => {
     const copy = settingChoice(t, key, value);
@@ -135,7 +150,7 @@ function schemaChoices(values: readonly string[], unavailable: readonly Unavaila
     known.add(choice.value);
     const copy = settingChoice(t, key, choice.value);
     choices.push({ value: choice.value, name: copy?.name ?? word(choice.value), disabled: true,
-      description: choice.reason === 'program_auto_unavailable' ? t('settings.editor.autoUnavailable') : t('settings.editor.choiceUnavailable') });
+      description: approvalUnavailableWords(choice.reason, t) ?? (choice.reason === 'program_auto_unavailable' ? t('settings.editor.autoUnavailable') : t('settings.editor.choiceUnavailable')) });
   }
   return choices;
 }
@@ -372,7 +387,7 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
   const key = useContext(SettingChoiceContext);
   if (key === 'composer.paste_inline_context_share' && shape.type === 'int') {
     const mode = value === 0 ? 'file' : value === 100 ? 'inline' : 'share';
-    return <div className="flex min-w-0 flex-wrap items-end gap-2"><Select label={label} hideLabel value={mode} disabled={disabled}
+    return <div className="flex min-w-0 flex-wrap items-end gap-2"><Select label={label} hideLabel value={mode} disabled={disabled === true || props.readOnly === true}
       onValueChange={(next) => onChange(next === 'file' ? 0 : next === 'inline' ? 100 : PASTE_SHARE_DEFAULT)}
       options={[{value:'file',name:t('uploads.alwaysFile')},{value:'share',name:t('uploads.contextShare')},{value:'inline',name:t('uploads.alwaysInline')}]} />
       {mode === 'share' && <IntControl {...props} shape={shape}/>}</div>;
@@ -381,7 +396,13 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
     case 'bool': {
       // The key's title stands beside the control already: the switch keeps it for a screen reader and says its state in words.
       const word = say ?? words;
-      const state = value === true ? word('on') : word('off');
+      // The file relay says what it does in its two states, as the registry's "File relay" title stands beside it.
+      const [on, off] = key === 'storage.relay_transfers' ? ['relayed', 'cached'] : ['on', 'off'];
+      const state = value === true ? word(on) : word(off);
+      const heldOff = (choice: boolean) => props.held !== undefined && props.held.value !== choice ? { disabled: true, description: props.held.reason } : {};
+      if (props.inheritance !== undefined) return <Select label={label} hideLabel size="sm" value={value === true ? 'on' : 'off'} disabled={disabled}
+        inheritance={props.inheritance} onValueChange={(next) => { if (props.held === undefined || props.held.value === (next === 'on')) onChange(next === 'on'); }}
+        options={[{ value: 'on', name: word(on), ...heldOff(true) }, { value: 'off', name: word(off), ...heldOff(false) }]} />;
       return (
         <Switch
           className="w-fit items-center gap-3"
@@ -402,18 +423,24 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
     case 'choice': {
       const word = say ?? words;
       const options = schemaChoices(shape.values, shape.unavailable, key, word, t);
+      // The closed field is as wide as what it can show (the inherited words with a value, or the longest choice), up to the row's width.
+      const longest = Math.max(0, ...options.map((option) => textColumns(option.name)));
+      const columns = (props.inheritance === undefined ? 0 : textColumns(props.inheritance.label) + 2) + longest;
       return (
-        <ChoiceLocator
-          label={label}
-          hideLabel
-          value={typeof value === 'string' ? value : ''}
-          placeholder={placeholder}
-          valueLabel={typeof value === 'string' && !options.some((option) => option.value === value) ? word(value) : undefined}
-          disabled={disabled === true}
-          error={error}
-          onValueChange={onChange}
-          options={options}
-        />
+        <div className="min-w-0 max-w-full" style={{ width: `calc(${columns}ch + 3rem)` }}>
+          <ChoiceLocator
+            inheritance={props.inheritance}
+            label={label}
+            hideLabel
+            value={typeof value === 'string' ? value : ''}
+            placeholder={placeholder}
+            valueLabel={typeof value === 'string' && !options.some((option) => option.value === value) ? word(value) : undefined}
+            disabled={disabled === true}
+            error={error}
+            onValueChange={onChange}
+            options={options}
+          />
+        </div>
       );
     }
     case 'text':
@@ -426,11 +453,12 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
           maxLength={shape.maxLength ?? undefined}
           value={typeof value === 'string' ? value : ''}
           disabled={disabled}
+          readOnly={props.readOnly}
           error={error}
           onChange={(event) => onChange(event.target.value)}
         />
       ) : (
-        <Input label={label} hideLabel={props.showLabel !== true} placeholder={placeholder} value={typeof value === 'string' ? value : ''} disabled={disabled} error={error} onChange={(event) => onChange(event.target.value)} autoComplete="off" />
+        <Input label={label} hideLabel={props.showLabel !== true} placeholder={placeholder} value={typeof value === 'string' ? value : ''} disabled={disabled} readOnly={props.readOnly} error={error} onChange={(event) => onChange(event.target.value)} autoComplete="off" />
       );
     case 'id':
       return (
@@ -441,6 +469,7 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
           placeholder={placeholder ?? t('settings.editor.idPlaceholder')}
           value={typeof value === 'string' ? value : ''}
           disabled={disabled}
+          readOnly={props.readOnly}
           error={error}
           onChange={(event) => onChange(event.target.value.trim())}
           autoComplete="off"

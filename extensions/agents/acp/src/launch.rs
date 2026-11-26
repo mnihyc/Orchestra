@@ -239,12 +239,25 @@ impl Launched {
             )
             .await
             .map_err(|error| self.explain(error))?;
+        // Some agy releases send the v1 envelope with a numeric version of 2.
+        // Negotiate by its actual shape, without enabling a different wire protocol.
+        let legacy_agy = program.kind == "antigravity"
+            && answer["protocolVersion"] == 2
+            && answer["agentCapabilities"].is_object()
+            && answer
+                .pointer("/agentInfo/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| {
+                    name.eq_ignore_ascii_case("antigravity-acp")
+                        || name.eq_ignore_ascii_case("Antigravity ACP Server")
+                })
+            && answer.get("agent").is_none();
         let initialized: Initialized = serde_json::from_value(answer).map_err(|error| {
             AdapterError::HarnessUnavailable(format!(
                 "its answer to initialize is not readable: {error}"
             ))
         })?;
-        if initialized.protocol_version != PROTOCOL_VERSION {
+        if initialized.protocol_version != PROTOCOL_VERSION && !legacy_agy {
             return Err(AdapterError::HarnessUnavailable(format!(
                 "the program speaks version {} of the Agent Client Protocol, and this adapter drives version {PROTOCOL_VERSION}",
                 initialized.protocol_version

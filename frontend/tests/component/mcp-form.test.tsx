@@ -8,14 +8,20 @@ import type * as ResourceApi from '@/api/resource-tools';
 import { ApiError } from '@/api/client';
 import { EditMcp } from '@/features/resources/mcp/Edit';
 import { ResourceCreateButton } from '@/features/resources/ResourceCreation';
-import type { McpServer } from '@/generated/api-types';
+import type { FactTarget, McpServer, ResourceImpact } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { Input } from '@/ui/Input';
 import { show } from './support';
+import { SECRET_DOTS } from '@/ui/SecretField';
 
 const calls = vi.hoisted(() => ({ create: vi.fn<typeof ResourceApi.createMcp>(), update: vi.fn<typeof ResourceApi.updateMcp>() }));
 vi.mock('@/api/resource-tools', () => ({ createMcp: calls.create, updateMcp: calls.update, mcpKey: (id: string) => ['mcp-server', id] }));
+vi.mock('@/api/resource-impact',()=>({resourceImpactQuery:(target:FactTarget)=>({queryKey:['mcp-form-impact',target],queryFn:():Promise<ResourceImpact>=>{
+  const empty={count:0,threads:0,visible:[],hidden:0,since:null};
+  return Promise.resolve({target,name:'Existing MCP server',stopping:false,applications:[],application_complete:true,
+    activity:{running:empty,waiting:empty,stopped:empty},facts:{subject:{kind:'resource',object:target.object},as_of:'2026-11-15T00:00:00Z',dependents:[],dependents_complete:true,uses:null}});
+},retry:false})}));
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange, disabled }: { value: string; onChange: (value: string) => void; disabled?: boolean }) =>
   <Input label={i18n.t('resources.home.label')} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} /> }));
 
@@ -103,7 +109,9 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await look(locale, theme); const t = i18n.getFixedT(locale), user = userEvent.setup();
     calls.update.mockResolvedValue({ ...server, revision: 8 }); draw(server);
     const token = screen.getByLabelText(t('resourceDetails.mcp.form.token'));
-    expect(token).toHaveValue(''); expect(token).toHaveAttribute('placeholder', t('resourceDetails.mcp.form.keepSecret'));
+    // A saved token is never an empty box: it is dots that are set, with Replace, and nothing of it is read back.
+    expect(token).toHaveValue(SECRET_DOTS); expect(token).toHaveAttribute('readonly');
+    expect(screen.getByText(t('settingsEditors.secret.set'))).toBeVisible(); expect(screen.getByRole('button', { name: t('settingsEditors.secret.replace') })).toBeVisible();
     const url = screen.getByRole('textbox', { name: t('resourceDetails.mcp.form.url') }); await user.clear(url); await user.type(url, 'https://new.example.test/mcp');
     await user.click(screen.getByRole('button', { name: t('resources.edit.save') }));
     expect(calls.update).toHaveBeenCalledWith(server.id, expect.objectContaining({ expected_revision: 7, spec: { ...(server.spec as Record<string, unknown>), url: 'https://new.example.test/mcp' } }));

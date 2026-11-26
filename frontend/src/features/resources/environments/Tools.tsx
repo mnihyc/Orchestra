@@ -6,6 +6,7 @@ import { ApiError } from '@/api/client';
 import { environmentKey, updateEnvironment } from '@/api/environments';
 import { McpServers } from '@/features/resources/environments/McpServers';
 import { PathValue } from '@/features/resources/TechnicalValue';
+import { ExecutionApproval } from '@/features/resources/ExecutionApproval';
 import type { Environment, EnvironmentMachineProgram, EnvironmentUpdateBody } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -50,12 +51,16 @@ function MachineProgramTools({ environment, program }: { environment: Environmen
       <span className="text-text-muted">{program.version === '' || program.version === 'unknown' ? t('machinePrograms.nativeUnknownVersion') : program.version}</span>
       <PathValue path={program.path} />
     </div>
-    <Switch name={name === null ? t('environmentTools.anyVersion') : t('environmentTools.anyVersionBy', { name })}
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+    <Switch className="flex-1" name={t('environmentTools.anyVersion')}
+      aria-label={name === null ? undefined : t('environmentTools.anyVersionBy', { name })}
       checked={checked} disabled={!manages || !availableConfig} aria-busy={change.isPending}
       onCheckedChange={(allow) => {
         const config = programVersionConfig(environment.config, program, allow);
         if (manages && !change.isPending && config !== null) change.mutate({ body: { expected_revision: environment.revision, config }, kind: program.harness_kind, path: program.path, version: program.version, allow });
       }} />
+    {approval !== null && <ExecutionApproval approval={approval} />}
+    </div>
     {!availableConfig && <p className="text-sm text-text-muted">{t('environmentTools.configUnavailable')}</p>}
     {change.error !== null && <ErrorAlert error={change.error} />}
   </section>;
