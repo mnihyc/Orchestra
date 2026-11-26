@@ -56,10 +56,10 @@ function PhoneChoice({ choice, controls, tabIndex, onFocus }: { choice: NarrowCh
   </Tooltip>;
 }
 
-export function NarrowChoices({ choices, presentation = 'named' }: { choices: readonly NarrowChoice[]; presentation?: 'named' | 'icons' }) {
+export function NarrowChoices({ choices, presentation = 'named', facts }: { choices: readonly NarrowChoice[]; presentation?: 'named' | 'icons'; facts?: ReactNode }) {
   const { t } = useTranslation();
   const root = useRef<HTMLDivElement>(null);
-  if (choices.length === 0) return null;
+  if (choices.length === 0) return facts === undefined ? null : <span className="inline-flex min-w-0 items-center px-1">{facts}</span>;
   const active = choices.findIndex((choice) => choice.active);
   const buttons = () => Array.from(root.current?.querySelectorAll<HTMLButtonElement>('button[data-container-choice]') ?? []);
   const rove = (target: HTMLButtonElement) => { for (const button of buttons()) button.tabIndex = button === target ? 0 : -1; };
@@ -89,5 +89,6 @@ export function NarrowChoices({ choices, presentation = 'named' }: { choices: re
       <span data-container-name className="min-w-0 text-left leading-5 whitespace-normal wrap-anywhere">{choice.name}</span>
     </Button>;
     })}
+    {facts}
   </div>;
 }

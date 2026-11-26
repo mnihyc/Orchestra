@@ -135,7 +135,8 @@ pub(crate) fn refused(error: WriteError) -> ApiError {
             Err(error) => error,
         },
         // The system has no place above it and is no thread.
-        other @ (WriteError::SideThread
+        other @ (WriteError::Ceiling { .. }
+        | WriteError::SideThread
         | WriteError::Locked { .. }
         | WriteError::Unreadable { .. }) => ApiError::internal(other),
     }
@@ -177,10 +178,14 @@ async fn reach(
 async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<ResolvedSetting> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
+    // Looks at the web edge before a transaction is held, for the keys that would put a human check in front of the
+    // forms: the check is not switched on where nobody could pass it.
+    crate::sign_in::human_check::before_setting(&ctx, &key, &body.value).await?;
     let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     crate::routes::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
+    crate::routes::resources::validation::named_things_exist(&mut tx, &key, &body.value).await?;
     let written = write(
         &mut tx,
         &Write {
@@ -209,6 +214,15 @@ async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<Resol
     tx.commit().await.map_err(DbError::from)?;
     if key == orch_settings_contract::registry::keys::AUTH_SECOND_STEP {
         crate::routes::settings::second_step_policy_changed(&ctx).await;
+    }
+    if orch_engine::environments::is_workspace_setting(&key)
+        && let Err(error) = ctx
+            .app
+            .engine
+            .workspace_scope_changed(orch_db::queries::access::SYSTEM_ID)
+            .await
+    {
+        tracing::warn!(%error, "system workspace changes remain pending");
     }
     Ok(reply)
 }
@@ -250,6 +264,15 @@ async fn delete(
     tx.commit().await.map_err(DbError::from)?;
     if key == orch_settings_contract::registry::keys::AUTH_SECOND_STEP {
         crate::routes::settings::second_step_policy_changed(&ctx).await;
+    }
+    if orch_engine::environments::is_workspace_setting(&key)
+        && let Err(error) = ctx
+            .app
+            .engine
+            .workspace_scope_changed(orch_db::queries::access::SYSTEM_ID)
+            .await
+    {
+        tracing::warn!(%error, "system workspace changes remain pending");
     }
     Ok(reply)
 }

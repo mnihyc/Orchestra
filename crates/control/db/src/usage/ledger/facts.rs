@@ -116,7 +116,9 @@ pub(super) async fn reconcile(
     };
     // Adapters and the forwarder can publish concurrently. No timing/token/model similarity is identity.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!("usage_request:{lease}:{identity}"))
+        .bind(orch_types::storable::encode_key(&format!(
+            "usage_request:{lease}:{identity}"
+        )))
         .execute(&mut *conn)
         .await?;
     let sql = format!(
@@ -126,13 +128,25 @@ pub(super) async fn reconcile(
         .bind(event.attribution.turn_id)
         .bind(event.attribution.provider_id)
         .bind(lease.to_string())
-        .bind(identity)
+        .bind(orch_types::storable::encode_key(identity))
         .fetch_optional(&mut *conn)
         .await?;
     let Some(existing) = existing else {
         let prior: Option<(Id,Option<Json>,Option<String>)> = sqlx::query_as("SELECT id,measurement_states->'_tool_refs',measurement_states->>'_adapter_request_ref' FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND measurement_states->>'_lease_id'=$3 AND provider_request_id=$4 ORDER BY id LIMIT 1 FOR UPDATE")
-            .bind(event.attribution.turn_id).bind(event.attribution.provider_id).bind(lease.to_string()).bind(identity)
+            .bind(event.attribution.turn_id).bind(event.attribution.provider_id).bind(lease.to_string()).bind(orch_types::storable::encode_key(identity))
             .fetch_optional(&mut *conn).await?;
+        let prior = prior
+            .map(|(id, refs, adapter)| {
+                Ok::<_, DbError>((
+                    id,
+                    refs.map(orch_types::storable::decode_exact).transpose()?,
+                    adapter
+                        .as_deref()
+                        .map(orch_types::storable::decode_key)
+                        .transpose()?,
+                ))
+            })
+            .transpose()?;
         let mut retained_adapter = adapter_ref;
         let tool_refs = prior.and_then(|(id, refs, adapter)| {
             event.id = id;
@@ -192,7 +206,7 @@ pub(super) async fn reconcile(
     if states != existing.measurement_states {
         rollup::unfold_event(conn, existing.id).await?;
         sqlx::query("UPDATE usage_events SET measurement_states=$2,error_reason=$3,upstream_status=$4,attempt=$5,first_token_ms=$6,generation_ms=$7,request_ms=$8,streamed_output_tokens=$9,speed_milli=$10 WHERE id=$1")
-            .bind(existing.id).bind(states).bind(joined.error_reason.as_deref()).bind(joined.upstream_status)
+            .bind(existing.id).bind(orch_types::storable::encode_exact(&states)).bind(joined.error_reason.as_deref().map(|text|text.replace('\0',"�"))).bind(joined.upstream_status)
             .bind(joined.attempt.unwrap_or(1)).bind(joined.first_token_ms.value().copied())
             .bind(joined.generation_ms.value().copied()).bind(joined.request_ms.value().copied())
             .bind(joined.streamed_tokens.value().copied()).bind(joined.speed_milli.value().copied())

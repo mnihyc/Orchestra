@@ -123,6 +123,7 @@ tracing-subscriber.workspace = true
 orch-connector-core.workspace = true
 hex.workspace = true
 orch-adapter-fake.workspace = true
+orch-human-check.workspace = true
 orch-identity-oidc.workspace = true
 orch-notifier-webhook.workspace = true
 orch-settings.workspace = true
@@ -474,6 +475,10 @@ path = "base/tests/component_updates.rs"
 [[test]]
 name = "connected_program_versions"
 path = "base/tests/connected_program_versions.rs"
+
+[[test]]
+name = "container_units"
+path = "base/tests/container_units.rs"
 
 [[test]]
 name = "content"
@@ -866,6 +871,10 @@ path = "base/tests/hosted_environments.rs"
 [[test]]
 name = "hosts"
 path = "base/tests/hosts.rs"
+
+[[test]]
+name = "human_check"
+path = "base/tests/human_check.rs"
 
 [[test]]
 name = "imports"

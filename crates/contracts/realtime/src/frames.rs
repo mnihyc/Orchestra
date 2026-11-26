@@ -25,6 +25,7 @@
 //!
 //! A valid same-person `reauth` renews the connection without a reply and keeps its subscriptions.
 //! Reusing a subscription id replaces it and answers `subscribed`, without closing the new id.
+//! A `sub` carrying `window` instead changes one page on the same admitted metadata source.
 //! `unsub` answers `closed` with `unsubscribed` once; an unknown id answers `error` with `not_found`. A malformed feed
 //! name answers `error` with `bad_feed` and keeps the socket open. A `visible` or `typing` frame
 //! needs an open subscription to act; presence merges visible tabs across API processes by person.
@@ -116,6 +117,10 @@ impl fmt::Debug for ReauthFrame {
 #[serde(deny_unknown_fields)]
 #[schemars(inline)]
 pub struct SubFrame {
+    /// Incrementally change one page of an existing hierarchy metadata subscription.
+    /// Omitted admits the metadata source normally; present keeps its admission and other pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<crate::document_tree::HierarchyWindow>,
     /// Exact native segment for a raw subscription; required there, forbidden on other feeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_segment_id: Option<Id>,
@@ -308,6 +313,8 @@ pub struct ReadyFrame {
     pub access_expires_at: Option<Time>,
     /// How often the client pings, in seconds.
     pub heartbeat_secs: u32,
+    /// Physical byte boundary of each client JSON frame, including metadata fragments.
+    pub max_client_frame_bytes: u32,
     /// The build of the server. When it differs from the build the page
     /// was loaded with, the client says that a new version is available
     /// and never reloads by itself while a draft is open.
@@ -327,6 +334,9 @@ pub struct RawSubscription {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct SubscribedFrame {
+    /// The committed shell change cut at personal-feed admission; absent on other feeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_revision: Option<orch_api_contract::auth::PersonalRevision>,
     /// Admitted raw segment and live-only floor; present only on a raw subscription.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<RawSubscription>,
@@ -727,7 +737,7 @@ mod tests {
         let auth = json!({ "op": "auth", "token": "oat_9f8e7d" });
         let ready = json!({
             "op": "ready", "connection_id": "c7", "user_id": B, "server_time": AT,
-            "access_expires_at": "2026-10-08T17:19:05.123Z", "heartbeat_secs": 25, "build": "0.1.0+412"
+            "access_expires_at": "2026-10-08T17:19:05.123Z", "heartbeat_secs": 25, "max_client_frame_bytes": MAX_CLIENT_FRAME_BYTES, "build": "0.1.0+412"
         });
         let sub = json!({ "op": "sub", "id": 1, "feed": feed, "since": 412 });
         let subscribed =
@@ -853,6 +863,7 @@ mod tests {
     #[test]
     fn a_member_that_may_be_left_out_is_not_written_when_it_is() {
         let sub = ClientFrame::Sub(SubFrame {
+            window: None,
             raw_segment_id: None,
             continuation_id: None,
             projection_revision: None,
@@ -1009,7 +1020,7 @@ mod tests {
         let feed = feed();
         let frames = [
             json!({ "op": "ready", "connection_id": "c7", "user_id": B, "server_time": AT,
-                    "access_expires_at": AT, "heartbeat_secs": 25, "build": "0.1.0+412" }),
+                    "access_expires_at": AT, "heartbeat_secs": 25, "max_client_frame_bytes": MAX_CLIENT_FRAME_BYTES, "build": "0.1.0+412" }),
             json!({ "op": "subscribed", "id": 1, "feed": feed, "seq": 412, "mode": "delta" }),
             json!({ "op": "subscribed", "id": 1, "feed": feed, "seq": 900, "mode": "reload" }),
             json!({ "op": "subscribed", "id": 2, "feed": format!("env:{A}:stats"), "seq": null, "mode": "ephemeral" }),
@@ -1065,7 +1076,7 @@ mod tests {
     #[test]
     fn the_server_may_say_more_than_this_client_knows_and_not_less() {
         let more = json!({ "op": "ready", "connection_id": "c7", "user_id": B, "server_time": AT,
-                           "access_expires_at": AT, "heartbeat_secs": 25, "build": "b", "region": "eu" });
+                           "access_expires_at": AT, "heartbeat_secs": 25, "max_client_frame_bytes": MAX_CLIENT_FRAME_BYTES, "build": "b", "region": "eu" });
         assert!(ServerFrame::decode(&more.to_string()).is_ok());
         let less = json!({ "op": "ready", "connection_id": "c7", "user_id": B, "server_time": AT, "build": "b" });
         assert!(matches!(
@@ -1116,7 +1127,22 @@ mod tests {
             feed: thread_feed,
             data: DataObject::new(),
         };
-        assert!(matches!(silent.data(), Err(DataError::NotCarried(_))));
+        // Thread events now carry accepted Stop observations, and reject an incomplete observation.
+        assert!(matches!(silent.data(), Err(DataError::Shape(_))));
+        let stopping = EventFrame {
+            data: serde_json::from_value(
+                json!({"version":1,"requested_at":AT,"pending":true,"thread_seq":9,"state_seq":7}),
+            )
+            .unwrap(),
+            ..silent
+        };
+        let EventData::ThreadStopping(read) = stopping.data().unwrap() else {
+            panic!("not accepted stopping");
+        };
+        assert_eq!(
+            (read.version, read.thread_seq, read.state_seq, read.pending),
+            (1, 9, 7, true)
+        );
     }
 
     #[test]
@@ -1150,7 +1176,7 @@ mod tests {
         let raw = serde_json::json!({
             "connection_id":"key-reader", "user_id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01",
             "server_time":"2026-10-08T17:04:05.123Z", "access_expires_at":null,
-            "heartbeat_secs":25, "build":"fixture"
+            "heartbeat_secs":25, "max_client_frame_bytes":MAX_CLIENT_FRAME_BYTES, "build":"fixture"
         });
         let decoded = serde_json::from_value::<ReadyFrame>(raw.clone());
         assert!(

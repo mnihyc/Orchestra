@@ -128,6 +128,8 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         .fetch_one(rig.world.pool.pool())
         .await
         .unwrap();
+    let opens_before = rig.world.commands.issued_of("session.open")
+        + rig.world.commands.issued_of("session.open.fenced");
     rig.world.restart_api().await;
     rig.world.engine().attach_blobs(rig.store.clone());
     rig.say(side, "Resume the recovered side").await;
@@ -138,14 +140,17 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         third.text
     );
     assert_eq!(rig.world.segment_of(side).await, recovered);
-    let opens = rig.world.commands.issued_bodies("session.open");
-    let fenced = rig.world.commands.issued_bodies("session.open.fenced");
-    assert!(opens.iter().chain(fenced.iter()).any(|(_, body)| {
-        let body = body.get("session").unwrap_or(body);
-        body["segment_id"] == recovered.to_string()
-            && body["mode"] == "resume"
-            && body["native_session_ref"] == native
-    }));
+    // A restarted API verifies this exact recovered conversation by resume before trusting its native identity.
+    assert_eq!(
+        rig.world.commands.issued_of("session.open")
+            + rig.world.commands.issued_of("session.open.fenced"),
+        opens_before + 1
+    );
+    {
+        let peer = rig.native.lock().unwrap();
+        assert_eq!(peer.threads.get(&side), Some(&native));
+        assert!(peer.sessions.contains_key(&native));
+    }
     rig.world.shutdown().await;
 }
 
@@ -469,12 +474,14 @@ async fn observed_success(
     // UPDATE of the native reference or a fabricated creation success.
     rig.world
         .machine
-        .publish(
+        .publish_from(
+            Some(original.id),
             &Stream::Session {
                 thread_id: side,
                 segment_id: body.session.segment_id,
             },
             &Event::SessionOpened(SessionOpened {
+                opening_id: original.id,
                 native_session_ref: opened.native_session_ref.clone(),
                 resumed: false,
             }),
@@ -1050,22 +1057,26 @@ async fn a_nonempty_confirmation_with_a_missing_cut_refuses_without_losing_the_o
         )
         .await
         .unwrap();
-    rig.world
+    let stopped = rig
+        .world
         .engine()
-        .interrupt(&rig.caller(), source, completed.id)
+        .stop_thread(&rig.caller(), source, Some(completed.id))
         .await
         .unwrap();
-    // submit_input already admitted file preparation before Stop. Let that
-    // actual housekeeping finish with the input still held, then freeze the
-    // baseline for the separate missing-cut refusal; no turn is delivered.
+    assert!(
+        stopped.turn.is_none(),
+        "the queued input has no native turn"
+    );
+    // Capture the held input after restart so the missing-cut refusal is
+    // checked against the persisted outcome of stopping its preparation.
     rig.world.restart_api().await;
     rig.world.engine().attach_blobs(rig.store.clone());
     eventually(
-        "the stopped original input finishes its already admitted preparation",
+        "the original input stays held after its preparation is stopped",
         || async {
             sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE id=$1
-            AND state='pending' AND queue_held AND state_detail='files_ready' AND turn_id IS NULL)",
+            AND state='pending' AND queue_held AND state_detail IS NULL AND turn_id IS NULL)",
             )
             .bind(input.input.id)
             .fetch_one(rig.world.pool.pool())
