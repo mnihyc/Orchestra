@@ -137,7 +137,7 @@ test('an environment’s page, its five rows by area and the list of who reaches
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
   await dialog(page).getByRole('button', { name: 'Back to the short form' }).click();
 
-  await dialog(page).getByRole('button', { name: /people reach into it/ }).click();
+  await dialog(page).getByRole('button', { name: 'Show who can reach it' }).click();
   await expect(page.getByRole('dialog', { name: 'Who can reach Workspace' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
 });

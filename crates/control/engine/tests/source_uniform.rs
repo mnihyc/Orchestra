@@ -200,8 +200,11 @@ async fn a_topics_repository_is_the_default_on_every_machine_and_an_explicit_cho
                 thread,
                 world.environment,
                 "web",
-                choice,
-                None,
+                source::CreationChoice {
+                    prepare: choice,
+                    worktree: None,
+                    workspace_edits: &[],
+                },
             )
             .await
             .unwrap();
@@ -264,6 +267,7 @@ async fn an_existing_directory_is_kept_even_without_write_permission_and_a_missi
                     }
                     Ok(CommandResult::FsStat(
                         orch_api_contract::workspace::FileStat {
+                            facts: None,
                             entry: orch_api_contract::workspace::DirEntry {
                                 name: "web".into(),
                                 path: body.path.clone(),
@@ -343,6 +347,8 @@ async fn an_existing_directory_is_kept_even_without_write_permission_and_a_missi
                     token: None,
                     creator_origin: None,
                     scheduled_input: None,
+                    workspace_edits: Vec::new(),
+                    prepared_source: None,
                     action: Action::Prepare {
                         directory: row.workspace_dir,
                         source: frozen,
@@ -428,8 +434,11 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         thread,
         world.environment,
         "web",
-        None,
-        None,
+        source::CreationChoice {
+            prepare: None,
+            worktree: None,
+            workspace_edits: &[],
+        },
     )
     .await
     .unwrap();
@@ -444,6 +453,7 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         .on(CommandKind::FsStat, move |_| {
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "web".into(),
                         path: "web".into(),
@@ -468,6 +478,8 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         .on(CommandKind::FsRecord, |_| {
             Ok(CommandResult::FsRecord(
                 orch_link_contract::source::FsRecordResult {
+                    indexing: None,
+
                     state: orch_link_contract::source::RecordState::Unavailable,
                     tree_ref: None,
                     repository_head: None,
@@ -663,6 +675,8 @@ async fn a_reported_physical_write_denial_or_missing_policy_stops_before_native_
                     token: None,
                     creator_origin: None,
                     scheduled_input: None,
+                    workspace_edits: Vec::new(),
+                    prepared_source: None,
                     action: Action::Prepare {
                         directory: row.workspace_dir,
                         source: RepositorySource {
@@ -725,7 +739,14 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
         atomic::{AtomicBool, Ordering},
     };
 
-    for refusal in [ErrorCode::PolicyRemoteWriteDisabled, ErrorCode::Internal] {
+    for (refusal, expected_code) in [
+        (
+            ErrorCode::PolicyRemoteWriteDisabled,
+            "workspace.remote_write_disabled",
+        ),
+        (ErrorCode::Internal, "internal"),
+        (ErrorCode::CloneStalled, "clone_stalled"),
+    ] {
         let mut world = World::new().await;
         let fixture = configured(&mut world, "connected").await;
         let thread = fixture.thread;
@@ -748,7 +769,23 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             });
         let retry_allowed = Arc::new(AtomicBool::new(false));
         let permitted = retry_allowed.clone();
-        let is_policy = refusal == ErrorCode::PolicyRemoteWriteDisabled;
+        if refusal == ErrorCode::CloneStalled {
+            let mut conn = world.pool.acquire().await.unwrap();
+            settings::put(
+                &mut conn,
+                None,
+                orch_settings_contract::registry::keys::SOURCE_CLONE_IDLE_SECS,
+                &settings::Stored {
+                    value: &json!(17),
+                    locked: false,
+                    by: Some(world.ada),
+                    at: world.clock.now(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
         fixture
             .native
             .added
@@ -796,6 +833,8 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             .handler
             .on(CommandKind::FsRecord, |_| {
                 Ok(CommandResult::FsRecord(FsRecordResult {
+                    indexing: None,
+
                     state: RecordState::Unavailable,
                     tree_ref: None,
                     repository_head: None,
@@ -814,8 +853,11 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             thread,
             world.environment,
             "web",
-            None,
-            None,
+            source::CreationChoice {
+                prepare: None,
+                worktree: None,
+                workspace_edits: &[],
+            },
         )
         .await
         .unwrap();
@@ -830,19 +872,38 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             )
             .await
             .unwrap();
-        world.wait_blocked(thread, "error").await;
+        // Source failure is a structured block; its reason code no longer lives in the sentence.
+        world.wait_blocked(thread, "source_failed").await;
         let shown = world.sync(thread).await.thread.source.unwrap();
         assert_eq!(shown.state, SourceState::Failed);
+        assert_eq!(shown.reason.as_deref(), Some(expected_code));
+        let blocked = world.sync(thread).await.thread.blocked.unwrap();
         assert_eq!(
-            shown.reason.as_deref(),
-            Some(if is_policy {
-                "workspace.remote_write_disabled"
-            } else {
-                "workspace.source_failed"
-            })
+            blocked.reason,
+            orch_api_contract::threads::BlockedReason::SourceFailed
+        );
+        assert!(
+            !blocked
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains(shown.reason.as_deref().unwrap()),
+            "{blocked:?}"
         );
         let job_id = shown.job.unwrap().id;
         assert_eq!(hosting::wait_over(&world, job_id).await.0, "failed");
+        if expected_code == "clone_stalled" {
+            let facts = world.sync(thread).await.thread.source;
+            let full = source::visible_source(facts.clone(), &["files.view".into()]).unwrap();
+            let counts = full.job.unwrap().clone.unwrap();
+            assert_eq!(
+                (counts.bytes, counts.objects, counts.idle_seconds),
+                (0, 0, 17)
+            );
+            let compact = source::visible_source(facts, &[]).unwrap();
+            assert_eq!(compact.reason.as_deref(), Some("clone_stalled"));
+            assert!(compact.job.unwrap().clone.is_none());
+        }
         assert_eq!(
             world
                 .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
@@ -870,18 +931,13 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             1,
             "ordinary preflight never retries the failed source"
         );
-        let frozen: serde_json::Value = world
-            .scalar("SELECT source FROM threads WHERE node_id=$1", thread)
-            .await;
-        let plan: Plan = serde_json::from_value(frozen["native_plan"].clone()).unwrap();
+        if refusal == ErrorCode::CloneStalled {
+            a_retried_clone_shows_its_own_progress_and_end(&world, &fixture, job_id, sent.input.id)
+                .await;
+        }
         retry_allowed.store(true, Ordering::SeqCst);
-        let mut tx = world.pool.begin().await.unwrap();
-        let retry = source::begin(&mut tx, plan, world.clock.now())
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-        world.engine().kick();
-        assert_eq!(hosting::wait_over(&world, retry.id).await.0, "succeeded");
+        let retry = retry_source(&world, thread).await;
+        assert_eq!(hosting::wait_over(&world, retry).await.0, "succeeded");
         hosting::physical::wait(
             &world,
             world.environment,
@@ -908,11 +964,87 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
                 .await,
             1
         );
-        assert_eq!(fixture.native.began(CommandKind::GitPrepare), 2);
+        assert_eq!(
+            fixture.native.began(CommandKind::GitPrepare),
+            if refusal == ErrorCode::CloneStalled {
+                3
+            } else {
+                2
+            }
+        );
         assert_eq!(
             world.sync(thread).await.thread.source.unwrap().state,
             SourceState::Ready
         );
         world.engine().stop();
     }
+}
+
+async fn retry_source(world: &World, thread: orch_types::Id) -> orch_types::Id {
+    let frozen: serde_json::Value = world
+        .scalar("SELECT source FROM threads WHERE node_id=$1", thread)
+        .await;
+    let plan: Plan = serde_json::from_value(frozen["native_plan"].clone()).unwrap();
+    let mut tx = world.pool.begin().await.unwrap();
+    let retry = source::begin(&mut tx, plan, world.clock.now())
+        .await
+        .unwrap();
+    let accepted = threads::thread(&mut tx, thread).await.unwrap().unwrap();
+    assert!(
+        accepted.blocked_reason.is_none(),
+        "the accepted replacement still shows the previous failure"
+    );
+    tx.commit().await.unwrap();
+    world.engine().wake(thread);
+    world.engine().kick();
+    retry.id
+}
+
+async fn a_retried_clone_shows_its_own_progress_and_end(
+    world: &World,
+    fixture: &Configured,
+    first: orch_types::Id,
+    input: orch_types::Id,
+) {
+    use orch_api_contract::threads::StartingStep;
+
+    let thread = fixture.thread;
+    fixture.native.hold(CommandKind::GitPrepare);
+    let retry = retry_source(world, thread).await;
+    assert_ne!(retry, first);
+    hosting::physical::wait(
+        world,
+        world.environment,
+        thread,
+        "the retried clone to show its transfer",
+        || async {
+            let shown = world.sync(thread).await.thread;
+            shown.starting_step == Some(StartingStep::Source)
+                && shown.blocked.is_none()
+                && shown.source.is_some_and(|source| {
+                    source.state == SourceState::Preparing
+                        && source.reason.is_none()
+                        && source.job.is_some_and(|job| {
+                            job.id == retry
+                                && job.clone.is_some_and(|counts| {
+                                    (counts.bytes, counts.objects, counts.idle_seconds)
+                                        == (0, 0, 17)
+                                })
+                        })
+                })
+        },
+    )
+    .await;
+    fixture.native.let_go();
+    assert_eq!(hosting::wait_over(world, retry).await.0, "failed");
+    world.wait_blocked(thread, "source_failed").await;
+    let shown = world.sync(thread).await.thread.source.unwrap();
+    assert_eq!(shown.state, SourceState::Failed);
+    assert_eq!(shown.reason.as_deref(), Some("clone_stalled"));
+    let job = shown.job.unwrap();
+    assert_eq!(job.id, retry);
+    assert_eq!(job.clone.unwrap().idle_seconds, 17);
+    assert_eq!(world.input_state(input).await.0, "pending");
+    assert_eq!(fixture.native.began(CommandKind::GitPrepare), 2);
+    assert_eq!(world.began(CommandKind::TurnStart), 0);
 }

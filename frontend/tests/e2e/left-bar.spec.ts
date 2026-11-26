@@ -31,7 +31,7 @@ const HOME = screenAddress('/org/acme');
 /** The org's own acts are in the menu of Navigation's title row. */
 const orgMenu = (page: Page) => page.getByRole('region', { name: 'Left bar' }).getByRole('button', { name: 'Navigation actions', exact: true });
 const rail = (page: Page) => page.getByRole('navigation', { name: 'Orgs and your own places' });
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const crumbs = (page: Page) => page.getByRole('navigation', { name: 'Where this is' });
 /** The head of the bar where there is a rail: the name of the org in view, which leads to its home. */
 const head = (page: Page) => bar(page).getByRole('link').first();
@@ -855,7 +855,7 @@ test('“Show only where I am” narrows the tree to the place in view, a thread
   // And there is nowhere to narrow to from there: the entry says so.
   const top = (await viewMenu(page)).getByRole('menuitem', { name: /^Show only where I am/ });
   await expect(top).toHaveAttribute('aria-disabled', 'true');
-  await expect(top).toContainText('You are at the org itself.');
+  await expect(top).toContainText('You are at the organization itself.');
 });
 
 test('by keyboard alone: a key narrows the tree to the row the keyboard is on, another steps one place up, each says why where it cannot, the line of a thing outside is acted on with Enter, and the list of keys names both keys', async ({ page }) => {
@@ -883,7 +883,7 @@ test('by keyboard alone: a key narrows the tree to the row the keyboard is on, a
   await page.keyboard.press('ArrowDown');
   await expect(row(page, 'Fee table')).toBeFocused();
   await page.keyboard.press('Alt+Shift+ArrowRight');
-  await expect(notices.getByText('The tree can begin at an org, a project, a folder or a topic.')).toBeVisible();
+  await expect(notices.getByText('The tree can begin at an organization, a project, a folder or a topic.')).toBeVisible();
   await expect(beginsAt(page)).toHaveText('Checkout');
   await page.keyboard.press('ArrowUp');
   await expect(row(page, 'Card fees')).toBeFocused();

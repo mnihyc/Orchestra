@@ -52,7 +52,21 @@ async fn recheck(ports: &Ports, proof: OwnedPort) -> Result<(), PortSocketError>
 
 /// Connects to the current owned TCP program, with no caller bytes sent under an earlier proof.
 pub async fn tcp(ports: &Ports, port: u16) -> Result<TcpStream, PortSocketError> {
-    let proof = current(ports, port, PortTransport::Tcp).await?;
+    tcp_with_reach(ports, port, false).await
+}
+
+/// The caller checked a personal Machine entry and the operator's current declaration for this port.
+pub async fn tcp_with_reach(
+    ports: &Ports,
+    port: u16,
+    machine_reach: bool,
+) -> Result<TcpStream, PortSocketError> {
+    let reader = ports.clone();
+    let proof = tokio::task::spawn_blocking(move || {
+        reader.resolve(port, PortTransport::Tcp, machine_reach)
+    })
+    .await
+    .map_err(|_| PortSocketError::Reader)??;
     let stream = tokio::time::timeout(
         Duration::from_secs(u64::from(OPEN_TIMEOUT_SECS)),
         TcpStream::connect(proof.address),
