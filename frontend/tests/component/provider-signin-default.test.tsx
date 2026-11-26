@@ -1,10 +1,11 @@
 /** P5: the screen-native flow wins even over an older cached token-import recommendation. */
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
-import { startProviderLogin } from '@/api/provider-plan';
+import { startProviderLogin, retryProvider } from '@/api/provider-plan';
+import type * as LoginApi from '@/api/provider-plan';
 import { ProviderLogin } from '@/features/resources/providers/Login';
-import type { LoginMethod } from '@/generated/api-types';
+import type { LoginMethod, ProviderTrial } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
@@ -22,14 +23,35 @@ const methods = ():LoginMethod[] => {
   ];
 };
 const idle={state:'idle' as const,method:null,shows:[],asks:null,expires_at:null,error:null};
-vi.mock('@/api/resources',()=>({providerSetupQuery:()=>({queryKey:['signin-preference-setup'],queryFn:()=>Promise.resolve({subscriptions:[{agent:{id:'profile'},methods:methods()}]})})}));
-vi.mock('@/api/provider-plan',()=>({
+const trial = vi.hoisted(() => ({ read: vi.fn<() => Promise<ProviderTrial | null>>() }));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),providerSetupQuery:()=>({queryKey:['signin-preference-setup'],queryFn:()=>Promise.resolve({subscriptions:[{agent:{id:'profile'},methods:methods()}]})})}));
+vi.mock('@/api/provider-plan',async (load)=>({ ...await load<typeof LoginApi>(),
   loginStateQuery:()=>({queryKey:['signin-preference-progress'],queryFn:()=>Promise.resolve(idle)}),
   startProviderLogin:vi.fn(()=>Promise.resolve(idle)),answerProviderLogin:vi.fn(),cancelProviderLogin:vi.fn(),retryProvider:vi.fn(),
+  providerTrialQuery:(id:string)=>({queryKey:['provider-trial',id],queryFn:trial.read,retry:false}),
 }));
 const provider=planProvider({harness_kind:'claude-code',agent:{id:'profile',name:'Claude Code',address:'acme.claude',harness_kind:'claude-code', harness: harnessName('claude-code'),machine:null,disabled:false},
   runtime_support:{lifecycle:'attach',after_up:false,commands_after_start:{supported:true,reason:null},sign_in:{home_owned:true,policy_allowed:false,allowed:true}}});
 afterEach(async()=>{cleanup();vi.clearAllMocks();await setLocale('en');});
+
+it.each(['en', 'zh-CN'] as const)('opens the actual trial record without another sign-in check and hides it after management is lost in %s', async (locale) => {
+  await setLocale(locale);
+  const observed: ProviderTrial = { state: 'reserved', at: '2026-11-15T00:00:00Z', input_ref: null, thread_ref: null, reserved_for: null };
+  trial.read.mockResolvedValue(observed);
+  vi.mocked(retryProvider).mockResolvedValue({ ...provider, trial: observed });
+  const view = show(<ProviderLogin provider={provider} />);
+  expect(trial.read).not.toHaveBeenCalled();
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('providerRecovery.checkSignIn') }));
+  await waitFor(() => expect(retryProvider).toHaveBeenCalledExactlyOnceWith(provider.id));
+  expect(trial.read).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const details = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  await within(details).findByText(i18n.t('providerRecovery.trialHidden'));
+  expect(trial.read).toHaveBeenCalledTimes(1);
+  expect(retryProvider).toHaveBeenCalledTimes(1);
+  view.rerender(<ProviderLogin provider={{ ...provider, access: { ...provider.access, permissions: ['provider.view'] } }} />);
+  expect(screen.queryByRole('dialog', { name: i18n.t('common.details') })).not.toBeInTheDocument();
+});
 
 it.each(['en','zh-CN'] as const)('starts the preselected code flow with no imported secret in %s',async(locale)=>{
   await setLocale(locale);const user=userEvent.setup();show(<ProviderLogin provider={provider}/>);

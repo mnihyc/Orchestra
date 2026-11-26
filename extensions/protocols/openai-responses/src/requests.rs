@@ -57,8 +57,9 @@ mod tests {
             crate::OpenAiResponses.native_capability("/alpha/search"),
             Some("web_search")
         );
-        assert!(!allowed(&Method::POST, "/responses/compact"));
-        assert!(!allowed(&Method::POST, "/responses/compact?api-version=1"));
+        assert!(allowed(&Method::POST, "/responses/compact"));
+        assert!(allowed(&Method::POST, "/responses/input_tokens"));
+        assert!(allowed(&Method::POST, "/responses/compact?api-version=1"));
         assert!(allowed(&Method::GET, "/models"));
         assert!(
             allowed(&Method::POST, "/responses?api-version=1"),

@@ -1,0 +1,2 @@
+test -p orch-envhost --lib -- directory_identity_cases
+test -p orch-connector-core --lib -- mcp_import

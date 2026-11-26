@@ -7,9 +7,7 @@
 
 use super::*;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_token;
 
 use crate::middleware::authentication::token_hash;
 
@@ -68,11 +66,12 @@ async fn actual_new_skill_draft_keeps_current_http_deadline_after_blob_header_an
                     .body(&body(scene.tree.project.base.id));
                 request.send().await.ok();
             }
-            let secret = new_token(API_TOKEN_PREFIX);
+            let issued_key_id = new_id();
+            let secret = new_api_token(issued_key_id);
             identity::create_api_token(
                 &mut *scene.rig.world.conn().await,
                 &NewApiToken {
-                    id: new_id(),
+                    id: issued_key_id,
                     user_id: scene.ada.id(),
                     name: "Native draft recording",
                     token_hash: &token_hash(&secret),
