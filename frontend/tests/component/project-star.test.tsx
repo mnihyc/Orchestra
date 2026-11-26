@@ -7,14 +7,14 @@ import type * as Personal from '@/api/personal';
 import type * as Day100 from '@/api/day100';
 import { ProjectStar } from '@/features/project/ProjectStar';
 import { SHIPPED_PROJECT_VIEW } from '@/features/project/viewState';
-import type { Favorite, ProjectView } from '@/generated/api-types';
+import type { ProjectView, Shortcut } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { NetworkError } from '@/lib/requests';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<Favorite[]>>(), star: vi.fn<(id: string, view: ProjectView | null) => Promise<void>>(), remove: vi.fn<(id: string) => Promise<void>>() }));
+const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<Shortcut[]>>(), star: vi.fn<(id: string, view: ProjectView | null) => Promise<void>>(), remove: vi.fn<(id: string) => Promise<void>>() }));
 vi.mock('@/api/personal', async (original) => ({ ...await original<typeof Personal>(),
-  favoritesQuery: { queryKey: ['favorites'], initialData: (): Favorite[] => [], queryFn: calls.read, staleTime: Infinity }, unstarNode: calls.remove,
+  favoritesQuery: { queryKey: ['favorites'], initialData: (): Shortcut[] => [], queryFn: calls.read, staleTime: Infinity }, unstarNode: calls.remove,
 }));
 vi.mock('@/api/day100', async (original) => ({ ...await original<typeof Day100>(), starProjectView: calls.star }));
 const view: ProjectView = { ...SHIPPED_PROJECT_VIEW, view: 'board', tag_ids: ['visible'], with_folders: true };
@@ -43,7 +43,7 @@ it.each(['en', 'zh-CN'] as const)('stars a view, clears only the saved view and 
   expect(star).toHaveAttribute('aria-pressed', 'true');
   await user.click(star); await user.click(screen.getByRole('menuitem', { name: i18n.t('day100.views.starPlace') }));
   await waitFor(() => expect(calls.star).toHaveBeenLastCalledWith('release', null));
-  expect(screen.queryByRole('link', { name: i18n.t('day100.views.openStarred') })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('link', { name: i18n.t('day100.views.openStarred') })).not.toBeInTheDocument());
   expect(star).toHaveAttribute('aria-pressed', 'true');
   await user.click(star); await user.click(screen.getByRole('menuitem', { name: i18n.t('day100.views.removeStar') }));
   await waitFor(() => expect(calls.remove).toHaveBeenCalledWith('release'));

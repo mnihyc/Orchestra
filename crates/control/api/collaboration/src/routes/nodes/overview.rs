@@ -75,7 +75,7 @@ fn part<T>(ctx: &Ctx, answer: ApiResult<T>, bounded: bool) -> OverviewPart<T> {
             };
             let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
             OverviewPart::Failed {
-                problem,
+                problem: Box::new(problem),
                 retry_after,
             }
         }
@@ -248,7 +248,7 @@ async fn prepare_inner(
         &principal,
         orch_api_contract::search::NameSearchListQuery {
             kinds: Some("thread".into()),
-            limit: Some(orch_api_contract::search::NAME_SEARCH_LIMIT_MAX),
+            limit: Some(orch_api_contract::search::NAME_SEARCH_OVERVIEW_COUNT),
             org_id: Some(org.base.org_id),
             ..Default::default()
         },

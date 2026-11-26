@@ -417,7 +417,81 @@ pub fn source_can_verify(sources: &orch_types::Json, native_keeper: bool) -> boo
     }
 }
 
+const CADENCE_KEYS: &[&str] = &[
+    orch_settings_contract::registry::keys::PROVIDERS_FACTS_ACTIVE_MINUTES,
+    orch_settings_contract::registry::keys::PROVIDERS_FACTS_IDLE_MINUTES,
+    orch_settings_contract::registry::keys::PROVIDERS_FACTS_RECENT_MINUTES,
+    orch_settings_contract::registry::keys::PROVIDERS_FACTS_REFUSED_MINUTES,
+];
+
+fn read_schedule(
+    provider_id: orch_types::Id,
+    snapshot: &orch_settings::Snapshot,
+) -> Result<rows::ReadSchedule, EngineError> {
+    use orch_settings_contract::registry::{self, keys};
+    let minutes = |key| -> Result<i64, EngineError> {
+        let def = registry::get(key)
+            .ok_or_else(|| EngineError::unreadable("a provider facts setting is missing"))?;
+        snapshot
+            .resolve(def)
+            .value
+            .and_then(|value| value.as_i64())
+            .filter(|value| *value >= 1)
+            .ok_or_else(|| {
+                EngineError::unreadable(
+                    "a provider facts interval is not a positive number of minutes",
+                )
+            })
+    };
+    Ok(rows::ReadSchedule {
+        provider_id,
+        idle: minutes(keys::PROVIDERS_FACTS_IDLE_MINUTES)?,
+        active: minutes(keys::PROVIDERS_FACTS_ACTIVE_MINUTES)?,
+        recent: minutes(keys::PROVIDERS_FACTS_RECENT_MINUTES)?,
+        refused: minutes(keys::PROVIDERS_FACTS_REFUSED_MINUTES)?,
+    })
+}
+
+pub(crate) async fn observation_interval(
+    conn: &mut orch_db::Conn,
+    provider: orch_types::Id,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Duration, EngineError> {
+    let definitions = CADENCE_KEYS
+        .iter()
+        .map(|key| {
+            orch_settings_contract::registry::get(key)
+                .ok_or_else(|| EngineError::unreadable("A provider facts setting is unavailable."))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot = orch_settings::Snapshot::load(
+        conn,
+        orch_settings::Place::Provider(provider),
+        orch_settings::Wanted::Keys(&definitions),
+    )
+    .await?;
+    let schedule = read_schedule(provider, &snapshot)?;
+    let seconds = rows::observation_seconds(conn, now, &schedule)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("The provider is unavailable."))?;
+    Ok(Duration::try_seconds(seconds).unwrap_or(Duration::MAX))
+}
+
 impl Engine {
+    /// The ordinary explicit Refresh claim's current reuse window; passive reads remain effect-free.
+    pub async fn provider_refresh_eligibility(
+        &self,
+        conn: &mut orch_db::Conn,
+        providers: &[orch_types::Id],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<std::collections::HashMap<orch_types::Id, rows::RefreshEligibility>, EngineError>
+    {
+        Ok(
+            rows::refresh_eligibility(conn, providers, now, self.inner.config.provider_facts.page)
+                .await?,
+        )
+    }
+
     /// Inspects the due batch without claiming reads or starting runtimes. All four settings for
     /// all candidates share one ancestor/settings pass; the result limit applies after resolution.
     pub async fn due_provider_fact_reads(
@@ -426,7 +500,6 @@ impl Engine {
         now: chrono::DateTime<chrono::Utc>,
         limit: i64,
     ) -> Result<Vec<orch_types::Id>, EngineError> {
-        use orch_settings_contract::registry::{self, keys};
         let candidates = rows::read_candidates(conn, now).await?;
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -440,46 +513,16 @@ impl Engine {
                 revision: provider.revision,
             })
             .collect();
-        let snapshots = orch_settings::snapshots_at_providers(
-            conn,
-            &providers,
-            &[
-                keys::PROVIDERS_FACTS_IDLE_MINUTES,
-                keys::PROVIDERS_FACTS_ACTIVE_MINUTES,
-                keys::PROVIDERS_FACTS_RECENT_MINUTES,
-                keys::PROVIDERS_FACTS_REFUSED_MINUTES,
-            ],
-        )
-        .await?;
+        let snapshots =
+            orch_settings::snapshots_at_providers(conn, &providers, CADENCE_KEYS).await?;
         let mut schedules = Vec::with_capacity(snapshots.len());
         for (provider_id, snapshot) in snapshots {
-            let minutes = |key| -> Result<i64, EngineError> {
-                let def = registry::get(key).ok_or_else(|| {
-                    EngineError::unreadable("a provider facts setting is missing")
-                })?;
-                snapshot
-                    .resolve(def)
-                    .value
-                    .and_then(|value| value.as_i64())
-                    .filter(|value| *value >= 1)
-                    .ok_or_else(|| {
-                        EngineError::unreadable(
-                            "a provider facts interval is not a positive number of minutes",
-                        )
-                    })
-            };
-            schedules.push(rows::ReadSchedule {
-                provider_id,
-                idle: minutes(keys::PROVIDERS_FACTS_IDLE_MINUTES)?,
-                active: minutes(keys::PROVIDERS_FACTS_ACTIVE_MINUTES)?,
-                recent: minutes(keys::PROVIDERS_FACTS_RECENT_MINUTES)?,
-                refused: minutes(keys::PROVIDERS_FACTS_REFUSED_MINUTES)?,
-            });
+            schedules.push(read_schedule(provider_id, &snapshot)?);
         }
         Ok(rows::due_reads(conn, now, &schedules, limit).await?)
     }
 
-    /// Runs credential-expiry upkeep on the engine's clock, including the short-token notice rule.
+    /// Runs credential-expiry upkeep on the engine's clock with each provider's chosen notice interval.
     pub async fn watch_provider_credential_ends(&self) -> Result<(), EngineError> {
         self.watch_token_ends().await
     }
