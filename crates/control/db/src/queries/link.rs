@@ -114,21 +114,33 @@ pub struct CommandRow {
     pub kind: String,
     /// Its body in the form the system keeps it: references to secrets and
     /// tickets in place of their values.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub body: Json,
-    /// Its protected serial queue identity; absent on an older retained row.
+    /// Its protected serial queue identity, for a command that uses one.
+    #[sqlx(try_from = "crate::storage::OptionalText")]
     pub serial_key: Option<String>,
+    /// Immutable physical target captured at admission and sent on each delivery.
+    pub native_target: Option<sqlx::types::Json<orch_link_contract::commands::NativeTarget>>,
+    /// Content uploaded for this command belongs only to its transfer until another owner adopts it.
+    pub content_transit: bool,
     /// Where it stands: `queued`, `sent`, `accepted`, `succeeded`,
     /// `failed`, `expired` or `cancelled`.
     pub state: String,
+    /// Queued, running with its key, or released, as the link acknowledgement reports.
+    pub key_phase: i16,
     /// What the machine answered, once it succeeded; none again once the
     /// answer of a read was cleared because the one who asked had it.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub result: Option<Json>,
     /// Why it failed.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub error: Option<Json>,
     /// How many times it was handed to a gateway.
     pub attempts: i32,
     /// The moment after which it is not to be started.
     pub deadline_at: DateTime<Utc>,
+    /// Original credential/operation expiry, independent of the command's work budget.
+    pub authority_until: Option<DateTime<Utc>>,
     /// When it was made.
     pub created_at: DateTime<Utc>,
     /// When its state last changed.
@@ -136,12 +148,10 @@ pub struct CommandRow {
 }
 
 impl CommandRow {
-    /// The authoritative queue identity, reading an older stored member only when no column was supplied.
+    /// The authoritative queue identity is separate from command data.
     #[must_use]
     pub fn serial_key(&self) -> Option<&str> {
-        self.serial_key
-            .as_deref()
-            .or_else(|| self.body.get("$key").and_then(Json::as_str))
+        self.serial_key.as_deref()
     }
 
     /// Whether nothing more is to happen to the command.
@@ -154,13 +164,15 @@ impl CommandRow {
 /// The columns of a command, in the order [`CommandRow`] has them.
 macro_rules! command_columns {
     () => {
-        "id, machine_id, kind, body, serial_key, state, result, error, attempts, deadline_at, created_at, updated_at"
+        "id, machine_id, kind, body, serial_key, tool_session->'native_target' AS native_target, content_transit, key_phase, state, result, error, attempts, deadline_at, authority_until, created_at, updated_at"
     };
 }
 
 /// What a command is made with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewCommand<'a> {
+    /// The original physical operand, when its producer captured it before a later queue phase.
+    pub native_target: Option<&'a orch_link_contract::commands::NativeTarget>,
     /// Its identifier.
     pub id: Id,
     /// The machine it is for.
@@ -171,6 +183,8 @@ pub struct NewCommand<'a> {
     pub body: &'a Json,
     /// Its serial queue identity, stored separately from the machine request.
     pub serial_key: Option<&'a str>,
+    /// Storage custody is protected command metadata, never inferred from native body members.
+    pub content_transit: bool,
     /// The moment after which it is not to be started.
     pub deadline_at: DateTime<Utc>,
 }
@@ -204,27 +218,74 @@ pub async fn insert_command_with_authority(
     at: DateTime<Utc>,
     authority: Option<&Json>,
 ) -> Result<bool, DbError> {
+    if !crate::queries::transaction_guard::in_transaction(conn) {
+        let mut tx = sqlx::Connection::begin(conn).await?;
+        let inserted = insert_command_on(&mut tx, command, at, authority).await?;
+        tx.commit().await?;
+        return Ok(inserted);
+    }
+    insert_command_on(conn, command, at, authority).await
+}
+
+async fn insert_command_on(
+    conn: &mut Conn,
+    command: &NewCommand<'_>,
+    at: DateTime<Utc>,
+    authority: Option<&Json>,
+) -> Result<bool, DbError> {
+    if command.native_target.is_some() {
+        let existing: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commands WHERE id=$1)")
+                .bind(command.id)
+                .fetch_one(&mut *conn)
+                .await?;
+        if existing {
+            return Ok(false);
+        }
+        if matches!(
+            command.native_target,
+            Some(orch_link_contract::native_target::NativeTarget::Session(_))
+        ) && orch_link_contract::native_target::session_action(command.kind, command.body)
+            .is_none()
+        {
+            return Err(DbError::Rule {
+                constraint: "native_target_command_kind".into(),
+            });
+        }
+    }
+    let lifecycle = crate::queries::runtime_controls::command_facts(&mut *conn, command).await?;
     let inserted = sqlx::query(
-        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required)
-         VALUES ($1, $2, $3, CASE WHEN jsonb_typeof($4::jsonb) = 'object'
-                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8, $9)
+        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required, content_transit)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(command.id)
     .bind(command.machine_id)
     .bind(command.kind)
-    .bind(command.body)
-    .bind(command.serial_key.or_else(|| command.body.get("$key").and_then(Json::as_str)))
+    .bind(orch_types::storable::encode_exact(command.body))
+    .bind(command.serial_key.map(orch_types::storable::encode_key))
     .bind(command.deadline_at)
     .bind(at)
     .bind(authority)
     .bind(authority.is_some())
+    .bind(command.content_transit)
     .execute(&mut *conn)
     .await?
     .rows_affected();
-    if inserted > 0 {
-        crate::queries::session_dependencies::admit(conn, command.id, command.kind, command.body)
-            .await?;
+    if inserted > 0
+        && let Some(target) = lifecycle
+    {
+        sqlx::query("UPDATE commands SET tool_session=COALESCE(tool_session,'{}'::jsonb)||jsonb_build_object('native_target',$2::jsonb) WHERE id=$1")
+            .bind(command.id).bind(target).execute(&mut *conn).await?;
+    } else if inserted > 0 {
+        crate::queries::session_dependencies::admit(
+            conn,
+            command.id,
+            command.kind,
+            command.body,
+            command.native_target,
+        )
+        .await?;
     }
     Ok(inserted > 0)
 }
@@ -267,6 +328,17 @@ pub async fn command_authority_required(conn: &mut Conn, id: Id) -> Result<bool,
             .await?
             .unwrap_or(false),
     )
+}
+
+/// Persist only a tighter original time bound; null is unbounded, never a reason to
+/// replace an earlier finite bound. This fact supplies no command or permission.
+pub async fn narrow_command_authority_until(
+    conn: &mut Conn,
+    id: Id,
+    until: Option<DateTime<Utc>>,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar("UPDATE commands SET authority_until=LEAST(authority_until,$2) WHERE id=$1 RETURNING authority_until")
+        .bind(id).bind(until).fetch_one(conn).await?)
 }
 
 /// Private controller completion of a real MCP copy, excluded from wire/public command rows.
@@ -419,15 +491,19 @@ pub async fn mark_queued(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<b
 
 /// Notes that the machine wrote the command down.
 pub async fn mark_accepted(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<bool, DbError> {
-    let changed = sqlx::query(
-        "UPDATE commands SET state = 'accepted', updated_at = $2
-          WHERE id = $1 AND state IN ('queued', 'sent')",
-    )
-    .bind(id)
-    .bind(at)
-    .execute(conn)
-    .await?
-    .rows_affected();
+    mark_accepted_phase(conn, id, 0, at).await
+}
+
+/// Key phases advance independently of the terminal result; replay cannot reacquire a released key.
+pub async fn mark_accepted_phase(
+    conn: &mut Conn,
+    id: Id,
+    phase: i16,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let changed = sqlx::query("UPDATE commands SET state = 'accepted', key_phase = GREATEST(key_phase, $3), updated_at = $2
+        WHERE id = $1 AND (state IN ('queued', 'sent') OR state = 'accepted' AND key_phase < $3)")
+        .bind(id).bind(at).bind(phase).execute(conn).await?.rows_affected();
     Ok(changed > 0)
 }
 
@@ -452,12 +528,29 @@ pub async fn finish_command(
     ending: &Ending<'_>,
     at: DateTime<Utc>,
 ) -> Result<bool, DbError> {
+    if !crate::queries::transaction_guard::in_transaction(conn) {
+        let mut tx = sqlx::Connection::begin(conn).await?;
+        let changed = finish_command_on(&mut tx, id, ending, at).await?;
+        tx.commit().await?;
+        return Ok(changed);
+    }
+    finish_command_on(conn, id, ending, at).await
+}
+
+async fn finish_command_on(
+    conn: &mut Conn,
+    id: Id,
+    ending: &Ending<'_>,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
     let (state, result, error) = match ending {
         Ending::Succeeded(result) => ("succeeded", Some(*result), None),
         Ending::Failed(error) => ("failed", None, Some(*error)),
         Ending::Expired => ("expired", None, None),
         Ending::Cancelled => ("cancelled", None, None),
     };
+    let result = result.map(orch_types::storable::encode_exact);
+    let error = error.map(orch_types::storable::encode_exact);
     let changed: Option<(String, Json, DateTime<Utc>)> = sqlx::query_as(
         "UPDATE commands SET state = $2, result = $3, error = $4, updated_at = $5
           WHERE id = $1 AND state IN ('queued', 'sent', 'accepted') RETURNING kind,body,created_at",
@@ -472,9 +565,73 @@ pub async fn finish_command(
     if state == "succeeded"
         && let Some((kind, body, issued)) = &changed
     {
-        crate::queries::session_dependencies::record(conn, id, kind, body, *issued, at).await?;
+        let body = orch_types::storable::decode_exact(body.clone())?;
+        crate::queries::session_dependencies::record(conn, id, kind, &body, *issued, at).await?;
+    } else if let Some((kind, body, _)) = &changed {
+        crate::queries::session_dependencies::failed_open(
+            conn,
+            id,
+            kind,
+            &orch_types::storable::decode_exact(body.clone())?,
+        )
+        .await?;
     }
     Ok(changed.is_some())
+}
+
+/// Retains the safe reason when a private native reply still cannot be stored.
+pub async fn record_command_storage_gap(
+    conn: &mut Conn,
+    id: Id,
+    code: &str,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO command_storage_gaps(command_id,sqlstate,recorded_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+        .bind(id).bind(code).bind(at).execute(conn).await?;
+    Ok(())
+}
+
+/// The oldest unfinished command ahead of an accepted command in its machine's line.
+/// A command already releasing its result holds no place in that line. An unsent command
+/// waits for its machine rather than for work that machine has accepted.
+pub async fn held_up_by(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted' AND me.key_phase = 0
+            AND ahead.state = 'accepted' AND ahead.key_phase < 2
+            AND (ahead.created_at, ahead.id) < (me.created_at, me.id)
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// The machine's actual key owner, whose elapsed work may pause a queued command's patience.
+/// Accepted commands that have not acquired the key still appear in the line, but cannot
+/// grant unlimited time to another command merely because their acknowledgement arrived first.
+pub async fn key_holder(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted' AND me.key_phase = 0
+            AND ahead.id <> me.id AND ahead.state = 'accepted' AND ahead.key_phase = 1
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// Expires the commands that no machine took before their deadline, on any
@@ -696,6 +853,8 @@ mod tests {
 
     fn new_command<'a>(machine: Id, body: &'a Json, deadline: DateTime<Utc>) -> NewCommand<'a> {
         NewCommand {
+            content_transit: false,
+            native_target: None,
             id: new_id(),
             machine_id: machine,
             kind: "machine.probe",
@@ -706,11 +865,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_command_reload_preserves_its_protected_queue_key_and_reads_an_older_retained_body() {
+    async fn a_transfer_commands_content_lifetime_survives_reload_without_appearing_in_its_body() {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
         let owner = machine(&mut conn).await;
-        let body = json!({"$key":"obsolete"});
+        let body = json!({"content_transit":false});
+        let mut asked = new_command(owner, &body, clock::start() + Duration::seconds(30));
+        asked.content_transit = true;
+        assert!(
+            insert_command(&mut conn, &asked, clock::start())
+                .await
+                .unwrap()
+        );
+        asked.content_transit = false;
+        assert!(
+            !insert_command(&mut conn, &asked, clock::start())
+                .await
+                .unwrap()
+        );
+        drop(conn);
+        let row = command(&mut test.pool.acquire().await.unwrap(), asked.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.content_transit,
+            "retrying an id preserves its original content custody"
+        );
+        assert_eq!(
+            row.body, body,
+            "the body is ordinary native data and cannot select storage custody"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_reload_uses_only_its_protected_queue_key() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let owner = machine(&mut conn).await;
+        let body = json!({"$key":"native field"});
         let mut asked = new_command(owner, &body, clock::start() + Duration::seconds(30));
         asked.serial_key = Some("authoritative");
         insert_command(&mut conn, &asked, clock::start())
@@ -722,14 +915,14 @@ mod tests {
         let row = command(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(row.serial_key(), Some("authoritative"));
         assert_eq!(
-            row.body,
-            json!({}),
-            "storage metadata never belongs to a machine request"
+            row.body, body,
+            "native fields stay ordinary data beside the protected queue identity"
         );
-        // Older durable commands have no column value; their queue order still survives a restart.
+        // Payload members never select a protected queue, including when the column has no value.
+        let native = json!({"$key":"native field without a queue"});
         sqlx::query("UPDATE commands SET serial_key=NULL,body=$2 WHERE id=$1")
             .bind(id)
-            .bind(json!({"$key":"older"}))
+            .bind(&native)
             .execute(&mut *conn)
             .await
             .unwrap();
@@ -741,7 +934,8 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(row.id, id);
-        assert_eq!(row.serial_key(), Some("older"));
+        assert_eq!(row.serial_key(), None);
+        assert_eq!(row.body, native, "reloading does not rewrite native fields");
     }
 
     #[tokio::test]
@@ -907,6 +1101,54 @@ mod tests {
         assert!(
             command(&mut conn, record.id).await.unwrap().is_some(),
             "what an environment was last given stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uploading_recording_no_longer_holds_the_next_recordings_patience() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let owner = machine(&mut conn).await;
+        let now = clock::start();
+        let body = json!({});
+        let mut first = new_command(owner, &body, now + Duration::seconds(30));
+        first.kind = "fs.record";
+        first.serial_key = Some("environment");
+        let mut next = new_command(owner, &body, now + Duration::seconds(30));
+        next.serial_key = first.serial_key;
+        insert_command(&mut conn, &first, now).await.unwrap();
+        insert_command(&mut conn, &next, now + Duration::seconds(1))
+            .await
+            .unwrap();
+        mark_accepted(&mut conn, first.id, now).await.unwrap();
+        mark_accepted(&mut conn, next.id, now).await.unwrap();
+        assert!(held_up_by(&mut conn, next.id).await.unwrap().is_some());
+        assert!(key_holder(&mut conn, next.id).await.unwrap().is_none());
+        mark_accepted_phase(&mut conn, first.id, 1, now)
+            .await
+            .unwrap();
+        assert!(held_up_by(&mut conn, next.id).await.unwrap().is_some());
+        assert!(key_holder(&mut conn, next.id).await.unwrap().is_some());
+        mark_accepted_phase(&mut conn, first.id, 2, now)
+            .await
+            .unwrap();
+        assert!(
+            held_up_by(&mut conn, next.id).await.unwrap().is_none(),
+            "the older upload no longer owns the environment key"
+        );
+        assert!(key_holder(&mut conn, next.id).await.unwrap().is_none());
+        assert!(
+            !mark_accepted_phase(&mut conn, first.id, 0, now)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            command(&mut conn, first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .key_phase,
+            2
         );
     }
 }

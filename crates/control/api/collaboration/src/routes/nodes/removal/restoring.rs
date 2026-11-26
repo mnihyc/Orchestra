@@ -122,7 +122,11 @@ async fn validate(
     row: &DeletedRow,
     body: &NodeRestoreBody,
 ) -> ApiResult<(Option<Id>, Option<Vec<hierarchy::KeptArchive>>)> {
-    if purge_at(row.deleted_at, ctx.app.config.retention.soft_delete_days) <= ctx.now {
+    if purge_at(
+        row.deleted_at,
+        orch_settings::retention::deleted_keep_days(conn).await?,
+    ) <= ctx.now
+    {
         return Err(ApiError::new(
             ErrorCode::Gone,
             "it was deleted so long ago that it is gone for good",

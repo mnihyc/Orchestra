@@ -1433,7 +1433,7 @@ fn finish_tree_checked<'a, 'check: 'a>(
         ))?;
         let changed = reread(conn, &items).await?;
         let until = if matches!(request.command, Command::Delete | Command::MoveOut) {
-            Some(prepare::deadline(now, options)?)
+            Some(prepare::deadline(now, options))
         } else {
             None
         };

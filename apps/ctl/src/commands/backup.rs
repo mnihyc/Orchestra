@@ -162,6 +162,9 @@ async fn dump(
     let snapshot = installation::export_snapshot(&mut tx)
         .await
         .map_err(|_| "the database snapshot inventory could not be read".to_owned())?;
+    let grace_hours = orch_settings::retention::blob_grace_hours(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
     let result = pg(&deployment.config.database.url, "pg_dump")?
         .arg("--format=custom")
         .arg("--no-owner")
@@ -200,6 +203,7 @@ async fn dump(
         .and_then(|name| name.to_str())
         .ok_or_else(|| "the dump needs a relative file name".to_owned())?;
     let mut excluded = snapshot.excluded;
+    excluded["blobs"]["grace_hours"] = json!(grace_hours);
     excluded["configuration"] = config_inventory(&args.host.config, &args.secrets_dir);
     let manifest = Manifest {
         format_version: 1,

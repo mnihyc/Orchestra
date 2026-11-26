@@ -16,7 +16,7 @@ use orch_api_contract::access::{
     AccessChoice, HistoryList, HistoryListQuery, HolderInput, PageChange, PageChangeName,
     PermissionPageUpdate,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::audit::{self, Actor, Entry, Origin};
@@ -38,7 +38,7 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

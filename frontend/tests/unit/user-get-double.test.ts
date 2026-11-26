@@ -29,7 +29,7 @@ it('returns not_found for an absent ID and keeps name search, methods and paths 
   try { world.places.handle(viewer, 'GET', `/users/${id(1, 999)}`, new URLSearchParams(), {}); } catch (error) { missing = error; }
   expect(missing).toBeInstanceOf(Refusal); expect(missing).toMatchObject({ answer: { status: 404, body: { code: 'not_found' } } });
   expect(world.places.handle(viewer, 'GET', '/users/search', new URLSearchParams({ q: 'dora' }), {})?.body)
-    .toEqual([userRef(world.people.get('dora')!.me)]);
+    .toEqual({items:[userRef(world.people.get('dora')!.me)],next_cursor:null});
   expect(world.places.handle(viewer, 'GET', '/users', new URLSearchParams(), {})).toBeNull();
   expect(world.places.handle(viewer, 'GET', `/users/${viewer.me.id}/other`, new URLSearchParams(), {})).toBeNull();
   expect(world.places.handle(viewer, 'POST', `/users/${viewer.me.id}`, new URLSearchParams(), {})).toBeNull();

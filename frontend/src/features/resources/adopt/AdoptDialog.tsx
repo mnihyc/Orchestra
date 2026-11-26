@@ -24,6 +24,7 @@ import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
+import { Input } from '@/ui/Input';
 import { toast } from '@/ui/Toast';
 import { ACTIONS } from '@/ui/actions';
 
@@ -67,7 +68,6 @@ function PlanFacts({ plan }: { plan: AdoptPlan }) {
     <Facts
       label={t('adopt.dialog.plan')}
       rows={[
-        { name: t('adopt.dialog.name'), value: plan.name },
         { name: t('adopt.dialog.where'), value: where },
         { name: t('adopt.dialog.model'), value: model },
         { name: t('adopt.dialog.history'), value: history },
@@ -80,6 +80,7 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [topic, setTopic] = useState<PickedPlace | null>(null);
+  const [named, setNamed] = useState('');
   const key = useActKey();
   const selection = useAgentAccessSelection(topic?.id ?? '');
   const body = { provider_id: providerId, agent_id: agentId, native_session_ref: session.native_session_ref,
@@ -92,7 +93,10 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
     pending: plan.isPending || plan.isFetching || plan.isPlaceholderData, error: plan.error, retry: () => void plan.refetch() });
   if (eligible && selection.chosen === null && plan.isSuccess && !plan.isFetching && !plan.isPlaceholderData && planned.agent_access !== undefined && planned.agent_access !== null) selection.onChange(access.value);
   const adopt = useMutation({
-    mutationFn: (topicId: string) => adoptSession(topicId, body, key({ topic: topicId, ...body })),
+    mutationFn: (topicId: string) => {
+      const write = { ...body, ...(named.trim() === '' ? {} : { name: named.trim() }) };
+      return adoptSession(topicId, write, key({ topic: topicId, ...write }));
+    },
     onSuccess: (thread) => {
       toast({
         tone: 'success',
@@ -104,6 +108,8 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
   });
   const ready = eligible && access.ready && selection.chosen !== null && !plan.isFetching && !plan.isPlaceholderData;
   const name = sessionName(session, t('adopt.untitled'));
+  const sourceTitle = session.title?.trim() ?? '';
+  const defaultName = planned?.name ?? (sourceTitle === '' ? t('start.options.nameDefault') : sourceTitle);
 
   const footer = (
     <>
@@ -136,6 +142,7 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
       footer={footer}
     >
       <div className="flex flex-col gap-4">
+        {already === null && <Input label={t('adopt.dialog.name')} optional value={named} placeholder={defaultName} disabled={adopt.isPending} onChange={(event) => { setNamed(event.target.value); adopt.reset(); }} />}
         {already !== null ? (
           <InlineAlert
             tone="info"
