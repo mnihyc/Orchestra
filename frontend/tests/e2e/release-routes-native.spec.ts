@@ -8,13 +8,24 @@ import { expectUniqueGuideEntries } from '../accessibility/guide-entries';
 import { expectOneScrollerPerArea } from '../accessibility/scrolling';
 
 type State = 'ready' | 'empty' | 'denied' | 'busy' | 'offline' | 'failed' | 'unavailable';
-interface Target { role: 'button' | 'link' | 'textbox' | 'combobox' | 'checkbox' | 'radio'; name: string }
+interface Target { role: 'button' | 'link' | 'textbox' | 'combobox' | 'checkbox' | 'radio' | 'menuitem' | 'tab' | 'switch' | 'option'; name: string; nth?: number }
+interface ActionStep extends Target { act: 'click' | 'fill' | 'press' | 'check'; value?: string }
+interface ActionCase {
+  name: string;
+  url?: string;
+  steps: ActionStep[];
+  cue: string;
+  navigation: 'preserve' | 'document' | 'popup' | 'download';
+  nativeFlow?: 'identity' | 'fresh_proof' | 'port' | 'public_address' | 'new_version';
+  timeoutMs?: number;
+}
 interface RouteCase { pattern: string; url: string; state: State; heading: string; cue: string; storageState?: string;
-  locale: 'en' | 'zh-CN'; actor: string; keyboardTargets: Target[]; note: string }
+  locale: 'en' | 'zh-CN'; actor: string; keyboardTargets: Target[]; actions: ActionCase[]; note: string }
 interface Walk { candidate: string; baseURL: string; routes: RouteCase[] }
 
 const path = process.env.ORCH_ROUTE_WALK;
 const walk = path === undefined ? undefined : JSON.parse(readFileSync(path, 'utf8')) as Walk;
+if (walk?.routes.some((row) => !Array.isArray(row.actions)) === true) throw new Error('The private native route walk needs explicit actions for every route');
 const normalize = (route: string) => route.replace(/\/$/, '') || '/';
 
 function patterns(directory: string): string[] {
@@ -63,6 +74,12 @@ test.describe('joined candidate route acceptance', () => {
     }
     for (const row of walk.routes) {
       expect(row.keyboardTargets.length, row.pattern).toBeGreaterThan(0);
+      expect(Array.isArray(row.actions) && row.actions.length > 0, `An action walk is required for ${row.pattern}`).toBe(true);
+      for (const action of row.actions) {
+        expect(action.steps.length, action.name).toBeGreaterThan(0);
+        expect(action.cue, action.name).not.toBe('');
+        if (action.navigation === 'document') expect(action.nativeFlow, action.name).toBeDefined();
+      }
       expect(row.note, row.pattern).not.toBe('');
       expect(row.cue, row.pattern).not.toBe('');
     }
@@ -110,3 +127,89 @@ test.describe('joined candidate route acceptance', () => {
     await test.info().attach('safe-route-receipts', { body: Buffer.from(JSON.stringify(receipts, null, 2)), contentType: 'application/json' });
   });
 });
+
+
+/** Stable DOM signatures cover every rendered action without recording hrefs or typed values. */
+async function actionKeys(page: Page): Promise<string[]> {
+  return page.locator('button,a[href],input[type="button"],input[type="submit"],[role="button"],[role="menuitem"],[role="tab"],[role="switch"]').evaluateAll((elements) => {
+    const key = (element: Element) => {
+      const labelled = element.getAttribute('aria-labelledby')?.split(/\s+/u).map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+      const label = element.getAttribute('aria-label') ?? labelled ?? element.getAttribute('title') ?? element.textContent;
+      return [element.getAttribute('role') ?? element.tagName.toLowerCase(), element.getAttribute('data-action') ?? '', label.replace(/\s+/gu, ' ').trim()].join(':');
+    };
+    return [...new Set(elements.filter((element) => {
+      const box = element.getBoundingClientRect(), style = getComputedStyle(element);
+      return box.width > 0 && box.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+        && element.closest('[aria-hidden="true"]') === null && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true';
+    }).map(key))];
+  });
+}
+async function step(page: Page, target: ActionStep, timeout: number): Promise<string> {
+  const all = page.getByRole(target.role, { name: target.name, exact: true });
+  const control = target.nth === undefined ? all : all.nth(target.nth);
+  if (target.nth === undefined) await expect(control).toHaveCount(1, { timeout });
+  await expect(control).toBeVisible({ timeout });
+  const key = await control.evaluate((element) => {
+    const labelled = element.getAttribute('aria-labelledby')?.split(/\s+/u).map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+    const label = element.getAttribute('aria-label') ?? labelled ?? element.getAttribute('title') ?? element.textContent;
+    return [element.getAttribute('role') ?? element.tagName.toLowerCase(), element.getAttribute('data-action') ?? '', label.replace(/\s+/gu, ' ').trim()].join(':');
+  });
+  switch (target.act) {
+    case 'click': await control.click({ timeout }); break;
+    case 'fill': if (target.value === undefined) throw new Error('A fill step needs its fixture value'); await control.fill(target.value, { timeout }); break;
+    case 'press': if (target.value === undefined) throw new Error('A key step needs its fixture key'); await control.press(target.value, { timeout }); break;
+    case 'check': await control.check({ timeout }); break;
+  }
+  return key;
+}
+
+for (const row of walk?.routes ?? []) for (const [size, viewport] of Object.entries(VIEWPORTS)) for (const theme of THEMES) {
+  test(`actions preserve their document: ${row.pattern} ${row.state} ${row.locale} ${theme} ${size}`, async ({ browser }) => {
+    if (walk === undefined) return;
+    const budget = row.actions.reduce((sum, action) => sum + (action.timeoutMs ?? test.info().project.timeout), 0);
+    test.setTimeout(budget);
+    const required = new Set<string>(), covered = new Set<string>();
+    const receipts: { name: string; navigation: ActionCase['navigation']; documentRequests: number; popup: number; downloads: number }[] = [];
+    for (const action of row.actions) {
+      const allowance = action.timeoutMs ?? test.info().project.timeout;
+      const context = await browser.newContext({ baseURL: walk.baseURL, storageState: row.storageState, locale: row.locale, viewport });
+      try {
+        const page = await context.newPage();
+        await page.emulateMedia({ colorScheme: theme });
+        await page.goto(action.url ?? row.url, { timeout: allowance });
+        await expect(page.getByRole('heading', { name: row.heading, exact: true }).first()).toBeVisible({ timeout: allowance });
+        for (const key of await actionKeys(page)) required.add(key);
+        const token = await page.evaluate(() => {
+          const value = crypto.randomUUID();
+          Object.defineProperty(window, '__orchActionDocument', { configurable: true, value });
+          return value;
+        });
+        let documentRequests = 0, popup = 0, downloads = 0;
+        page.on('request', (request) => { if (request.isNavigationRequest() && request.resourceType() === 'document' && request.frame() === page.mainFrame()) documentRequests += 1; });
+        page.on('popup', () => { popup += 1; });
+        page.on('download', () => { downloads += 1; });
+        for (const target of action.steps) {
+          covered.add(await step(page, target, allowance));
+          if (await page.getByRole('heading', { name: row.heading, exact: true }).first().isVisible()) {
+            for (const key of await actionKeys(page)) required.add(key);
+          }
+        }
+        await expect(page.getByText(action.cue, { exact: false }).first()).toBeVisible({ timeout: allowance });
+        if (action.navigation !== 'document') {
+          const retained = await page.evaluate((expected) => (window as Window & { __orchActionDocument?: string }).__orchActionDocument === expected, token);
+          expect(retained, action.name).toBe(true);
+          if (action.navigation !== 'download') expect(documentRequests, action.name).toBe(0);
+        } else {
+          expect(action.nativeFlow, action.name).toBeDefined();
+          expect(documentRequests, action.name).toBeGreaterThan(0);
+        }
+        if (action.navigation === 'popup') await expect.poll(() => popup, { timeout: allowance, message: action.name }).toBeGreaterThan(0);
+        if (action.navigation === 'download') await expect.poll(() => downloads, { timeout: allowance, message: action.name }).toBeGreaterThan(0);
+        receipts.push({ name: action.name, navigation: action.navigation, documentRequests, popup, downloads });
+      } finally { await context.close(); }
+    }
+    expect([...required].filter((key) => !covered.has(key)), 'Every visible enabled action, including controls revealed by a dialog or menu, needs a named act in the private walk').toEqual([]);
+    // No address, storage state, request body, typed value or credential enters this receipt.
+    await test.info().attach('document-preservation-actions', { body: Buffer.from(JSON.stringify({ candidate: walk.candidate, pattern: row.pattern, state: row.state, locale: row.locale, theme, size, receipts }, null, 2)), contentType: 'application/json' });
+  });
+}

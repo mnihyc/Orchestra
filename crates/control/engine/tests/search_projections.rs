@@ -99,6 +99,110 @@ impl World {
 }
 
 #[tokio::test]
+async fn repaired_completion_and_rebuilt_search_keep_the_same_source_and_reject_a_late_old_projection()
+ {
+    let world = World::new().await;
+    let source = json!({"text":"~orch.exact:Before\0after","text_len":24});
+    let item = world.item("agent_message", &source).await;
+    let expected = "~orch.exact:Before�after";
+    let mut conn = world.db.pool.acquire().await.unwrap();
+    projections::keep_item_text(
+        &mut conn,
+        item.id,
+        &source,
+        "completed",
+        Some("~orch.exact:Before\0after"),
+    )
+    .await
+    .unwrap();
+    let current = threads::item(&mut conn, item.id).await.unwrap().unwrap();
+    assert_eq!(current.payload["text"], expected);
+    assert_eq!(current.search_text.as_deref(), Some(expected));
+    assert_eq!(
+        current.text_replacements, 1,
+        "a derived projection never recounts the source repair"
+    );
+    sqlx::query("UPDATE items SET search_text='outdated' WHERE id=$1")
+        .bind(item.id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        projections::rebuild(&mut conn).await.unwrap().items,
+        1,
+        "a decoded source guard matches its stored private representation"
+    );
+    let current = threads::item(&mut conn, item.id).await.unwrap().unwrap();
+    assert_eq!(current.search_text.as_deref(), Some(expected));
+    assert_eq!(current.seq_updated, item.seq_updated);
+    sqlx::query("UPDATE items SET payload=$2,search_text='New words' WHERE id=$1")
+        .bind(item.id)
+        .bind(json!({"text":"New words","text_len":9}))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let updated=orch_db::queries::search::put_item_texts(&mut conn,&json!([{"id":item.id,"payload":current.payload,"status":"completed","text":"stale words"}])).await.unwrap();
+    assert_eq!(updated, 0, "late repair cannot overwrite a newer source");
+    assert_eq!(
+        threads::item(&mut conn, item.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .search_text
+            .as_deref(),
+        Some("New words")
+    );
+}
+
+#[tokio::test]
+async fn search_uses_the_chosen_text_allowance_for_live_items_and_rebuilds() {
+    let world = World::new().await;
+    let mut conn = world.db.pool.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "search.text_chars",
+        &orch_db::queries::settings::Stored {
+            value: &json!(24_000),
+            locked: false,
+            by: Some(world.owner),
+            at: clock::start(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let text = "界".repeat(20_010);
+    let item = world.item("agent_message", &json!({"text":text})).await;
+    assert_eq!(item.search_text.as_deref(), Some(text.as_str()));
+    let mut conn = world.db.pool.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "search.text_chars",
+        &orch_db::queries::settings::Stored {
+            value: &json!(7),
+            locked: false,
+            by: Some(world.owner),
+            at: clock::start(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    projections::rebuild(&mut conn).await.unwrap();
+    assert_eq!(
+        threads::item(&mut conn, item.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .search_text,
+        Some("界".repeat(7))
+    );
+}
+
+#[tokio::test]
 async fn live_item_text_and_a_full_rebuild_agree_without_changing_attention_or_sequences() {
     let world = World::new().await;
     let item = world
