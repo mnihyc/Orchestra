@@ -8,8 +8,8 @@
 //! has the same functions on top of the standard library, and says in its own documentation
 //! which of the guarantees it cannot give.
 //!
-//! The package contains no `unsafe` code: the system calls are made through `rustix`, whose
-//! interface is safe.
+//! POSIX calls use the safe `rustix` interface. Windows relative opens have one private
+//! native boundary; the rest of the host uses only its safe handle-based functions.
 
 pub mod linux;
 pub mod macos;
@@ -97,7 +97,7 @@ pub fn prepare_group(command: &mut std::process::Command) {
 }
 
 /// What kind of thing a directory entry is, without following a link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     /// A regular file.
     File,
@@ -109,8 +109,10 @@ pub enum Kind {
     Other,
 }
 
+pub use orch_driver_contract::runtime::FileNumber;
+
 /// What the system says of an entry, without following a link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
     /// What it is.
     pub kind: Kind,
@@ -124,7 +126,7 @@ pub struct Meta {
     /// Its permission bits.
     pub mode: u32,
     /// Its number on its device; zero where the system has none.
-    pub ino: u64,
+    pub ino: FileNumber,
     /// The device it lives on; zero where the system has none.
     pub dev: u64,
     /// How many names it has.
@@ -169,7 +171,7 @@ impl Meta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Identity {
     dev: u64,
-    ino: u64,
+    ino: FileNumber,
     size: u64,
     mtime_ns: i64,
     ctime_ns: i64,

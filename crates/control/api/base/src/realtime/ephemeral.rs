@@ -53,6 +53,8 @@ use std::collections::HashMap;
 
 use std::collections::HashSet;
 
+use std::collections::VecDeque;
+
 use std::sync::atomic::AtomicBool;
 
 use std::sync::atomic::Ordering;
@@ -149,7 +151,7 @@ fn deleted_batches<'a>(
                     kind: ResourceKind::Machine,
                     ..
                 } => None,
-                Feed::Resource { id, .. } => Some(*id),
+                Feed::Resource { id, .. } | Feed::ProviderRow(id) => Some(*id),
                 other => super::environment_watches::environment(other),
             })
             .collect();
@@ -207,6 +209,7 @@ fn deleted_batches<'a>(
                     Feed::Resource { kind, id } => {
                         !resources.contains(&(*id, kind.as_str().to_owned()))
                     }
+                    Feed::ProviderRow(id) => !resources.contains(&(*id, "provider".to_owned())),
                     other => super::environment_watches::environment(other)
                         .is_some_and(|id| !resources.contains(&(id, "environment".to_owned()))),
                 };
@@ -295,7 +298,7 @@ struct Assemblies {
 }
 
 impl Assemblies {
-    fn take(&mut self, text: &str) -> Option<Message> {
+    fn take(&mut self, text: &str) -> Option<(Message, usize)> {
         let chunk: Chunk = serde_json::from_str(text).ok()?;
         let now = Instant::now();
         self.waiting
@@ -333,7 +336,7 @@ impl Assemblies {
         let held = self.waiting.remove(&chunk.ephemeral)?;
         self.bytes = self.bytes.saturating_sub(held.size);
         let bytes: Vec<u8> = held.pieces.into_iter().flatten().flatten().collect();
-        serde_json::from_slice(&bytes).ok()
+        Some((serde_json::from_slice(&bytes).ok()?, bytes.len()))
     }
 }
 
@@ -378,9 +381,13 @@ pub async fn forward_report(db: &Db, report: &Report) -> Result<(), Fail> {
 /// State held only in this API process for unreplayed feeds.
 pub struct Feeds {
     document_tree_dirty: AtomicBool,
+    hierarchy_readers: Mutex<HashSet<Id>>,
     raw_dirty: AtomicBool,
     subs: Mutex<HashMap<Feed, Vec<Arc<Subscription>>>>,
     lists: Mutex<HashMap<Feed, Json>>,
+    /// Controlled captures wait for the actual reader's initial-state request.
+    #[cfg(any(test, feature = "test-support"))]
+    background_seeds: Mutex<HashMap<Feed, Json>>,
     publishers: Mutex<HashSet<Feed>>,
     offline: Mutex<HashSet<Feed>>,
     assemblies: Mutex<Assemblies>,
@@ -398,9 +405,12 @@ impl Default for Feeds {
         let (incoming, receiver) = mpsc::channel(MAILBOX);
         Self {
             document_tree_dirty: AtomicBool::new(false),
+            hierarchy_readers: Mutex::default(),
             raw_dirty: AtomicBool::new(false),
             subs: Mutex::default(),
             lists: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            background_seeds: Mutex::default(),
             publishers: Mutex::default(),
             offline: Mutex::default(),
             assemblies: Mutex::default(),
@@ -417,7 +427,16 @@ impl Feeds {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_background_seed(&self, feed: Feed, capture: Json) {
         assert!(matches!(feed, Feed::ThreadBackground(_)));
-        lock(&self.lists).insert(feed, capture);
+        if let Feed::ThreadBackground(thread) = &feed {
+            super::background_read_tests::retain_manual_capture(*thread, capture.clone());
+        }
+        lock(&self.background_seeds).insert(feed, capture);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn test_background_evict(&self, feed: &Feed) {
+        assert!(matches!(feed, Feed::ThreadBackground(_)));
+        lock(&self.lists).remove(feed);
     }
 
     /// Local tree/authority/reconnect wake; bounded-mailbox overflow requests one consolidated repair.
@@ -436,6 +455,34 @@ impl Feeds {
             self.document_tree_dirty.store(true, Ordering::Release);
             self.changed.notify_one();
         }
+    }
+
+    /// Personal read positions and group-chat signals refresh only existing hierarchy readers.
+    pub(crate) fn hierarchy_readers_changed(&self, users: &[Id]) {
+        let wanted = users.iter().copied().collect::<HashSet<_>>();
+        let active = lock(&self.subs)
+            .iter()
+            .filter(|(feed, _)| {
+                matches!(
+                    feed,
+                    Feed::DocumentTree(
+                        orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy { .. }
+                    )
+                )
+            })
+            .flat_map(|(_, subs)| subs.iter())
+            .map(|sub| sub.connection().user)
+            .filter(|user| wanted.contains(user))
+            .collect::<HashSet<_>>();
+        if active.is_empty() {
+            return;
+        }
+        lock(&self.hierarchy_readers).extend(active);
+        self.changed.notify_one();
+    }
+
+    fn take_hierarchy_readers(&self) -> Vec<Id> {
+        lock(&self.hierarchy_readers).drain().collect()
     }
 
     /// Only watched native sources are woken; overflow consolidates one repair without retaining an unbounded ID set.
@@ -498,9 +545,36 @@ impl Feeds {
         Ok(())
     }
 
+    /// Unwatched native sources retain no ordinary cached list.
+    pub(crate) fn retain_active_lists(&self, active: &HashSet<Feed>) {
+        lock(&self.lists).retain(|feed, _| {
+            (!matches!(
+                feed,
+                Feed::ThreadBackground(_)
+                    | Feed::ThreadGit(_)
+                    | Feed::EnvGit { .. }
+                    | Feed::Job(_)
+                    | Feed::Fork(_)
+                    | Feed::EnvProcs(_)
+                    | Feed::EnvStats(_)
+                    | Feed::EnvTerminals(_)
+                    | Feed::EnvPorts(_)
+                    | Feed::EnvDir { .. }
+            )) || active.contains(feed)
+        });
+    }
+
     /// The latest complete list held in this process.
     pub(crate) fn list(&self, feed: &Feed) -> Option<Json> {
         lock(&self.lists).get(feed).cloned()
+    }
+
+    fn initial_list(&self, feed: &Feed) -> Option<Json> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(capture) = lock(&self.background_seeds).remove(feed) {
+            return Some(capture);
+        }
+        self.list(feed)
     }
 
     /// Clears the cached outage when an environment returns.
@@ -555,10 +629,65 @@ impl Feeds {
         lock(&self.subs).get(feed).cloned().unwrap_or_default()
     }
 
-    /// Assembles a notification and admits the complete message to the bounded mailbox.
-    pub(crate) fn heard(&self, text: &str) {
-        if let Some(message) = lock(&self.assemblies).take(text) {
-            let _ = self.incoming.try_send(message);
+    /// Dispatches complete events immediately, even when this process is busy coordinating watches.
+    pub(crate) fn heard(&self, inner: &Arc<Inner>, text: &str) {
+        let Some((message, bytes)) = lock(&self.assemblies).take(text) else {
+            return;
+        };
+        match message {
+            Message::Event { feed, data } => {
+                if data.get("offline") != Some(&Json::Bool(true)) && is_list(&feed) {
+                    let mut lists = lock(&self.lists);
+                    if matches!(feed, Feed::EnvDir { .. }) {
+                        if data["reset"] == true || data["error"].is_object() {
+                            lists.insert(feed.clone(), data.clone());
+                        } else if let Some(held) = lists.get_mut(&feed) {
+                            merge_directory(held, data.clone());
+                        }
+                    } else {
+                        lists.insert(feed.clone(), data.clone());
+                    }
+                }
+                if let Feed::EnvStats(environment) = &feed
+                    && let Some(app) = inner.app()
+                    && let Ok(sample) = serde_json::from_value::<
+                        orch_api_contract::processes::ResourceSample,
+                    >(data.clone())
+                {
+                    app.cache.samples().push(*environment, sample);
+                }
+                if matches!(
+                    &feed,
+                    Feed::Resource {
+                        kind: ResourceKind::Provider,
+                        ..
+                    }
+                ) && data["what"] == "login"
+                {
+                    let _ = self.incoming.try_send(Message::Event {
+                        feed: feed.clone(),
+                        data: data.clone(),
+                    });
+                }
+                dispatch(inner, &feed, data, bytes, None);
+            }
+            Message::Initial {
+                process,
+                generation,
+                feed,
+                data,
+            } => {
+                if process == inner.process {
+                    dispatch(inner, &feed, data, bytes, Some(generation));
+                }
+            }
+            Message::List { feed, data } => {
+                lock(&self.lists).insert(feed.clone(), data.clone());
+                let _ = self.incoming.try_send(Message::List { feed, data });
+            }
+            message => {
+                let _ = self.incoming.try_send(message);
+            }
         }
     }
 
@@ -596,8 +725,8 @@ impl Feeds {
         let data = if offline {
             Some(serde_json::json!({"offline": true}))
         } else {
-            lock(&self.lists).get(sub.feed()).cloned().or_else(|| {
-                if matches!(sub.feed(), Feed::Resource { .. }) {
+            self.initial_list(sub.feed()).or_else(|| {
+                if matches!(sub.feed(), Feed::Resource { .. } | Feed::ProviderRow(_)) {
                     return Some(serde_json::json!({"what": "changed"}));
                 }
                 (super::machine_views::projected(sub.feed())
@@ -608,6 +737,11 @@ impl Feeds {
                 .then(|| serde_json::json!({}))
             })
         };
+        #[cfg(any(test, feature = "test-support"))]
+        let data = data.or_else(|| match sub.feed() {
+            Feed::ThreadBackground(thread) => super::background_read_tests::manual_capture(*thread),
+            _ => None,
+        });
         if let Some(data) = data {
             // Availability reads can await the database too; the seed is authorized for
             // this reader at the same serialization boundary as a newly published list.
@@ -639,7 +773,9 @@ impl Feeds {
                             .await
                     }
                 }
-            } else if matches!(sub.feed(), Feed::Resource { .. }) && data["what"] == "changed" {
+            } else if matches!(sub.feed(), Feed::Resource { .. } | Feed::ProviderRow(_))
+                && data["what"] == "changed"
+            {
                 send_resource(inner, sub, st, &data).await?;
             } else if super::machine_views::projected(sub.feed()) {
                 send_machine(inner, sub, st, &data).await?;
@@ -858,8 +994,10 @@ async fn send_resource(
                 .await;
             return Ok(());
         };
-        let fingerprint = (visible.get("row").is_some() || visible.get("view_revoked").is_some())
-            .then(|| orch_types::Hash::of(visible.to_string().as_bytes()));
+        let fingerprint = (visible.get("row").is_some()
+            || visible.get("view_revoked").is_some()
+            || visible.get("provider").is_some())
+        .then(|| orch_types::Hash::of(visible.to_string().as_bytes()));
         if fingerprint.is_some() && st.resource_read == fingerprint {
             return Ok(());
         }
@@ -935,6 +1073,7 @@ pub struct Coordinator {
     active: HashMap<Feed, Active>,
     pending: HashMap<(Feed, String), Pending>,
     last: HashMap<(Feed, String), Instant>,
+    publishing: HashMap<Feed, tokio::task::JoinHandle<()>>,
 }
 
 impl Coordinator {
@@ -981,6 +1120,19 @@ impl Coordinator {
         self.active.keys().cloned().collect()
     }
 
+    fn object_changed(&mut self, feed: Feed) {
+        if self.active().contains(&feed) {
+            let data = match feed {
+                Feed::Resource { .. } | Feed::ProviderRow(_) => {
+                    serde_json::json!({"what":"changed"})
+                }
+                Feed::Job(_) | Feed::Fork(_) => serde_json::json!({}),
+                _ => return,
+            };
+            self.queue(feed, data, false);
+        }
+    }
+
     /// Queues the latest event under the rate of its feed; process signals bypass the periodic gap.
     pub(crate) fn queue(&mut self, feed: Feed, data: Json, immediate: bool) {
         let what = data
@@ -1023,28 +1175,39 @@ impl Coordinator {
         }
     }
 
-    async fn flush(&mut self, inner: &Inner) -> Result<(), Fail> {
+    fn flush(&mut self, inner: &Arc<Inner>) {
+        self.publishing.retain(|_, task| !task.is_finished());
         let now = Instant::now();
-        let ready: Vec<_> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.due <= now)
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in ready {
-            if let Some(pending) = self.pending.remove(&key) {
-                broadcast(
-                    &inner.db,
-                    &Message::Event {
-                        feed: key.0.clone(),
-                        data: pending.data,
-                    },
-                )
-                .await?;
-                self.last.insert(key, Instant::now());
+        let mut ready: HashMap<Feed, Vec<Json>> = HashMap::new();
+        self.pending.retain(|key, pending| {
+            if pending.due > now || self.publishing.contains_key(&key.0) {
+                return true;
             }
+            ready
+                .entry(key.0.clone())
+                .or_default()
+                .push(pending.data.take());
+            self.last.insert(key.clone(), now);
+            false
+        });
+        for (feed, updates) in ready {
+            let inner = Arc::clone(inner);
+            let key = feed.clone();
+            let task = inner.tasks.clone().spawn(async move {
+                for data in updates {
+                    let message = Message::Event { feed: feed.clone(), data };
+                    tokio::select! {
+                        () = inner.stop.cancelled() => return,
+                        result = broadcast(&inner.db, &message) => {
+                            if let Err(error) = result {
+                                tracing::warn!(%error, kind = super::subscriptions::metric_kind(&feed), "a transient update could not be published");
+                            }
+                        }
+                    }
+                }
+            });
+            self.publishing.insert(key, task);
         }
-        Ok(())
     }
 }
 
@@ -1087,107 +1250,216 @@ pub(crate) fn merge_directory(held: &mut Json, new: Json) {
             changed.insert(name.to_owned(), entry.clone());
         }
     }
-    *held = serde_json::json!({"as_of": new["as_of"], "changed": changed.into_values().collect::<Vec<_>>(),
+    let facts = new
+        .get("facts")
+        .filter(|facts| !facts.is_null())
+        .or_else(|| held.get("facts"))
+        .cloned();
+    *held = serde_json::json!({"facts":facts, "as_of": new["as_of"], "changed": changed.into_values().collect::<Vec<_>>(),
         "removed": if reset { Vec::<String>::new() } else { removed.into_iter().collect::<Vec<_>>() },
         "reset":reset,"truncated":truncated,"invalidated":invalidated,
         "revision":new["revision"],"next_cursor":new["next_cursor"],"expires_at":new["expires_at"],
         "observed_from":new["observed_from"]});
 }
 
-pub(super) async fn deliver(
-    inner: &Arc<Inner>,
+/// An idle reader has no worker. Its in-flight projection and subsequent events are ordered
+/// independently of every other subscription, including other readers of the same feed.
+#[derive(Debug, Default)]
+pub(super) struct Deliveries(Mutex<Option<Waiting>>);
+
+#[derive(Debug, Default)]
+struct Waiting {
+    news: VecDeque<(Delivery, usize)>,
+    bytes: usize,
+}
+
+#[derive(Debug)]
+enum Delivery {
+    Event(Arc<Json>),
+    Resync,
+}
+
+impl Deliveries {
+    fn enqueue(&self, data: Arc<Json>, bytes: usize, budget: usize) -> bool {
+        let mut slot = lock(&self.0);
+        let start = slot.is_none();
+        let queue = slot.get_or_insert_with(Waiting::default);
+        if !queue.news.is_empty() && queue.bytes.saturating_add(bytes) > budget {
+            // Match the socket's recovery for a reader that cannot keep up. Only its queue is shed.
+            queue.news.clear();
+            queue.bytes = 0;
+            queue.news.push_back((Delivery::Resync, 0));
+        }
+        queue.news.push_back((Delivery::Event(data), bytes));
+        queue.bytes = queue.bytes.saturating_add(bytes);
+        start
+    }
+
+    fn next(&self) -> Option<Delivery> {
+        let mut slot = lock(&self.0);
+        let queue = slot.as_mut()?;
+        if let Some((next, bytes)) = queue.news.pop_front() {
+            queue.bytes -= bytes;
+            return Some(next);
+        }
+        *slot = None;
+        None
+    }
+}
+
+fn recipients(
+    inner: &Inner,
     feed: &Feed,
     data: &Json,
     generation: Option<u64>,
-) -> Result<(), Fail> {
+) -> Vec<Arc<Subscription>> {
     // Raw delivery requires its typed source batch and admitted live floor; a generic event cannot supply that proof.
     if matches!(feed, Feed::ThreadRaw(_)) {
-        return Ok(());
+        return Vec::new();
     }
     if data.get("offline") == Some(&Json::Bool(true)) {
         lock(&inner.ephemeral.offline).insert(feed.clone());
     } else {
         lock(&inner.ephemeral.offline).remove(feed);
     }
-    for sub in inner.ephemeral.subscribers(feed) {
-        if generation.is_some_and(|generation| generation != sub.tag().generation) {
+    inner
+        .ephemeral
+        .subscribers(feed)
+        .into_iter()
+        .filter(|sub| generation.is_none_or(|g| sub.tag().generation == g))
+        .collect()
+}
+
+fn dispatch(inner: &Arc<Inner>, feed: &Feed, data: Json, bytes: usize, generation: Option<u64>) {
+    let subs = recipients(inner, feed, &data, generation);
+    let data = Arc::new(data);
+    let budget = usize::try_from(inner.tuning.buffer_max_bytes.max(0)).unwrap_or(usize::MAX);
+    for sub in subs {
+        if !sub.deliveries.enqueue(Arc::clone(&data), bytes, budget) {
             continue;
         }
-        let mut st = sub.state.lock().await;
-        if !st.open {
-            continue;
-        }
-        // Each recipient pins its own identity and authority before the shared payload
-        // is projected and encoded; an ended token is never another token of that user.
-        let Some(_identity) = super::watches::delivery_guard(inner, sub.connection()).await? else {
-            continue;
-        };
-        let epoch = super::sync::read_epoch(inner).await?;
-        if !inner.recheck(&sub, &mut st, epoch).await? || !sub.is_live() {
-            continue;
-        }
-        let offline = data.get("offline") == Some(&Json::Bool(true));
-        if offline && st.offline {
-            continue;
-        }
-        st.offline = offline;
-        if matches!(feed, Feed::Resource { .. })
-            && matches!(data["what"].as_str(), Some("login" | "job"))
-            && !super::subscriptions::viewing(
-                sub.connection(),
-                super::resources::may_manage(inner, sub.connection().user, feed),
-            )
-            .await?
+        let inner = Arc::clone(inner);
+        inner.tasks.clone().spawn(async move {
+            while let Some(news) = sub.deliveries.next() {
+                let result = tokio::select! {
+                    () = inner.stop.cancelled() => break,
+                    result = deliver_to(&inner, &sub, news) => result,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(%error, kind = super::subscriptions::metric_kind(sub.feed()), reader = sub.tag().generation, "a transient event could not be delivered");
+                }
+            }
+        });
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn deliver(
+    inner: &Arc<Inner>,
+    feed: &Feed,
+    data: &Json,
+    generation: Option<u64>,
+) -> Result<(), Fail> {
+    for sub in recipients(inner, feed, data, generation) {
+        deliver_to(inner, &sub, Delivery::Event(Arc::new(data.clone()))).await?;
+    }
+    Ok(())
+}
+
+async fn deliver_to(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    news: Delivery,
+) -> Result<(), Fail> {
+    let feed = sub.feed();
+    let mut st = sub.state.lock().await;
+    if !st.open {
+        return Ok(());
+    }
+    // Each recipient pins its own identity and authority before the shared payload
+    // is projected and encoded; an ended token is never another token of that user.
+    let Some(_identity) = super::watches::delivery_guard(inner, sub.connection()).await? else {
+        return Ok(());
+    };
+    let epoch = super::sync::read_epoch(inner).await?;
+    if !inner.recheck(sub, &mut st, epoch).await? || !sub.is_live() {
+        return Ok(());
+    }
+    let Delivery::Event(data) = news else {
+        let frame = ServerFrame::Resync(orch_realtime_contract::frames::ResyncFrame {
+            id: sub.tag().id,
+            feed: feed.clone(),
+            reload: None,
+        })
+        .encode()
+        .map_err(Fail::other)?;
+        sub.connection().outbox.push_resync(sub.tag(), frame);
+        return Ok(());
+    };
+    let data = data.as_ref();
+    let offline = data.get("offline") == Some(&Json::Bool(true));
+    if offline && st.offline {
+        return Ok(());
+    }
+    st.offline = offline;
+    if matches!(feed, Feed::Resource { .. })
+        && matches!(data["what"].as_str(), Some("login" | "job"))
+        && !super::subscriptions::viewing(
+            sub.connection(),
+            super::resources::may_manage(inner, sub.connection().user, feed),
+        )
+        .await?
+    {
+        return Ok(());
+    }
+    // Browser lists are published canonically and cut down for the person receiving them.
+    if let Feed::Usage(scope) = feed {
+        for visible in
+            super::usage::project(inner, sub.connection(), scope, &mut st.usage_read).await?
         {
-            continue;
+            if scope.ends_with(":health") {
+                let hash = super::resource_health::fingerprint(&visible);
+                let epoch = super::sync::read_epoch(inner).await?;
+                if inner.recheck(sub, &mut st, epoch).await? && st.health_read != Some(hash) {
+                    send(sub, &visible)?;
+                    st.health_read = Some(hash);
+                }
+            } else {
+                send(sub, &visible)?;
+            }
         }
-        // Browser lists are published canonically and cut down for the person receiving them.
-        if let Feed::Usage(scope) = feed {
-            for visible in
-                super::usage::project(inner, sub.connection(), scope, &mut st.usage_read).await?
-            {
-                if scope.ends_with(":health") {
-                    let hash = super::resource_health::fingerprint(&visible);
-                    let epoch = super::sync::read_epoch(inner).await?;
-                    if inner.recheck(&sub, &mut st, epoch).await? && st.health_read != Some(hash) {
-                        send(&sub, &visible)?;
-                        st.health_read = Some(hash);
-                    }
-                } else {
-                    send(&sub, &visible)?;
+    } else if let Feed::ThreadBackground(thread) = feed {
+        send_background(inner, sub, &mut st, *thread, data).await?;
+    } else if matches!(feed, Feed::Job(_) | Feed::Fork(_)) {
+        match super::machine_views::progress(inner, sub.connection(), feed).await? {
+            Ok(visible) => {
+                let epoch = super::sync::read_epoch(inner).await?;
+                if inner.recheck(sub, &mut st, epoch).await? {
+                    send(sub, &visible)?;
                 }
             }
-        } else if let Feed::ThreadBackground(thread) = feed {
-            send_background(inner, &sub, &mut st, *thread, data).await?;
-        } else if matches!(feed, Feed::Job(_) | Feed::Fork(_)) {
-            match super::machine_views::progress(inner, sub.connection(), feed).await? {
-                Ok(visible) => {
-                    let epoch = super::sync::read_epoch(inner).await?;
-                    if inner.recheck(&sub, &mut st, epoch).await? {
-                        send(&sub, &visible)?;
-                    }
-                }
-                Err(access) => {
-                    inner
-                        .close_sub(
-                            &sub,
-                            &mut st,
-                            if access == super::subscriptions::Access::NotFound {
-                                orch_realtime_contract::frames::FeedClosedReason::Deleted
-                            } else {
-                                orch_realtime_contract::frames::FeedClosedReason::Revoked
-                            },
-                        )
-                        .await
-                }
+            Err(access) => {
+                inner
+                    .close_sub(
+                        sub,
+                        &mut st,
+                        if access == super::subscriptions::Access::NotFound {
+                            orch_realtime_contract::frames::FeedClosedReason::Deleted
+                        } else {
+                            orch_realtime_contract::frames::FeedClosedReason::Revoked
+                        },
+                    )
+                    .await
             }
-        } else if matches!(feed, Feed::Resource { .. }) && data["what"] == "changed" {
-            send_resource(inner, &sub, &mut st, data).await?;
-        } else if super::machine_views::projected(feed) {
-            send_machine(inner, &sub, &mut st, data).await?;
-        } else {
-            send(&sub, data)?;
         }
+    } else if matches!(feed, Feed::Resource { .. } | Feed::ProviderRow(_))
+        && data["what"] == "changed"
+    {
+        send_resource(inner, sub, &mut st, data).await?;
+    } else if super::machine_views::projected(feed) {
+        send_machine(inner, sub, &mut st, data).await?;
+    } else {
+        send(sub, data)?;
     }
     Ok(())
 }
@@ -1223,31 +1495,43 @@ async fn run(inner: Arc<Inner>, mut receiver: mpsc::Receiver<Message>) {
             _ = interval.tick() => None,
             message = receiver.recv() => message,
         };
-        let result = async {
-            if renewed.elapsed() >= INTEREST_EVERY || matches!(message, Some(Message::Refresh)) {
-                inner.ephemeral.close_deleted(&inner).await?;
-                let feeds = inner.ephemeral.interests();
-                coordinator.interests(inner.process.clone(), feeds.clone());
-                broadcast(
-                    &inner.db,
-                    &Message::Interests {
-                        process: inner.process.clone(),
-                        feeds,
-                    },
-                )
-                .await?;
-                if inner.ephemeral.link.get().is_some() {
-                    // Taken where it is free, renewed while held. A process whose renewal fails stops
-                    // coordinating until it holds the lease again; nobody else takes it before it lapses.
-                    let held = lease.hold(&inner.db, inner.clock.now()).await;
-                    coordinating = held.as_ref().is_ok_and(|held| *held);
-                    held?;
+        if renewed.elapsed() >= INTEREST_EVERY || matches!(message, Some(Message::Refresh)) {
+            if let Err(error) = inner.ephemeral.close_deleted(&inner).await {
+                tracing::warn!(%error, "deleted transient sources could not be checked");
+            }
+            let feeds = inner.ephemeral.interests();
+            coordinator.interests(inner.process.clone(), feeds.clone());
+            if let Err(error) = broadcast(
+                &inner.db,
+                &Message::Interests {
+                    process: inner.process.clone(),
+                    feeds,
+                },
+            )
+            .await
+            {
+                tracing::warn!(%error, "local watch interests could not be announced");
+            }
+            if inner.ephemeral.link.get().is_some() {
+                let held = lease.hold(&inner.db, inner.clock.now()).await;
+                coordinating = held.as_ref().is_ok_and(|held| *held);
+                if let Err(error) = held {
+                    tracing::warn!(%error, "the watch coordinator lease could not be renewed");
                 }
-                renewed = Instant::now();
             }
-            if inner.ephemeral.raw_dirty.swap(false,Ordering::AcqRel) {
-                super::raw_traffic::refresh(&inner,None).await?;
+            renewed = Instant::now();
+        }
+        if inner.ephemeral.raw_dirty.swap(false, Ordering::AcqRel)
+            && let Err(error) = super::raw_traffic::refresh(&inner, None).await
+        {
+            tracing::warn!(%error, "raw feed readers could not be refreshed");
+        }
+        for user in inner.ephemeral.take_hierarchy_readers() {
+            if let Err(error) = super::document_tree::refresh_reader(&inner, user).await {
+                tracing::warn!(%error, "a hierarchy reader could not be refreshed");
             }
+        }
+        let result = async {
             match message {
                 Some(Message::Raw {batch})=>super::raw_traffic::deliver(&inner,batch).await?,
                 Some(Message::RawChanged {thread})=>super::raw_traffic::refresh(&inner,thread).await?,
@@ -1262,37 +1546,11 @@ async fn run(inner: Arc<Inner>, mut receiver: mpsc::Receiver<Message>) {
                     coordinator.interests(process, feeds)
                 }
                 Some(Message::List { feed, data }) => {
-                    lock(&inner.ephemeral.lists).insert(feed.clone(), data.clone());
                     if coordinating {
                         coordinator.queue(feed, data, false);
                     }
                 }
-                Some(Message::Event { feed, data }) => {
-                    if data.get("offline") != Some(&Json::Bool(true)) && is_list(&feed) {
-                        let mut lists = lock(&inner.ephemeral.lists);
-                        if matches!(feed, Feed::EnvDir { .. }) {
-                            if data["reset"] == true || data["error"].is_object() {
-                                lists.insert(feed.clone(), data.clone());
-                            } else if let Some(held) = lists.get_mut(&feed) {
-                                merge_directory(held, data.clone());
-                            }
-                        } else { lists.insert(feed.clone(), data.clone()); }
-                    }
-                    if let Feed::EnvStats(environment) = &feed
-                        && let Some(app) = inner.app()
-                        && let Ok(sample) = serde_json::from_value::<orch_api_contract::processes::ResourceSample>(data.clone())
-                    { app.cache.samples().push(*environment, sample); }
-                    resources.observed(&feed, &data);
-                    deliver(&inner, &feed, &data, None).await?;
-                }
-                Some(Message::Initial {
-                    process,
-                    generation,
-                    feed,
-                    data,
-                }) if process == inner.process => {
-                    deliver(&inner, &feed, &data, Some(generation)).await?;
-                }
+                Some(Message::Event { feed, data }) => resources.observed(&feed, &data),
                 Some(Message::Current {
                     process,
                     generation,
@@ -1337,42 +1595,40 @@ async fn run(inner: Arc<Inner>, mut receiver: mpsc::Receiver<Message>) {
                     }
                 }
                 Some(Message::ObjectChanged { feed }) => {
-                    if coordinating && coordinator.active().contains(&feed) {
-                        coordinator.queue(feed, serde_json::json!({}), false);
+                    if coordinating {
+                        coordinator.object_changed(feed);
                     }
                 }
                 Some(Message::Report { .. } | Message::DirectoryCompleted { .. })
                 | Some(Message::Initial { .. } | Message::Refresh)
                 | None => {}
             }
-            if coordinating {
-                let active = coordinator.active();
-                if active != prior_active {
-                    sources.changed();
-                    prior_active = active.clone();
-                }
-                sources.reconcile(&inner, &active, &mut coordinator).await?;
-                background.reconcile(&inner, &active).await?;
-                usage.reconcile(&inner,&active).await?;
-                lock(&inner.ephemeral.lists).retain(|feed, _| {
-                    (!matches!(feed, Feed::ThreadBackground(_) | Feed::ThreadGit(_) | Feed::EnvGit { .. }
-                        | Feed::Job(_) | Feed::Fork(_)
-                        | Feed::EnvProcs(_) | Feed::EnvStats(_) | Feed::EnvTerminals(_) | Feed::EnvPorts(_) | Feed::EnvDir { .. }))
-                        || active.contains(feed)
-                });
-                resources
-                    .reconcile(&inner, &active, &mut coordinator)
-                    .await?;
-                coordinator
-                    .pending
-                    .retain(|(feed, _), _| active.contains(feed) && sources.available(feed));
-                coordinator.flush(&inner).await?;
-            }
             Ok::<_, Fail>(())
-        }
-        .await;
+        }.await;
         if let Err(error) = result {
-            tracing::warn!(%error, "a transient feed pass failed");
+            tracing::warn!(%error, "a transient watch message could not be processed");
+        }
+        if coordinating {
+            let active = coordinator.active();
+            if active != prior_active {
+                sources.changed();
+                prior_active = active.clone();
+            }
+            if let Err(error) = sources.reconcile(&inner, &active, &mut coordinator).await {
+                tracing::warn!(%error, "environment watches could not be reconciled");
+            }
+            if let Err(error) = background.reconcile(&inner, &active).await {
+                tracing::warn!(%error, "background watches could not be reconciled");
+            }
+            if let Err(error) = usage.reconcile(&inner, &active).await {
+                tracing::warn!(%error, "usage watches could not be reconciled");
+            }
+            inner.ephemeral.retain_active_lists(&active);
+            resources.reconcile(&inner, &active, &mut coordinator).await;
+            coordinator
+                .pending
+                .retain(|(feed, _), _| active.contains(feed) && sources.available(feed));
+            coordinator.flush(&inner);
         }
     }
     // A process that stops gives the role up at once; one that cannot leaves the lease to lapse.
@@ -1385,6 +1641,143 @@ async fn run(inner: Arc<Inner>, mut receiver: mpsc::Receiver<Message>) {
 pub mod tests {
 
     use super::*;
+    pub fn a_machine_storage_change_wakes_the_native_machine_row() {
+        use orch_realtime_contract::feeds::ResourceEvent;
+
+        let feed = Feed::Resource {
+            kind: ResourceKind::Machine,
+            id: orch_types::new_id(),
+        };
+        let mut coordinator = Coordinator::default();
+        coordinator.interests("reader".into(), vec![feed.clone()]);
+        coordinator.object_changed(feed.clone());
+        let pending = coordinator
+            .pending
+            .values()
+            .next()
+            .expect("the machine has a reader");
+        assert!(matches!(
+            EventData::decode(&feed, pending.data.clone()),
+            Ok(EventData::Resource(ResourceEvent::Changed {
+                row: None,
+                view_revoked: false
+            }))
+        ));
+    }
+
+    pub fn a_reader_that_runs_out_of_buffer_is_told_to_resync_before_its_latest_event() {
+        let queue = Deliveries::default();
+        let budget = 100;
+        let event = Arc::new(serde_json::json!({"what":"changed"}));
+        assert!(queue.enqueue(Arc::clone(&event), 60, budget));
+        assert!(!queue.enqueue(Arc::clone(&event), 50, budget));
+        assert!(matches!(queue.next(), Some(Delivery::Resync)));
+        assert!(matches!(queue.next(), Some(Delivery::Event(_))));
+        assert!(queue.next().is_none());
+        assert!(queue.enqueue(event, 60, budget));
+        assert!(matches!(queue.next(), Some(Delivery::Event(_))));
+        assert!(queue.next().is_none());
+    }
+
+    pub async fn a_machine_change_is_ready_while_a_provider_read_waits() {
+        use crate::realtime_support::{PATIENCE, Rig};
+
+        let rig = Rig::with_unstarted_engine().await;
+        let machine = Feed::Resource {
+            kind: ResourceKind::Machine,
+            id: rig.machine_id,
+        };
+        let provider = Feed::Resource {
+            kind: ResourceKind::Provider,
+            id: rig.provider,
+        };
+        let active = HashSet::from([machine.clone(), provider.clone()]);
+        let mut lock = rig.pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE providers IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let mut blocker = Some(lock);
+        let mut resources = super::super::resource_changes::Resources::default();
+        let mut coordinator = Coordinator::default();
+        for feed in [machine, provider] {
+            let key = (feed.clone(), "changed".to_owned());
+            tokio::time::timeout(PATIENCE, async {
+                while !coordinator.pending.contains_key(&key) {
+                    resources
+                        .reconcile(&rig.server.app.realtime.inner, &active, &mut coordinator)
+                        .await;
+                    tokio::time::sleep(TICK).await;
+                }
+            })
+            .await
+            .expect("each resource becomes ready as soon as its own table can be read");
+            if let Some(lock) = blocker.take() {
+                lock.rollback().await.unwrap();
+            }
+        }
+        rig.shutdown().await;
+    }
+
+    pub async fn another_feed_arrives_while_a_malformed_resource_event_waits() {
+        use crate::realtime_support::{Client, PATIENCE, Rig};
+
+        let rig = Rig::new().await;
+        let inner = &rig.server.app.realtime.inner;
+        let provider = Feed::Resource {
+            kind: ResourceKind::Provider,
+            id: rig.provider,
+        };
+        let browsers = Feed::EnvBrowsers(rig.environment);
+        let mut slow = Client::signed_in(rig.server.addr, &rig.token).await;
+        let mut healthy = Client::signed_in(rig.server.addr, &rig.token).await;
+        slow.sub(1, &provider.to_string(), None).await;
+        slow.expect("subscribed").await;
+        healthy.sub(1, &browsers.to_string(), None).await;
+        healthy.expect("subscribed").await;
+
+        let sub = inner.ephemeral.subscribers(&provider).pop().unwrap();
+        let held = sub.state.lock().await;
+        broadcast(
+            &inner.db,
+            &Message::Event {
+                feed: provider.clone(),
+                data: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        let login = serde_json::json!({"what":"login","state":{"state":"starting","method":"after-error","shows":[]}});
+        broadcast(
+            &inner.db,
+            &Message::Event {
+                feed: provider,
+                data: login,
+            },
+        )
+        .await
+        .unwrap();
+        let list = serde_json::json!({"browsers":[],"profiles":[{"name":"other-feed","size_bytes":null,"used_at":null,"browser":null}]});
+        rig.server
+            .realtime
+            .publish_list(browsers, list)
+            .await
+            .unwrap();
+        tokio::time::timeout(PATIENCE, async {
+            while healthy.frame().await["data"]["profiles"][0]["name"] != "other-feed" {}
+        })
+        .await
+        .expect("the browser list arrives before the unrelated resource lock is released");
+        drop(held);
+        tokio::time::timeout(PATIENCE, async {
+            while slow.frame().await["data"]["state"]["method"] != "after-error" {}
+        })
+        .await
+        .expect("the resource reader still receives its next valid event");
+        drop((slow, healthy));
+        rig.shutdown().await;
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     async fn watching_a_thousand_machines_among_a_million_reads_only_indexed_batches() {
         let db = orch_testkit::database::TestDb::fresh().await;
