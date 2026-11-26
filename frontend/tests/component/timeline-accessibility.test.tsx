@@ -6,21 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
 import { MarkerLine } from '@/features/timeline/items/Marker';
-import { RawCall } from '@/features/timeline/RawCall';
+import { RawCallView } from '@/features/timeline/RawCall';
 import { McpDisplay } from '@/features/timeline/tools/Mcp';
 import { FailureAlert } from '@/features/timeline/FailureAlert';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { effortDisplayName } from '@/features/models/names';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { threadWriter } from '@/realtime/stores/thread';
-import { marker, toolCall, turn } from '../doubles/thread-rows';
+import { marker, rawOf, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
 
 const given = vi.hoisted(() => vi.fn<(thread: string, selection: { turn?: string; record?: string }) => void>());
 vi.mock('@/features/inspector/givenFocus', () => ({ openGiven: given }));
 vi.mock('@/features/source/Restore', () => ({ RestoreFromTurn: () => null }));
 const THREAD = 'accessibility-thread';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Login', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const stored = (state: 'completed' | 'running' = 'completed') => turn('turn-1', { ordinal: 1, state, inputId: 'input-1', completedAt: state === 'completed' ? '2026-10-01T10:00:01Z' : null });
 const pointer = (id: string, record: string) => marker(id, { marker: 'orch_context', data: { model_input_id: record, purpose: 'input' } }, { turn: 'turn-1' });
@@ -32,6 +32,29 @@ afterEach(async () => { threadWriter.evict(THREAD); await setLocale(locale);
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('timeline in %s / %s', (language, look) => {
   beforeEach(async () => { await setLocale(language); document.documentElement.setAttribute('data-theme', look); });
+  it('opens the exact time of a rate-limit report by keyboard and touch', async () => {
+    const item = marker('rate-time', { marker: 'harness_changed', data: {
+      program: 'Claude Code', change: 'rate_limit', subject: null, previous: { state: 'unsupported' },
+      value: { status: 'rejected', message: 'Try again later' }, expected: { state: 'unsupported' }, changed: false,
+      diverged: false, next_turn: false, turn_id: null, reported_at: '2026-10-01T10:00:00.000Z',
+    } });
+    if (item.kind !== 'marker') throw new Error('The fixture is a rate report');
+    show(<TimelineContextValue.Provider value={context}><MarkerLine item={item} /></TimelineContextValue.Provider>);
+    const time = screen.getByRole('button', { name: i18n.t('timeline.exactTime') });
+    const user = userEvent.setup();
+    await user.tab();
+    expect(time).toHaveFocus();
+    await user.keyboard('{Enter}');
+    const moment = screen.getByRole('dialog', { name: i18n.t('timeline.exactTime') }).querySelector('time');
+    expect(moment).toBeVisible();
+    expect(moment).toHaveAttribute('datetime', item.created_at);
+    expect(moment?.textContent).toBe(time.getAttribute('title'));
+    await user.keyboard('{Escape}');
+    expect(time).toHaveFocus();
+    await user.pointer({ keys: '[TouchA]', target: time });
+    expect(screen.getByRole('dialog', { name: i18n.t('timeline.exactTime') })).toBeVisible();
+  });
+
   it('keeps native runtime names and diagnostics as inert text',()=>{
     const native='<img src=x onerror="globalThis.nativeNoticeExecuted=true">';
     const view=show(<FailureAlert error={{code:'mcp_server_failed',message:'Native wrapper',retryable:false,details:{server:'Source catalog',message:native}}}/>);
@@ -113,7 +136,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     const resumed=marker('native-resumed',{marker:'harness_changed',data:{...data,value:'resumed',previous:{state:'told',value:'closed'}}});
     if(resumed.kind!=='marker')throw new Error('The resume is a marker');
     view.rerender(<TimelineContextValue.Provider value={context}><MarkerLine item={resumed}/></TimelineContextValue.Provider>);
-    expect(screen.getByText(language==='en'?'Resumed Codex.':'已恢复 Codex 会话。')).toBeVisible();
+    expect(screen.getByText(language==='en'?'Resumed the Codex session.':'已恢复 Codex 会话。')).toBeVisible();
   });
 
   it('shows a named MCP failure with the source words under the translated cause',()=>{
@@ -149,6 +172,50 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(document.body).not.toHaveTextContent(/sandbox_mode|readOnly|workspaceWrite/);
   });
 
+  it('keeps a watched answer quiet and makes its recorded decision readable in Diagnostics', async () => {
+    const evaluated = '2026-10-01T10:00:01Z';
+    const watched = { ...stored(), notice_decision: { outcome: 'suppressed', reason: 'already_watching', evaluated_at: evaluated } } as const;
+    threadWriter.reset(THREAD, { turns: [watched] }, false);
+    const footer = (detail: TimelineContext['detail']) =>
+      <TimelineContextValue.Provider value={{ ...context, detail }}><TurnFooter turnId={watched.id} answered /></TimelineContextValue.Provider>;
+    const view = show(footer('normal'));
+    const reason = language === 'en' ? 'No turn-ended notice · Already watching' : '未发送本轮结束通知 · 正在查看';
+    for (const detail of ['normal', 'verbose'] as const) {
+      view.rerender(footer(detail));
+      expect(screen.queryByText(reason)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: i18n.t('common.details') })).not.toBeInTheDocument();
+    }
+    view.rerender(footer('diagnostics'));
+    expect(screen.getByText(reason)).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+    const facts = screen.getByRole('dialog');
+    expect(facts).toHaveTextContent(i18n.t('placesMail.outcomes.suppressed'));
+    expect(facts.querySelector('time')).toHaveAttribute('datetime', evaluated);
+  });
+
+  it('shows one Inbox receipt or a requested suppression and keeps other decisions quiet', () => {
+    const ended = stored();
+    const at = '2026-10-01T10:00:01Z';
+    const examples = [
+      { decision: { outcome: 'eligible', reason: null, evaluated_at: at }, line: language === 'en' ? 'Sent to your Inbox' : '已发送到你的收件箱' },
+      { decision: { outcome: 'suppressed', reason: 'interrupted', evaluated_at: at, requested_but_suppressed: true }, line: language === 'en' ? 'No turn-ended notice · Interrupted' : '未发送本轮结束通知 · 已中断' },
+      { decision: { outcome: 'suppressed', reason: 'interrupted', evaluated_at: at }, line: '' },
+      { decision: { outcome: 'not_evaluated', reason: null, evaluated_at: at }, line: '' },
+      { decision: null, line: '' },
+    ] as const;
+    const turns = examples.map(({ decision }, index) => ({ ...ended, id: String(index), notice_decision: decision }));
+    threadWriter.reset(THREAD, { turns }, false);
+    const footer = (id: string) => <TimelineContextValue.Provider value={context}><TurnFooter turnId={id} answered /></TimelineContextValue.Provider>;
+    const view = show(footer('0'));
+    examples.forEach(({ line }, index) => {
+      const id = String(index);
+      view.rerender(footer(id));
+      const row = view.container.querySelector(`[data-footer="${id}"]`);
+      expect(row?.textContent).toBe(line);
+      expect(row?.querySelector('button')).toBeNull();
+    });
+  });
+
   it('omits the first and unchanged model and names only a later model change', () => {
     const first = stored();
     const same = { ...first, id: 'turn-2', ordinal: 2 };
@@ -160,6 +227,17 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(screen.queryByText(first.model_display)).not.toBeInTheDocument();
     view.rerender(<TimelineContextValue.Provider value={context}><TurnFooter turnId={changed.id} /></TimelineContextValue.Provider>);
     expect(screen.getByText(new RegExp(changed.model_display))).toBeVisible();
+  });
+
+  it('shows the pool and the recorded rule for a turn even when it had no custom options', () => {
+    const turn = { ...stored(), params: {}, pool_choice: {
+      pool_id: 'pool-a', choice_id: 'receipt-a', pool_name: 'Team models',
+      member: 'Model A', policy: { type: 'round_robin' as const },
+    } };
+    threadWriter.reset(THREAD, { turns: [turn] }, false);
+    show(<TimelineContextValue.Provider value={context}><TurnFooter turnId={turn.id} answered /></TimelineContextValue.Provider>);
+    const choices = ['Team models', 'Model A', i18n.t('pools.policy.round_robin')].join(' · ');
+    expect(screen.getByRole('button', { name: i18n.t('timeline.footer.options', { choices }) })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('shows the effective model on the first rerouted turn while retaining the requested choice',()=>{
@@ -216,7 +294,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   it('uses level-two tool detail sections beneath the thread’s heading', () => {
     const item = toolCall('mcp-1', { kind: 'mcp', server: 'Issues', tool: 'lookup', arguments: { query: 'login' }, result: { found: true }, error: null }, { title: 'Look up login', turn: 'turn-1' });
     if (item.kind !== 'tool_call') throw new Error('The fixture is a tool call');
-    show(<><h1>Login</h1><RawCall item={item} /><McpDisplay item={item} /></>);
+    show(<><h1>Login</h1><RawCallView item={item} raw={rawOf(item)} /><McpDisplay item={item} /></>);
     const sections = screen.getAllByRole('heading').filter((heading) => heading.tagName !== 'H1');
     expect(sections).toHaveLength(4);
     for (const section of sections) expect(section.tagName).toBe('H2');

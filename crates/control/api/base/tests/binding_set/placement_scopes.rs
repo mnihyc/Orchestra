@@ -43,7 +43,7 @@ async fn reads(s: &Scene, thread: Id, to: Id, operation: &str) -> Proof<Vec<Json
 }
 fn request(to: Id) -> ThreadEnvironmentSetBody {
     ThreadEnvironmentSetBody {
-        choice: EnvironmentChoice::Use(to),
+        choice: EnvironmentChoice::existing(to),
         directory: Some("selected/working-directory".into()),
     }
 }

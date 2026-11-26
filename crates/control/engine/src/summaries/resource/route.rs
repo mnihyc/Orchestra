@@ -1,8 +1,8 @@
 //! Resource summaries project native model facts into the existing capability resolver.
 use super::*;
 use orch_provider_contract::capabilities::{
-    self as cap, Availability, BackendRef, Declarations, Endpoint, Offering, OfferingRef, Price,
-    Provider, Registry, Resolution, Support, ThreadContext,
+    self as cap, Availability, Declarations, Endpoint, Offering, Price, Provider, Registry,
+    Resolution, Support, ThreadContext,
 };
 
 /// The selected provider/model, actual installed execution ports and current Use go through
@@ -10,28 +10,55 @@ use orch_provider_contract::capabilities::{
 pub async fn resolve_route(
     conn: &mut Conn,
     principal: &Principal,
-    place: Id,
+    selected: &Selection,
+    executors: Vec<String>,
+) -> Result<Resolution, EngineError> {
+    project_route(
+        conn,
+        principal,
+        Some(selected.material.identity.place()),
+        &selected.config,
+        executors,
+        false,
+        selected.selected_member(),
+    )
+    .await
+}
+
+/// Global defaults can inspect technical support and current provider Use, but do
+/// not claim a source's authority, policy or caps before that source exists.
+pub async fn resolve_backend_choice(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Option<Id>,
     config: &Config,
     executors: Vec<String>,
 ) -> Result<Resolution, EngineError> {
-    project_route(conn, principal, place, config, executors, false).await
+    project_route(conn, principal, place, config, executors, false, None).await
 }
 
 async fn project_route(
     conn: &mut Conn,
     principal: &Principal,
-    place: Id,
+    place: Option<Id>,
     config: &Config,
     executors: Vec<String>,
     metadata: bool,
+    member: Option<&ProviderSelection>,
 ) -> Result<Resolution, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let provider = resources::provider(conn, offering.provider)
         .await?
         .ok_or_else(refused)?;
-    let model = resources::model(conn, provider.id, &config.model_name)
+    let model = resources::model(conn, provider.id, &offering.offering)
         .await?
         .ok_or_else(refused)?;
-    let protocol = super::completion_protocol(&provider.protocols)?.ok_or_else(refused)?;
+    let program = config.backend.route == "summary.delegation";
+    let protocol = if program {
+        None
+    } else {
+        Some(super::completion_protocol(&provider.protocols)?.ok_or_else(refused)?)
+    };
     let mut registry = Registry::default();
     registry
         .register("common", cap::catalogue().map_err(EngineError::unreadable)?)
@@ -47,18 +74,23 @@ async fn project_route(
         provider.id,
         Provider {
             title: provider.name,
-            endpoints: BTreeMap::from([(
-                protocol.clone(),
-                Endpoint {
-                    interface: protocol.clone(),
-                    ..Endpoint::default()
-                },
-            )]),
+            endpoints: protocol
+                .iter()
+                .map(|protocol| {
+                    (
+                        protocol.clone(),
+                        Endpoint {
+                            interface: protocol.clone(),
+                            ..Endpoint::default()
+                        },
+                    )
+                })
+                .collect(),
             offerings: BTreeMap::from([(
                 model.model_name.clone(),
                 Offering {
                     title: model.model_name.clone(),
-                    endpoint: protocol.clone(),
+                    endpoint: protocol.clone().unwrap_or_default(),
                     kind: "model".into(),
                     enabled: model.enabled,
                     capabilities: BTreeMap::from([(
@@ -70,7 +102,11 @@ async fn project_route(
                     )]),
                     groups: model.groups.clone(),
                     parameters: model.parameters.clone(),
-                    prices: base_prices(&model.parameters),
+                    prices: if program {
+                        BTreeMap::new()
+                    } else {
+                        base_prices(&model.parameters)
+                    },
                     ..Offering::default()
                 },
             )]),
@@ -80,24 +116,16 @@ async fn project_route(
     registry
         .register("native-summary-model", declarations)
         .map_err(EngineError::unreadable)?;
-    let allowed = require_model(conn, principal, place, config).await.is_ok();
+    let allowed = judge_model_at(conn, principal, place, config, member)
+        .await?
+        .is_ok();
     let context = ThreadContext {
         choices: BTreeMap::from([("summary".into(), Some("service".into()))]),
-        backends: BTreeMap::from([(
-            "summary".into(),
-            BackendRef {
-                route: orch_summarizer_model::capabilities::ROUTE.into(),
-                offering: Some(OfferingRef {
-                    provider: config.provider_id,
-                    offering: config.model_name.clone(),
-                }),
-                ..BackendRef::default()
-            },
-        )]),
+        backends: BTreeMap::from([("summary".into(), config.backend.clone())]),
         availability: BTreeMap::from([(
-            config.provider_id,
+            offering.provider,
             BTreeMap::from([(
-                config.model_name.clone(),
+                offering.offering.clone(),
                 Availability {
                     allowed,
                     show_provider: metadata,
@@ -108,7 +136,11 @@ async fn project_route(
             )]),
         )]),
         executors,
-        interfaces: vec![protocol],
+        interfaces: protocol.into_iter().collect(),
+        executor_support: BTreeMap::from([(
+            "program-session".into(),
+            crate::tools::capability_service::delegation::execution_support(),
+        )]),
         ..ThreadContext::default()
     };
     registry
@@ -136,10 +168,14 @@ pub async fn preview_route(
     project_route(
         conn,
         principal,
-        place,
+        Some(place),
         &config,
-        vec![orch_summarizer_model::capabilities::EXECUTOR.into()],
+        vec![
+            orch_summarizer_model::capabilities::EXECUTOR.into(),
+            "program-session".into(),
+        ],
         metadata,
+        None,
     )
     .await
     .map(Some)

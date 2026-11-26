@@ -58,17 +58,27 @@ WITH units AS (
   UNION ALL SELECT 'mount',w.id,'environment',e.id,e.name,'attachment',NULL FROM unnest($1::uuid[]) w(id)
     JOIN environments e ON e.facts->'mounts' @> jsonb_build_array(jsonb_build_object('mount_id',w.id,'state','attached'))
     WHERE e.deleted_at IS NULL AND e.lost_at IS NULL
+  UNION ALL SELECT 'mount',w.id,'environment',e.id,e.name,'attachment',NULL FROM unnest($1::uuid[]) w(id)
+    JOIN runtime_resource_inputs inputs ON inputs.mount_fingerprints ? w.id::text
+    JOIN runtimes r ON r.id=inputs.runtime_id JOIN environments e ON e.id=r.environment_id
+    WHERE r.state NOT IN ('retired','removed') AND r.lost_at IS NULL AND e.deleted_at IS NULL AND e.lost_at IS NULL
   UNION ALL SELECT DISTINCT 'skill',v.skill_id,'thread',h.node_id,n.name,'attachment',NULL::timestamptz FROM skill_versions v
     JOIN segments s ON s.delivered_resources @> jsonb_build_object('skills',jsonb_build_array(v.id)) JOIN threads h ON h.current_segment_id=s.id JOIN nodes n ON n.id=h.node_id
     WHERE v.skill_id=ANY($1) AND n.deleted_at IS NULL AND s.delivered_resources->>'state'='open'
   UNION ALL SELECT DISTINCT 'skill',v.skill_id,'thread',t.thread_id,n.name,'restore',NULL::timestamptz FROM skill_versions v
     JOIN turns t ON t.skill_versions @> ARRAY[v.id] JOIN nodes n ON n.id=t.thread_id WHERE v.skill_id=ANY($1)
+  UNION ALL SELECT DISTINCT 'pool',edge.child_id,'pool',parent.id,parent.name,'explicit',NULL::timestamptz
+    FROM pool_edges edge JOIN pools parent ON parent.id=edge.pool_id
+    WHERE edge.child_id=ANY($1) AND parent.deleted_at IS NULL
 ), scalar_keys(subject_kind,key) AS (VALUES
-  ('provider','agent.default_provider_id'),('agent','agent.default_agent_id'),('environment','env.default_id'),
-  ('template','env.template_id'),('template','runtime.template_id'),('host','env.host_id'),('host','runtime.host_id')
+  ('provider','agent.default_provider_id'),('pool','agent.default_provider_id'),('pool','agent.model'),('agent','agent.default_agent_id'),('environment','env.default_id'),
+  ('template','env.template_id'),('template','runtime.template_id'),('host','env.host_id'),('host','runtime.host_id'),('pool','env.host_id'),('pool','runtime.host_id')
 ), explicit AS (
   SELECT k.subject_kind,w.id AS subject_id,n.kind,n.id,COALESCE(n.name,'System') AS name,'explicit'::text AS relation,NULL::timestamptz AS until
-    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN settings s ON s.key=k.key AND s.value @> to_jsonb(w.id::text)
+    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN settings s ON s.key=k.key AND s.value @> (CASE WHEN k.subject_kind IN ('provider','host') THEN jsonb_build_object('type','single','resource',jsonb_build_object('kind',k.subject_kind,'id',w.id::text)) WHEN k.subject_kind='pool' THEN jsonb_build_object('type','pool','id',w.id::text) ELSE to_jsonb(w.id::text) END)
+    LEFT JOIN nodes n ON n.id=s.node_id WHERE n.deleted_at IS NULL
+  UNION ALL SELECT 'pool',w.id,n.kind,n.id,COALESCE(n.name,'System'),'explicit',NULL FROM unnest($1::uuid[]) w(id)
+    JOIN settings s ON s.key='calls.rules' AND s.value @> jsonb_build_array(jsonb_build_object('steps',jsonb_build_array(jsonb_build_object('candidate',jsonb_build_object('target',jsonb_build_object('type','pool','id',w.id::text))))))
     LEFT JOIN nodes n ON n.id=s.node_id WHERE n.deleted_at IS NULL
   UNION ALL SELECT 'mount',w.id,n.kind,n.id,COALESCE(n.name,'System'),'explicit',NULL FROM unnest($1::uuid[]) w(id)
     JOIN settings s ON s.key='env.mounts' AND s.value @> jsonb_build_object(w.id::text,true)
@@ -86,10 +96,10 @@ WITH units AS (
     LEFT JOIN nodes n ON n.id=s.node_id WHERE v.skill_id=ANY($1) AND n.deleted_at IS NULL
 ), own AS (
   SELECT k.subject_kind,w.id AS subject_id,'environment'::text AS kind,e.id,e.name,'explicit'::text AS relation,NULL::timestamptz AS until
-    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN environments e ON e.config @> jsonb_build_object(k.key,w.id::text)
+    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN environments e ON e.config @> jsonb_build_object(k.key,CASE WHEN k.subject_kind IN ('provider','host') THEN jsonb_build_object('type','single','resource',jsonb_build_object('kind',k.subject_kind,'id',w.id::text)) WHEN k.subject_kind='pool' THEN jsonb_build_object('type','pool','id',w.id::text) ELSE to_jsonb(w.id::text) END)
     WHERE e.deleted_at IS NULL
   UNION ALL SELECT k.subject_kind,w.id,'provider',p.id,p.name,'explicit',NULL
-    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN providers p ON p.runtime_config @> jsonb_build_object(k.key,w.id::text)
+    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN providers p ON p.runtime_config @> jsonb_build_object(k.key,CASE WHEN k.subject_kind IN ('provider','host') THEN jsonb_build_object('type','single','resource',jsonb_build_object('kind',k.subject_kind,'id',w.id::text)) WHEN k.subject_kind='pool' THEN jsonb_build_object('type','pool','id',w.id::text) ELSE to_jsonb(w.id::text) END)
     WHERE p.deleted_at IS NULL
   UNION ALL SELECT 'mount',w.id,'environment',e.id,e.name,'explicit',NULL FROM unnest($1::uuid[]) w(id)
     JOIN environments e ON e.config @> jsonb_build_object('env.mounts',jsonb_build_object(w.id::text,true))
@@ -98,7 +108,32 @@ WITH units AS (
   UNION ALL SELECT 'mcp_server',w.id,'environment',e.id,e.name,'explicit',NULL FROM unnest($1::uuid[]) w(id)
     JOIN environments e ON e.config @> jsonb_build_object('mcp.enabled',jsonb_build_object(w.id::text,true)) WHERE e.deleted_at IS NULL
 )
+, pool_where_names AS NOT MATERIALIZED (
+  SELECT 'node'::text source_kind,n.id source_id,n.kind,n.id,n.name FROM nodes n WHERE n.deleted_at IS NULL
+  UNION ALL SELECT 'provider',p.id,'provider',p.id,p.name FROM providers p WHERE p.deleted_at IS NULL
+  UNION ALL SELECT 'pool',p.id,'pool',p.id,p.name FROM pools p WHERE p.deleted_at IS NULL
+  UNION ALL SELECT 'system','00000000-0000-0000-0000-000000000000'::uuid,NULL::text,NULL::uuid,'System'
+), pool_where AS (
+  SELECT DISTINCT 'pool'::text subject_kind,w.id subject_id,n.kind,n.id,n.name,'explicit'::text relation,NULL::timestamptz until
+    FROM unnest($1::uuid[]) w(id)
+    JOIN permission_entries entry ON entry.removed_at IS NULL AND (entry.expires_at IS NULL OR entry.expires_at>$2)
+      AND (entry.options @> jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','environment_pool','id',w.id)))
+        OR entry.options @> jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','host_pool','id',w.id)))
+        OR entry.options @> jsonb_build_object('provider',jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','environment_pool','id',w.id))))
+        OR entry.options @> jsonb_build_object('provider',jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','host_pool','id',w.id)))))
+    JOIN pool_where_names n ON n.source_kind=entry.object_kind AND n.source_id=entry.object_id
+  UNION SELECT 'pool',w.id,n.kind,n.id,n.name,'explicit',NULL::timestamptz
+    FROM unnest($1::uuid[]) w(id)
+    JOIN pool_lending lending ON lending.removed_at IS NULL AND (lending.expires_at IS NULL OR lending.expires_at>$2)
+      AND (lending.options @> jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','environment_pool','id',w.id)))
+        OR lending.options @> jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','host_pool','id',w.id)))
+        OR lending.options @> jsonb_build_object('provider',jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','environment_pool','id',w.id))))
+        OR lending.options @> jsonb_build_object('provider',jsonb_build_object('where',jsonb_build_array(jsonb_build_object('kind','host_pool','id',w.id)))))
+    JOIN pool_where_names n ON n.source_kind=CASE WHEN lending.is_defaults THEN CASE WHEN lending.resource_id='00000000-0000-0000-0000-000000000000'::uuid THEN 'system' ELSE 'node' END ELSE lending.resource_kind END AND n.source_id=lending.resource_id
+)
 SELECT refs.*,NULL::text AS reference_key FROM refs
 UNION ALL SELECT explicit.*,NULL::text FROM explicit
 UNION ALL SELECT own.*,NULL::text FROM own
 UNION ALL SELECT * FROM units
+
+UNION ALL SELECT pool_where.*,NULL::text FROM pool_where

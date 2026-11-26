@@ -124,6 +124,8 @@ impl Program {
 pub struct Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     moving: Option<super::moving::Review>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pool: Option<super::pool::Review>,
     thread: Id,
     view: Id,
     segment: Option<Id>,
@@ -174,6 +176,7 @@ impl Input {
         };
         Ok(Self {
             moving: None,
+            pool: prepared.target.review.clone(),
             thread: prepared.source.thread().node_id,
             view: prepared.source.thread().active_continuation_id,
             segment: prepared.source.thread().current_segment_id,
@@ -210,6 +213,13 @@ impl Input {
         conn: &mut Conn,
         prepared: &PreparedFork,
     ) -> Result<Self, EngineError> {
+        if super::pool::target(&prepared.request).is_some()
+            && !matches!(I::KIND, Kind::Preview | Kind::Confirm)
+        {
+            return Err(EngineError::unreadable(
+                "Review the pool switch on its thread before confirming it.",
+            ));
+        }
         let mut selected = Self::selected(conn, prepared).await?;
         if I::KIND.is_move() {
             let review =

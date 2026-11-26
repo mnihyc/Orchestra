@@ -47,7 +47,13 @@ async fn a_thread_page_names_its_actual_provider_model_and_effort_and_a_page_man
         .execute(&mut *w.conn().await)
         .await
         .unwrap();
-    setting(&w, w.thread, "agent.model", json!("chosen-model")).await;
+    setting(
+        &w,
+        w.thread,
+        "agent.model",
+        json!({"type":"offering","name":"chosen-model"}),
+    )
+    .await;
     setting(&w, w.thread, "agent.effort", json!("high")).await;
     let shown = page(&w, w.boss, Target::Live(w.thread)).await;
     let dependency = shown
@@ -96,6 +102,9 @@ async fn a_thread_page_names_its_actual_provider_model_and_effort_and_a_page_man
     .await;
     let principal = w.principal(Caller::session(w.boss)).await;
     let options = orch_access_contract::decisions::MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        ]),
         services: None,
         models: Some(vec!["chosen-model".into()]),
         efforts: Some(vec!["high".into()]),
@@ -127,10 +136,22 @@ async fn a_places_dependencies_follow_its_inherited_defaults_and_its_private_def
         .await;
     w.thing_row("environment", environment, P::EnvironmentManage, false)
         .await;
-    setting(&w, w.project, "agent.default_provider_id", json!(provider)).await;
+    setting(
+        &w,
+        w.project,
+        "agent.default_provider_id",
+        json!({"type":"single","resource":{"kind":"provider","id":provider}}),
+    )
+    .await;
     setting(&w, w.project, "agent.default_agent_id", json!(profile)).await;
     setting(&w, w.project, "env.template_id", json!(template)).await;
-    setting(&w, w.project, "agent.model", json!("default-model")).await;
+    setting(
+        &w,
+        w.project,
+        "agent.model",
+        json!({"type":"offering","name":"default-model"}),
+    )
+    .await;
     setting(&w, w.project, "agent.effort", json!("high")).await;
     sqlx::query("INSERT INTO settings (node_id,key,value) VALUES ($1,'env.default_id',to_jsonb($2::uuid::text)) ON CONFLICT (node_id,key) DO UPDATE SET value=excluded.value")
         .bind(w.topic).bind(environment).execute(&mut *w.conn().await).await.unwrap();

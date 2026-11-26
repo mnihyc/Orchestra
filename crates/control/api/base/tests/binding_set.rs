@@ -152,6 +152,51 @@ async fn a_thread_without_history_is_put_on_another_profile_and_provider_and_its
 }
 
 #[tokio::test]
+async fn choosing_a_provider_directly_before_the_first_turn_releases_the_old_pool_binding() {
+    let s = Scene::new().await;
+    let topic = s.tree.topic.base.id;
+    let pool = s.rig.world.app.call(orch_api_contract::pools::PoolCreate, &[])
+        .token(&s.ada.token).raw_body(&json!({
+            "name":"First model","description":"","home_id":s.ada.person.personal_org,"access":"only_me",
+            "definition":{"kind":"model","enabled":true,"policy":{"type":"ordered"},"lend_members":false,
+                "config":{},"members":[{"id":orch_types::new_id(),"enabled":true,"rule":{"type":"single","resource":{
+                    "kind":"model","backend":{"route":"generation.model","offering":{"provider":s.on.provider,"offering":MODEL},"config":{}}
+                }}}]}
+        })).send().await.ok();
+    let target = json!({"type":"pool","kind":"model","id":pool.id});
+    let made = s.rig.world.app.call(ThreadCreate, &[&topic]).token(&s.ada.token).raw_body(&json!({
+        "binding":{"agent_id":s.on.agent,"target":&target}, "environment":EnvironmentChoice::existing(s.on.environment)
+    })).send().await.ok().into_full().unwrap();
+    let thread = made.base.id;
+    let (agent, provider) = another_provider(&s, "Chosen directly", &["separated"]).await;
+    bind(&s, &s.ada, thread, agent, provider, None).await.ok();
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM segment_pool_bindings b JOIN segments s ON s.id=b.segment_id WHERE s.thread_id=$1")
+        .bind(thread).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        retained, 0,
+        "the direct binding must stop using the previous pool"
+    );
+    s.exchange(thread, 0, "Use my new provider", "Done").await;
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pool_attempt_scopes a JOIN pool_choices c ON c.id=a.choice_id WHERE c.target=$1")
+        .bind(&target).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        attempts, 0,
+        "the direct turn must not consume an attempt from the pool"
+    );
+    let choices: i64 = sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE target=$1")
+        .bind(&target)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        choices, 1,
+        "the original creation receipt remains in history"
+    );
+}
+
+#[tokio::test]
 async fn a_thread_with_history_is_sent_to_a_switch_and_is_left_as_it_is() {
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
@@ -162,9 +207,15 @@ async fn a_thread_with_history_is_sent_to_a_switch_and_is_left_as_it_is() {
         .problem();
     assert_eq!(refused.code, ErrorCode::ThreadUseSwitch);
     let elsewhere = another_environment(&s, "Second", Some(s.rig.machine_id)).await;
-    let refused = place(&s, &s.ada, thread, EnvironmentChoice::Use(elsewhere), None)
-        .await
-        .problem();
+    let refused = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(elsewhere),
+        None,
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::ThreadUseSwitch);
     let (segment_agent, segment_provider, segment_environment, _) = segment_of(&s, thread).await;
     assert_eq!(
@@ -314,7 +365,7 @@ async fn somebody_who_does_not_manage_the_thread_is_refused_with_what_is_missing
         &s,
         &s.cai,
         thread,
-        EnvironmentChoice::Use(s.on.environment),
+        EnvironmentChoice::existing(s.on.environment),
         None,
     )
     .await
@@ -449,7 +500,7 @@ async fn a_thread_without_history_is_put_into_another_environment_that_its_calle
         &s,
         &s.ada,
         thread,
-        EnvironmentChoice::Use(second),
+        EnvironmentChoice::existing(second),
         Some("api/v2"),
     )
     .await
@@ -477,13 +528,13 @@ async fn a_thread_that_joins_an_environment_without_naming_a_directory_gets_the_
         .token(&s.ada.token)
         .body(&CreateThread {
             name: Some("Sibling".to_owned()),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: s.on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                s.on.agent,
+                s.on.provider,
+                None,
+            )),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(second)),
+            environment: Some(EnvironmentChoice::existing(second)),
             directory: Some("shared/dir".to_owned()),
             ..CreateThread::default()
         })
@@ -492,9 +543,15 @@ async fn a_thread_that_joins_an_environment_without_naming_a_directory_gets_the_
         .ok()
         .into_full()
         .unwrap();
-    let put = place(&s, &s.ada, thread, EnvironmentChoice::Use(second), None)
-        .await
-        .ok();
+    let put = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(second),
+        None,
+    )
+    .await
+    .ok();
     assert_eq!(put.directory, "shared/dir");
 }
 
@@ -535,13 +592,13 @@ async fn a_thread_is_made_in_an_environment_only_where_the_entry_lets_work_run()
             .token(&s.dan.token)
             .body(&CreateThread {
                 name: Some("Dan's".to_owned()),
-                binding: Some(CreateThreadBinding {
-                    agent_id: s.on.agent,
-                    provider_id: s.on.provider,
-                    arrangement: None,
-                }),
+                binding: Some(CreateThreadBinding::provider(
+                    s.on.agent,
+                    s.on.provider,
+                    None,
+                )),
                 model: Some(MODEL.to_owned()),
-                environment: Some(EnvironmentChoice::Use(environment)),
+                environment: Some(EnvironmentChoice::existing(environment)),
                 directory: Some("dan/dir".to_owned()),
                 ..CreateThread::default()
             })
@@ -564,7 +621,7 @@ async fn a_directory_that_leaves_the_workspace_is_refused() {
             &s,
             &s.ada,
             thread,
-            EnvironmentChoice::Use(second),
+            EnvironmentChoice::existing(second),
             Some(directory),
         )
         .await
@@ -579,7 +636,7 @@ async fn an_environment_the_caller_does_not_manage_is_refused_with_what_is_missi
     let thread = s.thread().await.base.id;
     names(&s, "node", thread, "thread.manage", &s.eve, json!({})).await;
     let hers = a_directory_on_a_machine(&s, "Ada's laptop").await;
-    let refused = place(&s, &s.eve, thread, EnvironmentChoice::Use(hers), None)
+    let refused = place(&s, &s.eve, thread, EnvironmentChoice::existing(hers), None)
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
@@ -592,9 +649,15 @@ async fn an_environment_the_agent_cannot_work_in_is_refused_and_the_thread_stays
     let thread = s.thread().await.base.id;
     // On no machine, the harness cannot run beside its tools, and nothing offers it a way.
     let nowhere = another_environment(&s, "Nowhere", None).await;
-    let refused = place(&s, &s.ada, thread, EnvironmentChoice::Use(nowhere), None)
-        .await
-        .problem();
+    let refused = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(nowhere),
+        None,
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::BindingIncompatible);
     assert!(refused.extra.get("reason").is_some());
     let (_, _, segment_environment, _) = segment_of(&s, thread).await;
@@ -611,9 +674,15 @@ async fn an_environment_whose_removal_is_scheduled_takes_no_thread() {
         .execute(s.rig.db.pool())
         .await
         .unwrap();
-    let refused = place(&s, &s.ada, thread, EnvironmentChoice::Use(doomed), None)
-        .await
-        .problem();
+    let refused = place(
+        &s,
+        &s.ada,
+        thread,
+        EnvironmentChoice::existing(doomed),
+        None,
+    )
+    .await
+    .problem();
     assert_eq!(refused.code, ErrorCode::RequestInvalid);
 }
 
@@ -649,4 +718,69 @@ async fn a_thread_that_is_archived_cannot_be_put_on_anything_else() {
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::NodeArchived);
+}
+
+#[tokio::test]
+async fn explicit_and_inherited_model_pools_choose_an_offering_on_the_locked_provider() {
+    use orch_api_contract::{pools::PoolCreate, settings::NodeSettingSet};
+    let s = Scene::new().await;
+    let topic = s.tree.topic.base.id;
+    let (_, other) = another_provider(&s, "First in the pool", &["separated"]).await;
+    sqlx::query("UPDATE providers SET agent_id=$1 WHERE id=$2")
+        .bind(s.on.agent)
+        .bind(other)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let members = [other, s.on.provider].map(|provider| {
+        json!({"id":orch_types::new_id(),"enabled":true,
+        "rule":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model",
+        "offering":{"provider":provider,"offering":MODEL},"config":{}}}}})
+    });
+    let pool = s.rig.world.app.call(PoolCreate,&[]).token(&s.ada.token).raw_body(&json!({
+        "name":"Accounts in order","description":"","home_id":s.ada.person.personal_org,"access":"only_me",
+        "definition":{"kind":"model","enabled":true,"policy":{"type":"ordered"},"lend_members":false,"config":{},"members":members}
+    })).send().await.ok();
+    let target = json!({"type":"pool","kind":"model","id":pool.id});
+    for (key, value, locked) in [
+        (
+            "agent.default_provider_id",
+            json!(orch_provider_contract::pools::Target::provider(
+                s.on.provider
+            )),
+            true,
+        ),
+        ("agent.model", target.clone(), false),
+        ("agent.default_agent_id", json!(s.on.agent), false),
+    ] {
+        s.rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&topic, &key])
+            .token(&s.ada.token)
+            .raw_body(&json!({"value":value,"locked":locked}))
+            .send()
+            .await
+            .ok();
+    }
+    for explicit in [true, false] {
+        let mut body = json!({"environment":EnvironmentChoice::existing(s.on.environment)});
+        if explicit {
+            body["binding"] = json!({"agent_id":s.on.agent,"target":target});
+        }
+        let made = s
+            .rig
+            .world
+            .app
+            .call(ThreadCreate, &[&topic])
+            .token(&s.ada.token)
+            .raw_body(&body)
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap();
+        assert_eq!(made.binding.unwrap().provider.id, s.on.provider);
+        assert_eq!(made.model.as_deref(), Some(MODEL));
+    }
 }

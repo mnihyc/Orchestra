@@ -29,8 +29,6 @@ use std::collections::HashMap;
 pub use orch_api_base::routes::document_tree::convert;
 
 pub use orch_api_base::routes::document_tree::result;
-/// Exact unit conversion for the deployment's retention policy.
-const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Registers only typed document-domain endpoints; none accepts hierarchy folders as a container.
 pub fn mount(registry: &mut Registry) {
@@ -110,18 +108,11 @@ pub(crate) async fn container_refs(
 }
 orch_api_base::__api_bind_b705bab7c6!();
 
-pub(crate) fn options(ctx: &Ctx) -> domain::Options {
-    domain::Options {
-        retention: std::time::Duration::from_secs(
-            ctx.app
-                .config
-                .retention
-                .soft_delete_days
-                .saturating_mul(SECONDS_PER_DAY),
-        ),
-        version_window_secs: i64::try_from(ctx.app.config.documents.version_window_secs)
-            .unwrap_or(i64::MAX),
-    }
+pub(crate) async fn options(ctx: &Ctx, conn: &mut Conn) -> ApiResult<domain::Options> {
+    Ok(domain::Options::with_days(
+        orch_settings::retention::deleted_keep_days(conn).await?,
+        i64::try_from(ctx.app.config.documents.version_window_secs).unwrap_or(i64::MAX),
+    ))
 }
 orch_api_base::__api_bind_d61ba637ac!();
 

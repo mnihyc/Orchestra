@@ -629,6 +629,7 @@ impl orch_connector_core::programs::Handler for Programs {
             })
             .collect();
         MachinePrograms {
+            approvals: Vec::new(),
             machine_view: None,
             entries,
             capabilities: [Kind::Agent, Kind::ProviderSource]
@@ -774,7 +775,8 @@ impl orch_connector_core::programs::Handler for Programs {
                 }
             }
             MachineProgramsCommand::ConfirmHarness { .. }
-            | MachineProgramsCommand::RemoveHarness { .. } => {
+            | MachineProgramsCommand::RemoveHarness { .. }
+            | MachineProgramsCommand::CheckHarness { .. } => {
                 return Err(error(
                     "Local harness selections are handled by the connector's policy.",
                 ));

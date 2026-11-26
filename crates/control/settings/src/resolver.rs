@@ -20,14 +20,14 @@ use orch_access_contract::roles::NodeKind;
 use orch_db::Conn;
 use orch_db::queries::hierarchy::{self, NodeRow};
 use orch_db::queries::settings as queries;
-use orch_settings_contract::provenance::{OwnRow, Resolved};
+use orch_settings_contract::provenance::{OwnRow, Resolved, SourceScope};
 use orch_settings_contract::registry::{self, DefaultOf, Scope, SettingDef, Supplier, keys};
 use orch_types::{Id, Json};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
 use crate::locks::Here;
-use crate::merge::{Link, OwnValues, Rows, Stack, Supply, resolve_key};
+use crate::merge::{Link, OwnValues, Rows, Stack, Supply, layers, resolve_key};
 use crate::provenance::SettingView;
 use crate::supplied::{self, Supplies};
 use crate::validation::keys_at;
@@ -149,6 +149,22 @@ async fn load_place(conn: &mut Conn, place: Place) -> Result<PlaceFacts, Error> 
                 environment: None,
             }
         }
+        Place::Pool(id) => {
+            let row: Option<(Id, Json, i64)> = sqlx::query_as(
+                "SELECT home_id,definition->'config',revision FROM pools WHERE id=$1 AND deleted_at IS NULL"
+            ).bind(id).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
+            let (home, values, revision) = row.ok_or(Error::NotFound)?;
+            PlaceFacts {
+                scope: Scope::Pool,
+                chain: chain_to(conn, home).await?,
+                own: Some(OwnValues {
+                    scope: Scope::Pool,
+                    values,
+                    revision,
+                }),
+                environment: None,
+            }
+        }
         Place::Host(id) => {
             let row: Option<(Option<i64>, i64)> =
                 sqlx::query_as("SELECT cleanup_keep_days,revision FROM hosts WHERE id=$1")
@@ -241,9 +257,9 @@ impl Snapshot {
             return None;
         }
         let model = registry::get(keys::AGENT_MODEL)?;
-        self.resolve(model)
-            .value
-            .and_then(|value| value.as_str().map(str::to_owned))
+        self.resolve(model).value.and_then(|value| {
+            orch_settings_contract::thread_defaults::offering(&value).map(str::to_owned)
+        })
     }
 
     /// The place that was read.
@@ -294,19 +310,23 @@ impl Snapshot {
     /// What `def` resolves to at this place, with where it comes from.
     #[must_use]
     pub fn resolve(&self, def: &'static SettingDef) -> Resolved<Id> {
-        self.resolve_following(def, 0)
+        self.resolve_following(def, 0, None)
     }
 
-    fn resolve_following(&self, def: &'static SettingDef, depth: usize) -> Resolved<Id> {
+    fn resolve_following(
+        &self,
+        def: &'static SettingDef,
+        depth: usize,
+        omit: Option<&str>,
+    ) -> Resolved<Id> {
         let stack = Stack {
             rows: &self.rows,
             chain: &self.chain,
             own: self.own.as_ref(),
         };
         let other = match def.default {
-            DefaultOf::SameAs(name) if depth < SAME_AS_DEPTH => {
-                registry::get(name).and_then(|other| self.resolve_following(other, depth + 1).value)
-            }
+            DefaultOf::SameAs(name) if depth < SAME_AS_DEPTH => registry::get(name)
+                .and_then(|other| self.resolve_following(other, depth + 1, omit).value),
             _ => None,
         };
         let supply = match def.default {
@@ -317,7 +337,16 @@ impl Snapshot {
             DefaultOf::SameAs(_) => other.as_ref().map(Supply::Default),
             DefaultOf::Value(_) | DefaultOf::Unset => None,
         };
-        resolve_key(def, &stack, supply)
+        let mut values = layers(def, &stack, supply);
+        if omit == Some(def.key) {
+            let scope = SourceScope::from(self.scope);
+            let node = match self.place {
+                Place::Node(id) => Some(id),
+                _ => None,
+            };
+            values.retain(|layer| layer.scope != scope || layer.node != node);
+        }
+        orch_settings_contract::merge::resolve(def, &values)
     }
 
     /// The row of `def` at the place itself, or its own value for an
@@ -358,6 +387,7 @@ impl Snapshot {
             self.resolve(def),
             self.own_row(def),
         )
+        .with_inherited(self.resolve_following(def, 0, Some(def.key)))
     }
 
     /// Every key the snapshot was read for, as it holds here, in the order of
@@ -467,6 +497,60 @@ pub async fn get_at_nodes<T: DeserializeOwned>(
             reason: error.to_string(),
         })?;
         result.insert(*id, value);
+    }
+    Ok(result)
+}
+
+/// Full native settings snapshots for a page of nodes. The shared rows still
+/// resolve separately through each node's own ancestry, locks and supplied facts.
+pub async fn snapshots_at_nodes(
+    conn: &mut Conn,
+    ids: &[Id],
+    keys: &[&str],
+) -> Result<std::collections::HashMap<Id, Snapshot>, Error> {
+    let defs = keys
+        .iter()
+        .map(|key| registry::get(key).ok_or_else(|| Error::UnknownKey((*key).to_owned())))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let nodes = hierarchy::with_ancestors(conn, ids).await?;
+    let ancestors = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+    let mut names = defs
+        .iter()
+        .flat_map(|def| std::iter::once(def.key).chain(dependencies(def)))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    let rows = Arc::new(Rows::new(
+        queries::rows_on_chain(conn, &ancestors, Some(&names)).await?,
+    ));
+    let mut result = std::collections::HashMap::new();
+    let mut contexts = Vec::new();
+    for id in ids {
+        let chain = chain_of(&nodes, *id)?;
+        let scope = chain.last().map(|link| link.scope).ok_or(Error::NotFound)?;
+        let snapshot = Snapshot {
+            place: Place::Node(*id),
+            scope,
+            chain,
+            rows: rows.clone(),
+            own: None,
+            supplies: Supplies::default(),
+            defs: defs.clone(),
+        };
+        contexts.push(supplied::NodeContext {
+            id: *id,
+            is_thread: scope == Scope::Thread,
+            model_for_effort: snapshot.model_for_effort(scope == Scope::Thread),
+        });
+        result.insert(*id, snapshot);
+    }
+    let mut supplies = supplied::load_at_nodes(conn, &contexts, &defs).await?;
+    for (id, snapshot) in &mut result {
+        snapshot.supplies = supplies.remove(id).unwrap_or_default();
     }
     Ok(result)
 }
@@ -589,4 +673,26 @@ pub async fn get<T: DeserializeOwned>(
                 })
         }
     }
+}
+
+/// The offering named by this place when its model does not need a draw.
+pub async fn thread_model(conn: &mut Conn, place: Place) -> Result<Option<String>, Error> {
+    Ok(
+        get::<orch_settings_contract::thread_defaults::ModelDefault>(
+            conn,
+            place,
+            keys::AGENT_MODEL,
+        )
+        .await?
+        .and_then(|model| model.offering().map(str::to_owned)),
+    )
+}
+
+/// The provider explicitly named by this place before any accepted pool operation.
+pub async fn thread_provider(conn: &mut Conn, place: Place) -> Result<Option<Id>, Error> {
+    Ok(
+        get::<orch_provider_contract::pools::Target>(conn, place, keys::AGENT_DEFAULT_PROVIDER_ID)
+            .await?
+            .and_then(|target| target.single_provider()),
+    )
 }

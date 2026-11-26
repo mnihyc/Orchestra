@@ -16,7 +16,6 @@ use orch_api_contract::documents::{
 };
 use orch_api_contract::nodes::NodeArchive;
 use orch_api_core::testing::Reply;
-use orch_config::ServerConfig;
 use orch_db::idempotency;
 use orch_db::queries::documents::discussions;
 use orch_db::queries::{access, documents, identity};
@@ -26,9 +25,23 @@ use places::Who;
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 async fn office(hours: u64) -> Desk {
-    let mut config = ServerConfig::default();
-    config.api.idempotency_ttl_hours = hours;
-    let world = support::World::with(config).await;
+    let world = support::World::new().await;
+    // The one replay window is the system's creation replay setting.
+    let window = serde_json::json!(hours);
+    orch_db::queries::settings::put(
+        &mut *world.conn().await,
+        None,
+        orch_settings_contract::registry::keys::API_IDEMPOTENCY_WINDOW,
+        &orch_db::queries::settings::Stored {
+            value: &window,
+            locked: false,
+            by: None,
+            at: world.now(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let ada = places::person(&world, "ada").await;
     let org = places::make_org(&world, &ada, "Office", "office")
         .await
