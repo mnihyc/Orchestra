@@ -142,6 +142,8 @@ async fn actual_replacement_revocation_keeps_exact_private_commands_after_its_ke
         assert_eq!(private["kind"], "capability_recreation");
         let authority: CommandAuthority = serde_json::from_value(private).unwrap();
         let mut proposed = NewCommand {
+            content_transit: false,
+            native_target: None,
             id: command.id,
             machine_id: machine,
             kind: &command.kind,
