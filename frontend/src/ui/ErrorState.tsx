@@ -8,10 +8,12 @@ import { Check, OctagonAlert, RefreshCw, WifiOff } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
-import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { ApiError, databaseWaitOf, invitationIssuerAuthorityLost } from '@/api/client';
+import { isReadCancelled } from '@/api/reads';
 import { WhereNames } from '@/features/access/WhereField';
+import { purposeNames } from '@/features/access/purposes';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
-import type { MissingAccess } from '@/generated/api-types';
+import type { DatabaseWait, MissingAccess } from '@/generated/api-types';
 import { permissionDenial } from '@/lib/permissions';
 import { NetworkError } from '@/lib/requests';
 import { Button } from '@/ui/Button';
@@ -22,6 +24,11 @@ import { Dialog } from '@/ui/Dialog';
 import { useErrorText } from '@/ui/errorText';
 import { PlanHostBlockers, planHostBlockers } from '@/ui/PlanHostBlockers';
 import { StateLine } from '@/ui/StateLine';
+import { FactDisclosure, FactDisclosureBody, type FactGroup } from '@/ui/FactDisclosure';
+import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
+import { formatSpan, SECOND_MS } from '@/lib/time';
+import { useReadAttemptDisclosure } from '@/ui/ReadAttemptDetails';
 
 export interface ErrorStateProps {
   error: unknown;
@@ -59,6 +66,7 @@ export function ErrorState({
   recovery,
   className,
 }: ErrorStateProps) {
+  if (isReadCancelled(error)) return null;
   // Verification is a workflow, not a generic retry or a second status paragraph.
   if (waitsForSecondStep(error)) return <SecondStepGate error={error} onDone={onRetry} className={className} />;
   return <FailureLine error={error} title={title} titleAs={titleAs} message={message} onRetry={onRetry} onReadback={onReadback} retrying={retrying} compact={compact} action={action} recovery={recovery} className={className} />;
@@ -68,6 +76,9 @@ function FailureLine({ error, title, titleAs, message, onRetry, onReadback, retr
   const { t } = useTranslation();
   const [reviewing, setReviewing] = useState(false);
   const text = useErrorText()(error);
+  const database = databaseWaitOf(error);
+  const read = useReadAttemptDisclosure(error);
+  const groups = [...useDatabaseWaitGroups(database), ...read.groups];
   if (text.acknowledged === true) return <StateLine role="status" tone="neutral" icon={<Check aria-hidden />}
     title={t('ui.receipt.title')} titleAs={titleAs} message={text.message} compact={compact} className={className}
     action={onReadback === undefined ? undefined : <Button size="sm" icon={<RefreshCw aria-hidden />} onClick={onReadback}>{t('ui.receipt.readback')}</Button>} />;
@@ -85,12 +96,30 @@ function FailureLine({ error, title, titleAs, message, onRetry, onReadback, retr
   const next = review === undefined
     ? action ?? (onRetry !== undefined && text.retryable ? <Button size="sm" icon={<RefreshCw aria-hidden />} pending={retrying} onClick={onRetry}>{t('common.tryAgain')}</Button> : undefined)
     : <Button size="sm" onClick={() => setReviewing(true)}>{review.label}</Button>;
+  const primary = database === null ? message ?? text.message : text.message;
+  const explanation = text.diagnostic === undefined ? primary : <div className="flex min-w-0 flex-col gap-1"><div>{primary}</div><p className="wrap-anywhere whitespace-pre-line">{text.diagnostic}</p></div>;
   return <>
-    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={text.diagnostic===undefined ? message ?? text.message : <div className="flex min-w-0 flex-col gap-1"><div>{message ?? text.message}</div><p className="wrap-anywhere whitespace-pre-line">{text.diagnostic}</p></div>} action={next} compact={compact} className={className} />
+    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={review !== undefined ? explanation : <div className="flex min-w-0 flex-wrap items-center gap-1"><div className="min-w-0">{explanation}</div><FactDisclosure key={database?.occurrence_id} groups={groups} fragment={read.fragment} /></div>} action={next} compact={compact} className={className} />
     {review !== undefined && reviewing && <Dialog open onOpenChange={setReviewing} title={review.label}>
-      <div className="flex flex-col gap-3">{review.content}</div>
+      <div className="flex flex-col gap-3">{review.content}{groups.length > 0 && <FactDisclosureBody groups={groups} />}</div>
     </Dialog>}
   </>;
+}
+
+/** Captured request facts are static: opening them performs no read or retry. */
+function useDatabaseWaitGroups(wait: DatabaseWait | null): FactGroup[] {
+  const { t } = useTranslation();
+  const context = useAppearance();
+  if (wait === null) return [];
+  const phases = { acquire: 'databaseWait.phases.acquire', statement: 'databaseWait.phases.statement', idle_transaction: 'databaseWait.phases.idleTransaction' } as const;
+  const limit = wait.applied_limit_ms;
+  const duration = limit === null ? undefined : limit < SECOND_MS || limit % SECOND_MS !== 0
+    ? formatNumber(limit, context.locale, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' })
+    : formatSpan(limit, context);
+  return [{ key: 'database', kind: 'recorded_outcome', facts: [
+    { key: 'phase', label: t('databaseWait.phase'), value: t(phases[wait.phase]) },
+    { key: 'deadline', label: t('databaseWait.deadline'), value: duration },
+  ] }];
 }
 
 /** What a refusal says is missing: the permissions, on what, and who can give them. */
@@ -118,6 +147,7 @@ export function MissingAccessList({ missing, className }: { missing: readonly Mi
               <span className="font-medium">{what}</span>
             </span>
             {entry.options?.where !== undefined && entry.options.where !== null && entry.options.where.length > 0 && <span><Trans i18nKey="access.missing.notWhere" components={{ names: <WhereNames names={entry.options.where} unreadable={t('access.missing.thatPlace')} /> }} /></span>}
+            {entry.options?.purposes !== undefined && entry.options.purposes !== null && <span>{t('access.options.purposes')}{': '}{purposeNames(t, entry.options.purposes)}</span>}
             {entry.closed !== null || entry.ask.length === 0 ? <span className="text-text-muted">{answer}</span> : <span className="flex flex-wrap items-center gap-1 text-text-muted">
               <span className="sr-only">{answer}</span>
               <Trans i18nKey="access.missing.askPeople" components={{ people: entry.ask.length === 1 && entry.ask_more === 0 && entry.ask[0] !== undefined ? <UserChip user={entry.ask[0]} size={24} /> : <AvatarStack users={entry.ask} total={entry.ask.length + entry.ask_more} size={24} /> }} />
@@ -140,5 +170,6 @@ export interface ErrorAlertProps {
 
 /** A request that was refused, said beside the form that made it. */
 export function ErrorAlert({ error, message, action, onReadback, className }: ErrorAlertProps) {
+  if (isReadCancelled(error)) return null;
   return <FailureLine error={error} message={message} action={action} onReadback={onReadback} compact className={className} />;
 }
