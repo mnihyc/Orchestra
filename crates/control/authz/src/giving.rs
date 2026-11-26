@@ -40,6 +40,7 @@ use orch_db::Conn;
 use orch_types::{Id, Json};
 
 use crate::engine::{Frame, Graph, PageRef, Site};
+use crate::holders::FrameSubject;
 use crate::{Error, Policy, Principal, missing};
 
 /// Whether the checked options allow no more than the stored options. The option catalogue uses
@@ -75,6 +76,11 @@ pub(crate) fn entry_widens(before: &Entry, update: &CheckedUpdate) -> bool {
         Options::ProviderUse(after) => !matches!(
             Options::parse(Permission::ProviderUse, &before.options),
             Ok(Options::ProviderUse(before)) if after.within(&before)
+        ),
+        Options::PoolUse(after) => !matches!(Options::parse(Permission::PoolUse,&before.options), Ok(Options::PoolUse(before)) if after.within(&before)),
+        Options::Files(after) => !matches!(
+            Options::parse(Permission::FilesView, &before.options),
+            Ok(Options::Files(before)) if after.within(&before)
         ),
         after => !options_only_narrow(&before.options, &after.to_json()),
     }) || update
@@ -145,8 +151,8 @@ pub enum Judgement {
 
 /// The giver on one page: who they are there, and what the place lets them give.
 #[derive(Debug)]
-pub struct Giving<'a, 'p> {
-    frame: &'a Frame<'p>,
+pub struct Giving<'a, 'p, S = Principal> {
+    frame: &'a Frame<'p, S>,
     policy: Policy,
     site: Option<&'a Site>,
     page: PageKind,
@@ -191,13 +197,17 @@ fn is_a_place(site: &Site) -> bool {
     site.kind.node().is_some_and(|node| node.place().is_some())
 }
 
-impl<'a, 'p> Giving<'a, 'p> {
+#[allow(
+    private_bounds,
+    reason = "only sealed account facts extend the ordinary giver evaluator"
+)]
+impl<'a, 'p, S: FrameSubject> Giving<'a, 'p, S> {
     /// The giver on the page `page` of the thing `site` (for a defaults page, of the place `site`;
     /// none for the defaults of the system), under `acting`. The frame has read every permission
     /// of the page's kind, and the defaults of a place the page is of.
     #[must_use]
     pub fn of(
-        frame: &'a Frame<'p>,
+        frame: &'a Frame<'p, S>,
         site: Option<&'a Site>,
         page: PageKind,
         acting: Acting,
@@ -205,21 +215,17 @@ impl<'a, 'p> Giving<'a, 'p> {
         let principal = frame.principal();
         let manages = match site {
             Some(site) => !frame.ways(site, Permission::AccessManage).is_empty(),
-            None => crate::system_administration::system_defaults(principal),
+            None => principal.system_defaults(),
         };
-        let (owns, administers) = site.map_or(
-            (
-                false,
-                crate::system_administration::system_defaults(principal),
-            ),
-            |site| (frame.owns(site), frame.administers(site)),
-        );
+        let (owns, administers) = site.map_or((false, principal.system_defaults()), |site| {
+            (frame.owns(site), frame.administers(site))
+        });
         let admin_of_the_place = match site {
             Some(site) if is_a_place(site) => frame
                 .role_at(site.id)
                 .is_some_and(|held| held.role == Role::Admin),
             Some(_) => false,
-            None => crate::system_administration::system_defaults(principal),
+            None => principal.system_defaults(),
         };
         let place = site.filter(|site| is_a_place(site));
         let places = place.map_or_else(Vec::new, |site| {
@@ -347,7 +353,7 @@ impl<'a, 'p> Giving<'a, 'p> {
     /// owners and admins take (`access.manage`, `access.external`) is theirs alone, and every other
     /// row takes holding it.
     fn within_bound(&self, permission: Permission, profile: Profile) -> bool {
-        if !self.frame.principal().caller().permits(permission) {
+        if !self.frame.principal().permits(permission) {
             return false;
         }
         match permission.named_by() {
@@ -479,17 +485,14 @@ impl<'a, 'p> Giving<'a, 'p> {
     }
 
     fn scope_ceiling(&self) -> Option<Role> {
-        let caller = self.frame.principal().caller();
-        if caller.grant().is_none() {
-            return Some(Role::Admin);
-        }
+        let principal = self.frame.principal();
         Role::ALL
             .iter()
             .copied()
             .filter(|role| {
                 self.role_permissions(*role)
                     .iter()
-                    .all(|permission| caller.permits(*permission))
+                    .all(|permission| principal.permits(*permission))
             })
             .max()
     }
@@ -497,12 +500,9 @@ impl<'a, 'p> Giving<'a, 'p> {
     /// How the giver stands to giving roles in the place.
     #[must_use]
     pub fn role_standing(&self) -> RoleStanding {
-        let reaches = self.site.is_some_and(|site| {
-            self.frame
-                .principal()
-                .caller()
-                .reaches(site.path.as_deref())
-        });
+        let reaches = self
+            .site
+            .is_some_and(|site| self.frame.principal().reaches(site.path.as_deref()));
         RoleStanding {
             manages: self.manages && reaches,
             may_share: self.may_share() && reaches,
@@ -587,7 +587,7 @@ impl<'a, 'p> Giving<'a, 'p> {
         let rows = Self::rows_of_agents(site.kind, level);
         !rows.is_empty()
             && rows.iter().all(|(permission, inside)| {
-                if !self.frame.principal().caller().permits(*permission) {
+                if !self.frame.principal().permits(*permission) {
                     return false;
                 }
                 if *inside {
@@ -621,7 +621,7 @@ impl<'a, 'p> Giving<'a, 'p> {
         }
         rows.into_iter()
             .filter(|(permission, inside)| {
-                if !self.frame.principal().caller().permits(*permission) {
+                if !self.frame.principal().permits(*permission) {
                     return false;
                 }
                 if *inside {

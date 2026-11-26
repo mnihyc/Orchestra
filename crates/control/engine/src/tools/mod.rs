@@ -39,6 +39,7 @@ pub mod announce;
 pub mod browser;
 pub mod browser_definition;
 pub mod capability_service;
+pub mod catalogue;
 pub mod chat_message;
 pub mod definitions;
 pub mod display;
@@ -108,10 +109,12 @@ const UNAVAILABLE_MESSAGE: &str = "Orch did not confirm this call's result. A ch
 /// The settings of a thread's place that every call is checked against.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSettings {
+    pub enabled_source: orch_api_contract::settings::SettingSource,
     /// The resolved `orch_tools.enabled`.
     pub enabled: Vec<String>,
     /// The resolved `orch_tools.calls_per_minute`.
     pub calls_per_minute: i64,
+    pub rate_source: orch_api_contract::settings::SettingSource,
     /// The resolved `agent.messages`.
     pub messages: BTreeMap<String, String>,
     /// One snapshot for shared search's schema and execution.
@@ -140,6 +143,18 @@ pub(crate) fn definition_of(key: &str) -> Result<&'static SettingDef, EngineErro
         .ok_or_else(|| EngineError::unreadable(format!("the setting {key} is not in the registry")))
 }
 
+/// Capture a supplying identity without copying a private place name into an agent's result.
+pub(crate) fn setting_source(
+    snapshot: &Snapshot,
+    key: &str,
+) -> Result<orch_api_contract::settings::SettingSource, EngineError> {
+    let source = snapshot.resolve(definition_of(key)?).source;
+    Ok(serde_json::from_value(serde_json::json!({
+        "scope":source.scope,
+        "node":source.node.map(|id|serde_json::json!({"id":id,"kind":source.scope,"name":null,"redacted":true})),
+    }))?)
+}
+
 impl ToolSettings {
     /// Reads them for a thread.
     pub async fn load(conn: &mut Conn, thread: Id) -> Result<Self, EngineError> {
@@ -150,10 +165,13 @@ impl ToolSettings {
         ];
         wanted.extend(search_budgets::SearchBudgets::definitions()?);
         let snapshot = Snapshot::load(conn, Place::Node(thread), Wanted::Keys(&wanted)).await?;
+        let rate_source = setting_source(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?;
         Ok(Self {
+            enabled_source: setting_source(&snapshot, keys::ORCH_TOOLS_ENABLED)?,
             enabled: setting(&snapshot, keys::ORCH_TOOLS_ENABLED)?.unwrap_or_default(),
             calls_per_minute: setting(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?
                 .unwrap_or_default(),
+            rate_source,
             messages: setting(&snapshot, keys::AGENT_MESSAGES)?.unwrap_or_default(),
             search_budgets: search_budgets::SearchBudgets::resolve(&snapshot)?,
         })
@@ -166,13 +184,13 @@ pub(crate) fn side_reading(
     thread: &ThreadRow,
 ) -> Option<orch_agent_contract::descriptor::SideReading> {
     use orch_agent_contract::descriptor::SideReading;
-    thread
-        .side_of
-        .map(|_| match thread.side_reading.as_deref() {
-            Some("read_only") => SideReading::ReadOnly,
-            Some("approval_gated") => SideReading::ApprovalGated,
-            _ => SideReading::NoTools,
-        })
+    thread.side_of?;
+    match thread.side_reading.as_deref() {
+        Some("acting") => None,
+        Some("read_only") => Some(SideReading::ReadOnly),
+        Some("approval_gated") => Some(SideReading::ApprovalGated),
+        _ => Some(SideReading::NoTools),
+    }
 }
 
 /// The tools a thread's session is opened with: those the thread's settings enable and the engine has built, and
@@ -184,13 +202,40 @@ pub async fn offered_for_session(
     harness_takes_mcp: bool,
     now: orch_types::Time,
 ) -> Result<Vec<OrchTool>, EngineError> {
-    if session_tool_blocker(conn, thread, harness_takes_mcp)
-        .await?
-        .is_some()
-    {
+    offered_for_session_in(conn, thread, harness_takes_mcp, now, None).await
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolOfferInputs {
+    pub enabled: Vec<String>,
+    pub source: Option<orch_api_contract::settings::SettingSource>,
+    pub blocker: Option<orch_api_contract::settings::OrchToolUnavailable>,
+}
+
+pub(crate) async fn offered_for_session_in(
+    conn: &mut Conn,
+    thread: &ThreadRow,
+    harness_takes_mcp: bool,
+    now: orch_types::Time,
+    facts: Option<&mut ToolOfferInputs>,
+) -> Result<Vec<OrchTool>, EngineError> {
+    let blocker = session_tool_blocker(conn, thread, harness_takes_mcp).await?;
+    if let Some(blocker) = blocker {
+        if let Some(facts) = facts {
+            facts.blocker = Some(match blocker {
+                orch_api_contract::ports::PortToolInactiveReason::ProgramUnsupported => {
+                    orch_api_contract::settings::OrchToolUnavailable::ProgramUnsupported
+                }
+                _ => orch_api_contract::settings::OrchToolUnavailable::EnvironmentToolsOff,
+            });
+        }
         return Ok(Vec::new());
     }
     let settings = ToolSettings::load(conn, thread.node_id).await?;
+    if let Some(facts) = facts {
+        facts.enabled.clone_from(&settings.enabled);
+        facts.source = Some(settings.enabled_source.clone());
+    }
     let mut offered = definitions::offered(&settings.enabled, side_reading(thread));
     read_tools::append_offered(conn, thread, &mut offered).await?;
     if !browser::offered(conn, thread.environment_id).await? {
@@ -416,6 +461,9 @@ impl Engine {
         .await
         {
             Ok(answer) => answer,
+            Err(error @ EngineError::Commands(crate::commands::CommandsError::Stopping)) => {
+                return Err(error);
+            }
             Err(EngineError::Capability(failure)) => Answer::Done(failure.reply()),
             Err(EngineError::CapabilityPaused(pause)) => Answer::Done(pause.reply()),
             Err(error @ (EngineError::StaleToolSource | EngineError::ToolCallIdentity)) => {
@@ -434,6 +482,7 @@ impl Engine {
                 let body = result_of(
                     call,
                     Err(ToolError {
+                        rate_limit: None,
                         code: UNAVAILABLE.to_owned(),
                         message: UNAVAILABLE_MESSAGE.to_owned(),
                     }),
@@ -449,6 +498,7 @@ impl Engine {
             Answer::Refused(refusal) => result_of(
                 call,
                 Err(ToolError {
+                    rate_limit: refusal.rate_limit,
                     code: refusal.code.as_str().to_owned(),
                     message: refusal.message,
                 }),
@@ -581,14 +631,26 @@ impl Engine {
                 settings.calls_per_minute,
             );
             if let Err(seconds) = admitted {
-                return Ok(Refusal::new(
-                Code::RateLimited,
-                format!(
-                    "You have made more calls of these tools than a minute allows ({}). Wait {seconds} seconds, and try again.",
-                    settings.calls_per_minute
-                ),
-            )
-            .into());
+                let now = self.inner.clock.now();
+                let mut refusal = Refusal::new(
+                    Code::RateLimited,
+                    format!(
+                        "You have made more calls of these tools than a minute allows ({}). Wait {seconds} seconds, and try again.",
+                        settings.calls_per_minute
+                    ),
+                );
+                refusal.rate_limit = Some(Box::new(orch_api_contract::threads::ToolRateLimit {
+                    allowed_calls: settings.calls_per_minute,
+                    period_secs: definitions::CallRate::period_secs(),
+                    retry_at: i64::try_from(seconds)
+                        .ok()
+                        .and_then(chrono::Duration::try_seconds)
+                        .and_then(|wait| now.checked_add_signed(wait))
+                        .map(orch_types::Time::new),
+                    observed_at: orch_types::Time::new(now),
+                    source: settings.rate_source.clone(),
+                }));
+                return Ok(refusal.into());
             }
             if let Err(refusal) = definitions::check_arguments_with_search_budgets(
                 call.tool,
@@ -604,8 +666,8 @@ impl Engine {
             OrchTool::OrchDocs | OrchTool::Open | OrchTool::Search | OrchTool::FindOperation | OrchTool::Read => Box::pin(self.read_tool_call(call, thread)).await,
             OrchTool::UseBrowser => Box::pin(self.use_browser_call(call, thread)).await,
             OrchTool::UseDisplay => Box::pin(self.use_display_call(call,thread)).await,
-            OrchTool::ListShared => self.list_shared_call(call, thread).await,
-            OrchTool::ReadShared => self.read_shared_call(call, thread).await,
+            OrchTool::ListShared => self.list_shared_call(call, thread, &settings.search_budgets).await,
+            OrchTool::ReadShared => self.read_shared_call(call, thread, &settings.search_budgets).await,
             OrchTool::SearchShared => Box::pin(self.search_shared_call(call, thread, &settings.search_budgets)).await,
             OrchTool::DownloadShared => Box::pin(self.download_shared_call(call, thread)).await,
             OrchTool::SendMessage => Box::pin(self.send_message_call(call, thread, &settings)).await,

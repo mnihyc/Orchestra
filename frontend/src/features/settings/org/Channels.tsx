@@ -7,18 +7,25 @@
  * it. A department has no channels of its own: its members are members of the root org, so its section
  * is one line that leads to the root's. Secrets are written through the same form and never read back.
  */
-import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { client } from '@/api/client';
+import { useStore } from 'zustand';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { useRetainedRows } from '@/lib/retainedRows';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { type InfiniteData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { FlaskConical, Mail, Pencil, Plus, Trash2, Webhook } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { metaQuery } from '@/api/auth';
-import { channelsKey, channelsQuery, createOrgChannel, createSystemChannel, deleteChannel, notifiersQuery, testChannel, updateChannel } from '@/api/settings';
+import { channelsKey, channelsPageQuery, createOrgChannel, createSystemChannel, deleteChannel, notifiersQuery, testChannel, updateChannel } from '@/api/settings';
 import { NotifierDialog, type NotifierFormValue } from '@/features/settings/NotifierForm';
 import { takes } from '@/features/settings/refusals';
 import { EnabledRoutes, enabledRouteCount } from '@/features/settings/personal/away/Manager';
-import type { Notifier, NotificationChannel, NotificationTestReply, Org } from '@/generated/api-types';
+import type { Notifier, NotificationChannel, NotificationChannelPage, NotificationTestReply, Org } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { holds } from '@/lib/permissions';
 import { boxClasses, Section } from '@/shell/Page';
@@ -99,9 +106,26 @@ type ChannelPlace = Pick<Org, 'id' | 'name'> & { owner: Org['owner'] | null };
 function acceptChannel(cache: QueryClient, scope: string, channel: NotificationChannel) {
   cache.setQueryData<NotificationChannel[]>(channelsKey(scope), (held) => held === undefined ? held
     : held.some((entry) => entry.id === channel.id) ? held.map((entry) => entry.id === channel.id ? channel : entry) : [...held, channel]);
+  for (const query of cache.getQueryCache().findAll({ queryKey: [...channelsKey(scope), 'pages'] })) {
+    const q: unknown = query.queryKey.at(-1);
+    if (typeof q !== 'string') continue;
+    const words = q.toLowerCase().split(/\s+/u).filter(Boolean), text = (channel.name + ' ' + channel.kind).toLowerCase();
+    const matches = words.every((word) => text.includes(word));
+    cache.setQueryData<InfiniteData<NotificationChannelPage>>(query.queryKey, (held) => {
+      if (held === undefined) return held;
+      const found = held.pages.some((page) => page.items.some((row) => row.id === channel.id));
+      const pages = held.pages.map((page) => ({ ...page, kinds: [...new Set([...page.kinds, channel.kind])], items: page.items.flatMap((row) => {
+        if (row.id !== channel.id) return [row];
+        return matches ? [channel] : [];
+      }) }));
+      const last = pages.at(-1);
+      if (!found && matches && last?.next_cursor === null) last.items.push(channel);
+      return { ...held, pages };
+    });
+  }
 }
 
-function ChannelCard({ channel, notifier, notifiers, org, may }: { channel: NotificationChannel; notifier: Notifier | undefined; notifiers: readonly Notifier[]; org: ChannelPlace; may: boolean }) {
+function ChannelCard({ channel, notifier, notifiers, org, may, visible, keep }: { visible: boolean; keep: (row: NotificationChannel, active: boolean) => void; channel: NotificationChannel; notifier: Notifier | undefined; notifiers: readonly Notifier[]; org: ChannelPlace; may: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [dialog, setDialog] = useState<'edit' | 'test' | 'remove' | null>(null);
@@ -120,14 +144,23 @@ function ChannelCard({ channel, notifier, notifiers, org, may }: { channel: Noti
     mutationFn: () => deleteChannel(channel.id),
     onSuccess: () => {
       queryClient.setQueryData<NotificationChannel[]>(channelsKey(org.id), (held) => held?.filter((entry) => entry.id !== channel.id));
+      const root = channelsKey(org.id);
+      const complete = queryClient.getQueryData<InfiniteData<NotificationChannelPage>>([...root, 'pages', '']);
+      const kinds = complete?.pages.at(-1)?.next_cursor === null
+        ? [...new Set(complete.pages.flatMap((page) => page.items).filter((row) => row.id !== channel.id).map((row) => row.kind))] : undefined;
+      queryClient.setQueriesData<InfiniteData<NotificationChannelPage>>({ queryKey: [...root, 'pages'] }, (held) => held === undefined ? held : {
+        ...held, pages: held.pages.map((page) => ({ ...page, items: page.items.filter((row) => row.id !== channel.id), ...(kinds === undefined ? {} : { kinds }) })),
+      });
       toast({ tone: 'success', title: t('settings.channels.removed', { name: channel.name }) });
       setDialog(null);
     },
   });
+  const busy = dialog !== null || toggle.isPending || save.isPending || remove.isPending;
+  useEffect(() => { keep(channel, busy); }, [channel, busy, keep]);
   const Icon = channel.kind === 'webhook' ? Webhook : Mail;
   const enabled = toggle.isPending ? toggle.variables : channel.enabled;
   return (
-    <li className="flex flex-col gap-3 px-4 py-4" data-channel={channel.id}>
+    <li hidden={!visible} className={visible ? "flex flex-col gap-3 px-4 py-4" : "hidden"} data-channel={channel.id}>
       <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
         <Icon className="mt-1 size-4 shrink-0 text-text-subtle" aria-hidden />
         <div className="min-w-0 flex-1 basis-[min(100%,14rem)]">
@@ -227,14 +260,21 @@ export function SystemChannels() {
   return <ManagedChannels org={{ id: 'system', name: t('access.place.system'), owner: null }} may system embedded />;
 }
 
-function ManagedChannels({ org, may, level = 2, system = false, embedded = false }: { org: ChannelPlace; may: boolean; level?: 2 | 3; system?: boolean; embedded?: boolean }) {
+function ManagedChannels(props: { org: ChannelPlace; may: boolean; level?: 2 | 3; system?: boolean; embedded?: boolean }) {
+  const reader = useStore(client.session, (state) => state.readerVersion ?? 0);
+  return <ChannelList key={String(reader) + ':' + props.org.id} {...props} />;
+}
+function ChannelList({ org, may, level = 2, system = false, embedded = false }: { org: ChannelPlace; may: boolean; level?: 2 | 3; system?: boolean; embedded?: boolean }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const actKey = useActKey();
   const meta = useQuery({ ...metaQuery, enabled: !system });
   const refusal = takes(t, 'settings.manage', org.name, org.owner);
   const notifiers = useQuery(notifiersQuery);
-  const list = useQuery({ ...channelsQuery(org.id), enabled: may });
+  const search = useCollectionSearch("channels:" + org.id);
+  const list = useInfiniteQuery({ ...channelsPageQuery(org.id, search.q), enabled: may });
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
+  const held = useRetainedRows(rows);
   const [making, setMaking] = useState(false);
   const make = useMutation({
     mutationFn: (value: NotifierFormValue) => {
@@ -249,10 +289,10 @@ function ManagedChannels({ org, may, level = 2, system = false, embedded = false
   });
 
   const people = (notifiers.data ?? []).filter((entry) => entry.owners.includes(system ? 'system' : 'org') && entry.targets.includes('person'));
-  const have = new Set((list.data ?? []).map((channel) => channel.kind));
+  const have = new Set(list.data?.pages.at(-1)?.kinds ?? []);
   // A kind the org may have only once is not offered again.
   const offered = people.filter((entry) => !(entry.single && have.has(entry.name)));
-  const mailHere = (list.data ?? []).some((channel) => channel.kind === 'email');
+  const mailHere = have.has('email');
 
   const action = <PermissionGate allowed={may} mode="block" reason={refusal}>
           <Button size="sm" variant="primary" icon={<Plus aria-hidden />} blocked={offered.length === 0 || list.isError || notifiers.isError} onClick={() => setMaking(true)}>
@@ -262,23 +302,24 @@ function ManagedChannels({ org, may, level = 2, system = false, embedded = false
   const body = <>
       {!system && <InlineAlert tone="info">{t('settings.channels.sendsNothing')}</InlineAlert>}
       {!system && !mailHere && <p className="text-sm text-text-muted">{meta.data?.mail === true ? t('settings.channels.mailSystem') : t('settings.channels.mailNone', { name: org.name })}</p>}
+      {may && <CollectionSearch name={t("settings.channels.list", { name: org.name })} {...search} />}
       {!may ? (
         <EmptyState compact icon={<Mail aria-hidden />} title={t('settings.channels.readers', { name: org.name })} description={refusal} />
       ) : list.isPending || notifiers.isPending ? (
         <SkeletonRows reads={[list, notifiers]} rows={3} />
-      ) : list.isError ? (
+      ) : list.isError && rows.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : notifiers.isError ? (
         <ErrorState compact error={notifiers.error} retrying={notifiers.isRefetching} onRetry={() => void notifiers.refetch()} />
-      ) : list.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<Mail aria-hidden />} title={t('settings.channels.none', { name: org.name })} description={t('settings.channels.noneAbout')} />
-      ) : (
+      ) : null}
+      {may && held.rows.length > 0 && <ScrollRegion kind="table" label={t('settings.channels.list', { name: org.name })} className={rows.length === 0 ? "hidden" : "max-h-96 overflow-y-auto"}>
         <ul className={`${boxClasses} divide-y divide-border`} aria-label={t('settings.channels.list', { name: org.name })}>
-          {list.data.map((channel) => (
-            <ChannelCard key={channel.id} channel={channel} notifier={people.find((entry) => entry.name === channel.kind)} notifiers={people} org={org} may={channel.can_edit} />
-          ))}
+          {held.rows.map((channel) => <ChannelCard key={channel.id} channel={channel} notifier={people.find((entry) => entry.name === channel.kind)} notifiers={people} org={org} may={channel.can_edit} visible={held.visible.has(channel.id)} keep={held.keep} />)}
         </ul>
-      )}
+      </ScrollRegion>}
+      <Pagination hasMore={may && list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       {making && (
         <NotifierDialog
           title={t('settings.channels.addTitle', { name: org.name })}

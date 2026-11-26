@@ -282,3 +282,120 @@ async fn a_signed_port_entry_header_replays_only_its_accepted_code_identity_afte
     assert_eq!(after, before);
     assert_eq!(redeem(&world, url).await.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn a_preparing_environment_stop_withdraws_new_port_entries_and_issued_browser_codes() {
+    use orch_db::queries::{environments::hosting, runtime_controls, runtime_incarnations};
+
+    let (world, manager, _, env, _, machine) = setup().await;
+    let mut tx = world.db.pool.begin().await.unwrap();
+    let (host, runtime, template) = (new_id(), new_id(), new_id());
+    let node =
+        orch_db::queries::resources::testing::insert_machine(&mut tx, "Port host", "connected")
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Port host')")
+        .bind(host)
+        .bind(node)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO env_templates(id,name,driver,spec) VALUES($1,'Port environment','test','{}')",
+    )
+    .bind(template)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE environments SET placement='managed',template_id=$2,status='running',facts=COALESCE(facts,'{}')||jsonb_build_object('ports',jsonb_build_object('transports',jsonb_build_array('tcp'))) WHERE id=$1")
+        .bind(env).bind(template).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE machines host SET facts=jsonb_set(host.facts,'{policy}',source.facts->'policy') FROM machines source WHERE host.id=$1 AND source.id=$2")
+        .bind(node).bind(machine).execute(&mut *tx).await.unwrap();
+    hosting::insert_runtime(
+        &mut tx,
+        &hosting::NewRuntime {
+            id: runtime,
+            host_id: host,
+            environment_id: env,
+            unit_name: "port-serving-unit",
+            driver: "test",
+            template_id: template,
+            spec_hash: &[0; 32],
+            generation: 1,
+            volumes: &json!({}),
+        },
+        world.now(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        orch_db::queries::resources::hosting::adopt_machine(&mut tx, machine, runtime, world.now())
+            .await
+            .unwrap()
+    );
+    assert!(
+        hosting::set_runtime_state(
+            &mut tx,
+            runtime,
+            &["creating"],
+            "running",
+            None,
+            world.now()
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+
+    let issued = entry(&world, env, &manager.token).await.ok();
+    let mut tx = world.db.pool.begin().await.unwrap();
+    hosting::lock_environment(&mut tx, env)
+        .await
+        .unwrap()
+        .unwrap();
+    let original = runtime_controls::accept(&mut tx, runtime, new_id())
+        .await
+        .unwrap();
+    assert!(
+        runtime_incarnations::prepare_stop(&mut tx, runtime, &original, world.now())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !runtime_incarnations::stop(&mut tx, runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
+    );
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        entry(&world, env, &manager.token).await.problem().code,
+        ErrorCode::PortsUnavailable
+    );
+    let rejected = redeem(&world, &issued.url).await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!rejected.headers().contains_key(http::header::SET_COOKIE));
+    let mut tx = world.db.pool.begin().await.unwrap();
+    hosting::lock_environment(&mut tx, env)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE environments SET generation=generation+1 WHERE id=$1")
+        .bind(env)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(
+        !runtime_incarnations::withdrawn(&mut tx, runtime)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let next = entry(&world, env, &manager.token).await.ok();
+    assert_eq!(
+        redeem(&world, &next.url).await.status(),
+        StatusCode::SEE_OTHER
+    );
+}

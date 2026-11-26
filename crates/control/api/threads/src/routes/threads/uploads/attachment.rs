@@ -25,6 +25,7 @@ use crate::registry::Ctx;
 use crate::uploads;
 
 use axum::body::Body;
+use chrono::{DateTime, Duration, Utc};
 
 use futures::future::BoxFuture;
 
@@ -156,18 +157,20 @@ pub(super) fn raw_creation()
 }
 
 pub(super) struct Known {
+    idle: Duration,
     name: Option<String>,
 }
 
 pub(super) struct Input {
+    idle: Duration,
     name: String,
     replace: Option<String>,
     bytes: Sent,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Sent {
-    Direct(BlobMeta),
+    Direct(orch_blob_contract::store::Stored),
     Reference(Hash),
 }
 
@@ -176,9 +179,9 @@ impl Input {
         matches!(self.bytes, Sent::Direct(_))
     }
     fn hash(&self) -> Hash {
-        match self.bytes {
+        match &self.bytes {
             Sent::Direct(meta) => meta.hash,
-            Sent::Reference(hash) => hash,
+            Sent::Reference(hash) => *hash,
         }
     }
 }
@@ -260,8 +263,23 @@ impl native::raw::Staged for Attachment {
         (): (),
     ) -> BoxFuture<'a, ApiResult<(Known, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
+            let hours = orch_settings::get::<i64>(
+                conn,
+                orch_settings::Place::System,
+                orch_settings_contract::registry::keys::STORAGE_UPLOAD_SESSION_HOURS,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::internal("the attachment staging interval is missing"))?;
+            let idle = Duration::try_hours(hours).ok_or_else(|| {
+                ApiError::invalid(
+                    "storage.upload_session_hours",
+                    "the duration cannot be represented",
+                )
+            })?;
             Ok((
                 Known {
+                    idle,
                     name: filename_of(ctx),
                 },
                 vec![primary(ctx, conn).await?],
@@ -295,6 +313,7 @@ impl native::raw::Staged for Attachment {
                     .await
                     .map_err(uploads::stored_badly)?;
                 return Ok(Input {
+                    idle: known.idle,
                     name,
                     replace: None,
                     bytes: Sent::Direct(meta),
@@ -305,6 +324,7 @@ impl native::raw::Staged for Attachment {
                 .map_err(|_| ApiError::new(ErrorCode::RequestTooLarge, "the body is too large"))?;
             let named: ThreadAttachmentBlobBody = serde_json::from_slice(&bytes).map_err(|_| ApiError::invalid("", "a file is sent as the body with its name in the header, or as the hash of an upload and a name"))?;
             Ok(Input {
+                idle: known.idle,
                 name: uploads::clean_name("name", &named.name)?,
                 replace: named.replace,
                 bytes: Sent::Reference(named.blob),
@@ -417,15 +437,15 @@ impl native::effects::ApplyOwned for Attachment {
         Box::pin(async move {
             ctx.retain_source(value.witness.clone())?;
             let input = &value.input;
-            let meta = match input.bytes {
-                Sent::Direct(meta) => meta,
+            let meta = match &input.bytes {
+                Sent::Direct(meta) => meta.meta,
                 Sent::Reference(hash) => BlobMeta {
-                    hash,
+                    hash: *hash,
                     size: ctx
                         .app
                         .blobs
                         .store()
-                        .size(&hash)
+                        .size(hash)
                         .await
                         .map_err(ApiError::internal)?
                         .ok_or_else(ApiError::not_found)?,
@@ -467,13 +487,13 @@ impl native::effects::ApplyOwned for Attachment {
                 &current,
                 &mut tx,
                 guard.principal(),
-                &attachments::Taken {
-                    meta,
-                    name: input.name.clone(),
-                    supplied_bytes: input.direct(),
-                },
+                &attachments::Taken::protected(meta, input.name.clone(), input.direct()),
             )
             .await?;
+            let expires_at = current
+                .now
+                .checked_add_signed(input.idle)
+                .unwrap_or(DateTime::<Utc>::MAX_UTC);
             let owned: Option<String> = if let Some(path) = &input.replace {
                 if !path.starts_with(".orch/attachments/") {
                     return Err(ApiError::invalid(
@@ -486,7 +506,7 @@ impl native::effects::ApplyOwned for Attachment {
                 None
             };
             let name = if let Some(name) = owned {
-                sqlx::query("UPDATE thread_attachment_uploads SET blob=$3,expires_at=$4 WHERE thread_id=$1 AND path=$2").bind(value.witness.thread).bind(&input.replace).bind(meta.hash.as_bytes().as_slice()).bind(current.now+uploads::SESSION_LIFE).execute(&mut *tx).await.map_err(DbError::from)?;
+                sqlx::query("UPDATE thread_attachment_uploads SET blob=$3,expires_at=$4 WHERE thread_id=$1 AND path=$2").bind(value.witness.thread).bind(&input.replace).bind(meta.hash.as_bytes().as_slice()).bind(expires_at).execute(&mut *tx).await.map_err(DbError::from)?;
                 name
             } else {
                 let used = orch_engine::paste::attachment_names(&mut tx, value.witness.thread)
@@ -496,7 +516,7 @@ impl native::effects::ApplyOwned for Attachment {
                     &crate::media::safe_name(&input.name),
                     &used,
                 );
-                sqlx::query("INSERT INTO thread_attachment_uploads(thread_id,path,name,created_by,blob,expires_at) VALUES($1,$2,$3,$4,$5,$6)").bind(value.witness.thread).bind(format!("{ATTACHMENTS_DIR}/{name}")).bind(&name).bind(guard.user().id()).bind(meta.hash.as_bytes().as_slice()).bind(current.now+uploads::SESSION_LIFE).execute(&mut *tx).await.map_err(DbError::from)?;
+                sqlx::query("INSERT INTO thread_attachment_uploads(thread_id,path,name,created_by,blob,expires_at) VALUES($1,$2,$3,$4,$5,$6)").bind(value.witness.thread).bind(format!("{ATTACHMENTS_DIR}/{name}")).bind(&name).bind(guard.user().id()).bind(meta.hash.as_bytes().as_slice()).bind(expires_at).execute(&mut *tx).await.map_err(DbError::from)?;
                 name
             };
             if let Some(described) = described {

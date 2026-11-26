@@ -42,6 +42,25 @@ const visited: NameHit = { home_path: [], id: 'topic-one', kind: 'topic', name: 
   address: null, avatar: null, owner: null, username: null, color: null, custom_color: null, tag: null, thread_attention: null };
 
 describe('the registry replaces the last screen refreshes', () => {
+  it('keeps a Copy review from changing mounted resource views', () => {
+    const review = findAct('POST', '/mounts/selected/copy-plan', { answer: { preflight_id: 'review' } });
+    expect(review).not.toBeNull();
+    expect(review?.changes).toEqual([]);
+  });
+
+  it('repairs only the selected mount Copy progress after an identity receipt', async () => {
+    const latest = await watch(['mount-copy-job', 'selected'], null);
+    const other = await watch(['mount-copy-job', 'other'], null);
+    const mount = await watch(['mount', 'selected'], { id: 'selected', name: 'Data' });
+    const accepted = { id: 'copy-job', state: 'queued' };
+    latest.mockResolvedValue(accepted);
+    await acted('POST', '/mounts/selected/copy', { answer: { projection: 'receipt', job_id: accepted.id } });
+    expect(cache.getQueryData(['mount-copy-job', 'selected'])).toEqual(accepted);
+    expect(latest).toHaveBeenCalledTimes(2);
+    expect(other).toHaveBeenCalledTimes(1);
+    expect(mount).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ['PUT', '/me/favorites/topic-one'], ['DELETE', '/me/favorites/topic-one'],
     ['PUT', '/me/favorites/provider/provider-one'], ['DELETE', '/me/favorites/provider/provider-one'],

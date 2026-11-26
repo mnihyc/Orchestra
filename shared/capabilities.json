@@ -228,6 +228,17 @@
         }
       }
     },
+    "ask": {
+      "title": "Ask",
+      "setting": "ask.models",
+      "item": "agent_message",
+      "ledger_unit": "token",
+      "modes": {
+        "off": { "routes": [], "native_value": "off" },
+        "native": { "routes": ["ask.program"], "native_value": "on" },
+        "service": { "routes": ["provider.generate", "ask.delegation"], "native_value": "off" }
+      }
+    },
     "summary": {
       "title": "Summarization",
       "setting": "auto.summarizer",
@@ -359,6 +370,13 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "generation.conversation",
+        "result": "generation.answer",
+        "streaming": true,
+        "read_tools": true,
+        "confined_tools": true
       }
     },
     "image_input.model": {
@@ -488,6 +506,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "image_input.request",
+        "result": "image_input.result"
       }
     },
     "web_search.model": {
@@ -594,6 +616,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "web_search.request",
+        "result": "web_search.result"
       }
     },
     "page_fetch.model": {
@@ -700,6 +726,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "page_fetch.request",
+        "result": "page_fetch.result"
       }
     },
     "image_generation.model": {
@@ -806,6 +836,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "image.request",
+        "result": "image.generated"
       }
     },
     "embeddings.model": {
@@ -909,6 +943,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "embeddings.request",
+        "result": "embeddings.result"
       }
     },
     "provider_facts.model": {
@@ -1012,7 +1050,27 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "provider_facts.request",
+        "result": "provider_facts.result"
       }
+    },
+    "provider.generate": {
+      "kind": "service", "executor": "model-backed", "capabilities": ["ask"],
+      "uses_backend": true, "requires_opt_in": true, "requires_offering": true,
+      "requires_generation_interface": true, "title": "API model",
+      "text": { "en": "API model", "zh-CN": "API 模型" }
+    },
+    "ask.program": {
+      "kind": "native-program", "capabilities": ["ask"], "requires_program_support": true, "requires_offering": true,
+      "title": "Program model", "text": { "en": "Program model", "zh-CN": "程序模型" }
+    },
+    "ask.delegation": {
+      "kind": "delegation", "executor": "program-session", "capabilities": ["ask"],
+      "uses_backend": true, "requires_opt_in": true, "disable_native": true, "requires_offering": true, "title": "Subscription",
+      "text": { "en": "Subscription", "zh-CN": "订阅" },
+      "execution": {"input": "ask.step", "result": "ask.reply", "read_tools": true, "confined_tools": true}
     },
     "summary.model": {
       "kind": "native-model",
@@ -1108,13 +1166,17 @@
       ],
       "uses_backend": true,
       "requires_opt_in": true,
-      "requires_orch_tools": true,
       "disable_native": true,
       "requires_offering": true,
       "title": "Delegated session",
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "summary.request",
+        "result": "summary.result",
+        "confined_tools": true
       }
     }
   }
