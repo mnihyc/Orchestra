@@ -411,6 +411,72 @@ async fn a_persons_own_skills_reach_the_threads_they_started_where_the_place_all
 }
 
 #[tokio::test]
+async fn publication_follows_the_same_locked_and_personal_choices_as_the_delivered_skill() {
+    let world = World::new().await;
+    let store = store().await;
+    let own = own_org(&world, world.ada).await;
+    let made = skill(&world, &store, own, world.ada, "publication-choice").await;
+    let id = made.skill.id;
+    let thread = world.thread("Receives my skill").await;
+    async fn follows(world: &World, id: Id, thread: Id) -> bool {
+        let mut conn = world.pool.acquire().await.unwrap();
+        resolve::latest_followers(&mut conn, id, &[thread])
+            .await
+            .unwrap()
+            .contains(&thread)
+    }
+    assert!(follows(&world, id, thread).await);
+    world
+        .set(
+            own,
+            "agents.skills",
+            json!({id.to_string():made.version.id}),
+        )
+        .await;
+    assert!(
+        !follows(&world, id, thread).await,
+        "the current latest can be pinned"
+    );
+    world.unset(own, "agents.skills").await;
+    world
+        .set(world.project, "agents.personal_skills", json!(false))
+        .await;
+    assert!(!follows(&world, id, thread).await);
+    world
+        .set(
+            world.root,
+            "agents.skills",
+            json!({id.to_string():"latest"}),
+        )
+        .await;
+    assert!(
+        follows(&world, id, thread).await,
+        "a place may give a skill without personal fallback"
+    );
+    world
+        .set(
+            world.topic,
+            "agents.skills",
+            json!({id.to_string():made.version.id}),
+        )
+        .await;
+    assert!(!follows(&world, id, thread).await);
+    set_as(
+        &world,
+        world.ada,
+        world.root,
+        "agents.skills",
+        json!({id.to_string():"latest"}),
+        true,
+    )
+    .await;
+    assert!(
+        follows(&world, id, thread).await,
+        "a locked Latest keeps the lower pin out"
+    );
+}
+
+#[tokio::test]
 async fn a_disabled_or_deleted_skill_or_a_version_of_another_is_left_out_with_why() {
     let world = World::new().await;
     let store = store().await;
@@ -686,6 +752,19 @@ async fn a_session_is_given_its_threads_skills_opened_anew_when_they_change_and_
     assert_eq!(given, [("pdf-tools".to_owned(), made.version.id)]);
     let archive = &opened.last().unwrap().skills[0];
     assert!(store.store.exists(&archive.blob).await.unwrap());
+    let pool = world.pool.pool();
+    let receipt = |thread: Id| async move {
+        sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('revision',revision,'applied_at',applied_at,'selected',selected,'skipped',skipped) FROM session_skill_outcomes WHERE thread_id=$1 AND applied_at IS NOT NULL ORDER BY position DESC LIMIT 1")
+            .bind(thread).fetch_one(pool).await.unwrap()
+    };
+    let accepted = receipt(thread).await;
+    assert_eq!(
+        accepted["selected"][0]["version_id"],
+        json!(made.version.id)
+    );
+    assert_eq!(accepted["selected"][0]["contributor"], json!(world.ada));
+    assert!(!accepted.to_string().contains("archive"));
+    assert!(!accepted.to_string().contains("files"));
 
     // A new version reaches the next turn: its session is opened anew with it before the turn.
     let second = version(
@@ -697,6 +776,11 @@ async fn a_session_is_given_its_threads_skills_opened_anew_when_they_change_and_
     )
     .await
     .unwrap();
+    assert_eq!(
+        receipt(thread).await,
+        accepted,
+        "a later skill version cannot rewrite the accepted session outcome"
+    );
     world
         .engine()
         .submit_input(
@@ -713,6 +797,25 @@ async fn a_session_is_given_its_threads_skills_opened_anew_when_they_change_and_
         reopened.last().unwrap().skills[0].version_id,
         second.version.id
     );
+    let refreshed = receipt(thread).await;
+    assert_ne!(refreshed["revision"], accepted["revision"]);
+    assert_eq!(
+        refreshed["selected"][0]["version_id"],
+        json!(second.version.id)
+    );
+    let original: Value =
+        sqlx::query_scalar("SELECT selected FROM session_skill_outcomes WHERE revision=$1")
+            .bind(
+                accepted["revision"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<Id>()
+                    .unwrap(),
+            )
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(original, accepted["selected"]);
 
     // Each turn records what it was given.
     for (turn, version) in [
