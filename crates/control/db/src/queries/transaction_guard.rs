@@ -19,10 +19,10 @@
 //! pins its existing parent through its foreign key. The epochs are locked only inside a commit, in
 //! one order (by org id, the system's nil id first), so a lock on one lasts as long as a commit.
 //!
-//! Personal credential writes exclusively lock their own user and watch no epoch, so even a slow
-//! recovery never makes another person wait; they change no shared permission page. A write still
-//! locks its own user, session and token rows while it runs, as before: revoking a session or
-//! suspending a person waits for that person's open writes only.
+//! Personal credential writers serialize with one another on their account using NO KEY UPDATE.
+//! Identity readers and foreign keys can keep a KEY SHARE on that account. Authority changes to a
+//! particular session or token conflict with actions holding that credential. A suspension or change
+//! of administrator standing still takes FOR UPDATE on the account itself.
 
 use super::identity::UserRow;
 use crate::{Conn, DbError};
@@ -80,6 +80,15 @@ pub async fn request_scope<T>(scope: Scope, work: impl Future<Output = T>) -> T 
     REQUEST_SCOPE.scope(scope, work).await
 }
 
+/// Ordinary HTTP reads can project from a read-only transaction. Other declared
+/// scopes establish their own locks or record the epochs their commit must check.
+pub(crate) fn permits_read_only_snapshot() -> bool {
+    matches!(
+        REQUEST_SCOPE.try_with(|scope| *scope).ok(),
+        Some(Scope::Action) | None
+    )
+}
+
 pub(crate) fn personal_user() -> Option<Id> {
     match REQUEST_SCOPE.try_with(|scope| *scope).ok() {
         Some(Scope::Personal { user }) => user,
@@ -100,7 +109,7 @@ pub(crate) async fn begin_scope(conn: &mut Conn) -> Result<(), DbError> {
         Some(Scope::Personal { user }) => {
             mark_scope(conn, "personal").await?;
             if let Some(user) = user {
-                let _ = lock_person(conn, user).await?;
+                let _ = lock_credential_writer(conn, user).await?;
             }
         }
         Some(Scope::Action) | None => {}
@@ -116,10 +125,22 @@ async fn mark_scope(conn: &mut Conn, mode: &'static str) -> Result<(), DbError> 
     Ok(())
 }
 
-/// Pins a personal credential writer against every action authenticated as that person.
+/// Pins an account-wide change of standing against every action authenticated as that person.
 pub async fn lock_person(conn: &mut Conn, user: Id) -> Result<Option<UserRow>, DbError> {
     Ok(
         sqlx::query_as("SELECT * FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// Orders changes of sign-in methods and sessions for this person, including the initial
+/// proof and the final check inside a sign-in transaction. Ordinary identity readers and
+/// references to the account take KEY SHARE. The changed session or token orders its own users.
+pub async fn lock_credential_writer(conn: &mut Conn, user: Id) -> Result<Option<UserRow>, DbError> {
+    Ok(
+        sqlx::query_as("SELECT * FROM users WHERE id = $1 FOR NO KEY UPDATE")
             .bind(user)
             .fetch_optional(conn)
             .await?,
@@ -168,9 +189,10 @@ pub async fn current_transaction_id(conn: &mut Conn) -> Result<i64, DbError> {
         .await?)
 }
 
-/// Holds a machine's row against deletion and owner change for the rest of the transaction.
+/// Pins machine authority until commit. Its schema guard orders every non-observation change
+/// against this key share, while hardware measurements and link rates can still be reported.
 pub async fn share_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR KEY SHARE")
         .bind(machine)
         .fetch_optional(conn)
         .await?;
@@ -372,7 +394,8 @@ pub fn resource_table(kind: &str) -> Option<&'static str> {
     })
 }
 
-/// Current identity facts, with the rows locked until the transaction ends.
+/// Current identity facts: with the rows locked until the transaction ends ([`lock_identity`],
+/// [`lock_identity_for_write`]), or as one statement's snapshot holds them ([`read_identity`]).
 #[derive(Debug, sqlx::FromRow)]
 pub struct Identity {
     /// The exact session's mode; always false for an API token.
@@ -390,15 +413,49 @@ pub struct Identity {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Locks the user and credential for a read (a frame's projection), returning no revoked
-/// credential; the caller checks expiration with its clock. Watches no epoch: a read commits nothing.
+/// Reads the exact browser credential in an opening's snapshot, retaining its original deadline.
+pub async fn opening_session(
+    conn: &mut Conn,
+    user: Id,
+    session: Id,
+    hash: &[u8],
+) -> Result<Option<Identity>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT u.*,s.as_admin,NULL::text[] AS scopes,NULL::jsonb AS operation_scope,
+                NULL::uuid AS node_id,LEAST(a.expires_at,s.expires_at) AS expires_at
+           FROM users u JOIN sessions s ON s.user_id=u.id JOIN access_tokens a ON a.session_id=s.id
+          WHERE u.id=$1 AND s.id=$2 AND a.token_hash=$3 AND s.revoked_at IS NULL",
+    )
+    .bind(user)
+    .bind(session)
+    .bind(hash)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Locks the user and credential for a read that must wait for a change of that credential being
+/// made (a request's read, a socket's sign-in), returning no revoked credential; the caller checks
+/// expiration with its clock. Watches no epoch. A row lock gives the transaction an id and writes to
+/// the log, so its commit waits for the database's disk.
 pub async fn lock_identity(
     conn: &mut Conn,
     user: Id,
     credential: Credential<'_>,
     authority_change: bool,
 ) -> Result<Option<Identity>, DbError> {
-    identity_in(conn, user, credential, authority_change, None).await
+    identity_in(conn, user, credential, authority_change, None, true).await
+}
+
+/// The same identity as [`lock_identity`], read in this statement's snapshot without locking a row:
+/// for a socket's check before it sends a frame, which writes nothing and so commits without
+/// waiting for the database's disk. A change of the credential committed after the snapshot is seen
+/// by the next check; the commit that makes it also announces it to the sockets.
+pub async fn read_identity(
+    conn: &mut Conn,
+    user: Id,
+    credential: Credential<'_>,
+) -> Result<Option<Identity>, DbError> {
+    identity_in(conn, user, credential, false, None, false).await
 }
 
 /// Locks the user and credential of a write in one statement that also reads the authorization
@@ -411,7 +468,7 @@ pub async fn lock_identity_for_write(
     authority_change: bool,
     place: Place,
 ) -> Result<Option<Identity>, DbError> {
-    identity_in(conn, user, credential, authority_change, Some(place)).await
+    identity_in(conn, user, credential, authority_change, Some(place), true).await
 }
 
 async fn identity_in(
@@ -420,13 +477,15 @@ async fn identity_in(
     credential: Credential<'_>,
     authority_change: bool,
     place: Option<Place>,
+    locked: bool,
 ) -> Result<Option<Identity>, DbError> {
     // PostgreSQL's row-lock conflict-table lines:
     // SHARE conflicts with NO KEY UPDATE and UPDATE; SHARE and KEY SHARE coexist.
     // KEY SHARE conflicts only with UPDATE.
-    // Session end, token scopes/end and access-token expiry are non-key updates,
-    // so they require SHARE. Suspension/admin writers explicitly lock users FOR
-    // UPDATE; KEY SHARE also permits inbox counters and foreign-key references.
+    // Session security changes acquire UPDATE through sessions_authority_changed;
+    // KEY SHARE lets independent activity/lifetime extensions proceed. Token
+    // scopes/end and access-token expiry still require SHARE. Suspension/admin
+    // writers explicitly lock users FOR UPDATE.
     // Row locking rechecks tuples changed during a wait; later permission statements
     // obtain new snapshots after that wait.
     let personal = matches!(
@@ -462,8 +521,12 @@ async fn identity_in(
         _ => "SELECT $4::uuid IS NULL OR $5::uuid IS NULL OR $6::boolean OR $7::text IS NULL
                      OR $8::uuid IS NULL OR $9::uuid IS NULL OR $10::boolean OR true",
     };
-    let user_lock = if personal { "UPDATE" } else { "KEY SHARE" };
-    let (identity, id, hash) = match credential {
+    let user_lock = if personal {
+        "NO KEY UPDATE"
+    } else {
+        "KEY SHARE"
+    };
+    let (identity, locks, id, hash) = match credential {
         Credential::Session { id, hash } => (
             "SELECT u.*, s.as_admin, NULL::text[] AS scopes, NULL::jsonb AS operation_scope, NULL::uuid AS node_id,
                     LEAST(a.expires_at, s.expires_at) AS expires_at
@@ -471,8 +534,8 @@ async fn identity_in(
                JOIN sessions s ON s.user_id = u.id
                JOIN access_tokens a ON a.session_id = s.id
               WHERE u.id = $1 AND s.id = $2 AND a.token_hash = $3
-                AND s.revoked_at IS NULL
-              FOR {user_lock} OF u FOR SHARE OF s, a",
+                AND s.revoked_at IS NULL",
+            "FOR {user_lock} OF u FOR KEY SHARE OF s FOR SHARE OF a",
             id,
             hash,
         ),
@@ -481,8 +544,8 @@ async fn identity_in(
                FROM marked CROSS JOIN users u
                JOIN api_tokens t ON t.user_id = u.id
               WHERE u.id = $1 AND t.id = $2 AND t.token_hash = $3
-                AND t.revoked_at IS NULL
-              FOR {user_lock} OF u FOR SHARE OF t",
+                AND t.revoked_at IS NULL",
+            "FOR {user_lock} OF u FOR SHARE OF t",
             id,
             hash,
         ),
@@ -496,14 +559,19 @@ async fn identity_in(
             _ => "read",
         }
     };
-    let identity = identity.replace("{user_lock}", user_lock);
+    let locks = if locked {
+        locks.replace("{user_lock}", user_lock)
+    } else {
+        String::new()
+    };
     // Only the fixed statements above are composed, never request text.
     let query = sqlx::AssertSqlSafe(format!(
         "WITH watched AS MATERIALIZED ({watched}), marked AS MATERIALIZED (
              SELECT set_config('orch.guard_epoch',
                  CASE WHEN current_setting('orch.guard_epoch', true) IN ('write','birth','personal')
                       THEN current_setting('orch.guard_epoch', true) ELSE '{mode}' END, true) FROM watched
-         ) {identity}"
+         ) {identity}
+              {locks}"
     ));
     let place = place.unwrap_or_default();
     let identity: Option<Identity> = sqlx::query_as(query)

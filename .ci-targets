@@ -1,0 +1,5 @@
+test -p orch-engine --test turns -- stop_at_once::an_explicit_stop_applies_its_hold_when_background_reconciliation_is_paused
+test -p orch-engine --test turns -- stop_at_once::an_explicit_stop_applies_its_hold_when_background_reconciliation_is_paused
+test -p orch-engine --test turns -- stop_at_once::an_explicit_stop_applies_its_hold_when_background_reconciliation_is_paused
+test -p orch-engine --test turns -- stop_at_once::an_explicit_stop_applies_its_hold_when_background_reconciliation_is_paused
+test -p orch-engine --test turns -- stop_at_once::an_explicit_stop_applies_its_hold_when_background_reconciliation_is_paused

@@ -6,8 +6,8 @@
  */
 import { MessagesSquare } from 'lucide-react';
 
-import { ChatPanel } from '@/features/chat/ChatPanel';
-import { registerView } from '@/features/workbench/views';
+import { lazyPart } from '@/features/files/lazy';
+import { registerView, type ViewProps } from '@/features/workbench/views';
 import { allTabs } from '@/features/workbench/layout';
 import { useWorkbench } from '@/features/workbench/store';
 
@@ -20,5 +20,5 @@ registerView({
   area: 'right',
   singleton: true,
   targeted: () => allTabs(useWorkbench.getState().layout).some((tab) => tab.view === 'chat' && tab.of?.node !== undefined),
-  body: ChatPanel,
+  body: lazyPart<ViewProps>(() => import('./ChatPanel').then(({ ChatPanel }) => ({ default: ChatPanel }))),
 });

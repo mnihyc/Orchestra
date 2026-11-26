@@ -817,3 +817,51 @@ async fn an_owned_mcp_move_binds_its_real_source_parent_and_uses_the_same_native
     assert!(s.sealed(made).await?.is_some());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_server_definition_cannot_borrow_the_builtin_tool_servers_names_or_write_a_definition_that_can_never_be_reached()
+-> Proof {
+    let s = Scene::new().await?;
+    let before = s.count().await?;
+    for name in ["exec", "orch"] {
+        let reply = s
+            .world
+            .app
+            .call(McpServerCreate, &[])
+            .token(&s.company.boss.token)
+            .body(&McpServerCreateBody {
+                home_id: Some(s.company.acme),
+                name: name.into(),
+                description: None,
+                spec: json!({"transport":"stdio","command":["fixture-tool"]}),
+                secrets: None,
+                access: Some(NewResourceAccess::OnlyMe),
+            })
+            .send_bytes()
+            .await;
+        assert_eq!(reply.status.as_u16(), 400, "{reply:?}");
+        assert_eq!(
+            s.count().await?,
+            before,
+            "a reserved native service name writes nothing"
+        );
+    }
+    let reply = s
+        .world
+        .app
+        .call(McpServerCreate, &[])
+        .token(&s.company.boss.token)
+        .body(&McpServerCreateBody {
+            home_id: Some(s.company.acme),
+            name: "exec-tools".into(),
+            description: None,
+            spec: json!({"transport":"stdio","command":["fixture-tool"]}),
+            secrets: None,
+            access: Some(NewResourceAccess::OnlyMe),
+        })
+        .send_bytes()
+        .await;
+    assert!(reply.status.is_success(), "{reply:?}");
+    assert_eq!(s.count().await?, before + 1);
+    Ok(())
+}
