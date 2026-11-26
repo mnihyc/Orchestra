@@ -71,7 +71,7 @@ test('I show a port to a colleague in the project with its current audience coun
   await open(page); const dialog = await more(page, 'Place');
   await dialog.getByLabel('Find a place', { exact: true }).fill('Web');
   await dialog.getByRole('treeitem', { name: 'Web', exact: true }).click();
-  await expect(dialog.getByText('7 people can enter. No other environment door is given.')).toBeVisible();
+  await expect(dialog.getByText('7 . This gives no other access to the environment.')).toBeVisible();
   await expect(dialog.getByText('Everyone who may view Web, including guests, can use this port after signing in.')).toBeVisible();
   await dialog.getByRole('button', { name: 'Allow the place' }).click();
   await expect(card(page).getByTestId('opening-place')).toBeVisible();
@@ -169,11 +169,11 @@ test('a phone decides an agent request with the link destination stated before A
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test('the host form reviews its three explicit proposed fields and affected allocations, without a firewall claim', async ({ page }) => {
+test('the host form saves its three explicit proposed fields at once, without a firewall claim', async ({ page }) => {
   await control('/set', { scene: 'no_range' }); await signIn(page); await page.goto(`/resources/hosts/${id(KIND.host, 1)}?tab=ports`);
   const host = page.getByTestId('host-ports'); await expect(host.getByText('No declaration saved')).toBeVisible(); await host.getByRole('button', { name: 'Edit ports…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Host ports', exact: true }); await expect(dialog.getByLabel('Incoming address', { exact: true })).toHaveValue('host.example'); await expect(dialog.getByRole('radio', { name: 'All addresses', exact: true })).toBeChecked(); await expect(dialog.getByLabel('Port ranges', { exact: true })).toHaveValue('41000–41015');
-  await dialog.getByRole('button', { name: 'Review changes' }).click(); await expect(dialog.getByText('This does not configure a firewall.')).toBeVisible(); await expect(dialog.getByText('Affected openings')).toBeVisible(); await dialog.getByRole('button', { name: 'Save declaration' }).click();
+  await expect(dialog.getByText('This does not configure a firewall.')).toBeVisible(); await expect(dialog.getByRole('button', { name: 'Review changes' })).toHaveCount(0); await dialog.getByRole('button', { name: 'Save declaration' }).click();
   await expect(host.getByText('Saved values are shown. The host’s acknowledgement has not been reported.')).toBeVisible(); expect((await control('/state'))?.openings).toHaveLength(0);
 });
 

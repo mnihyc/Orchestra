@@ -3,8 +3,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useRouterState } from '@tanstack/react-router';
 import { nodeQuery, orgBySlugQuery, orgsQuery } from '@/api/nodes';
 import type { NodeRef, Org } from '@/generated/api-types';
-import { useNodePath, useTreeStore } from '@/realtime/stores/tree';
-import { useThreadRow } from '@/realtime/stores/thread';
+import { useNodeOrg, useTreeStore } from '@/realtime/stores/tree';
+import { useThreadPart } from '@/realtime/stores/thread';
 import { useSelectedOrg } from '@/shell/org';
 import { useCurrentHeading } from '@/shell/screen';
 
@@ -27,24 +27,23 @@ export function readableNavigationRoot(path: readonly NodeRef[] | undefined, fal
 
 /** Every query here is cache-only: the screen owns its data read and its permission check. */
 export function useNavigationOrg(): string | null {
-  const location = useRouterState({ select: (state) => state.location });
-  const pathname = location.pathname;
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const selected = useSelectedOrg((state) => state.orgId);
   const retained = useTreeStore((state) => selected !== null && state.byOrg.get(selected)?.loaded === true ? selected : null);
-  const heading = useCurrentHeading();
+  const heading = useCurrentHeading(true, (value) => ({ nodeId: value.nodeId, document: value.target?.kind === 'document' ? value.target.id : null, path: value.path }));
   const match = /^\/(org|project|topic|thread|doc)\/([^/]+)/.exec(pathname);
   const kind = match?.[1];
   let id = '';
   try { id = decodeURIComponent(match?.[2] ?? ''); } catch { /* A malformed address has no navigation target. */ }
-  const headingMatches = kind === 'doc' ? heading?.target?.kind === 'document' && heading.target.id === id : heading?.nodeId === id;
+  const headingMatches = kind === 'doc' ? heading?.document === id : heading?.nodeId === id;
   const nodeId = kind === 'project' || kind === 'topic' ? id : headingMatches ? heading?.nodeId ?? '' : '';
-  const node = useQuery({ ...nodeQuery(nodeId), enabled: false }).data;
-  const org = useQuery({ ...orgBySlugQuery(kind === 'org' ? id : ''), enabled: false }).data;
+  const node = useQuery({ ...nodeQuery(nodeId), enabled: false, select: (row) => readableNavigationRoot(row.path) }).data;
+  const org = useQuery({ ...orgBySlugQuery(kind === 'org' ? id : ''), enabled: false, select: (row) => readableNavigationRoot(row.path) }).data;
   const orgs = useQuery({ ...orgsQuery, enabled: false }).data ?? [];
-  const thread = useThreadRow(kind === 'thread' ? id : '');
-  const path = useNodePath(headingMatches ? heading?.nodeId : undefined);
+  const thread = useThreadPart(kind === 'thread' ? id : '', (view) => readableNavigationRoot(view.thread?.path));
+  const treeOrg = useNodeOrg(headingMatches ? heading?.nodeId : undefined);
   return navigationRoot(pathname, orgs, selected, {
-    thread: readableNavigationRoot(thread?.path), node: readableNavigationRoot(node?.path), org: readableNavigationRoot(org?.path), retained,
-    heading: headingMatches ? readableNavigationRoot(heading?.path, path.orgId) : null,
+    thread, node: node ?? null, org: org ?? null, retained,
+    heading: headingMatches ? readableNavigationRoot(heading?.path, treeOrg) : null,
   });
 }

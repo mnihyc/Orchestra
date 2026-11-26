@@ -40,6 +40,15 @@ function enumValues(schema: unknown): string[] {
   return values;
 }
 
+/** These protocol values drive rendering or a background read without a corresponding status label. */
+const unlabelledStates = new Set([
+  'AgentMessagePhase.commentary', 'AgentMessagePhase.final', 'AutomaticScheduleState.idle',
+  'FetchStatus.ready', 'FetchStatus.fetching',
+  'HumanCheckEdgeState.allows',
+  'NativeCatalogState.ready', 'NativeCatalogState.not_ready', 'NativeCatalogState.unsupported', 'NativeCatalogState.failed',
+  'ShortcutTargetState.open', 'SourceState.ready', 'TerminalListState.open', 'TerminalListState.closed', 'TerminalState.opening',
+]);
+
 /** No count, vendor list or sample fixture can make a newly declared member disappear from coverage. */
 export function requiredHelpReferences(settings: readonly { key: string; schema: unknown }[], openapi: unknown, declarations: unknown): string[] {
   const required = new Set<string>();
@@ -50,7 +59,10 @@ export function requiredHelpReferences(settings: readonly { key: string; schema:
   if (object(openapi) && object(openapi.components) && object(openapi.components.schemas)) {
     for (const [name, schema] of Object.entries(openapi.components.schemas)) {
       if (/(Options|OptionsBody)$/.test(name)) for (const path of schemaFieldPaths(schema)) required.add(`option:${name}.${path}`);
-      if (/(State|Status|Phase)$/.test(name)) for (const value of enumValues(schema)) required.add(`state:${name}.${value}`);
+      if (/(State|Status|Phase)$/.test(name)) for (const value of enumValues(schema)) {
+        const entry = `${name}.${value}`;
+        if (!unlabelledStates.has(entry)) required.add(`state:${entry}`);
+      }
     }
     for (const code of enumValues(openapi.components.schemas.ErrorCode)) required.add(`error:${code}`);
   }
@@ -73,10 +85,11 @@ export function requiredHelpReferences(settings: readonly { key: string; schema:
 const table = (token: Token): token is Tokens.Table => token.type === 'table';
 
 /** Only a rendered table row with a real explanation counts; comments and code examples do not. */
-export function documentedReferences(body: string): { id: string; explanation: string }[] {
+export function documentedReferences(body: string, allowStateKeysInCode = false): { id: string; explanation: string }[] {
   return Lexer.lex(body).filter(table).flatMap((token) => token.rows.flatMap((row) => {
     const key = row[0]?.text.trim() ?? '';
-    const found = /^`((?:setting|option|state|error):[^`]+)`$/.exec(key);
+    if (!allowStateKeysInCode && key.startsWith('`state:')) return [];
+    const found = /^\[[^\]]+\]\(#(state:\w+\.\w+)\)$/.exec(key) ?? /^`((?:setting|option|state|error):[^`]+)`$/.exec(key);
     return found?.[1] === undefined ? [] : [{ id: found[1], explanation: row.slice(1).map((cell) => articleFirstLine({ body: cell.text })).join(' ').trim() }];
   }));
 }
@@ -87,7 +100,7 @@ export function checkReferenceCoverage(guide: Guide, userArticles: readonly stri
   for (const language of ['en', 'zh-CN']) {
     const entries = guide.articles.filter((article) => userArticles.includes(article.id)).flatMap((article) => {
       const body = language === 'en' ? article.body : article.translations?.[language]?.body;
-      return body === undefined ? [] : documentedReferences(body);
+      return body === undefined ? [] : documentedReferences(body, article.id === 'option-reference');
     });
     const seen = new Set<string>();
     for (const entry of entries) {

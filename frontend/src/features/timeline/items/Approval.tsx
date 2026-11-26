@@ -22,11 +22,12 @@ import { useDecision } from '@/features/approvals/Decision';
 import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { approvalTitle, ApprovalSubjectScope } from '@/features/approvals/Card';
+import { ApprovalDeliveryFacts, approvalDeliveryFragment } from '@/features/approvals/DeliveryFacts';
 import { approvalAtItem, approvalOutcome } from '@/features/approvals/current';
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 import { AnswersForm, decisionOfOption, ElicitationForm, type HarnessApproval, OptionButtons, optionWords, planDecision, RequestBody } from '@/features/approvals/Harness';
 import { PlanAnswer } from '@/features/approvals/PlanAnswer';
-import { useTimelineContext } from '@/features/timeline/context';
+import { useConversationTurn, useTimelineContext } from '@/features/timeline/context';
 import { ItemFrame } from '@/features/timeline/ItemActions';
 import { useThreadPart, useThreadView } from '@/realtime/stores/thread';
 import { actionName } from '@/ui/actions';
@@ -61,10 +62,12 @@ function decidedWhat(approval: Approval, t: TFunction): string {
   }
 }
 
-function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostTo: Approval | null; children?: React.ReactNode }) {
+function DecidedLine({ approval, turnId, lostTo, children }: { approval: Approval; turnId: string | null; lostTo: Approval | null; children?: React.ReactNode }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const what = decidedWhat(approval, t);
+  const turn = useConversationTurn(turnId);
+  const what = approval.state === 'cancelled' && turn?.error?.code === 'turn_lost'
+    ? t('inbox.actions.approvalCancelled') : decidedWhat(approval, t);
   const Icon = ['approved', 'answered'].includes(approvalOutcome(approval)) ? ShieldCheck : approval.state === 'pending' ? ShieldQuestionMark : ShieldX;
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-3 py-2">
@@ -80,6 +83,7 @@ function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostT
           <span className="font-medium wrap-anywhere text-text">{approvalTitle(approval,t)}</span><span>{what}
           {approval.decided_automatically ? ` ${t('approvals.automatically')}` : approval.decided_by !== null ? ` ${t('approvals.by', { name: approval.decided_by.display_name })}` : ''}
           </span>{approval.decided_at !== null && <TimeOfDay at={approval.decided_at} />}
+          {approvalDeliveryFragment(approval,t) !== null && <span>{approvalDeliveryFragment(approval,t)}</span>}
         </span>
       </button>
       {lostTo !== null && (
@@ -87,7 +91,7 @@ function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostT
           {t('approvals.alreadyAnswered', { name: lostTo.decided_by?.display_name ?? t('approvals.someoneElse') })}
         </p>
       )}
-      {open && children}
+      {open && <>{children}<ApprovalDeliveryFacts approval={approval} /></>}
     </div>
   );
 }
@@ -155,7 +159,7 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
           options={request.options}
           disabled={!may || busy} reason={reason}
           pressed={decision.pressed}
-          onChoose={(option) => decision.decide(decisionOfOption(option), option.label)}
+          onChoose={(option, note) => decision.decide(decisionOfOption(option, note), option.label)}
         />
       )}
       {!approval.can_decide && (
@@ -296,7 +300,7 @@ export function ApprovalCard({ item, pinned = false }: { item: ApprovalItem; pin
       );
   } else {
     body = (
-      <DecidedLine approval={approval} lostTo={lostTo}>
+      <DecidedLine approval={approval} turnId={item.turn_id} lostTo={lostTo}>
         {approval.kind === 'harness' && (approval.request.request_kind === 'user_input' ? <QuestionAnswers approval={approval} /> : <RequestBody request={approval.request} />)}
       </DecidedLine>
     );

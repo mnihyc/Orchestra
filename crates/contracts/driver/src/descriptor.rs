@@ -245,6 +245,9 @@ pub struct DriverDescriptor {
     /// Whether this host can publish node listeners for this driver's units.
     #[serde(default, skip_serializing_if = "OperationSupport::is_empty")]
     pub host_ports: OperationSupport,
+    /// Whether this physical placement can prepare and clean up a confined capability unit.
+    #[serde(default, skip_serializing_if = "OperationSupport::is_empty")]
+    pub program_units: OperationSupport,
     /// Whether kept installed files can travel between hosts as an owned artifact.
     #[serde(default, skip_serializing_if = "OperationSupport::is_empty")]
     pub kept_file_transfer: OperationSupport,
@@ -378,6 +381,17 @@ impl DriverDescriptor {
             },
         );
         answer.insert(
+            "program_units".into(),
+            if self.program_units.is_empty() {
+                OperationSupport::available(
+                    false,
+                    "this placement does not offer isolated capability units",
+                )
+            } else {
+                self.program_units.clone()
+            },
+        );
+        answer.insert(
             "kept_file_transfer".into(),
             if self.kept_file_transfer.is_empty() {
                 OperationSupport::available(
@@ -410,6 +424,7 @@ impl DriverDescriptor {
             gateway_access: Some(crate::host::GatewayAccess::NodeAddress),
             volume_export_consistency: None,
             host_ports: OperationSupport::available(true, ""),
+            program_units: OperationSupport::default(),
             kept_file_transfer: OperationSupport::default(),
             local_accounts: false,
             unavailable: BTreeMap::new(),
@@ -640,6 +655,10 @@ mod tests {
         assert!(descriptor.capabilities.is_empty() && !descriptor.private_views);
         assert_eq!(descriptor.network_egress, vec![EgressMode::Open]);
         assert!(!descriptor.makes_units_for(RuntimeKind::Environment));
+        assert!(
+            !descriptor.availability()["program_units"].supported,
+            "a directory attachment does not imply an isolated execution unit"
+        );
     }
 
     /// A descriptor of the first built-in driver, as it is published.

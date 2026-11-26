@@ -49,6 +49,7 @@ impl Harness {
             config: ProfileConfig::default(),
             inherited: BTreeMap::new(),
             as_root: false,
+            sandbox: Default::default(),
         }
     }
 

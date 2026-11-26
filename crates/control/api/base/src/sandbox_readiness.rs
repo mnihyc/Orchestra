@@ -85,6 +85,7 @@ impl Prepared {
             .map(|row| -> ApiResult<MachineRef> {
                 Ok(MachineRef {
                     id: row.id,
+                    host_id: row.host_id,
                     name: row.name.clone(),
                     online: row.online,
                     placement: serde_json::from_value(Json::String(row.placement.clone()))
@@ -145,6 +146,9 @@ pub async fn prepare(
     let modes = descriptor
         .as_ref()
         .map(|descriptor| descriptor.sandbox_modes.as_slice());
+    let reason = descriptor
+        .as_ref()
+        .and_then(|descriptor| descriptor.sandbox_reason.as_deref());
     let mut candidates = Vec::new();
     if let Some(executor) = executor {
         candidates.push(orch_engine::sessions::sandbox_readiness(
@@ -154,6 +158,7 @@ pub async fn prepare(
             &physical,
             template.as_ref(),
             Some(executor),
+            None,
         ));
     } else if agent.is_some() {
         candidates.push(orch_engine::sessions::sandbox_readiness(
@@ -163,6 +168,7 @@ pub async fn prepare(
             &physical,
             template.as_ref(),
             None,
+            reason,
         ));
     } else {
         let offers = orch_engine::binding::offers_of(conn, row.id)
@@ -195,6 +201,7 @@ pub async fn prepare(
                     &physical,
                     template.as_ref(),
                     Some(kind),
+                    None,
                 ));
             }
         }
@@ -212,6 +219,7 @@ pub async fn prepare(
                 &physical,
                 template.as_ref(),
                 executor,
+                reason,
             )
         });
     let (machine, policy_manage) = match physical.machine_id {

@@ -97,10 +97,7 @@ pub async fn resolve(url: &Url, allowed: Option<&[String]>) -> Result<Target, De
         }
     }
     match (addresses.is_empty(), refusal) {
-        (true, Some(refused)) => Err(DeliverError::refused(
-            "address_not_allowed",
-            &refused.to_string(),
-        )),
+        (true, Some(refused)) => Err(refused.refusal("url")),
         _ => Ok(Target {
             url: url.clone(),
             host: name,

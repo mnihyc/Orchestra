@@ -1,10 +1,8 @@
 /** The existing dialog, picker and people card keep each native copy as one deliberate act. */
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import type * as SearchApi from '@/api/search';
+import { namedPlace, placeNamePage } from './picker-name-fixture';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useEffect } from 'react';
-import { useQueryClient, type QueryClient } from '@tanstack/react-query';
-import type * as Loss from '@/api/loss';
-import { ADA } from '../unit/general-access-fixtures';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Router from '@tanstack/react-router';
 import type * as Copies from '@/api/duplicates';
@@ -23,15 +21,21 @@ import { treeNode } from '../doubles/tree-node';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ judge: vi.fn<typeof Destinations.judgeCopyDestinations>(), copy: vi.fn<typeof Copies.duplicate>(), document: vi.fn<typeof Copies.duplicateDocument>(),
-  preview: vi.fn<typeof Copies.previewChatDuplicate>(), recipients: vi.fn<typeof Loss.moreOperationRecipients>(), tree: vi.fn<typeof Nodes.fetchTree>(), navigate: vi.fn<(options: { href: string }) => Promise<void>>(), current: vi.fn<() => boolean>() }));
-vi.mock('@/api/loss', async (original) => ({ ...await original<typeof Loss>(), moreOperationRecipients: calls.recipients }));
+  preview: vi.fn(), tree: vi.fn<typeof Nodes.fetchTreePage>(), navigate: vi.fn<(options: { href: string }) => Promise<void>>(), current: vi.fn<() => boolean>() }));
+vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), pickerNamesQuery: (search: SearchApi.NameSearch) => {
+  const places = ([['source-org','Source'],['other-org','Other org']] as const).flatMap(([id,name]) => {
+    const root = namedPlace(id, 'org', name);
+    return [root, namedPlace(id+'-topic','topic','A topic',root)];
+  });
+  return placeNamePage(search, places);
+} }));
 vi.mock('@/api/duplicates', async (original) => ({ ...await original<typeof Copies>(), duplicate: calls.copy, duplicateDocument: calls.document, previewChatDuplicate: calls.preview }));
 vi.mock('@/api/resourceLibrary', async (original) => ({ ...await original<typeof Library>(), sameLibraryReader: () => calls.current() }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), useNavigate: () => calls.navigate }));
 vi.mock('@/api/copyDestinations', async (original) => ({ ...await original<typeof Destinations>(),
   copyDestinationsQuery: (request: Destinations.CopyDestinationsRequest, reader: readonly unknown[]) => ({ queryKey: ['copy-destinations', reader, request], queryFn: ({ signal }: { signal: AbortSignal }) => calls.judge(request, signal), retry: false, gcTime: 0 }),
 }));
-vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), fetchTree: calls.tree,
+vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), fetchTreePage: calls.tree,
   orgsQuery: { queryKey: ['copy-orgs'], queryFn: () => Promise.resolve([org('source-org', 'source', 'Source', userRef(me(1, 'reader', 'Reader'))), org('other-org', 'other', 'Other org', userRef(me(1, 'reader', 'Reader')))]) } }));
 const previous = client.session.getState();
 beforeEach(() => {
@@ -46,14 +50,13 @@ beforeEach(() => {
   calls.copy.mockImplementation((kind) => Promise.resolve({ projection: 'receipt', kind, id: 'fresh-copy' }));
   calls.document.mockResolvedValue({ kind: 'document', id: 'fresh-document' });
   calls.preview.mockResolvedValue({ people: 3, notify_limit: 200, preview_id: 'audience-preview' });
-  calls.recipients.mockResolvedValue({ people: { items: [ADA], next_cursor: null }, hidden: 2, total: 3 });
   calls.tree.mockImplementation((id) => Promise.resolve({ nodes: [treeNode({ id, kind: 'org', parent_id: null, name: id === 'source-org' ? 'Source' : 'Other org' }), treeNode({ id: `${id}-topic`, kind: 'topic', parent_id: id, name: 'A topic' })], hidden: [], seq: 1, next_cursor: null, complete: true, since: null }));
 });
 afterEach(async () => { cleanup(); useDuplicateHost.getState().close(); client.session.setState(previous); await setLocale('en'); });
 const target = { kind: 'provider', id: 'source', name: 'Provider', revision: 7 } as const;
 async function chooseOther(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  await user.click(await screen.findByRole('option', { name: 'Other org' }));
+  await user.click(await screen.findByRole('treeitem', { name: 'Other org' }));
 }
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`keeps a missing native setup observation unknown after a completed copy (${locale})`, async () => {
@@ -98,10 +101,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await setLocale(locale); const user = userEvent.setup(); show(<DuplicateDialog target={target} onClose={() => undefined} />);
     await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
     await waitFor(() => {
-      const topic = screen.getByRole('option', { name: 'Other org / A topic' });
+      const topic = screen.getByRole('treeitem', { name: 'Other org / A topic' });
       expect(topic).toHaveAttribute('aria-disabled', 'true'); expect(topic).toHaveTextContent(i18n.t('duplicate.causes.destination_creation'));
     });
-    await user.click(screen.getByRole('option', { name: 'Other org' }));
+    await user.click(screen.getByRole('treeitem', { name: 'Other org' }));
     await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
     await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('provider', 'source', { expected_revision: 7, destination: { kind: 'node', id: 'other-org' } }, expect.any(String), {}));
   });
@@ -112,18 +115,15 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
     await screen.findByRole('alert'); expect(screen.getByText('Other org', { exact: true })).toBeInTheDocument(); expect(calls.navigate).not.toHaveBeenCalled();
   });
-  it(`notifies the native contributor preview only after the explicit choice in ${locale}`, async () => {
-    await setLocale(locale); const user = userEvent.setup(); show(<DuplicateDialog target={{ kind: 'chat', id: 'group', name: 'Design' }} onClose={() => undefined} />);
-    await chooseOther(user); const check = screen.getByRole('checkbox'); expect(check).not.toBeChecked();
-    await user.click(check); await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
-    await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('chat', 'group', { destination: { kind: 'node', id: 'other-org' } }, expect.any(String), { notify: { preview: 'audience-preview' } }));
-  });
-  it(`a notification limit does not prevent a silent native copy in ${locale}`, async () => {
-    await setLocale(locale); calls.preview.mockResolvedValue({ people: 201, notify_limit: 200, preview_id: null });
-    const user = userEvent.setup(); show(<DuplicateDialog target={{ kind: 'chat', id: 'group', name: 'Design' }} onClose={() => undefined} />);
-    await chooseOther(user); expect(screen.getByRole('checkbox')).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
-    await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('chat', 'group', { destination: { kind: 'node', id: 'other-org' } }, expect.any(String), {}));
+  it(`copies a group without reading or notifying its contributors in ${locale}`, async () => {
+    await setLocale(locale);
+    const user = userEvent.setup();
+    show(<DuplicateDialog target={{kind:'chat', id:'group', name:'Design'}} onClose={() => undefined} />);
+    await chooseOther(user);
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', {name:i18n.t('duplicate.now')}));
+    await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('chat','group',{destination:{kind:'node',id:'other-org'}},expect.any(String),{}));
+    expect(calls.preview).not.toHaveBeenCalled();
   });
 }
 it('a lost answer retries the same act key and never borrows source configuration', async () => {
@@ -134,6 +134,8 @@ it('a lost answer retries the same act key and never borrows source configuratio
 });
 it('a changed deliberate destination/name gets a different act identity', async () => {
   calls.copy.mockRejectedValue(new NetworkError('failed')); const user = userEvent.setup(); show(<DuplicateDialog target={target} onClose={() => undefined} />);
+  const name = screen.getByRole('textbox', { name: new RegExp(i18n.t('duplicate.name')) });
+  expect(name.compareDocumentPosition(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   await chooseOther(user); await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
   await screen.findByRole('alert'); await user.type(screen.getByRole('textbox', { name: new RegExp(i18n.t('duplicate.name')) }), 'Separate provider');
   await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
@@ -159,40 +161,6 @@ it('documents use their actual immediate native directory and open the returned 
   await waitFor(() => expect(calls.document).toHaveBeenCalledWith('source-document', { kind: 'container', id: 'source-folder' }, undefined, expect.any(String)));
   expect(calls.copy).not.toHaveBeenCalled(); await waitFor(() => expect(calls.navigate.mock.calls.at(-1)?.[0].href).toMatch(/\/doc\/fresh-document$/u));
 });
-it('an audience read failure leaves the notification choice unavailable while silent copy remains possible', async () => {
-  calls.preview.mockRejectedValue(new NetworkError('failed')); const user = userEvent.setup(); show(<DuplicateDialog target={{ kind: 'chat', id: 'group', name: 'Design' }} onClose={() => undefined} />);
-  await chooseOther(user); expect(screen.getByRole('checkbox')).toBeDisabled();
-  const dialog = screen.getByRole('dialog'); await user.click(within(dialog).getByRole('button', { name: i18n.t('duplicate.now') }));
-  await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('chat', 'group', { destination: { kind: 'node', id: 'other-org' } }, expect.any(String), {}));
-});
-
-const held: { cache: QueryClient | null } = { cache: null };
-function CurrentCache() {
-  const cache = useQueryClient();
-  useEffect(() => { held.cache = cache; return () => { held.cache = null; }; }, [cache]);
-  return null;
-}
-it('a contributor preview refresh cannot turn retry into a second copy with a different key', async () => {
-  calls.copy.mockRejectedValueOnce(new NetworkError('failed'));
-  const user = userEvent.setup(); show(<><CurrentCache /><DuplicateDialog target={{ kind: 'chat', id: 'group', name: 'Design' }} onClose={() => undefined} /></>);
-  await chooseOther(user); await user.click(screen.getByRole('checkbox')); await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
-  await screen.findByRole('button', { name: i18n.t('common.tryAgain') });
-  calls.preview.mockResolvedValue({ people: 4, notify_limit: 200, preview_id: 'new-preview' });
-  await act(async () => { await held.cache?.invalidateQueries({ queryKey: ['chat-duplicate-audience'] }); });
-  await waitFor(() => expect(calls.preview).toHaveBeenCalledTimes(2));
-  await user.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
-  await waitFor(() => expect(calls.copy).toHaveBeenCalledTimes(2));
-  expect(calls.copy.mock.calls[1]).toEqual(calls.copy.mock.calls[0]);
-  expect(calls.copy.mock.calls[1]?.[4]).toEqual({ notify: { preview: 'audience-preview' } });
-});
-it('opens actual native recipient names through the common bounded people list', async () => {
-  const user = userEvent.setup(); show(<DuplicateDialog target={{ kind: 'chat', id: 'group', name: 'Design' }} onClose={() => undefined} />);
-  const count = await screen.findByRole('button', { name: i18n.t('operation.notify', { count: 3, number: '3' }) });
-  await user.click(count); await screen.findByText(ADA.display_name, { exact: true });
-  expect(calls.recipients).toHaveBeenCalledWith('audience-preview', undefined, expect.any(AbortSignal));
-  expect(calls.copy).not.toHaveBeenCalled();
-});
-
 for (const locale of ['en', 'zh-CN'] as const) it(`fulfils the native environment placement choice with destination defaults (${locale})`, async () => {
   await setLocale(locale);
   calls.judge.mockImplementation((request) => Promise.resolve({ subject: request.subject, intent: request.intent, source_owned: false,

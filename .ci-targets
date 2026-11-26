@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/member-move-at-once.test.tsx tests/component/project-page-selection.test.tsx tests/component/archive-at-once.test.tsx tests/component/mcp-switch-off.test.tsx
