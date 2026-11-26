@@ -73,28 +73,35 @@ pub(crate) async fn prepare(
     )
     .await
     .map_err(ApiError::internal)?;
-    let range = match chat {
-        Some(chat) => sources::disclosure_range(conn, &principal, chat).await.ok(),
-        None => None,
-    };
-    let mut targets = Vec::new();
-    if let Some(chat) = chat {
-        if let Some(range) = range {
-            targets.push((SummaryTarget::Chat { id: chat }, Some(range)));
-        }
-        targets.push((SummaryTarget::ChatTitle { id: chat }, None));
-    }
-    if let Some(place) = place {
-        targets.push((place, None));
-    }
     let mut views = Vec::new();
-    for (target, wanted) in targets {
-        // Each optional source has its own admission; a missing view never drops its siblings.
-        if let Ok(Some(view)) = optional_view(ctx, conn, caller, target, wanted, plan, slots).await
-        {
-            views.push(view);
+    // The chat's range, its catch-up, its title and the place ask again whether the chat opens for the reader and
+    // whether the reader may use the place's model: decided once for all of them.
+    let range = orch_engine::summaries::once::deciding(async {
+        let range = match chat {
+            Some(chat) => sources::disclosure_range(conn, &principal, chat).await.ok(),
+            None => None,
+        };
+        let mut targets = Vec::new();
+        if let Some(chat) = chat {
+            if let Some(range) = range {
+                targets.push((SummaryTarget::Chat { id: chat }, Some(range)));
+            }
+            targets.push((SummaryTarget::ChatTitle { id: chat }, None));
         }
-    }
+        if let Some(place) = place {
+            targets.push((place, None));
+        }
+        for (target, wanted) in targets {
+            // Each optional source has its own admission; a missing view never drops its siblings.
+            if let Ok(Some(view)) =
+                optional_view(ctx, conn, caller, target, wanted, plan, slots).await
+            {
+                views.push(view);
+            }
+        }
+        range
+    })
+    .await;
     Ok((!views.is_empty()).then(|| {
         Arc::new(Embedded {
             views,
@@ -133,7 +140,7 @@ async fn optional_view(
         .map(Some)
 }
 
-/// The actual original opening caller and every source are restored at the final byte boundary.
+/// Check the original opening caller and sources in the snapshot taken before the reply is published.
 pub(crate) fn retain(ctx: &Ctx, principal: &Principal, selected: &Arc<Embedded>) -> ApiResult<()> {
     let caller = principal.caller();
     let selection = caller
@@ -145,32 +152,50 @@ pub(crate) fn retain(ctx: &Ctx, principal: &Principal, selected: &Arc<Embedded>)
         caller,
         (Arc::clone(selected), selection),
         |ctx, conn, current, (old, selection)| {
-            Box::pin(async move {
+            Box::pin(orch_engine::summaries::once::deciding(async move {
                 let plan = Prepared::new(ctx.route, selection).map_err(source_error)?;
+                let principal = Principal::load(
+                    conn,
+                    plan.preparation_caller(current.caller())
+                        .map_err(source_error)?,
+                    ctx.app.clock.time(),
+                )
+                .await
+                .map_err(ApiError::internal)?;
                 for view in &old.views {
-                    let target = view.identity.target();
-                    let wanted = if matches!(target, SummaryTarget::Chat { .. }) {
-                        old.range
-                    } else {
-                        None
-                    };
-                    let fresh = optional_view(
-                        ctx,
-                        conn,
-                        current.caller(),
-                        target,
-                        wanted,
-                        &plan,
-                        old.slots,
-                    )
-                    .await?
-                    .ok_or_else(ApiError::not_found)?;
-                    if !same_view(view, &fresh) {
+                    let held =
+                        sources_held(conn, current.caller(), &principal, &plan, view, old.slots)
+                            .await?;
+                    if crate::testing::comparing_summary_sources() {
+                        let wanted = match view.identity.target() {
+                            SummaryTarget::Chat { .. } => old.range,
+                            _ => None,
+                        };
+                        let rebuilt = sources_held_by_rebuilding(
+                            ctx,
+                            conn,
+                            current.caller(),
+                            &plan,
+                            view,
+                            wanted,
+                            old.slots,
+                        )
+                        .await?;
+                        crate::testing::note_boundary(
+                            ctx.route.name,
+                            if held == rebuilt {
+                                "embedded.sources_agree"
+                            } else {
+                                "embedded.sources_differ"
+                            },
+                        );
+                    }
+                    if !held {
                         return Err(ApiError::not_found());
                     }
                 }
                 Ok(())
-            })
+            }))
         },
     )
 }

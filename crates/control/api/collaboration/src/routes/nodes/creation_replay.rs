@@ -123,6 +123,7 @@ const COMPOUND: Declaration<&str> = Declaration {
             FacetUsage::ResponseContent,
         ),
         collection("creator_new_environment_homes", FacetUsage::Required),
+        collection("creator_pool_placement", FacetUsage::Required),
         collection("creator_initial_file_threads", FacetUsage::Required),
         collection("creator_initial_file_environments", FacetUsage::Required),
         collection("creator_file_environments", FacetUsage::Required),

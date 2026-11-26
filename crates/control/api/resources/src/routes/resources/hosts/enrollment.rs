@@ -35,11 +35,12 @@ pub(super) fn fault(fault: crate::certificates::LinkFault) -> ApiError {
     ApiError::internal(format!("{}: {}", fault.code, fault.detail))
 }
 
-pub(super) fn validate(
+pub(super) async fn validate(
     ctx: &Ctx,
+    conn: &mut Conn,
     body: &api::HostEnrollmentTokenCreateBody,
 ) -> ApiResult<(orch_config::ServerConfig, Option<String>)> {
-    let installation = super::super::machines::installation_config(ctx);
+    let installation = super::super::machines::installation_config(ctx, conn).await?;
     super::super::machines::require_node_installable(&installation)?;
     let hint = body
         .name_hint
@@ -65,7 +66,7 @@ pub(super) fn resolve<'a>(
     body: api::HostEnrollmentTokenCreateBody,
 ) -> OperationFuture<'a> {
     Box::pin(async move {
-        validate(ctx, &body)?;
+        validate(ctx, conn, &body).await?;
         let target = crate::routes::resources::creation_home::target(conn, body.home_id).await?;
         let plan: OperationPlan = native::bind_required(
             ctx,

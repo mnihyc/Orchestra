@@ -2,7 +2,8 @@
 //!
 //! The call is not made yet and the conversation is not written, so the figures are estimates: the input is the
 //! newest turns in brief and an index line for each older one, as long as the conversation has material for, and never
-//! more than the place's share of the model's window (`summary.handoff_input_share`).
+//! more than the place's share of the model's window (`summary.handoff_input_share`). The output is what the request
+//! itself would ask for: the answer's allowance and, for a model that reasons, the room left for its reasoning.
 
 use super::budget::input_budget;
 use super::choice;
@@ -21,6 +22,7 @@ pub(crate) const FRAME_TOKENS: i64 = 250;
 
 /// What a summary of `turns` turns of `thread` will send and cost, where a summary model is chosen for its place.
 pub(crate) async fn handoff_estimate(
+    engine: &crate::Engine,
     conn: &mut Conn,
     thread: Id,
     turns: i64,
@@ -36,21 +38,62 @@ pub(crate) async fn handoff_estimate(
     let Some(chosen) = choice(conn, thread).await? else {
         return Ok(none);
     };
+    let wanted = turns
+        .max(0)
+        .saturating_mul(BRIEF_TURN_BYTES + INDEX_LINE_BYTES);
+    if chosen.kind == "model"
+        && let Some(id) = Config::pool_id(&chosen.config).map_err(EngineError::unreadable)?
+    {
+        let Some(options) = super::pool::handoff_preview(engine, conn, &chosen, thread, id).await?
+        else {
+            return Ok(none);
+        };
+        return Ok(HistorySummaryEstimate {
+            available: true,
+            window: None,
+            share: super::budget::handoff_share(conn, thread).await?,
+            input_tokens: (wanted / crate::fork_history::CARRY_BYTES_PER_TOKEN + FRAME_TOKENS)
+                .min(i64::from(options.context_tokens)),
+            output_tokens: options.output_reserve(
+                orch_summarizer_contract::descriptor::SummaryField::Handoff,
+                true,
+            ),
+            credits: None,
+        });
+    }
     let Ok(config) = Config::read(&chosen.config)
         .map_err(|_| ())
         .and_then(|config| (chosen.kind == "model").then_some(config).ok_or(()))
     else {
         return Ok(none);
     };
-    let budget = input_budget(conn, thread, config.provider_id, &config.model_name).await?;
-    let wanted = turns
-        .max(0)
-        .saturating_mul(BRIEF_TURN_BYTES + INDEX_LINE_BYTES);
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    // The output a request asks for is whatever the function that builds the request says: the visible answer's
+    // allowance and, for a model that reasons, the room it is left for its reasoning.
+    let reasoning = orch_summarizer_model::Reasoning {
+        reasons: super::budget::reasons(conn, &config).await?,
+        lowest_effort: None,
+    };
+    let output_tokens = config
+        .completion_with(
+            &reasoning,
+            String::new(),
+            String::new(),
+            config.answer_max_output_tokens,
+        )
+        .max_output_tokens;
+    let budget = input_budget(
+        conn,
+        thread,
+        offering.provider,
+        &offering.offering,
+        output_tokens,
+    )
+    .await?;
     let bytes = wanted.min(i64::try_from(budget.bytes).unwrap_or(i64::MAX));
     let input_tokens =
         (bytes / crate::fork_history::CARRY_BYTES_PER_TOKEN + FRAME_TOKENS).min(budget.tokens);
-    let output_tokens = config.max_output_tokens;
-    let own = crate::caps::own_rate(conn, config.provider_id, &config.model_name).await?;
+    let own = crate::caps::own_rate(conn, offering.provider, &offering.offering).await?;
     let book = crate::rates::RateBook::load(conn, thread).await?;
     let tokens = orch_db::usage::ledger::Tokens {
         input: input_tokens,
@@ -64,7 +107,7 @@ pub(crate) async fn handoff_estimate(
         .price(
             conn,
             own.as_ref(),
-            &config.model_name,
+            &offering.offering,
             &tokens,
             Some(input_tokens),
             None,

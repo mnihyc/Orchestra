@@ -1,3 +1,4 @@
+import { defaultProviderId } from '@/features/settings/threadDefaults';
 /** Screen transports reuse native fixture projections and preserve each caller's admission. */
 import type { ActivityEntryPage, ChatOpening, FirstSteps, Node, NodeChatOpening, NodeDefaultsOpening, NodeDocumentPage, NodeOverview, NodeKind, NodeRef, OrgOverview, PortOpeningPage, Problem, ResolvedSetting, UsageAnalytics } from '../../src/generated/api-types.ts';
 import { Refusal, type Answer, type Person, type World } from './world.ts';
@@ -79,7 +80,7 @@ export async function orgLandingPlaces(world: World, person: Person, root: strin
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 function selectedProvider(rows: ResolvedSetting[] | null, key: string, member?: string): string | null {
   const resolved = rows?.find((row) => row.key === key)?.value;
-  const value = member === undefined ? resolved : record(resolved) ? resolved[member] : null;
+  const value = key === 'agent.default_provider_id' ? defaultProviderId(resolved) : member === undefined ? resolved : record(resolved) ? resolved[member] : null;
   return typeof value === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value) ? value : null;
 }
 

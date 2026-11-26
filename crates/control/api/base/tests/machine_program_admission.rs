@@ -90,6 +90,7 @@ impl Floor {
             json!([{"type":"separated","executor":"codex-exec-server","executor_version":"same"}]);
         rig.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".into(),
                 descriptor: serde_json::from_value(descriptor.clone()).unwrap(),
@@ -211,13 +212,13 @@ impl Floor {
             .token(&self.owner.token)
             .body(&CreateThread {
                 name: Some("Current native builds".into()),
-                binding: Some(CreateThreadBinding {
-                    agent_id: self.agent,
-                    provider_id: self.provider,
-                    arrangement: Some(orch_api_contract::binding::ArrangementType::Separated),
-                }),
+                binding: Some(CreateThreadBinding::provider(
+                    self.agent,
+                    self.provider,
+                    Some(orch_api_contract::binding::ArrangementType::Separated),
+                )),
                 model: Some(MODEL.into()),
-                environment: Some(EnvironmentChoice::Use(self.environment)),
+                environment: Some(EnvironmentChoice::existing(self.environment)),
                 directory: Some(String::new()),
                 prepare_source: Some(false),
                 ..Default::default()

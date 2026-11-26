@@ -1161,6 +1161,7 @@ impl Engine {
             meaning_work.0 = None;
             match answer {
                 crate::semantic::query::Meaning::Found {
+                    receipt: _,
                     near,
                     fusion_k,
                     candidates,

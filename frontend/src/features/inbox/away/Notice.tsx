@@ -1,4 +1,5 @@
 /** A route's historical Inbox notice names only supplied safe outcome facts and its existing repair card. */
+import { PathLink } from '@/shell/TrailLink';
 import { useTranslation } from 'react-i18next';
 import type { MouseEventHandler } from 'react';
 
@@ -13,5 +14,5 @@ export function noticeWords(row: Notification): { way: string | null; reason: st
 export function RouteNotice({ row, onOpen, onAuxOpen }: { row: Notification; onOpen?: MouseEventHandler<HTMLAnchorElement>; onAuxOpen?: MouseEventHandler<HTMLAnchorElement> }) {
   const { t } = useTranslation();
   const words = noticeWords(row);
-  return <span className="flex flex-col gap-1 text-sm text-text-muted">{words.reason !== null && <span>{words.reason}</span>}{words.devices.length > 0 && <span>{t('away.outcome.partial', { devices: words.devices.join(t('startFlow.separator')) })}</span>}<span>{t('away.outcome.lastAccepted')} {words.accepted === null ? t('away.outcome.never') : <RelativeTime at={words.accepted} />}</span>{words.count !== null && <span>{t('away.outcome.waiting', { count: words.count })}</span>}<a href={row.url} onClick={onOpen} onAuxClick={onAuxOpen} className="pointer-events-auto relative z-10 font-medium text-accent-text">{t('away.outcome.open')}</a></span>;
+  return <span className="flex flex-col gap-1 text-sm text-text-muted">{words.reason !== null && <span>{words.reason}</span>}{words.devices.length > 0 && <span>{t('away.outcome.partial', { devices: words.devices.join(t('startFlow.separator')) })}</span>}<span>{t('away.outcome.lastAccepted')} {words.accepted === null ? t('away.outcome.never') : <RelativeTime at={words.accepted} />}</span>{words.count !== null && <span>{t('away.outcome.waiting', { count: words.count })}</span>}<PathLink href={row.url} onClick={onOpen} onAuxClick={onAuxOpen} className="pointer-events-auto relative z-10 font-medium text-accent-text">{t('away.outcome.open')}</PathLink></span>;
 }

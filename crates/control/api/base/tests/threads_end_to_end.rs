@@ -89,13 +89,9 @@ async fn a_thread_goes_from_its_making_to_the_agents_answer_through_the_whole_sy
         .token(&ada.token)
         .body(&CreateThread {
             name: Some("Fix login".to_owned()),
-            binding: Some(CreateThreadBinding {
-                agent_id: on.agent,
-                provider_id: on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(on.agent, on.provider, None)),
             model: Some(MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(on.environment)),
+            environment: Some(EnvironmentChoice::existing(on.environment)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

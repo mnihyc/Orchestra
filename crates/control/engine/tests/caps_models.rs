@@ -151,7 +151,13 @@ impl Cap {
 /// A thread that runs `model`, at the speed `tier` where it chose one.
 async fn thread_of(world: &World, name: &str, model: &str, tier: Option<&str>) -> Id {
     let thread = world.thread(name).await;
-    world.set(thread, keys::AGENT_MODEL, json!(model)).await;
+    world
+        .set(
+            thread,
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":model}),
+        )
+        .await;
     if let Some(tier) = tier {
         world
             .set(thread, keys::AGENT_PARAMS, json!({ "service_tier": tier }))

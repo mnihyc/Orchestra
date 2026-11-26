@@ -197,7 +197,7 @@ pub(crate) async fn project(
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            let identity = super::server::current_identity(&app, &mut conn, &origin)
+            let identity = super::server::delivery_identity(&app, &mut conn, &origin)
                 .await
                 .map_err(Fail::other)?;
             identity.check_deadline(&app).map_err(Fail::other)?;
@@ -211,7 +211,7 @@ pub(crate) async fn project(
         if !connection.still_current(&origin) {
             return Ok(Projection::Changed);
         }
-        let identity = super::server::current_identity(&app, &mut conn, &origin)
+        let identity = super::server::delivery_identity(&app, &mut conn, &origin)
             .await
             .map_err(Fail::other)?;
         let reader = match crate::key_operations::background_read::prepare(
@@ -247,7 +247,7 @@ pub(crate) async fn project(
             super::background_read_tests::Cut::SocketProjected,
         )
         .await;
-        let identity = super::server::current_identity(&app, &mut conn, &origin)
+        let identity = super::server::delivery_identity(&app, &mut conn, &origin)
             .await
             .map_err(Fail::other)?;
         let current = match crate::key_operations::background_read::prepare(

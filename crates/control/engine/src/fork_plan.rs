@@ -24,6 +24,7 @@ pub mod command;
 /// Native original-Thread deletion inside the existing fork mechanism.
 pub mod moving;
 pub mod operation;
+pub(crate) mod pool;
 pub(crate) mod program;
 use crate::access::{Answer, ProviderUse, RunsIn};
 use crate::binding::{self, Facts};
@@ -105,15 +106,6 @@ pub mod code {
 /// The longest name a thread made by a fork may be given, as a thread's name is bounded.
 const NAME_MAX_CHARS: usize = binding::NAME_MAX_CHARS;
 
-/// The fewest minutes a switch may wait for a turn: it may be told not to wait at all.
-const WAIT_MINUTES_MIN: i64 = 0;
-/// The most minutes a switch may wait for a turn: a day.
-const WAIT_MINUTES_MAX: i64 = 1_440;
-/// The fewest seconds the health checks may be given.
-const VERIFY_SECS_MIN: i64 = 10;
-/// The most seconds the health checks may be given: an hour.
-const VERIFY_SECS_MAX: i64 = 3_600;
-
 /// Why a plan could not be made at all.
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
@@ -194,6 +186,7 @@ impl From<serde_json::Error> for PlanError {
 /// A plan that is worked out and not yet kept.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
+    pub(crate) review: Option<pool::Review>,
     /// What was asked, with the omitted members left omitted.
     pub request: ForkRequest,
     /// The exact choice or omitted preset captured for this new holder.
@@ -303,7 +296,9 @@ impl PreparedFork {
                     host: Some(host), ..
                 } = &self.target.landing
             {
-                new.host_id = Some(Some(host.host.id));
+                new.host_id = Some(Some(orch_provider_contract::pools::Target::host(
+                    host.host.id,
+                )));
             }
         }
         Ok(())
@@ -319,6 +314,7 @@ impl PreparedFork {
             && self.target.agent.id == fresh.target.agent.id
             && self.target.provider.id == fresh.target.provider.id
             && self.target.descriptor == fresh.target.descriptor
+            && self.target.review == fresh.target.review
             && self.target.model == fresh.target.model
             && self.target.effort == fresh.target.effort
             && self.target.arrangement == fresh.target.arrangement
@@ -429,6 +425,8 @@ impl Draft {
 /// A plan as it is kept between asking for it and carrying it out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) review: Option<pool::Review>,
     /// What was asked.
     pub request: ForkRequest,
     /// What was answered.
@@ -447,6 +445,19 @@ pub struct StoredPlan {
     /// The same native explicit notice audience, retained only for this Move preflight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) move_people: Option<moving::Audience>,
+}
+
+impl StoredPlan {
+    /// The real source of a moved Thread's privately reviewed contributor list.
+    #[must_use]
+    pub fn move_recipient_subject(&self) -> Option<orch_access_contract::decisions::ObjectRef> {
+        self.moving
+            .as_ref()
+            .map(|_| orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Thread,
+                id: self.source,
+            })
+    }
 }
 
 /// One plan of a kept batch: the thread, what was asked of it, and how the caller reached it.
@@ -749,6 +760,7 @@ impl Promised {
 /// What the result runs on.
 #[derive(Clone)]
 struct Target {
+    review: Option<pool::Review>,
     agent: AgentRow,
     provider: ProviderRow,
     descriptor: AgentDescriptor,
@@ -878,16 +890,16 @@ pub(crate) async fn applied_options(
             .await?
             .unwrap_or(false),
     };
-    if !(WAIT_MINUTES_MIN..=WAIT_MINUTES_MAX).contains(&wait_minutes) {
+    if wait_minutes < 0 || chrono::Duration::try_minutes(wait_minutes).is_none() {
         return Err(PlanError::invalid(
             "options.wait_minutes",
-            format!("is between {WAIT_MINUTES_MIN} and {WAIT_MINUTES_MAX}"),
+            "must be a nonnegative representable duration",
         ));
     }
-    if !(VERIFY_SECS_MIN..=VERIFY_SECS_MAX).contains(&verify_timeout_secs) {
+    if verify_timeout_secs < 1 || chrono::Duration::try_seconds(verify_timeout_secs).is_none() {
         return Err(PlanError::invalid(
             "options.verify_timeout_secs",
-            format!("is between {VERIFY_SECS_MIN} and {VERIFY_SECS_MAX}"),
+            "must be a positive representable duration",
         ));
     }
     Ok(AppliedChangeOptions {
@@ -977,6 +989,11 @@ async fn choose_host(
 ) -> Result<(Option<Box<crate::places::HostPlace>>, Promised), PlanError> {
     use crate::places::{self, Ask, IDLE_MINUTES_DEFAULT};
     use orch_db::queries::resources::hosting as host_rows;
+    if let Some(Some(target)) = &new.host_id {
+        target
+            .validate(orch_provider_contract::pools::Kind::Host)
+            .map_err(|reason| PlanError::invalid("environment.new.host_id", reason))?;
+    }
     if let Some(config) = &new.config {
         crate::environments::check_initial_program_consent(config).map_err(|reason| {
             PlanError::invalid("environment.new.config.exec.version_overrides", reason)
@@ -1035,34 +1052,55 @@ async fn choose_host(
             Json::String(template_id.to_string()),
         );
     }
-    if let Some(Some(host)) = new.host_id {
-        own.insert(keys::ENV_HOST_ID.to_owned(), Json::String(host.to_string()));
+    if let Some(host) = &new.host_id {
+        own.insert(keys::ENV_HOST_ID.to_owned(), serde_json::to_value(host)?);
     }
     let own = Json::Object(own);
     let wanted = places::wanted(conn, home, template, &own).await?;
-    let named: Option<Id> = match new.host_id {
-        Some(Some(host)) => Some(host),
-        _ => places::resolved_for_new(conn, home, &own, keys::ENV_HOST_ID)
+    let host_target: Option<orch_provider_contract::pools::Target> = match &new.host_id {
+        Some(host) => host.clone(),
+        None => places::resolved_for_new(conn, home, &own, keys::ENV_HOST_ID)
             .await?
-            .and_then(|value| serde_json::from_value(value).ok()),
+            .filter(|value| !value.is_null())
+            .map(serde_json::from_value)
+            .transpose()?,
     };
+    let named = host_target
+        .as_ref()
+        .and_then(orch_provider_contract::pools::Target::single_host);
     let minutes_idle = places::resolved_for_new(conn, home, &own, keys::ENV_RECYCLE_IDLE_MINUTES)
         .await?
         .and_then(|value| value.as_i64())
         .unwrap_or(IDLE_MINUTES_DEFAULT);
-    let listed = places::host_places(
-        conn,
-        principal,
-        &Ask {
-            home,
-            wanted: &wanted,
-            current: None,
-            minutes_idle,
-            now,
-        },
-    )
-    .await?;
-    match places::choose(&listed, named) {
+    let ask = Ask {
+        home,
+        wanted: &wanted,
+        current: None,
+        minutes_idle,
+        now,
+    };
+    let mut pool_refusal = None;
+    let listed = if let Some(target) = &host_target {
+        crate::resource_choice::host::select(
+            conn,
+            principal,
+            &crate::resource_choice::host::Request {
+                ask: &ask,
+                target,
+                config: &own,
+                bound: None,
+                creation: None,
+            },
+            &mut pool_refusal,
+        )
+        .await?
+        .into_iter()
+        .map(|placement| placement.place)
+        .collect()
+    } else {
+        places::host_places(conn, principal, &ask).await?
+    };
+    match places::choose(&listed, named).map_err(|why| pool_refusal.unwrap_or(why)) {
         Ok(place) => {
             if crate::jobs::environment_move::preparation::is_active() {
                 use orch_access_contract::{
@@ -1149,7 +1187,11 @@ async fn choose_agent(
     settings: &Resolved,
     blockers: &mut Blockers,
 ) -> Result<(AgentRow, AgentDescriptor), PlanError> {
-    let named = request.to.as_ref().and_then(|to| to.agent_id);
+    let named = request
+        .to
+        .as_ref()
+        .and_then(|to| to.agent_id)
+        .or_else(|| pool::target(request).and(source.map(|s| s.agent.id)));
     let mut candidates: Vec<Id> = Vec::new();
     match named {
         Some(id) => candidates.push(id),
@@ -1436,6 +1478,7 @@ impl Engine {
             machine,
             orch_link_contract::commands::SerialKey::Environment(environment.id),
             &orch_link_contract::commands::FsManifest {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment.id,
                 selection,
             },
@@ -1486,6 +1529,7 @@ fn isolation_view(
     );
     let offered = descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp;
     Ok(Isolation {
+        translation: isolation.translation,
         kind: convert(&isolation.kind)?,
         harness_runs_in: if isolation.harness_with_provider {
             HarnessPlace::Provider
@@ -1569,6 +1613,35 @@ impl Engine {
         self.assemble_prepared_fork(conn, &prepared).await
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the original native fork planner operands and the accepted recovery selection stay separate"
+    )]
+    pub(crate) async fn draft_pooled_in(
+        &self,
+        conn: &mut Conn,
+        caller: &Caller,
+        thread_id: Id,
+        request: &ForkRequest,
+        reach: Reach,
+        pool: &crate::resource_choice::ProviderSelection,
+    ) -> Result<Draft, PlanError> {
+        let prepared = prepare_with_pool_access(
+            conn,
+            self.inner.clock.as_ref(),
+            self.inner.access.as_ref(),
+            caller,
+            thread_id,
+            request,
+            reach,
+            None,
+            None,
+            Some(pool),
+        )
+        .await?;
+        self.assemble_prepared_fork(conn, &prepared).await
+    }
+
     /// Selects the native source, target binding and ordinary prerequisites without supplier IO.
     #[allow(
         clippy::too_many_arguments,
@@ -1618,8 +1691,49 @@ pub async fn prepare_with_access(
     own_batch: Option<Id>,
     captured_agent_access: Option<binding::BirthAgentAccess>,
 ) -> Result<PreparedFork, PlanError> {
+    prepare_with_pool_access(
+        conn,
+        clock,
+        access,
+        caller,
+        thread_id,
+        request,
+        reach,
+        own_batch,
+        captured_agent_access,
+        None,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the shared native selector retains its original operands and an explicit factual pool selection"
+)]
+pub(crate) async fn prepare_with_pool_access(
+    conn: &mut Conn,
+    clock: &dyn orch_types::Clock,
+    access: &dyn crate::access::ResourceAccess,
+    caller: &Caller,
+    thread_id: Id,
+    request: &ForkRequest,
+    reach: Reach,
+    own_batch: Option<Id>,
+    captured_agent_access: Option<binding::BirthAgentAccess>,
+    pool: Option<&crate::resource_choice::ProviderSelection>,
+) -> Result<PreparedFork, PlanError> {
     let now = clock.now();
     let person = caller.user();
+    if let Some(pool) = pool
+        && (pool.caller() != caller
+            || pool.purpose() != orch_access_contract::permissions::UsagePurpose::Turn)
+    {
+        return Err(PlanError::invalid(
+            "to",
+            "the pool selection belongs to another native request",
+        ));
+    }
     let principal = Principal::load(&mut *conn, caller.clone(), Time::new(now)).await?;
     let thread = threads::thread(&mut *conn, thread_id)
         .await?
@@ -1636,7 +1750,20 @@ pub async fn prepare_with_access(
     if replace && thread.side_of.is_some() {
         return Err(PlanError::Side);
     }
+    let pooled_target = pool::target(request).is_some();
+    if pooled_target && (reach != Reach::Seen || own_batch.is_some()) {
+        return Err(PlanError::invalid(
+            "to.target",
+            "Review the pool on the individual thread.",
+        ));
+    }
     if let Some(program) = orch_db::queries::ask::program_binding(conn, thread_id).await? {
+        if pooled_target {
+            return Err(PlanError::invalid(
+                "to.target",
+                "Choose the model for this program in its own settings.",
+            ));
+        }
         return program::prepare(
             conn,
             program::Request {
@@ -1649,6 +1776,7 @@ pub async fn prepare_with_access(
                 reach,
                 own_batch,
                 agent_access: captured_agent_access,
+                pool,
             },
         )
         .await;
@@ -1719,6 +1847,11 @@ pub async fn prepare_with_access(
         .await?
         .ok_or_else(|| EngineError::unreadable("the thread's profile never reported"))?;
     let settings = resolved::load(&mut *conn, thread_id).await?;
+    let selected = pool::select(conn, access, &principal, &thread, request, None).await?;
+    let pool = selected
+        .as_ref()
+        .and_then(|(chosen, _)| chosen.pool.as_ref())
+        .or(pool);
     let source = AgentSource {
         arrangement: parse_arrangement(thread.arrangement.as_deref()),
         model: settings.model.clone(),
@@ -1762,7 +1895,16 @@ pub async fn prepare_with_access(
     }
 
     // ---- what the result runs on
-    let wanted_provider = request.to.as_ref().and_then(|to| to.provider_id);
+    if pooled_target && selected.is_none() {
+        blockers.add(
+            code::NO_ARRANGEMENT,
+            "No usable member of this pool fits the agent, model and current environment.",
+        );
+    }
+    let wanted_provider = selected
+        .as_ref()
+        .map(|(chosen, _)| chosen.provider)
+        .or_else(|| request.to.as_ref().and_then(|to| to.provider_id));
     let provider = match wanted_provider {
         Some(id) if id != source.provider.id => {
             match resources::provider(&mut *conn, id)
@@ -1778,15 +1920,22 @@ pub async fn prepare_with_access(
         }
         _ => source.provider.clone(),
     };
-    let model = request
-        .to
+    let model = selected
         .as_ref()
-        .and_then(|to| to.model.clone())
+        .map(|(chosen, _)| chosen.model.clone())
+        .or_else(|| request.to.as_ref().and_then(|to| to.model.clone()))
         .or_else(|| source.model.clone());
     let destination = if target_topic == source.thread.topic_id {
         source.thread.node_id
     } else {
         target_topic
+    };
+    let approval_place = if replace { thread_id } else { target_topic };
+    let target_settings = crate::resolved::load(&mut *conn, approval_place).await?;
+    let binding_settings = if destination == thread_id {
+        &source.settings
+    } else {
+        &target_settings
     };
     if let Some(why) =
         crate::provider_policy::forbidden(&mut *conn, destination, provider.id).await?
@@ -1805,20 +1954,12 @@ pub async fn prepare_with_access(
             "no model is chosen for the thread, and the request names none",
         ),
         Some(name) => {
-            if crate::models::check_allowed(
+            if let Err(why) = crate::models::check_allowed(
                 model_row.as_ref(),
-                source.settings.models_allowed.as_deref(),
+                binding_settings.models_allowed.as_deref(),
                 name,
-            )
-            .is_err()
-            {
-                blockers.add(
-                    code::MODEL_NOT_ALLOWED,
-                    format!(
-                        "the model {name} is not allowed on the provider {}",
-                        provider.name
-                    ),
-                );
+            ) {
+                blockers.add(code::MODEL_NOT_ALLOWED, why.describe(name));
             }
         }
     }
@@ -1975,10 +2116,59 @@ pub async fn prepare_with_access(
     // ---- the profile, the access to it, and the arrangement
     let mut entry: Option<Vec<AgentArrangement>> = None;
     let provider_changes = provider.id != source.provider.id;
-    if replace && !provider_changes && matches!(landing, Landing::Same) {
+    if pool.is_none() && replace && !provider_changes && matches!(landing, Landing::Same) {
         // nothing is asked about a provider that stays where it is
+    } else if pool.is_none() && replace && !provider_changes {
+        // A placement under the provider the thread has: whoever places it does not become the one who
+        // runs it, the thread goes on being carried by its first owner's use. So the question is whether
+        // the first owner may use the provider, with the model and effort the thread has, where it would
+        // now run; the placer needs only what placement needs (the environments they manage). A placer
+        // who is not the first owner is told the place and nothing else of that person's entry, and a
+        // refusal for any other reason is for the turns to say, as it was before an entry named places.
+        let carrier = source.thread.owner_id;
+        let answer = access
+            .provider_use(
+                &mut *conn,
+                &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
+                    person: carrier,
+                    node: thread_id,
+                    provider: provider.id,
+                    model: model.as_deref(),
+                    effort: effort.as_deref(),
+                    runs_in: landing.runs_in(Some(judged_in.id)),
+                },
+            )
+            .await
+            .map_err(EngineError::from)?;
+        match answer {
+            Answer::Allowed { arrangements } => entry = arrangements,
+            Answer::Refused(missing) if missing.iter().any(Missing::leaves_out_the_place) => {
+                let missing = if carrier == person {
+                    missing
+                } else {
+                    crate::access::only_the_place(provider.id, missing).missing
+                };
+                blockers.lack(
+                    "the entry through which the thread uses its provider does not let it run where the result would run",
+                    missing,
+                );
+            }
+            Answer::Refused(_) => entry = Some(crate::access::staying_types()),
+        }
     } else if reach == Reach::Seen {
-        if !caller.permits(Permission::ProviderUse) {
+        if let Some(pool) = pool
+            && !pool.matches_request(provider.id, model.as_deref())
+        {
+            return Err(PlanError::invalid(
+                "to",
+                "the actual destination differs from the accepted pool member",
+            ));
+        }
+        if !(caller.permits(Permission::ProviderUse)
+            || pool.is_some() && caller.permits(Permission::PoolUse))
+        {
             blockers.add(
                 code::ACCESS,
                 "this credential does not include provider.use for the requested new binding",
@@ -1989,6 +2179,8 @@ pub async fn prepare_with_access(
             .provider_use(
                 &mut *conn,
                 &ProviderUse {
+                    pool,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node,
                     provider: provider.id,
@@ -2027,18 +2219,16 @@ pub async fn prepare_with_access(
     let (agent, descriptor) = choose_agent(
         &mut *conn,
         Some(&source),
-        source.thread.node_id,
+        destination,
         request,
         &provider,
         Some(&judged_in),
         made_for_it.as_ref(),
         entry.clone(),
-        &source.settings,
+        binding_settings,
         &mut blockers,
     )
     .await?;
-    let approval_place = if replace { thread_id } else { target_topic };
-    let target_settings = crate::resolved::load(&mut *conn, approval_place).await?;
     let approval_mode =
         match binding::offered_approval_mode(&descriptor, target_settings.approval_mode) {
             Ok(mode) => mode,
@@ -2097,7 +2287,7 @@ pub async fn prepare_with_access(
         offers: made_for_it
             .as_ref()
             .map_or(offers.offers, |promised| promised.offers.clone()),
-        settings: &source.settings,
+        settings: binding_settings,
         entry,
         colocated: made_for_it.map_or(offers.colocated, |promised| promised.colocated),
         runtime: binding::runtime_facts(conn, &agent, &provider, &judged_in).await?,
@@ -2138,6 +2328,7 @@ pub async fn prepare_with_access(
     };
 
     let target = Target {
+        review: selected.map(|(_, review)| review),
         agent,
         provider,
         descriptor,
@@ -2157,7 +2348,7 @@ pub async fn prepare_with_access(
         .arrangement
         .as_ref()
         .is_some_and(|chosen| Some(chosen.kind) != source.arrangement);
-    let changes_binding = provider_changes || agent_changes || arrangement_changes;
+    let changes_binding = pooled_target || provider_changes || agent_changes || arrangement_changes;
     if replace && !(changes_binding || environment_changes || directory_changes) {
         blockers.add(
                 code::NOTHING_TO_CHANGE,
@@ -2613,7 +2804,9 @@ impl Engine {
         let window = resources::model(&mut *conn, target.provider.id, &target.model)
             .await?
             .and_then(|model| crate::fork_history::model_window(&model.parameters));
-        let budget = crate::fork_history::carry_budget(&mut *conn, target.topic, window).await?;
+        let allowance =
+            crate::fork_history::carry_allowance(&mut *conn, target.topic, window).await?;
+        let budget = allowance.bytes;
         let mut declined = Vec::new();
         if let Some(segment) = source.thread.current_segment_id
             && (orch_db::queries::agent_history::get(conn, segment)
@@ -2644,6 +2837,7 @@ impl Engine {
             off.iter()
                 .any(|feature| feature == "import_native")
                 .then(|| orch_api_contract::admin::RunningHarnessBuild {
+                    check_machine_id: None,
                     kind: limited.kind.clone(),
                     harness: Some(crate::programs::shipped_name(
                         &limited.kind,
@@ -2651,6 +2845,7 @@ impl Engine {
                     )),
                     version: limited.harness.version.clone(),
                     build: None,
+                    installed: None,
                 });
         let decide = |declined: &[AgentMethod]| {
             if turns == 0 && counts.items_total() == 0 {
@@ -3090,6 +3285,12 @@ impl Engine {
             let files =
                 (!nothing_copied || home_plan.is_some() || !private_views.is_empty()).then(|| {
                     FilesPlan {
+                        source_policy: online.then(crate::fork_source::workspace_copy_policy),
+                        home_policy: home_plan
+                            .as_ref()
+                            .filter(|home| home.measured)
+                            .map(|_| crate::fork_source::owned_copy_policy()),
+                        file_states_policy: None,
                         kept_image_bytes: None,
                         source: if online {
                             FilesSource::Live
@@ -3128,8 +3329,9 @@ impl Engine {
                         replace,
                         history.mode != HistoryMode::Nothing,
                     ),
-                    files: listing.notes_files,
-                    bytes: listing.notes_bytes,
+                    proposal: None,
+                    files: Some(listing.notes_files),
+                    bytes: Some(listing.notes_bytes),
                 });
             let bytes = files.as_ref().map(|plan| {
                 (
@@ -3141,6 +3343,50 @@ impl Engine {
             (files, memory, bytes)
         } else {
             (None, None, None)
+        };
+
+        let memory = {
+            use orch_api_contract::forks::{MemoryProposal, MemoryProposedFate};
+            let kept = crate::memory::kept(source.settings.memory);
+            let carried = kept
+                && crate::memory::carried(
+                    request.memory,
+                    replace,
+                    history.mode != HistoryMode::Nothing,
+                );
+            let same_environment = match &target.landing {
+                Landing::Same => true,
+                Landing::Existing(row) => row.id == source.workspace()?.id,
+                Landing::New { .. } => false,
+            };
+            let same = same_environment && target.directory == source.thread.workspace_dir;
+            let proposed_fate = if !kept {
+                MemoryProposedFate::Off
+            } else if same {
+                MemoryProposedFate::Shared
+            } else if carried {
+                MemoryProposedFate::CopyIfAbsent
+            } else {
+                MemoryProposedFate::NotCarried
+            };
+            let mut memory = memory.unwrap_or(ForkPlanMemory {
+                proposal: None,
+                carried,
+                files: None,
+                bytes: None,
+            });
+            memory.carried = carried;
+            memory.proposal = Some(MemoryProposal {
+                source_directory: Some(crate::memory::below(&source.thread.workspace_dir)),
+                target_directory: Some(crate::memory::below(&target.directory)),
+                proposed_fate,
+                observed_target_revision: match &target.landing {
+                    Landing::Same => Some(source.workspace()?.revision),
+                    Landing::Existing(row) => Some(row.revision),
+                    Landing::New { .. } => None,
+                },
+            });
+            Some(memory)
         };
 
         // ---- who, and who can go on
@@ -3331,6 +3577,9 @@ impl Engine {
             && request.worktree.is_none()
         {
             files = Some(FilesPlan {
+                source_policy: None,
+                home_policy: None,
+                file_states_policy: None,
                 kept_image_bytes: None,
                 source: FilesSource::Cached,
                 source_as_of: saved.created_at,
@@ -3367,6 +3616,14 @@ impl Engine {
             (DisclosureKind::Topic, target.topic),
         ] {
             disclosure.insert((kind, id));
+        }
+        if let Some(review) = &target.review {
+            disclosure.extend(
+                review
+                    .path
+                    .iter()
+                    .map(|hop| (DisclosureKind::Pool, hop.pool_id)),
+            );
         }
         let mut homes = vec![
             source.thread.node_id,
@@ -3470,6 +3727,16 @@ impl Engine {
                 directory: target.directory.clone(),
             },
             history: ForkPlanHistory {
+                selected_range: range.filter(|(from, through)| through >= from).map(
+                    |(from, through)| orch_api_contract::forks::HistoryTurnRange {
+                        from: i64::from(from),
+                        through: i64::from(through),
+                    },
+                ),
+                context_allowance: Some(crate::fork_history::allowance_for_method(
+                    allowance.fact,
+                    method,
+                )),
                 native_import_unavailable,
                 mode: history.mode,
                 turns,
@@ -3480,6 +3747,7 @@ impl Engine {
                 summary: if history.mode == orch_api_contract::forks::HistoryMode::Summary {
                     Some(
                         crate::summaries::handoff_estimate(
+                            self,
                             &mut *conn,
                             source.thread.node_id,
                             turns,
@@ -3539,6 +3807,7 @@ impl Engine {
             source.check(self).await?;
         }
         Ok(Draft {
+            review: target.review.clone(),
             request: ForkRequest {
                 history: Some(history.clone()),
                 ..request.clone()
@@ -3579,6 +3848,7 @@ impl Engine {
         let id = new_id();
         draft.plan.preflight_id = id;
         let stored = StoredPlan {
+            review: draft.review,
             request: draft.request.clone(),
             plan: draft.plan.clone(),
             source: draft.plan.source.id,

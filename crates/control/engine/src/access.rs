@@ -21,7 +21,14 @@ pub async fn resource_policies(
     resource: Id,
 ) -> Result<orch_authz::usable::Policies, crate::EngineError> {
     let facts = orch_db::queries::resources::resource_facts(conn, &[resource]).await?;
-    let home = facts.first().and_then(|facts| facts.home_id);
+    resource_policies_at_home(conn, facts.first().and_then(|facts| facts.home_id)).await
+}
+
+/// Resolve the inherited settings for a resource whose home was already read.
+pub async fn resource_policies_at_home(
+    conn: &mut Conn,
+    home: Option<Id>,
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
     let place = home.map_or(orch_settings::Place::System, orch_settings::Place::Node);
     let shared = orch_settings::get(
         conn,
@@ -49,9 +56,16 @@ pub async fn resource_policies_among(
     conn: &mut Conn,
     resources: &[Id],
 ) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    let facts = orch_db::queries::resources::resource_facts(conn, resources).await?;
+    resource_policies_for_facts(conn, &facts).await
+}
+
+pub(crate) async fn resource_policies_for_facts(
+    conn: &mut Conn,
+    facts: &[orch_db::queries::resources::AccessFacts],
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
     use orch_authz::usable::{Policies, ResourcePolicy};
     use orch_settings_contract::registry::keys;
-    let facts = orch_db::queries::resources::resource_facts(conn, resources).await?;
     let homes = facts
         .iter()
         .filter_map(|row| row.home_id)
@@ -66,7 +80,9 @@ pub async fn resource_policies_among(
     .await?;
     let external =
         orch_settings::get_at_nodes::<bool>(conn, &homes, keys::SHARING_ALLOW_EXTERNAL).await?;
-    let system = if facts.iter().any(|row| row.home_id.is_none()) {
+    let holders =
+        orch_settings::get_at_nodes::<bool>(conn, &homes, keys::SHARING_ALLOW_HOLDERS).await?;
+    let (system, system_sharing) = if facts.iter().any(|row| row.home_id.is_none()) {
         let shared_subscriptions = orch_settings::get(
             conn,
             orch_settings::Place::System,
@@ -80,24 +96,60 @@ pub async fn resource_policies_among(
         )
         .await?
         .unwrap_or(false);
-        ResourcePolicy {
-            owners_name_outsiders,
-            shared_subscriptions,
-        }
-    } else {
-        ResourcePolicy::default()
-    };
-    let mut policies = Policies::everywhere(system);
-    for home in homes {
-        policies = policies.at_home(
-            home,
+        let holders_share = orch_settings::get::<bool>(
+            conn,
+            orch_settings::Place::System,
+            keys::SHARING_ALLOW_HOLDERS,
+        )
+        .await?
+        .unwrap_or(true);
+        (
             ResourcePolicy {
-                owners_name_outsiders: external.get(&home).copied().flatten().unwrap_or(false),
-                shared_subscriptions: sharing.get(&home).cloned().flatten(),
+                owners_name_outsiders,
+                shared_subscriptions,
             },
-        );
+            orch_authz::Policy {
+                owners_name_outsiders,
+                holders_share,
+            },
+        )
+    } else {
+        (ResourcePolicy::default(), orch_authz::Policy::default())
+    };
+    let mut policies = Policies::everywhere(system).with_sharing(None, system_sharing);
+    for home in homes {
+        let owners_name_outsiders = external.get(&home).copied().flatten().unwrap_or(false);
+        policies = policies
+            .at_home(
+                home,
+                ResourcePolicy {
+                    owners_name_outsiders,
+                    shared_subscriptions: sharing.get(&home).cloned().flatten(),
+                },
+            )
+            .with_sharing(
+                Some(home),
+                orch_authz::Policy {
+                    owners_name_outsiders,
+                    holders_share: holders.get(&home).copied().flatten().unwrap_or(true),
+                },
+            );
     }
     Ok(policies)
+}
+
+/// Every pool hop keeps its own current home policy beside the actual member's policy.
+pub async fn resource_policies_for_choice(
+    conn: &mut Conn,
+    resources: &[Id],
+    path: &[orch_access_contract::pools::PathMember],
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    let ids = resources
+        .iter()
+        .copied()
+        .chain(path.iter().map(|hop| hop.pool_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    resource_policies_among(conn, &ids.into_iter().collect::<Vec<_>>()).await
 }
 
 /// Resolve a resource-page gift's existing sharing settings beside its ordinary use policy.
@@ -166,6 +218,10 @@ impl Answer {
 /// May a person run a provider, as a thread is set to use it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUse<'a> {
+    /// The native producer's current pooled selection, repeated at its real first-effect fence.
+    pub pool: Option<&'a crate::resource_choice::ProviderSelection>,
+    /// The factual purpose of this use, shared with permission selection and accounting.
+    pub purpose: orch_access_contract::permissions::UsagePurpose,
     /// The person: the author of an input, the thread's first owner for an
     /// input that has none, or whoever puts a thread on the provider.
     pub person: Id,
@@ -182,6 +238,24 @@ pub struct ProviderUse<'a> {
     /// run there. None for work that runs in no environment (Ask, summaries, the semantic index),
     /// which no entry holds to a place.
     pub runs_in: Option<RunsIn>,
+}
+
+/// Recovery and provider grants name the same actual work even when their wire words differ.
+#[must_use]
+pub fn provider_purpose(
+    purpose: orch_provider_contract::calls::Purpose,
+) -> orch_access_contract::permissions::UsagePurpose {
+    use orch_access_contract::permissions::UsagePurpose as P;
+    use orch_provider_contract::calls::Purpose;
+    match purpose {
+        Purpose::Agent => P::Turn,
+        Purpose::Summary => P::Summary,
+        Purpose::Embedding => P::Embeddings,
+        Purpose::Review => P::Review,
+        Purpose::WebSearch => P::WebSearch,
+        Purpose::PageFetch => P::PageFetch,
+        Purpose::ImageGeneration => P::ImageGeneration,
+    }
 }
 
 /// The environment that work runs in, as far as the entries of a Use row are concerned.

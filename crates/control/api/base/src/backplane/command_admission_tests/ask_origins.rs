@@ -139,11 +139,12 @@ async fn message_key(s: &Scene, history_read: bool) -> Proof<String> {
         "allow":[{"operation":"AskMessageCreate","actions":actions}]
     }]}))?;
     assert!(scope.validate().is_empty());
-    let bearer = authentication::new_token(authentication::API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let bearer = authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut conn,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: person,
             name: "Question history permission",
             token_hash: &authentication::token_hash(&bearer),
@@ -285,7 +286,7 @@ impl Scene {
             transport.clock.time(),
         )
         .await?;
-        let choices = json!([{"provider_id":provider,"model":MODEL}]);
+        let choices = json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]);
         let written = orch_db::queries::settings::put(
             &mut conn,
             Some(root),
@@ -350,11 +351,14 @@ async fn a_queued_ask_request_keeps_the_original_access_token_deadline_after_a_n
                 text: QUESTION.into(),
             }],
             context: None,
-            model: Some(Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
-                params: None,
-            })),
+            model: Some(Some(
+                AskModel {
+                    backend: orch_api_contract::ask::AskModelIdentity::api(provider, MODEL.into())
+                        .backend,
+                    params: None,
+                }
+                .into(),
+            )),
         };
         let app = s.app.clone();
         let thread = s.thread;
@@ -540,11 +544,14 @@ async fn a_queued_ask_command_rechecks_its_controller_model_endpoint_and_retaine
                 text: QUESTION.into(),
             }],
             context: None,
-            model: Some(Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
-                params: None,
-            })),
+            model: Some(Some(
+                AskModel {
+                    backend: orch_api_contract::ask::AskModelIdentity::api(provider, MODEL.into())
+                        .backend,
+                    params: None,
+                }
+                .into(),
+            )),
         };
         let app = s.app.clone();
         let thread = s.thread;
@@ -1021,11 +1028,14 @@ async fn submitting_an_ask_needs_its_own_history_read_beside_message_write() -> 
             text: QUESTION.into(),
         }],
         context: None,
-        model: Some(Some(AskModel {
-            provider_id: provider,
-            model: MODEL.into(),
-            params: None,
-        })),
+        model: Some(Some(
+            AskModel {
+                backend: orch_api_contract::ask::AskModelIdentity::api(provider, MODEL.into())
+                    .backend,
+                params: None,
+            }
+            .into(),
+        )),
     };
     let denied = s
         .app
@@ -1110,7 +1120,7 @@ async fn ordinary_members_cannot_add_or_open_another_persons_ask_attachment() ->
     s.app
         .app
         .blobs
-        .register(&mut conn, meta, s.transport.clock.now())
+        .register(&mut conn, &meta, s.transport.clock.now())
         .await?;
     orch_db::queries::uploads::remember(&mut conn, owner, &meta.hash, s.transport.clock.now())
         .await?;

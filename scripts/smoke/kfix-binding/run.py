@@ -205,7 +205,7 @@ service_dns_names = ["127.0.0.1", "api", "gateway"]
         assert provider_machine["roles"] == ["provider"], provider_machine
         assert not separated["available"] and separated["reason"] and separated["detail"], separated
         self.evidence.append({"options": options, "agent": agent, "environment": environment})
-        body = {"name": "First binding", "binding": {"provider_id": provider["id"], "agent_id": agent["id"]}, "model": MODEL, "environment": {"use": environment["id"]}}
+        body = {"name": "First binding", "binding": {"target": {"type": "single", "resource": {"kind": "provider", "id": provider["id"]}}, "agent_id": agent["id"]}, "model": MODEL, "environment": {"use": {"type": "single", "resource": {"kind": "environment", "id": environment["id"]}}}}
         body["binding"]["arrangement"] = "separated"
         status, refused = self.api("POST", f"/topics/{topic_id}/threads", body)
         assert status == 409 and refused["code"] == "binding.incompatible", (status, refused)
