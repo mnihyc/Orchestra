@@ -50,6 +50,7 @@ fn read(row: &rows::JobRow) -> Result<Option<Retained>, EngineError> {
         || !matches!(
             row.kind.as_str(),
             rows::kind::ENVIRONMENT_PROVISION
+                | rows::kind::ENVIRONMENT_RESTART
                 | rows::kind::ENVIRONMENT_RECREATE
                 | "environment_move"
                 | jobs::fork::KIND

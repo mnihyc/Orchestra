@@ -108,6 +108,22 @@ pub async fn node(conn: &mut Conn, id: Id) -> ApiResult<KeyResolvedTarget> {
     target_result(conn, result).await
 }
 
+/// Existing nodes, each as [`node`] resolves it, from one Graph read: the first of `ids` that is not there is refused
+/// as [`node`] refuses it.
+pub async fn nodes(conn: &mut Conn, ids: &[Id]) -> ApiResult<BTreeMap<Id, KeyResolvedTarget>> {
+    let mut found = BTreeMap::new();
+    if ids.is_empty() {
+        return Ok(found);
+    }
+    let loaded = Graph::load(conn, ids).await;
+    let graph = authz_result(conn, loaded).await?;
+    for id in ids {
+        let site = graph.site_of(*id).ok_or_else(ApiError::not_found)?;
+        found.insert(*id, from_site(&graph, &site)?);
+    }
+    Ok(found)
+}
+
 /// Resolve only the stored typed identity and current path, including a retained node.
 /// This grants no visibility or restoration authority; the same ordinary inspection
 /// producer still decides whether a selected retained operation may read it.
@@ -157,7 +173,8 @@ pub async fn machine_subjects(
 }
 
 /// Current canonical identity for an already native-selected physical reference, including retained.
-/// This supplies no live read, private inspection or lifecycle authority.
+/// This supplies no live read, private inspection or lifecycle authority. A unit that a host runs
+/// is named by that host, as the neutral resolver names it.
 pub async fn machine_identities(
     conn: &mut Conn,
     machines: &[Id],
@@ -486,6 +503,10 @@ pub(crate) async fn schedule_destination(
 /// no broad union of IDs from an opaque row is accepted as a substitute.
 pub(crate) async fn object(conn: &mut Conn, object: KeyObjectRef) -> ApiResult<KeyResolvedTarget> {
     match (object.kind, object.id) {
+        // A machine reference is named by the page that governs it: its host when a host's node
+        // or a unit that a host runs, otherwise its own page. Only a person's own machine has a
+        // Machine page.
+        (KeyTargetKind::Object(ObjectKind::Machine), Some(id)) => machine_subject(conn, id).await,
         (KeyTargetKind::Object(kind), Some(id)) => page_object(conn, ObjectRef { kind, id }).await,
         (KeyTargetKind::Identity(KeyIdentityKind::Chat), Some(id)) => chat(conn, id).await,
         (KeyTargetKind::Identity(KeyIdentityKind::Group), Some(id)) => group(conn, id).await,

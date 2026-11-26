@@ -1,0 +1,3 @@
+# n41-defaults: the summaries module whose crash-recovery case failed once (RecvError) in the whole engine library run
+# 45894274007 and passed alone on the unchanged trunk (45899515482), run alone on this head
+test -p orch-engine --lib -- summaries::resource::tests

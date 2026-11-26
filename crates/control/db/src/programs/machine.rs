@@ -6,7 +6,7 @@ use orch_types::{Id, Json};
 /// The exact registry and enforcing local policy fields needed by the existing native formatter.
 pub async fn registry_facts(conn: &mut Conn, machine: Id) -> Result<Option<Json>, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT jsonb_build_object('policy',facts->'policy','programs',facts->'programs')
+        "SELECT jsonb_build_object('policy',facts->'policy','programs',facts->'programs','harnesses',facts->'harnesses','runtime_platform',facts->'runtime_platform')
         FROM machines WHERE id=$1 AND deleted_at IS NULL",
     )
     .bind(machine)

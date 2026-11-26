@@ -21,7 +21,7 @@ providers is explicitly frozen into the new request, so that displaying the curr
 The debounce gates the request itself, not merely its key; resetting a choice, a placeholder, an expired plan or a failed refresh cannot
 confirm an older plan. One logical prompt scope encloses the presenter's reads: its loading-to-loaded replacement keeps its original
 opening order, while a newer prompt pauses the covered form's effects and retains its choices. Component `switch-readiness`/`change-labels`
-and browser `start-help-switch` are the unrun regression sources; `help-layers` covers the delayed-presenter ordering.
+and browser `start-help-switch` are the regression sources; `help-layers` covers the delayed-presenter ordering.
 
 - A switch of a blocked or running thread to another provider, agent or environment: the provider that can take it
   is chosen for a thread held back by its provider, a model and an effort are chosen again with it, who may go on
@@ -82,8 +82,7 @@ one selected consequence, duplicates and grouped creation actions. Unit `change-
 and truthful unnamed values. Browser `change-controls` covers ordinary pickers/options/confirmation/progress/results,
 environment transitions and retry, and the loading new-thread action row at 1440/400 in light/dark. The geometry helper
 resolves the actual height token and intrinsic action widths, allowing one CSS pixel only for fractional rounding.
-Legacy sentence/editor test cases are not proof of the current picker UI. The integrator runs all gates and walks the
-shipping build in both languages/themes; writers run no builds or tests.
+Legacy sentence/editor test cases do not cover the current picker UI.
 
 A built-in source opens the complete native-target review, including its required destination.
 It inherits no native agent or workspace: provider/profile/model and an existing or new environment

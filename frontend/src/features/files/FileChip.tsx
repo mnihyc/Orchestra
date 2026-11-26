@@ -1,4 +1,5 @@
 /** One file chip and thumbnail family, used in messages, tool results, documents and file lists. */
+import { PathLink } from '@/shell/TrailLink';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -7,6 +8,7 @@ import { ReferenceCard } from '@/ui/ReferenceCard';
 import { cx } from '@/ui/cx';
 import { defaultViewer } from './viewers';
 import { FileGlyph, FilePreview, FileState, fileFailure } from './FilePreview';
+import { imageDeliveryFragment } from './FileFacts';
 import { FileOverlay } from './FileOverlay';
 import { previewQuery, sourceFacts, sourceHasReference, sourceReference, type FileSource } from './source';
 import { ORCH_REFERENCE } from '@/lib/drop';
@@ -29,7 +31,7 @@ export function FileChip({ source, presentation, reference, onOpen, bare = false
       const bytes = preview.data?.size ?? source.size;
       const content = <><FileGlyph source={source} preview={preview.data} /><span data-user-content className="min-w-0 truncate">{label ?? source.name}</span>{size !== 'small' && <span className="shrink-0 text-sm text-text-muted">{bytes ===undefined ? '–' : <ByteSize bytes={bytes} />}</span>}</>;
       return source.href === undefined ? <button {...drag} type="button" aria-label={ariaLabel ?? (typeof label === 'string' ? label : source.name)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); if (onOpen === undefined) keep(); else onOpen(event); }} title={source.name} className={className}>{content}</button> :
-        <a {...drag} href={source.href} aria-label={ariaLabel ?? source.name} title={source.name} className={className} onClick={(event) => { if (event.button === 0 && (onOpen !== undefined || !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey)) { event.preventDefault(); event.stopPropagation(); if (onOpen ===undefined) keep(); else onOpen(event); } }}>{content}</a>;
+        <PathLink {...drag} href={source.href} aria-label={ariaLabel ?? source.name} title={source.name} className={className} onClick={(event) => { if (event.button === 0 && (onOpen !== undefined || !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey)) { event.preventDefault(); event.stopPropagation(); if (onOpen ===undefined) keep(); else onOpen(event); } }}>{content}</PathLink>;
     }}
   </ReferenceCard>;
 }
@@ -47,6 +49,7 @@ export function FileAttachment({ source, presentation, thumbnail = true }: { sou
   return <span className="inline-flex max-w-full flex-col items-start gap-1 align-top" data-file-attachment="">
     {thumbnail && visual && size !== 'large' && presentation?.place !== 'compact' && <button type="button" aria-label={t('fileMedia.openFile', { name: source.name })} onClick={() => setViewing(true)} className="focus-inset block max-w-full rounded-md"><FilePreview source={source} /></button>}
     <FileChip source={source} presentation={presentation} />
+    {imageDeliveryFragment(source.imageDelivery, t) !== undefined && <span className="text-xs text-text-muted">{imageDeliveryFragment(source.imageDelivery, t)}</span>}
     {viewing && <FileOverlay source={source} onClose={() => setViewing(false)} />}
   </span>;
 }

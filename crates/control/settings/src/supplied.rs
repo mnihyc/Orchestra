@@ -199,6 +199,113 @@ pub async fn load(
     Ok(found)
 }
 
+/// The native identity and resolved model of one node in a shared settings read.
+pub(crate) struct NodeContext {
+    pub id: Id,
+    pub is_thread: bool,
+    pub model_for_effort: Option<String>,
+}
+
+/// The same suppliers for a node page, with global facts, native environments and
+/// composed model defaults read once for the whole requested set.
+pub(crate) async fn load_at_nodes(
+    conn: &mut Conn,
+    contexts: &[NodeContext],
+    defs: &[&'static SettingDef],
+) -> Result<HashMap<Id, Supplies>, Error> {
+    if contexts.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let common = load(
+        conn,
+        &Context {
+            thread: None,
+            environment: None,
+            model_for_effort: None,
+        },
+        defs,
+    )
+    .await?;
+    let supplied = defs
+        .iter()
+        .filter(|def| matches!(def.default, DefaultOf::Supplied(_)))
+        .collect::<Vec<_>>();
+    let needs_environment = supplied
+        .iter()
+        .any(|def| matches!(def.key, keys::APPROVAL_MODE | keys::SANDBOX_MODE));
+    let threads = contexts
+        .iter()
+        .filter(|context| context.is_thread)
+        .map(|context| context.id)
+        .collect::<Vec<_>>();
+    let environments: HashMap<_, _> = if needs_environment {
+        queries::thread_environments(conn, &threads)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let mut ids = environments
+        .values()
+        .map(|environment| environment.environment_id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    let facts: HashMap<_, _> = if ids.is_empty() {
+        HashMap::new()
+    } else {
+        orch_db::queries::environment_facts::of_many(conn, &ids)
+            .await?
+            .into_iter()
+            .collect()
+    };
+    let requested = if supplied.iter().any(|def| def.key == keys::AGENT_EFFORT) {
+        contexts
+            .iter()
+            .filter(|context| context.is_thread)
+            .filter_map(|context| {
+                context
+                    .model_for_effort
+                    .as_ref()
+                    .map(|model| (context.id, model.clone()))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let models: HashMap<_, _> = queries::thread_model_parameters_many(conn, &requested)
+        .await?
+        .into_iter()
+        .collect();
+    let mut result = HashMap::new();
+    for context in contexts {
+        let mut found = common.clone();
+        if let Some(environment) = environments.get(&context.id) {
+            let confinement = facts
+                .get(&environment.environment_id)
+                .map_or("none", |facts| facts.confinement());
+            for def in &supplied {
+                if matches!(def.key, keys::APPROVAL_MODE | keys::SANDBOX_MODE)
+                    && let Some(value) =
+                        from_environment(def.key, confinement, environment.template_spec.as_ref())
+                {
+                    found.values.insert(def.key, value);
+                }
+            }
+        }
+        if let Some(value) = models
+            .get(&context.id)
+            .and_then(|model| model.get("default_effort"))
+            .filter(|value| value.is_string())
+        {
+            found.values.insert(keys::AGENT_EFFORT, value.clone());
+        }
+        result.insert(context.id, found);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
