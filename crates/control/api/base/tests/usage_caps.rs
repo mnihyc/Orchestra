@@ -1207,7 +1207,7 @@ async fn wait(world: &World, t: &Team, thread: Id, author: Id, ago: Duration) {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO settings (node_id, key, value) VALUES ($1, 'agent.model', '\"gpt-test\"'::jsonb)",
+        "INSERT INTO settings (node_id, key, value) VALUES ($1, 'agent.model', jsonb_build_object('type','offering','name','gpt-test'))",
     )
     .bind(thread)
     .execute(&mut *conn)

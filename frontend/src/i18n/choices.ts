@@ -12,6 +12,9 @@ export type ChoiceValues = Record<string, string | number>;
 /** Schema-only editors receive the setting's context once; nested choices keep the same context. */
 export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup[] | undefined>> = {
   'notify.operations': ['operationNotices'],
+  'mount.delete_data_fate': ['mountDataFate'],
+  'models.add_switches_on': ['modelAddSwitches'],
+  'ask.models': ['askModelTarget'],
   'ask.paid_by': ['askPayer'],
   'gateways.tunnel_strategy': ['tunnelGateway'],
   'threads.agent_access': ['agentReach', 'agentStep'],
@@ -23,6 +26,7 @@ export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup
   'agents.page_fetch': ['pageFetch'],
   'agent.effort': ['effort'], 'agent.memory': ['memory'], 'approval.mode': ['approvalMode'], 'approval.allowed_modes': ['approvalMode'],
   'sandbox.mode': ['sandboxLevel'], 'collab.attribution': ['attribution'], 'collab.default_delivery': ['delivery'],
+  'env.host_id': ['hostTarget'], 'runtime.host_id': ['hostTarget'],
   'env.thread_default': ['environmentDefault'], 'env.lifetime': ['environmentLifetime'], 'env.update': ['updateMode'], 'runtime.update': ['updateMode'], 'env.mounts': ['mountMode'],
   'env.data_sources': ['dataSource'], 'runtime.data_sources': ['dataSource'], 'runtime.home': ['dataSource'],
   'orch_tools.enabled': ['sharedTool'],
@@ -35,6 +39,8 @@ export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup
   'capability.policy': ['capabilityDecision', 'approverScope'], 'chat.direct': ['directMessages'], 'chat.group_mentions': ['groupMentions'],
   'orgs.created_by': ['orgCreation'], 'navigation.order': ['sortOrder'], 'registration.mode': ['registration'],
   'invitations.forms': ['invitationForm'], 'registration.email_verification': ['verification'], 'auth.email_code': ['emailCode'],
+  'human_check.provider': ['humanCheckProvider'], 'human_check.mode': ['humanCheckWidget'], 'human_check.verification': ['humanCheckVerification'],
+  'human_check.when_unreachable': ['humanCheckUnreachable'], 'human_check.acts': ['humanCheckAct'],
   'auth.second_step': ['secondStep'], 'system.banner': ['severity'], 'thread.inputs_without_use': ['modelUseWait'],
   'thread.switch_history': ['switchHistory'], 'thread.plan_answered_by': ['planAnswers'], 'agents.skills': ['skillChoice'],
   'agents.harness_versions': ['harnessVersion'], 'calls.return': ['callsReturn'], 'documents.links.shown': ['linksTab'],

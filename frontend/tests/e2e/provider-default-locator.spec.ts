@@ -1,3 +1,4 @@
+import { providerTarget } from '@/lib/resourceTargets';
 /** Production provider defaults over native-shaped fixture APIs; successful authority replies are never replaced. */
 import { expect, type APIRequestContext, type Locator, type Page, type Request, type TestInfo, test } from '@playwright/test';
 import type { AuthResult, CreateProvider, EverythingRowPage, Provider, ProviderWriteReply, ResolvedSetting } from '../../src/generated/api-types.ts';
@@ -162,10 +163,10 @@ test('provider default searches and pages the native usable inventory, then save
     expect(await writes(page)).toEqual([]); await capture(page, info, 'provider-default-name-search-1440-en-light', field);
     const savedRead = bodyAnswer(page, settingPath, 'PUT'); await field.press('Enter'); const savedReply = await savedRead; expect(savedReply.response.status()).toBe(200); const saved = savedReply.data as ResolvedSetting;
     await expect(field).toHaveValue(held.late.name); await expect(field).toHaveAttribute('aria-expanded', 'false');
-    await expect.poll(async () => (await writes(page)).length).toBe(1); expect((await writes(page))[0]).toEqual({ value: held.late.id, expected_revision: held.before.own!.revision });
+    await expect.poll(async () => (await writes(page)).length).toBe(1); expect((await writes(page))[0]).toEqual({ value: providerTarget(held.late.id), expected_revision: held.before.own!.revision });
     const undone = answer(page, settingPath, 'PUT'); await row.getByRole('button', { name: words.settings.compact.undoNamed.replace('{{name}}', words.settingRegistry.agent.default_provider_id.title), exact: true }).click();
     expect((await undone).status()).toBe(200); await expect(field).toHaveValue(held.current.name); await expect.poll(async () => (await writes(page)).length).toBe(2);
-    expect((await writes(page))[1]).toEqual({ value: held.current.id, locked: held.before.own!.locked, expected_revision: saved.own!.revision });
+    expect((await writes(page))[1]).toEqual({ value: providerTarget(held.current.id), locked: held.before.own!.locked, expected_revision: saved.own!.revision });
     await page.waitForTimeout(OBSERVE_MS); expect(seen.choices()).toHaveLength(4);
     expect(seen.calls.filter((call) => call.path === '/api/v1/providers' || call.path === `/api/v1/providers/${held.late.id}`)).toEqual([]);
     await capture(page, info, 'provider-default-undo-1440-en-light', field);

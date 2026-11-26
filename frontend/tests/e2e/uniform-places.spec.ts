@@ -27,6 +27,8 @@ for (const [kind, path] of [['org', '/org/acme'], ['project', `/project/${ACME.w
         await mainArea(page).locator('header').filter({ has: page.getByRole('heading', { level: 1, name: 'Acme', exact: true }) }).locator('button[aria-haspopup="menu"]').click();
         await page.getByRole('menuitem', { name: 'Description and tags', exact: true }).click();
       } else if (kind === 'project') await mainArea(page).getByRole('button', { name: 'Description and tags', exact: true }).click();
+      // A topic's one-row header keeps its description and tags under Details, as a resource's page does.
+      else await mainArea(page).locator('header').first().getByRole('button', { name: 'Details', exact: true }).click();
     };
     await details();
     await page.getByRole('button', { name: kind === 'topic' ? 'Edit tags' : 'Add tags', exact: true }).click();

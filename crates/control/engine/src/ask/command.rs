@@ -123,6 +123,7 @@ pub struct CommandSource {
     person: Id,
     payer: Id,
     provider: Id,
+    backend: orch_provider_contract::capabilities::BackendRef,
     machine: Id,
     body: Hash,
     endpoint: Vec<u8>,
@@ -254,7 +255,14 @@ impl NativeSource for Source {
             }
             let request: ProviderGenerate =
                 serde_json::from_value(selected.call.request.clone()).map_err(EngineError::from)?;
-            if request.provider_id != input.provider {
+            let binding = rows::segment_binding(conn, input.thread, input.segment)
+                .await?
+                .ok_or(Error::Refused)?;
+            if request.provider_id != input.provider
+                || binding.provider_id != request.provider_id
+                || binding.model != request.model_name
+                || !matches!(&binding.transport, rows::DialogueTransport::Api{protocol, backend} if protocol==&request.protocol && backend==&input.backend)
+            {
                 return Err(Error::Refused);
             }
             let selected = match Box::pin(model::select(
@@ -262,11 +270,11 @@ impl NativeSource for Source {
                 &principal,
                 input.root,
                 AskModel {
-                    provider_id: request.provider_id,
-                    model: request.model_name.clone(),
+                    backend: input.backend.clone(),
                     params: request.params.clone(),
                 },
                 principal.now(),
+                Some(input.turn),
             ))
             .await
             {
@@ -301,9 +309,9 @@ impl NativeSource for Source {
                 Err(model::Error::Db(error)) => return Err(error.into()),
                 Err(model::Error::Native(error)) => return Err(error.into()),
             };
-            if chosen.machine != input.machine
+            if chosen.machine != Some(input.machine)
                 || chosen.payer != input.payer
-                || chosen.protocol != request.protocol
+                || chosen.protocol.as_deref() != Some(request.protocol.as_str())
                 || chosen.model.params != request.params
                 || chosen.parameters != request.model_parameters
             {
@@ -363,6 +371,12 @@ impl CommandSource {
             .await?
             .ok_or_else(closed)?;
         let request: ProviderGenerate = serde_json::from_value(call.request.clone())?;
+        let binding = rows::segment_binding(conn, call.thread_id, call.segment_id)
+            .await?
+            .ok_or_else(closed)?;
+        let rows::DialogueTransport::Api { protocol, backend } = binding.transport else {
+            return Err(closed());
+        };
         if call.thread_id != controller.thread
             || call.turn_id != controller.turn
             || call.person_id != caller.user()
@@ -377,10 +391,14 @@ impl CommandSource {
             || authored.turn_id != Some(controller.turn)
             || authored.run_as.is_some()
             || request.provider_id != call.provider_id
+            || binding.provider_id != request.provider_id
+            || binding.model != request.model_name
+            || protocol != request.protocol
         {
             return Err(closed());
         }
         Ok(Self {
+            backend,
             origin: CapturedOperation::capture(caller).map_err(EngineError::unreadable)?,
             call: call.id,
             thread: call.thread_id,
@@ -465,7 +483,7 @@ impl CommandSource {
             .await
             .map_err(DbError::from)?
             .ok_or_else(closed)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.machine)
             .fetch_optional(&mut *conn)
             .await
@@ -523,6 +541,8 @@ impl CommandSource {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

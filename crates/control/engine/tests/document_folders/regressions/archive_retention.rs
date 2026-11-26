@@ -41,7 +41,7 @@ async fn the_domain_refuses_live_archived_agent_mutations_but_can_restore_a_reta
     let before = state(&area.world, &[area.topic, destination]).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     for item in [
         domain::Item::Container(live),
         domain::Item::Document(live_document),
@@ -162,9 +162,9 @@ async fn a_preview_uses_the_original_child_promise_after_retention_changes_and_r
     let entry = removed.entries[0].clone();
     // Both a longer and a shorter deployment policy must leave the recorded promise exact.
     for days in [90_u64, 1] {
-        area.world.set_config(|config| {
-            config.soft_delete = std::time::Duration::from_secs(days * 86_400)
-        });
+        area.world
+            .set_system("retention.deleted_keep_days", json!(days))
+            .await;
         area.world.restart_api().await;
         let before = state(&area.world, &[area.topic]).await?;
         let preview = area
@@ -193,7 +193,7 @@ async fn a_preview_uses_the_original_child_promise_after_retention_changes_and_r
             before,
             "reading a preview never rewrites a promise or cohort"
         );
-        let options = domain::Options::for_engine(&area.world.engine());
+        let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
         assert_eq!(
             domain::restore_deadline_in(&mut *area.world.pool.acquire().await?, &entry, options)
                 .await?,
@@ -209,13 +209,9 @@ async fn a_preview_uses_the_original_child_promise_after_retention_changes_and_r
     .bind(old)
     .execute(&mut *tx)
     .await?;
+    let options = domain::Options::for_engine(&mut tx).await?;
     assert_eq!(
-        domain::restore_deadline_in(
-            &mut tx,
-            &entry,
-            domain::Options::for_engine(&area.world.engine())
-        )
-        .await?,
+        domain::restore_deadline_in(&mut tx, &entry, options).await?,
         Some(promised)
     );
     tx.rollback().await?;
@@ -229,7 +225,7 @@ async fn a_preview_uses_the_original_child_promise_after_retention_changes_and_r
     let mut tx = area.world.pool.begin().await?;
     let now = Time::new(area.world.clock.now());
     let actor = domain::Actor::Agent { thread: area.agent };
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let child_first = request(
         domain::Command::Restore,
         vec![domain::Item::Document(old)],
@@ -264,7 +260,7 @@ async fn a_preview_uses_the_original_child_promise_after_retention_changes_and_r
         Some(promised)
     );
     let longer = domain::Options {
-        retention: std::time::Duration::from_secs(90 * 86_400),
+        deleted_keep_days: 90,
         ..options
     };
     assert!(

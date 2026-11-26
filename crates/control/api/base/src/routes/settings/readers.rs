@@ -4,6 +4,9 @@
 //! provenance sources before these helpers put bounded current names in the response.
 
 use super::Holds;
+use crate::middleware::authorization;
+use orch_authz::Act;
+use orch_authz::Policy;
 
 use super::placed;
 
@@ -27,7 +30,7 @@ pub use orch_settings::Place;
 
 pub use orch_settings::SettingView;
 
-use orch_settings::resolve_all;
+use orch_settings::{Snapshot, Wanted};
 
 pub use orch_types::Id;
 /// Raw resolved values and write hints, without a projected Node reference.
@@ -53,6 +56,9 @@ impl PreparedSettings {
             .value()?;
         let value = match member {
             Some(member) => value.get(member)?,
+            None if key == orch_settings_contract::keys::AGENT_DEFAULT_PROVIDER_ID => {
+                value.pointer("/resource/id")?
+            }
             None => value,
         };
         value.as_str()?.parse().ok()
@@ -82,6 +88,40 @@ orch_api_base::api_family_callback! {
     async fn prepare_settings<'__api>(arg0: &'__api mut orch_db::Conn, arg1: &'__api orch_authz::Principal, arg2: orch_types::Id) -> orch_api_base::middleware::requests::ApiResult<orch_api_base::routes::settings::readers::PreparedSettings>;
 }
 
+/// The native readers' existing NodeView decision, on this operation's current Principal.
+/// The caller owns credential restoration and operation admission on the supplied snapshot;
+/// no child endpoint selection, replacement caller or wide-name proof is created here.
+pub async fn require_readable(conn: &mut Conn, principal: &Principal, node: Id) -> ApiResult<()> {
+    let bounded = principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some());
+    authorization::require_projected(
+        conn,
+        principal,
+        node,
+        authorization::VIEW,
+        Act::Use,
+        Policy::default(),
+        bounded,
+    )
+    .await
+}
+
+/// Resolve the settings whose provenance the enclosing screen will actually show.
+pub async fn prepare_settings_views(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    keys: Option<&[&str]>,
+) -> ApiResult<PreparedSettings> {
+    require_readable(conn, principal, node).await?;
+    Ok(PreparedSettings {
+        node,
+        views: resolved_views(conn, principal, node, keys).await?,
+    })
+}
+
 /// Kept separate from the list's NodeView gate: existing internal selected-key readers
 /// already have their own ordinary entry gate and retain that exact behavior.
 pub async fn resolved_views(
@@ -93,13 +133,23 @@ pub async fn resolved_views(
     let (_, kind) = placed(conn, node).await?;
     let policy = policy_at(conn, node).await?;
     let holds = Holds::of(conn, principal, node, kind, policy).await?;
-    let views = resolve_all(conn, Place::Node(node))
-        .await
-        .map_err(ApiError::internal)?;
     let scope = scope_of(kind);
+    let definitions;
+    let wanted = match keys {
+        Some(keys) => {
+            definitions = validation::keys_at(scope)
+                .filter(|definition| keys.contains(&definition.key))
+                .collect::<Vec<_>>();
+            Wanted::Keys(&definitions)
+        }
+        None => Wanted::All,
+    };
+    let views = Snapshot::load(conn, Place::Node(node), wanted)
+        .await
+        .map_err(ApiError::internal)?
+        .views();
     Ok(views
         .into_iter()
-        .filter(|view| keys.is_none_or(|keys| keys.contains(&view.def().key)))
         .map(|view| {
             let need =
                 validation::need_for_node(view.def(), scope, node, holds.thread_environment());

@@ -1,0 +1,10 @@
+test -p orch-api-core --test forks -- environment_switch::
+test -p orch-api-core --test binding_set --test binding_options --test threads_make --test thread_creator_operation_scopes
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test ask --test ask_tools_native_origin
+test -p orch-api-core --test resource_summaries
+test -p orch-engine --test resource_summaries --test goals
+test -p orch-engine --lib -- resource_choice::
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --lib -- ask::policy::tests::
+test -p orch-summarizer-model --lib

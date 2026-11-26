@@ -8,6 +8,11 @@ use orch_api_contract::common::FieldFault;
 
 use orch_api_contract::common::Problem;
 
+use orch_db::Conn;
+use orch_settings_contract::registry::keys;
+
+use orch_types::Id;
+
 use orch_types::Json;
 /// Validates before any part of a resource form is written.
 pub(crate) fn value(path: &str, schema: &Json, value: &Json) -> ApiResult<()> {
@@ -48,7 +53,177 @@ pub(crate) fn setting(engine: &orch_engine::Engine, key: &str, given: &Json) -> 
     })?;
     value("value", &schema, &config)
 }
+/// The providers a setting's value names, each with the path of the member that holds it, wherever the value names one: a default provider, the
+/// provider of a summarizer, of the Ask models, of the embeddings, of a search or image backend and of a failover candidate.
+fn providers_named(key: &str, given: &Json) -> Vec<(String, Id)> {
+    use orch_settings_contract::registry::keys;
+    let mut found = Vec::new();
+    let mut take = |path: String, value: Option<&Json>| {
+        if let Some(id) = value.and_then(|value| serde_json::from_value::<Id>(value.clone()).ok()) {
+            found.push((path, id));
+        }
+    };
+    match key {
+        keys::AGENT_DEFAULT_PROVIDER_ID => take(
+            "value.resource.id".to_owned(),
+            given.pointer("/resource/id"),
+        ),
+        keys::AGENT_MODEL => take(
+            "value.resource.backend.offering.provider".to_owned(),
+            given.pointer("/resource/backend/offering/provider"),
+        ),
+        keys::AUTO_SUMMARIZER | keys::SEARCH_SEMANTIC_EMBEDDINGS => {
+            take("value.provider_id".to_owned(), given.get("provider_id"));
+        }
+        keys::ASK_MODELS => {
+            for (index, entry) in given.as_array().into_iter().flatten().enumerate() {
+                take(
+                    format!("value[{index}].provider_id"),
+                    entry.get("provider_id"),
+                );
+            }
+        }
+        keys::AGENTS_WEB_SEARCH_BACKEND | keys::AGENTS_IMAGE_GENERATION_BACKEND => {
+            take("value.provider_id".to_owned(), given.get("provider_id"));
+            take(
+                "value.offering.provider".to_owned(),
+                given
+                    .get("offering")
+                    .and_then(|offering| offering.get("provider")),
+            );
+            for (capability, backend) in given
+                .get("capabilities")
+                .and_then(Json::as_object)
+                .into_iter()
+                .flatten()
+            {
+                take(
+                    format!("value.capabilities.{capability}.offering.provider"),
+                    backend
+                        .get("offering")
+                        .and_then(|offering| offering.get("provider")),
+                );
+            }
+        }
+        keys::CALLS_RULES => {
+            for (index, rule) in given.as_array().into_iter().flatten().enumerate() {
+                take(
+                    format!("value[{index}].when.provider_id"),
+                    rule.get("when").and_then(|when| when.get("provider_id")),
+                );
+                for (step, one) in rule
+                    .get("steps")
+                    .and_then(Json::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    take(
+                        format!(
+                            "value[{index}].steps[{step}].candidate.target.resource.backend.offering.provider"
+                        ),
+                        one.get("candidate").and_then(|candidate| {
+                            candidate.pointer("/target/resource/backend/offering/provider")
+                        }),
+                    );
+                    let target = one
+                        .get("candidate")
+                        .and_then(|candidate| candidate.get("target"));
+                    if target
+                        .and_then(|target| target.pointer("/resource/kind"))
+                        .and_then(Json::as_str)
+                        == Some("provider")
+                    {
+                        take(
+                            format!("value[{index}].steps[{step}].candidate.target.resource.id"),
+                            target.and_then(|target| target.pointer("/resource/id")),
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
+/// A thing a setting names has to exist: an identifier of a provider that is not one is refused at save, with its kind in the sentence, and not left to
+/// fail at a later run. Whether the person may use it is the access engine's question, asked where the value is used.
+pub(crate) async fn named_things_exist(conn: &mut Conn, key: &str, given: &Json) -> ApiResult<()> {
+    let mut faults = Vec::new();
+    if matches!(key, keys::AGENT_DEFAULT_PROVIDER_ID | keys::AGENT_MODEL)
+        && given["type"] == "pool"
+        && let Some(id) = given["id"].as_str().and_then(|id| id.parse().ok())
+        && !orch_db::queries::pools::get(conn, id)
+            .await?
+            .is_some_and(|row| {
+                row.deleted_at.is_none() && Some(row.kind.as_str()) == given["kind"].as_str()
+            })
+    {
+        faults.push(FieldFault {
+            path: "value.id".into(),
+            message: "choose an existing pool of the requested kind".into(),
+        });
+    }
+    if key == keys::CALLS_RULES {
+        for (index, rule) in given.as_array().into_iter().flatten().enumerate() {
+            for (step, one) in rule
+                .get("steps")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let target = one.pointer("/candidate/target");
+                if target
+                    .and_then(|target| target.get("type"))
+                    .and_then(Json::as_str)
+                    == Some("pool")
+                    && let Some(id) = target
+                        .and_then(|target| target.get("id"))
+                        .and_then(Json::as_str)
+                        .and_then(|id| id.parse().ok())
+                {
+                    let present =
+                        orch_db::queries::pools::get(conn, id)
+                            .await?
+                            .is_some_and(|pool| {
+                                pool.deleted_at.is_none()
+                                    && target
+                                        .and_then(|target| target.get("kind"))
+                                        .and_then(Json::as_str)
+                                        == Some(pool.kind.as_str())
+                            });
+                    if !present {
+                        faults.push(FieldFault {
+                            path: format!("value[{index}].steps[{step}].candidate.target"),
+                            message: "choose an existing pool of the requested kind".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for (path, id) in providers_named(key, given) {
+        let present = orch_db::queries::resources::thread_engine::provider(conn, id)
+            .await?
+            .is_some_and(|row| row.deleted_at.is_none());
+        if !present {
+            faults.push(FieldFault {
+                path,
+                message: "no provider with this identifier exists".to_owned(),
+            });
+        }
+    }
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(Problem::invalid(faults).into())
+    }
+}
 orch_api_base::__api_bind_d2a05682ae!();
+
+orch_api_base::__api_bind_ef3cd14b55!();
 
 /// An absent or empty options schema declares no provider options; otherwise it is ordinary JSON Schema.
 pub(crate) fn provider_options(schema: &Json, given: &Json) -> ApiResult<()> {

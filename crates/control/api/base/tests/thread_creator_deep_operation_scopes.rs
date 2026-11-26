@@ -129,7 +129,7 @@ async fn new_environment_body(s: &Scene) -> orch_api_contract::nodes::CreateThre
     requested.environment = Some(EnvironmentChoice::New(Box::new(NewEnvironment {
         name: Some("Scoped new environment".into()),
         home_node_id: Some(s.tree.topic.base.id),
-        host_id: Some(Some(host)),
+        host_id: Some(Some(orch_provider_contract::pools::Target::host(host))),
         template_id: Some(template),
         ..Default::default()
     })));

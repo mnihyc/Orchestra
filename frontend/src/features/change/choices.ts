@@ -6,6 +6,7 @@
  * The request is built here and nowhere else.
  */
 import type { ArrangementType, ChangeOptions, CopyInto, FileSelection, ForkEnvironment, ForkHistory, ForkRequest, MountChoice, MountFate, PlanMount, Thread, ThreadAccess } from '@/generated/api-types';
+import { hostChoiceTarget } from '@/features/resources/pools/hostTarget';
 
 /** What the person chose for one mount; a mount without one takes its default. */
 export interface MountPick {
@@ -65,7 +66,14 @@ export interface AutomaticRuns {
   effort?: { providerId: string; model: string; value: string | null; by: 'retained' | 'default' | 'first' | 'none' | 'unreported'; replaced: boolean };
 }
 
+export interface SwitchPool {
+  id: string;
+  name: string;
+  kind: 'model' | 'provider';
+}
+
 export interface Choices {
+  pool?: SwitchPool | null;
   /** A new thread, or this thread on another side. */
   result: 'new' | 'replace';
   /** What it runs on: `null` is what the thread has. */
@@ -147,7 +155,7 @@ function environmentOf(where: WhereChoice): ForkEnvironment | null {
     case 'new':
       return {
         new: {
-          ...(where.hostId === null ? { host_id: null } : { host_id: where.hostId }),
+          ...(where.hostId === null ? { host_id: null } : { host_id: hostChoiceTarget(where.hostId) }),
           ...(where.name.trim() === '' ? {} : { name: where.name.trim() }),
           ...(where.files.mode === 'all' ? {} : { files: selectionOf(where.files) }),
           ...(where.home ? { home: true } : {}),
@@ -179,6 +187,10 @@ function accessOf(page: PageChoice): ThreadAccess | null {
 
 /** The members of `to` that were changed. A provider or an agent that changes takes its model and its effort with it. */
 function toOf(choices: Choices): ForkRequest['to'] {
+  if (choices.pool && choices.result === 'replace') {
+    const { id, kind } = choices.pool;
+    return { target: { type: 'pool', kind, id }, ...(choices.agentId === null ? {} : { agent_id: choices.agentId }) };
+  }
   const moved = choices.providerId !== null || choices.agentId !== null;
   const to = {
     ...(choices.providerId === null ? {} : { provider_id: choices.providerId }),

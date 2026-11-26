@@ -6,14 +6,13 @@
 //! - `document_versions`, every minute: a document that changed since its last version and that
 //!   nobody has written in for `[documents] version_idle_secs` gets a version, so that the state
 //!   somebody leaves behind is itself one, and not only the open end of its history.
-//! - `document_purge`, every day: the rows of blocks removed longer ago than `[retention]
-//!   soft_delete_days` go, and each document says up to where, so that a reader who would go on
+//! - `document_purge`, every day: the rows of blocks removed longer ago than `retention.deleted_keep_days` go, and each document says up to where, so that a reader who would go on
 //!   from below that loads it again; the records of accepted batches older than a day go; and so
 //!   do the files that nothing names any more: no block of their document, live or removed and not
 //!   yet purged (a removed block can come back), and no version the document keeps (a version can
 //!   be put back). Such a file lets go of the pin it held on its bytes, as taking it out by hand
 //!   does, and the collection of content removes the bytes once their grace has run out. A file put
-//!   in less than `[retention] blob_grace_hours` ago is never taken: it may be the upload of a block
+//!   in less than `retention.blob_grace_hours` ago is never taken: it may be the upload of a block
 //!   that is about to name it.
 //!
 //! A document that is purged as a whole lets go of the pins of its files where soft-deleted rows
@@ -119,16 +118,16 @@ pub async fn cut_versions(
 }
 
 /// Removes what no document needs any more: the rows of blocks removed longer ago than
-/// `[retention] soft_delete_days`, the records of batches older than a day, and the files that
-/// nothing names and that were put in longer ago than `[retention] blob_grace_hours`, whose pins
+/// `retention.deleted_keep_days`, the records of batches older than a day, and the files that
+/// nothing names and that were put in longer ago than `retention.blob_grace_hours`, whose pins
 /// on their bytes are let go.
-pub async fn purge(db: &Db, clock: &dyn Clock, config: &ServerConfig) -> Result<Purged, DbError> {
+pub async fn purge(db: &Db, clock: &dyn Clock, _config: &ServerConfig) -> Result<Purged, DbError> {
     let lease =
         orch_db::queries::job_leases::Lease::for_run(PURGE_JOB, ChronoDuration::minutes(10));
     if !lease.hold(db, clock.now()).await? {
         return Ok(Purged::default());
     }
-    let result = purge_held(db, clock, config, &lease).await;
+    let result = purge_held(db, clock, &lease).await;
     lease.release(db).await?;
     result
 }
@@ -136,23 +135,19 @@ pub async fn purge(db: &Db, clock: &dyn Clock, config: &ServerConfig) -> Result<
 async fn purge_held(
     db: &Db,
     clock: &dyn Clock,
-    config: &ServerConfig,
     lease: &orch_db::queries::job_leases::Lease,
 ) -> Result<Purged, DbError> {
     use orch_db::queries::{document_purge_progress as progress, transaction_guard};
     let now = clock.now();
-    let blocks_before = before(
-        now,
-        i64::try_from(config.retention.soft_delete_days)
-            .ok()
-            .and_then(ChronoDuration::try_days),
-    );
-    let files_before = before(
-        now,
-        i64::try_from(config.retention.blob_grace_hours)
-            .ok()
-            .and_then(ChronoDuration::try_hours),
-    );
+    let (blocks_before, files_before) = {
+        let mut conn = db.acquire().await?;
+        let days = orch_settings::retention::deleted_keep_days(&mut conn).await?;
+        let hours = orch_settings::retention::blob_grace_hours(&mut conn).await?;
+        (
+            orch_settings::retention::deleted_before(now, days),
+            orch_settings::retention::unreferenced_before(now, hours),
+        )
+    };
     let batches_before = before(now, Some(BATCH_RECORDS_KEPT));
     let mut done = Purged::default();
     loop {

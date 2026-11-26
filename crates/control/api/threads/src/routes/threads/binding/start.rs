@@ -52,6 +52,15 @@ async fn render_selected(
             .remove(&id),
         None => None,
     };
+    let translation_scope = match context.settings.translation_scope {
+        Some(id) => value
+            .projection
+            .names
+            .refs(conn, principal, &[id])
+            .await?
+            .remove(&id),
+        None => None,
+    };
     let defaults = defaults_of(conn, principal, id).await?;
     let mut providers = providers_from(
         conn,
@@ -64,12 +73,92 @@ async fn render_selected(
             offers,
             orch_tools: &context.orch_tools,
             scope: scope.as_ref(),
+            translation_scope: translation_scope.as_ref(),
         },
         &value.providers,
         Some(&value.inputs),
         Some(&value.projection),
     )
     .await?;
+    let preference = orch_settings::resolve(conn, Place::Node(id), keys::APPROVAL_MODE)
+        .await
+        .map_err(ApiError::internal)?;
+    let preferred = context.settings.approval_mode;
+    let source = preference.resolved.source;
+    let mut source_node = match source.node {
+        Some(node) => node_view::refs(conn, principal, &[node], Policy::default())
+            .await?
+            .remove(&node),
+        None => None,
+    };
+    if let Some(node) = &mut source_node {
+        bound_ref(node, &value.projection.names);
+    }
+    let source = orch_api_contract::settings::SettingSource {
+        scope: serde_json::from_value(
+            serde_json::to_value(source.scope).map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        node: source_node,
+    };
+    for provider in &mut providers {
+        for agent in &mut provider.agents {
+            let Some(descriptor) = value
+                .inputs
+                .agents
+                .iter()
+                .find(|(row, _)| row.id == agent.agent.id)
+                .and_then(|(_, descriptor)| descriptor.as_ref())
+            else {
+                continue;
+            };
+            let effective = orch_engine::binding::offered_approval_mode(descriptor, preferred).ok();
+            let reason = if effective.is_none() {
+                Some(orch_api_contract::binding::ApprovalDefaultReason::NoOrdinaryMode)
+            } else if effective != Some(preferred) {
+                Some(orch_api_contract::binding::ApprovalDefaultReason::NotDeclared)
+            } else {
+                None
+            };
+            let revision = blake3::hash(
+                &serde_json::to_vec(&(preferred, &source, &descriptor.approval_modes))
+                    .map_err(ApiError::internal)?,
+            )
+            .to_hex()
+            .to_string();
+            let mode = |mode| {
+                serde_json::to_value(mode)
+                    .map_err(ApiError::internal)
+                    .and_then(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| ApiError::internal("an approval mode is not a string"))
+                    })
+            };
+            agent.approval_resolution =
+                Some(orch_api_contract::binding::ApprovalDefaultResolution {
+                    preferred: mode(preferred)?,
+                    effective: effective.map(mode).transpose()?,
+                    reason,
+                    source: source.clone(),
+                    revision,
+                });
+        }
+    }
+    // A visible provider can still be requested. None of its models can start work here
+    // until the person has a Work entry permitting this placement.
+    for provider in &mut providers {
+        if matches!(
+            provider.reason.as_deref(),
+            Some(NO_USE | NOT_ALLOWED_WHERE | SUBSCRIPTION_NOT_SHARED)
+        ) {
+            for model in provider.models.iter_mut().filter(|model| model.allowed) {
+                model.allowed = false;
+                model.reason = Some(ModelOptionReason::ExcludedByEntry);
+            }
+        }
+    }
     let mut environments = environments_from(
         conn,
         principal,
@@ -82,7 +171,6 @@ async fn render_selected(
     .await?;
     if context.node.kind == "project" {
         for entry in &mut environments {
-            entry.is_default = false;
             let used_here =
                 orch_db::queries::binding_start::used_in_project(conn, entry.environment.id, id)
                     .await?;
@@ -95,6 +183,8 @@ async fn render_selected(
             };
         }
     }
+    let default_environment =
+        default_environment_of(conn, principal, id, &environments, &value.projection.names).await?;
     let (mut access, mut new_environment) = access_of(conn, principal, id).await?;
     bound_summary(&mut access.managed, &value.projection.names);
     bound_summary(&mut access.connected, &value.projection.names);
@@ -116,9 +206,23 @@ async fn render_selected(
     )
     .await?;
     let hosts = hosts.into_iter().map(|host| host.place).collect::<Vec<_>>();
+    let chosen_host = match context.recipe.map(|(_, host)| host).or(value.query.host_id) {
+        Some(id) => Some(id),
+        None if value.query.host_auto => None,
+        None => setting::<orch_provider_contract::pools::Target>(
+            conn,
+            Place::Node(id),
+            keys::ENV_HOST_ID,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .and_then(|target| target.single_host()),
+    };
     if environment.is_some_and(|row| row.id.is_nil())
         && value.can_create.allowed
-        && !hosts.iter().any(|host| host.usable)
+        && !hosts
+            .iter()
+            .any(|host| host.usable && chosen_host.is_none_or(|id| host.host.id == id))
     {
         for provider in &mut providers {
             for agent in &mut provider.agents {
@@ -227,6 +331,7 @@ async fn render_selected(
         providers,
         environments,
         environment_default: context.environment_default,
+        default_environment,
         source,
         access,
         agent_access: Some(
@@ -287,45 +392,59 @@ async fn chosen_environment(
     Ok(row)
 }
 
-fn strings(value: Option<&Json>) -> Vec<String> {
-    value
-        .and_then(Json::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Json::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 async fn template_ground_source(
     conn: &mut Conn,
     principal: &Principal,
     node: &hierarchy::NodeDetail,
+    chosen: Option<Id>,
 ) -> ApiResult<Option<(environments::EnvironmentRow, EnvironmentOffers, Id)>> {
-    let id = setting::<Id>(conn, Place::Node(node.id), keys::ENV_TEMPLATE_ID)
-        .await
-        .map_err(ApiError::internal)?
-        .unwrap_or(orch_db::seeds::DEFAULT_TEMPLATE_ID);
+    let id = match chosen {
+        Some(id) => id,
+        None => setting::<Id>(conn, Place::Node(node.id), keys::ENV_TEMPLATE_ID)
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or(orch_db::seeds::DEFAULT_TEMPLATE_ID),
+    };
     let template = orch_db::queries::resources::hosting::template(conn, id)
         .await?
         .filter(|row| row.deleted_at.is_none() && row.kind == "environment");
     let Some(template) = template else {
+        if chosen.is_some() {
+            return Err(ApiError::not_found());
+        }
         return Ok(None);
     };
-    let offers = EnvironmentOffers {
-        offers: strings(
-            template
-                .spec
-                .get("exec")
-                .and_then(|exec| exec.get("offers")),
-        ),
-        colocated: orch_agent_programs::Programs::colocated_for(&template.spec),
-    };
+    if chosen.is_some() {
+        let object = orch_access_contract::decisions::ObjectRef {
+            kind: ObjectKind::Template,
+            id,
+        };
+        let decision = resources::needs(
+            conn,
+            principal,
+            &resources::Needs {
+                required: Permission::TemplateUse,
+                anchor: object,
+                through: Some(node.id),
+                items: vec![resources::Need {
+                    object,
+                    permissions: vec![Permission::TemplateUse],
+                    options: None,
+                }],
+            },
+            Policy::default(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        allowed(conn, decision).await?;
+        if !template.enabled {
+            return Err(invalid("template_id", "this template is switched off"));
+        }
+    }
+    let offers = EnvironmentOffers::from_template(&template.spec);
     // No row is made for a preview. Nil identifies this template promise to the shared projector.
     let environment = environments::EnvironmentRow {
+        revision: 0,
         id: Id::nil(),
         template_id: Some(id),
         name: String::new(),

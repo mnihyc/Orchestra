@@ -268,7 +268,7 @@ expect "the connector in it enrolled and reports the environment to the system" 
 
 step "a thread bound to that environment, and a turn of the scripted agent through the web edge"
 THREAD="$(call POST "/topics/$TOPIC/threads" "$(jq -cn --arg agent "$AGENT" --arg provider "$PROVIDER" --arg env "$ENV_ID" \
-  '{name:"In a container",binding:{agent_id:$agent,provider_id:$provider},model:"mock-large",environment:{use:$env},directory:"web"}')" | jq -r .id)"
+  '{name:"In a container",binding:{agent_id:$agent,target:{type:"single",resource:{kind:"provider",id:$provider}}},model:"mock-large",environment:{use:{type:"single",resource:{kind:"environment",id:$env}}},directory:"web"}')" | jq -r .id)"
 check "the thread was made on a profile whose harness had never run" test -n "$THREAD" -a "$THREAD" != null
 NODE="$(call GET "/nodes/$THREAD")"
 expect "its harness runs with the provider and its tools are carried out in the environment" "separated" "$(printf '%s' "$NODE" | jq -r .binding.arrangement)"

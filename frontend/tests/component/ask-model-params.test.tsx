@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Resources from '@/api/resources';
 import { AskModelChoice } from '@/features/ask/ModelChoice';
 import { effortDisplayName } from '@/features/models/names';
-import type { AskModel, AskModelsReply } from '@/generated/api-types';
+import type { AskPreference, AskModelsReply } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { askModels } from '../unit/ask-fixtures';
@@ -34,7 +34,7 @@ function nativeChoices() {
       option_constraints: { 'another-interface': { type: 'object', properties: { wrong: { type: 'string', title: 'Wrong interface' } } } } },
   }] };
 }
-function Choice({ changed, value: initial = null }: { changed: (value: AskModel | null) => void; value?: AskModel | null }) {
+function Choice({ changed, value: initial = null }: { changed: (value: AskPreference | null) => void; value?: AskPreference | null }) {
   const [value, setValue] = useState(initial);
   return <AskModelChoice root="root" value={value} disabled={false} onChange={(next) => { setValue(next); changed(next); }} />;
 }
@@ -44,11 +44,17 @@ afterEach(async () => { cleanup(); useAppearance.setState(appearance); await set
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`edits effort and the resolved constrained field without ProviderGet or ProviderModelList (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); const changed = vi.fn();
-    show(<Choice changed={changed} />); fireEvent.click(screen.getByRole('button', { name: i18n.t('ask.model') }));
+    show(<Choice changed={changed} />);
+    // The effort has a control of its own beside the model; the request options stay closed at the foot of the model list.
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: effortDisplayName('low') }) }));
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: effortDisplayName('high') }));
+    await waitFor(() => expect(changed).toHaveBeenLastCalledWith({ ...nativeChoices().default_model, params: { effort: 'high' } }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('ask.model') }));
     const picker = await screen.findByRole('dialog', { name: i18n.t('ask.model') });
-    const effort = await within(picker).findByRole('group', { name: i18n.t('composer.model.efforts', { model: 'Readable API model' }) });
-    fireEvent.click(within(effort).getByRole('menuitemradio', { name: effortDisplayName('high') }));
     const temperature = await within(picker).findByRole('spinbutton', { name: 'Temperature' });
+    expect(temperature).not.toBeVisible();
+    fireEvent.click(within(picker).getByText(i18n.t('providerOptions.title'), { exact: true }));
+    expect(temperature).toBeVisible();
     expect(temperature).toHaveAttribute('min', '0'); expect(temperature).toHaveAttribute('max', '1');
     expect(within(picker).queryByRole('textbox', { name: 'Wrong interface' })).not.toBeInTheDocument();
     expect(within(picker).queryByRole('combobox', { name: 'Effort' })).not.toBeInTheDocument();
@@ -64,7 +70,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await screen.findByRole('menuitemradio', { name: 'Readable API model' });
     expect(screen.queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /JSON/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('group', { name: i18n.t('composer.model.efforts', { model: 'Readable API model' }) })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: new RegExp(`^${i18n.t('composer.effort.title')}`) })).not.toBeInTheDocument();
     expect(calls.provider).not.toHaveBeenCalled(); expect(calls.providerModels).not.toHaveBeenCalled();
   });
 }

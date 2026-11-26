@@ -164,6 +164,9 @@ pub enum Metering {
 /// What an arrangement comes to, worked out from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Isolation {
+    /// Captured translated interfaces and fidelity; absent when direct or not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<orch_provider_contract::models::ProtocolTranslation>,
     /// The arrangement type.
     #[serde(rename = "type")]
     pub kind: ArrangementType,
@@ -188,8 +191,8 @@ pub struct Isolation {
     pub held_by: CredentialHolder,
     /// For a shared or handed-over credential: the adapter's name for what leaves.
     pub form: Option<String>,
-    /// How long a copy of the credential is good for; `null` until it is
-    /// rotated or revoked.
+    /// A fixed copy duration where the issuer declares one; null leaves the actual expiry
+    /// to each issued credential, or to rotation/revocation for a non-expiring form.
     pub lifetime_secs: Option<i64>,
     /// Where the list of allowed models is enforced.
     pub model_enforcement: ModelEnforcement,
@@ -246,9 +249,33 @@ pub struct Arrangement {
 
 pub use crate::resources::HostRef;
 
+/// Independent locks on the four creation defaults; one never freezes an unrelated choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BindingDefaultLocks {
+    /// The default provider is fixed.
+    pub provider: bool,
+    /// The default agent profile is fixed.
+    pub agent: bool,
+    /// The model routing name is fixed.
+    pub model: bool,
+    /// The effort is fixed independently of the model.
+    pub effort: bool,
+}
+
+/// A saved pool identity and the display name this reader may see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BindingPoolDefault {
+    pub id: Id,
+    pub kind: orch_provider_contract::pools::Kind,
+    pub name: Option<String>,
+}
+
 /// What settings choose when a thread is bound without being told.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BindingDefaults {
+    /// Evaluated at creation with the chosen agent and placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_pool: Option<BindingPoolDefault>,
     /// The provider.
     pub provider_id: Option<Id>,
     /// The agent profile.
@@ -257,8 +284,26 @@ pub struct BindingDefaults {
     pub model_name: Option<String>,
     /// The effort.
     pub effort: Option<String>,
-    /// Whether a lock above holds these.
-    pub locked: bool,
+    /// The independently fixed defaults.
+    pub locks: BindingDefaultLocks,
+}
+
+/// The approval default this declared program would select, rechecked when the thread is created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalDefaultResolution {
+    pub preferred: String,
+    pub effective: Option<String>,
+    pub reason: Option<ApprovalDefaultReason>,
+    pub source: crate::settings::SettingSource,
+    /// Identifies the observed preference, source and declared modes; reserves nothing.
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDefaultReason {
+    NotDeclared,
+    NoOrdinaryMode,
 }
 
 /// An agent profile a provider offers, and the ways it can be placed.
@@ -279,6 +324,9 @@ pub struct BindingAgent {
     /// The current program report, only when the reader may inspect this provider's processes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_report: Option<BindingProgramReport>,
+    /// Present in a start proposal when the program declares its approval modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_resolution: Option<ApprovalDefaultResolution>,
     /// Each arrangement the adapter could support on that provider and the thread's environment,
     /// including ones that are unavailable or not permitted, each with its reason.
     pub arrangements: Vec<Arrangement>,
@@ -293,6 +341,21 @@ pub struct BindingProgramReport {
     pub detail: Option<String>,
 }
 
+/// The observed condition to address before choosing this provider for a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum BindingProviderSetup {
+    /// The subscription's last reported token reached its expiry.
+    SignInLapsed {
+        /// The caller currently holds the provider management permission needed for sign-in.
+        can_sign_in: bool,
+    },
+    /// The subscription has no sign-in.
+    NeedsSignIn,
+    /// The provider has no enabled model.
+    NeedsModel,
+}
+
 /// A provider the thread could be bound to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BindingProvider {
@@ -304,6 +367,9 @@ pub struct BindingProvider {
     pub grouping: crate::resource_groups::ResourceGrouping,
     /// The provider.
     pub provider: ProviderRef,
+    /// The setup condition, independent of the caller's model and access filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<BindingProviderSetup>,
     /// Whether the caller may use it.
     pub usable: bool,
     /// Why not, when not.
@@ -336,6 +402,12 @@ pub enum EnvironmentUse {
 /// An existing environment a thread could join.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BindingEnvironment {
+    /// Most recently measured room on this choice's visible placement source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<crate::environment::PlaceRoom>,
+    /// Last reported capacity of a visible machine providing this directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<crate::environment::MachineCapacity>,
     /// Its first owner, using the resource's existing protected owner reference.
     #[serde(default)]
     pub owner: Option<crate::users::UserRef>,
@@ -354,7 +426,8 @@ pub struct BindingEnvironment {
     pub usable: bool,
     /// Why not, when not.
     pub reason: Option<String>,
-    /// Whether it is the topic's default.
+    /// Whether it is the default of the threads started here: the environment the nearest setting of
+    /// `env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it.
     pub is_default: bool,
     /// How it is used at present, from the point of view of this topic.
     pub used: EnvironmentUse,
@@ -364,6 +437,18 @@ pub struct BindingEnvironment {
     pub topics_hidden: i64,
     /// The directory a thread would get there.
     pub directory: String,
+}
+
+/// The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BindingDefaultEnvironment {
+    /// The environment the setting names.
+    pub environment: Id,
+    /// The place whose setting it is, when that is not the place asked about itself: a project or org above it.
+    pub from: Option<NodeRef>,
+    /// Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,
+    /// or `environment_not_seen` when it is not among those the caller may see.
+    pub reason: Option<String>,
 }
 
 /// What `env.thread_default` resolves to.
@@ -413,6 +498,10 @@ pub struct BindingOptions {
     pub environments: Vec<BindingEnvironment>,
     /// What a new thread does about its environment unless told.
     pub environment_default: EnvironmentDefault,
+    /// The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use
+    /// it when they cannot; absent when no setting names one and when rebinding an existing thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_environment: Option<BindingDefaultEnvironment>,
     /// Safe resolved repository settings and the place supplying the repository address.
     pub source: BindingSource,
     /// The permission page that a thread created here would begin with.
@@ -529,15 +618,15 @@ pub struct NewEnvironment {
     /// The template; what its home resolves when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<Id>,
-    /// The host. When left out, whatever the home resolves; when `null`, the host with the most
-    /// room among those the caller may use.
+    /// A canonical host or host-pool target. Omission inherits the home; `null` explicitly chooses
+    /// Most room. An accepted creation retains its exact native host separately from this intent.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "absent_or_null"
     )]
-    #[schemars(with = "Option<Id>")]
-    pub host_id: Option<Option<Id>>,
+    #[schemars(with = "Option<orch_provider_contract::pools::Target>")]
+    pub host_id: Option<Option<orch_provider_contract::pools::Target>>,
     /// Values of its own for the keys whose scope is environment: mounts, storage, resources, what
     /// it needs, variables, idle stop, update, removal when unused, and what its exec node offers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -559,9 +648,21 @@ pub struct NewEnvironment {
 pub enum EnvironmentChoice {
     /// An environment that already exists and that the caller manages, whether running or not and
     /// whether or not other threads and topics use it.
-    Use(Id),
+    Use(orch_provider_contract::pools::Target),
     /// One made now, owned by the caller.
     New(Box<NewEnvironment>),
+}
+
+impl EnvironmentChoice {
+    /// Select one existing environment for a thread.
+    pub fn existing(id: Id) -> Self {
+        Self::Use(orch_provider_contract::pools::Target::environment(id))
+    }
+
+    /// Pooled and newly created placements are resolved inside the thread's birth transaction.
+    pub fn requires_birth(&self) -> bool {
+        !matches!(self, Self::Use(target) if target.single_environment().is_some())
+    }
 }
 
 /// Binds a thread that has no execution history.
@@ -642,6 +743,17 @@ impl ThreadBindingResponse {
     }
 }
 
+/// The chosen agent, model and effort kept fixed while a setup preview considers environments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StartPoolBinding {
+    pub binding: crate::nodes::CreateThreadBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
 /// The environment used to judge a binding before a thread exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -655,8 +767,8 @@ pub struct NodeBindingOptionsGetQuery {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "creation_access_query::serialize",
-        deserialize_with = "creation_access_query::deserialize"
+        serialize_with = "structured_query::serialize",
+        deserialize_with = "structured_query::deserialize"
     )]
     #[schemars(with = "Option<String>")]
     pub thread_access: Option<crate::access::ThreadAccess>,
@@ -664,18 +776,40 @@ pub struct NodeBindingOptionsGetQuery {
     /// if the caller manages it, otherwise the resolved template's declaration for a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_id: Option<Id>,
+    /// Assess binding options on an existing usable environment in this pool without reserving it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_pool_id: Option<Id>,
+    /// JSON-encoded fixed binding to assess when choosing from the environment pool.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "structured_query::serialize",
+        deserialize_with = "structured_query::deserialize"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub pool_binding: Option<StartPoolBinding>,
     /// Judge the new-environment template rather than the topic's existing shared default; cannot be combined with environment_id.
     #[serde(default)]
     pub environment_new: bool,
+    /// The template of the new environment being assessed; requires environment_new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<Id>,
+    /// The chosen host must be usable for this template; omission inherits the place's host unless host_auto is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
+    /// Choose the scheduler's host rather than inheriting the place's configured host.
+    /// Requires environment_new and cannot be combined with host_id.
+    #[serde(default)]
+    pub host_auto: bool,
 }
 
-// Form queries carry strings. Keep this one structured preview input typed in Rust,
+// Form queries carry strings. Keep structured preview inputs typed in Rust,
 // using JSON only at the field boundary rather than changing query parsing for other routes.
-mod creation_access_query {
+mod structured_query {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(
-        value: &Option<crate::access::ThreadAccess>,
+    pub fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<T>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         value
@@ -686,16 +820,16 @@ mod creation_access_query {
             .serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+    pub fn deserialize<'de, T: serde::de::DeserializeOwned, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Option<crate::access::ThreadAccess>, D::Error> {
+    ) -> Result<Option<T>, D::Error> {
         match serde_json::Value::deserialize(deserializer)? {
             serde_json::Value::Null => Ok(None),
             serde_json::Value::String(text) => {
                 serde_json::from_str(&text).map_err(serde::de::Error::custom)
             }
             _ => Err(serde::de::Error::custom(
-                "thread_access is a JSON-encoded form field",
+                "expected a JSON-encoded form field",
             )),
         }
     }
@@ -706,7 +840,7 @@ crate::endpoints! {
     NodeBindingOptionsGet: GET "/nodes/{id}/binding/options", Rule("topic.start_threads on a topic or project.create_topics on a project or folder, and environment.use on an environment named"), query NodeBindingOptionsGetQuery, none, json BindingOptions, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Object(K::Topic), Object(K::Project)], Target::Path("id")),
-            Facet::required(Read, &[Object(K::Environment), Object(K::Template)], Target::ResolvedCollection("binding_context")),
+            Facet::required(Read, &[Object(K::Environment), Object(K::Template), Object(K::Host), Object(K::Pool), Object(K::Agent), Object(K::Provider)], Target::ResolvedCollection("binding_context")),
             Facet::required(Read, &[Object(K::Agent), Object(K::Provider), Object(K::Environment), Object(K::Template), Object(K::Host), Object(K::Machine), Object(K::Mount)], Target::ResolvedCollection("binding_choices")),
             Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("binding_names_orgs")),
             Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("binding_names_projects")),
@@ -744,7 +878,7 @@ mod tests {
     #[test]
     fn a_thread_is_put_into_an_environment_that_exists_or_one_made_now() {
         let existing: ThreadEnvironmentSetBody = serde_json::from_value(
-            json!({ "use": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b", "directory": "web" }),
+            json!({ "use": { "type": "single", "resource": { "kind": "environment", "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b" } }, "directory": "web" }),
         )
         .unwrap();
         assert!(matches!(existing.choice, EnvironmentChoice::Use(_)));
@@ -770,7 +904,7 @@ mod tests {
         }
         assert!(
             serde_json::from_value::<ThreadEnvironmentSetBody>(
-                json!({ "use": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b", "bogus": 1 })
+                json!({ "use": { "type": "single", "resource": { "kind": "environment", "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b" } }, "bogus": 1 })
             )
             .is_err()
         );

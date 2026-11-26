@@ -36,8 +36,8 @@ def load_world(path):
 
 def thread(api, world, name):
     return api.call('POST', f'/topics/{world["topic"]}/threads', {'name': name,
-        'binding': {'agent_id': world['agent'], 'provider_id': world['provider']},
-        'model': 'mock-large', 'environment': {'use': world['environment']}, 'directory': '.'})['id']
+        'binding': {'agent_id': world['agent'], 'target': {'type': 'single', 'resource': {'kind': 'provider', 'id': world['provider']}}},
+        'model': 'mock-large', 'environment': {'use': {'type': 'single', 'resource': {'kind': 'environment', 'id': world['environment']}}}, 'directory': '.'})['id']
 
 
 def input_body(key, marker, delay_ms=0):

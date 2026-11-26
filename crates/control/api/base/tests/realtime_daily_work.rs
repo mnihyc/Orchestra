@@ -298,13 +298,9 @@ async fn a_new_thread_enters_the_existing_tree_from_its_create_route() {
         .token(&rig.token)
         .body(&CreateThread {
             name: Some("The new thread".into()),
-            binding: Some(CreateThreadBinding {
-                agent_id: rig.agent,
-                provider_id: rig.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(rig.agent, rig.provider, None)),
             model: Some(MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(rig.environment)),
+            environment: Some(EnvironmentChoice::existing(rig.environment)),
             directory: Some("web".into()),
             ..CreateThread::default()
         })

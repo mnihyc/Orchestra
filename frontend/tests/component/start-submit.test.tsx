@@ -1,29 +1,57 @@
+import { providerTarget, singleProviderId } from '@/lib/resourceTargets';
 /** One atomic request keeps the named setup and cannot change a place default. */
+import type { QueryClient } from '@tanstack/react-query';
 import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { client } from '@/api/client';
+import type { ReactNode } from 'react';
+import { ApiError, client } from '@/api/client';
+import { NewThreadDialog } from '@/features/start/BindingDialog';
+import type * as EverythingApi from '@/api/everything';
+import { inventoryRow } from '../doubles/everything-row';
+import type * as ResourcesApi from '@/api/resources';
 import type * as AccessApi from '@/api/access';
 import { queryClient } from '@/api/query';
-import type { StartOptions } from '@/api/start';
+import type { StartOptions, StartPoolBinding } from '@/api/start';
 import { NO_PICKS, resolve } from '@/features/start/choices';
 import { useLastSetup } from '@/features/start/lastSetup';
 import { useStart, type StartPlan } from '@/features/start/start';
 import { bindingReason, runsLine } from '@/features/start/words';
-import type { CreateThread, NewEnvironment } from '@/generated/api-types';
+import type { CreateThread, EverythingRowPage, NewEnvironment, Pool, Template } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { agent, arrangement, options, provider } from '../unit/start-fixtures';
+import { agent, arrangement, host, options, provider } from '../unit/start-fixtures';
 import { CATALOGUE } from '../unit/general-access-fixtures';
-import { show } from './support';
+import { show as renderWithProviders, skipOverflowFallback } from './support';
+import { modelMemoryClient } from './model-memory';
+let shownCache: QueryClient;
+function show(ui: ReactNode) { shownCache = modelMemoryClient(); return renderWithProviders(ui, shownCache); }
+import { deferred } from './deferred';
+
+// These cases prove accepted choices and request bodies, without measuring clipped text.
+skipOverflowFallback();
 
 const io = vi.hoisted(() => ({
   environment: vi.fn<(body: NewEnvironment, key: string) => Promise<{ id: string; name: string }>>(),
   thread: vi.fn<(topic: string, body: CreateThread, key: string) => Promise<{ id: string; topic_id: string; environment: { id: string; name: string } }>>(),
   topic: vi.fn<(parent: string) => Promise<{ id: string; name: string }>>(),
   topicThread: vi.fn<(parent: string, body: CreateThread, key: string) => Promise<{ id: string; topic_id: string; environment: { id: string; name: string } }>>(),
+  poolBinding: vi.fn<(binding?: StartPoolBinding) => void>(),
   offered: null as StartOptions | null, reads: vi.fn<(node: string, target: string | null) => void>(),
+  pools: vi.fn<() => Promise<EverythingRowPage>>(),
   defaultEnvironment: vi.fn(), defaultSetting: vi.fn(), navigate: vi.fn(),
   readPage: vi.fn<typeof AccessApi.readPage>(),
+  preview: vi.fn<(placement?: Pick<NewEnvironment, 'template_id' | 'host_id'>) => Promise<StartOptions>>(),
+}));
+vi.mock('@/api/everything', async (load) => {
+  const actual = await load<typeof EverythingApi>();
+  return { ...actual, everythingQuery: (...args: Parameters<typeof actual.everythingQuery>) => ({
+    ...actual.everythingQuery(...args), queryFn: io.pools,
+  }) };
+});
+vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourcesApi>(),
+  templatesQuery: () => ({ queryKey: ['submit-templates'], queryFn: () => Promise.resolve([
+    { id: 'alternate', name: 'Agent ready', enabled: true, access: { permissions: ['template.use'] }, description: '' } as unknown as Template,
+  ]) }),
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => io.navigate }));
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), createEnvironment: io.environment }));
@@ -33,8 +61,8 @@ vi.mock('@/api/access', async (original) => ({ ...await original<object>(), perm
   queryKey: ['start-submit-permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply),
 }, readPage: io.readPage }));
 vi.mock('@/api/start', async (original) => ({ ...await original<object>(), setDefaultEnvironment: io.defaultEnvironment, setStartDefault: io.defaultSetting,
-  startOptionsQuery: (node: string, target: string | null) => ({ queryKey: ['submit-preview', node, target], queryFn: (): Promise<StartOptions> => {
-    io.reads(node, target); return io.offered === null ? Promise.reject(new Error('No preview')) : Promise.resolve(io.offered);
+  startOptionsQuery: (node: string, target: string | null, _context?: unknown, placement?: Pick<NewEnvironment, 'template_id' | 'host_id'>, poolBinding?: StartPoolBinding) => ({ queryKey: ['submit-preview', node, target, placement ?? null, poolBinding ?? null], queryFn: (): Promise<StartOptions> => {
+    io.reads(node, target); if (target?.startsWith('\u0000pool:') === true) io.poolBinding(poolBinding); return io.preview(placement);
   } }),
 }));
 
@@ -81,14 +109,182 @@ it('binds a first thread’s explicit audience to its new topic, preserving late
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear(); queryClient.clear();
   client.session.setState({ status: 'signed_in', userId: 'starter' });
+  modelMemoryClient(null, queryClient);
+  io.pools.mockResolvedValue({ items: [], next_cursor: null });
   io.environment.mockResolvedValue({ id: 'made', name: 'Main' });
   io.offered = options({ environments: [], environment_default: 'fresh' });
-  io.thread.mockResolvedValue({ id: 'thread', topic_id: 'topic', environment: { id: 'made', name: 'Main' } });
-  io.topicThread.mockResolvedValue({ id: 'thread', topic_id: 'new-topic', environment: { id: 'made', name: 'Main' } });
+  io.preview.mockImplementation(() => io.offered === null ? Promise.reject(new Error('No preview')) : Promise.resolve(io.offered));
+  const acceptedStart = (topic: string, body: CreateThread) => {
+    const made = { id: 'thread', topic_id: topic, environment: { id: 'made', name: 'Main' } };
+    shownCache.setQueryData(['me-state'], { thread_setup: { place: topic, picks: { ...NO_PICKS,
+      provider: singleProviderId(body.binding?.target), agent: body.binding?.agent_id ?? null,
+      model: body.model ?? null, effort: body.effort ?? null, environment: made.environment.id,
+      arrangement: body.binding?.arrangement ?? null,
+    } } });
+    return Promise.resolve(made);
+  };
+  io.thread.mockImplementation((topic, body) => acceptedStart(topic, body));
+  io.topicThread.mockImplementation((_parent, body) => acceptedStart('new-topic', body));
   io.topic.mockResolvedValue({ id: 'topic', name: 'Login' });
   io.readPage.mockRejectedValue(new Error('Creation must not read or change a permission page after birth'));
 });
 afterEach(async () => { act(() => client.session.setState({ status: 'signed_out', userId: null })); await setLocale('en'); });
+
+it.each(['model', 'provider'] as const)('submits a %s pool from the Model field with the same agent', async (kind) => {
+  const pool: Pool = {
+    id: 'team-pool', name: 'Team pool', address: '', description: '', kind,
+    target: { type: 'pool', kind, id: 'team-pool' }, enabled: true, policy: { type: 'round_robin' },
+    lend_members: false, revision: 1, owner: null, home: null, settings: [],
+    grouping: { home: null, home_path: [], origin_machine: null, availability: [] },
+    access: { permissions: ['pool.view', 'pool.use'], administers: false, through: [] },
+  };
+  io.pools.mockResolvedValue({ next_cursor: null, items: [
+    inventoryRow({ id: pool.id, name: pool.name, kind: 'pool', resource: { kind: 'pool', value: pool } }),
+  ] });
+  io.offered = kind === 'model' ? options({providers:[provider('p1', {models:[]})]}) : options();
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={plan().place} open onClose={() => undefined} />);
+  const create = await screen.findByRole('button', { name: i18n.t('start.create') });
+  if (kind === 'model') expect(create).toBeDisabled();
+  const trigger = await screen.findByRole('button', { name: new RegExp(i18n.t('start.model.model')) });
+  await user.click(trigger);
+  await user.click(await screen.findByRole('menuitemradio', { name: new RegExp(pool.name) }));
+  expect(screen.getByRole('button', {name: new RegExp(i18n.t('start.model.model'))})).toHaveTextContent(pool.name);
+  if (kind === 'provider') {
+    const requested = screen.getByRole('textbox', {name:i18n.t('start.model.model')});
+    expect(requested).toHaveValue('m1');
+    await user.clear(requested);
+    expect(create).toBeDisabled();
+    await user.type(requested, 'review-large');
+  }
+  expect(create).toBeEnabled();
+  await user.click(create);
+  await waitFor(() => expect(io.thread).toHaveBeenCalledOnce());
+  const body = io.thread.mock.calls[0]?.[1];
+  expect(body?.binding?.target).toEqual(pool.target);
+  expect(body?.binding?.agent_id).toBe('a1');
+  expect(body?.model).toBe(kind === 'provider' ? 'review-large' : undefined);
+});
+
+it('submits the selected environment pool after its placement check returns', async () => {
+  const pool: Pool = {
+    id: 'build-pool', name: 'Build environments', address: '', description: '', kind: 'environment',
+    target: { type: 'pool', kind: 'environment', id: 'build-pool' }, enabled: true, policy: { type: 'round_robin' },
+    lend_members: false, revision: 1, owner: null, home: null, settings: [],
+    grouping: { home: null, home_path: [], origin_machine: null, availability: [] },
+    access: { permissions: ['pool.view', 'pool.use'], administers: false, through: [] },
+  };
+  io.pools.mockResolvedValue({ next_cursor: null, items: [
+    inventoryRow({ id: pool.id, name: pool.name, kind: 'pool', resource: { kind: 'pool', value: pool } }),
+  ] });
+  const offered = options();
+  io.offered = offered;
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={plan().place} open onClose={() => undefined} />);
+  const create = await screen.findByRole('button', { name: i18n.t('start.create') });
+  await waitFor(() => expect(create).toBeEnabled());
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
+  const row = await screen.findByRole('option', { name: pool.name });
+  const answer = deferred<StartOptions>();
+  io.preview.mockReturnValue(answer.promise);
+  await user.click(row);
+  await waitFor(() => expect(io.reads).toHaveBeenCalledWith('topic', '\u0000pool:' + pool.id));
+  expect(io.poolBinding).toHaveBeenCalledOnce();
+  expect(io.poolBinding.mock.calls[0]?.[0]).toMatchObject({
+    binding: {agent_id:'a1', target:providerTarget('p1')}, model:'m1',
+  });
+  expect(create).toBeDisabled();
+  expect(io.thread).not.toHaveBeenCalled();
+  await act(async () => { answer.resolve({ ...offered, assessedEnvironmentPool: pool.id }); await answer.promise; });
+  await waitFor(() => expect(create).toBeEnabled());
+  await user.click(create);
+  await waitFor(() => expect(io.thread).toHaveBeenCalledOnce());
+  expect(io.thread.mock.calls[0]?.[1].environment).toEqual({ use: pool.target });
+  expect(io.environment).not.toHaveBeenCalled();
+});
+
+it.each([false, true])('checks the chosen template before creating in an implicit or explicit new environment (%s)', async (explicit) => {
+  const ready = options({ environments: [], environment_default: 'fresh', hosts: [host('quiet', 'Quiet host')] });
+  const blocked = options({ environments: [], environment_default: 'fresh', hosts: explicit ? [] : [host('default', 'Default host')], providers: [provider('p1', { agents: [agent('a1', { reason: 'executor_missing' })] })] });
+  io.offered = blocked;
+  let pending = deferred<StartOptions>();
+  io.preview.mockImplementation((placement) => placement?.template_id === 'alternate' ? placement.host_id?.type === 'single' && placement.host_id.resource.kind === 'host' && placement.host_id.resource.id === 'quiet' ? Promise.resolve(ready) : pending.promise : Promise.resolve(blocked));
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={plan().place} open onClose={() => undefined} />);
+  if (explicit) {
+    await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+    await user.click(screen.getByRole('option', { name: i18n.t('start.where.newRow') }));
+  }
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.template') }));
+  await user.click(screen.getByRole('option', { name: 'Agent ready' }));
+  await waitFor(() => expect(io.preview).toHaveBeenCalledWith({ template_id: 'alternate' }));
+  const create = screen.getByRole('button', { name: i18n.t('start.create') });
+  expect(create).toBeDisabled();
+  expect(io.thread).not.toHaveBeenCalled();
+  if (explicit) {
+    await act(async () => { pending.reject(new ApiError({ type: 'orch:error:request.invalid', code: 'request.invalid', status: 400,
+      title: 'Invalid request', detail: 'The selected template is unavailable', request_id: 'placement-refused' }, null)); await pending.promise.catch(() => undefined); });
+    expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('errors.request.invalid'));
+    expect(create).toBeDisabled();
+    expect(io.thread).not.toHaveBeenCalled();
+    pending = deferred<StartOptions>();
+    await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.template') }));
+    await user.click(screen.getByRole('option', { name: i18n.t('start.where.templateDefault') }));
+    await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.template') }));
+    await user.click(screen.getByRole('option', { name: 'Agent ready' }));
+    expect(create).toBeDisabled();
+  }
+  await act(async () => { pending.resolve(ready); await pending.promise; });
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.host') }));
+  await user.click(await screen.findByRole('option', { name: 'Quiet host' }));
+  if (explicit) {
+    await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.host') }));
+    await user.click(screen.getByRole('option', { name: i18n.t('start.where.hostAuto') }));
+  }
+  await waitFor(() => expect(create).toBeEnabled());
+  await user.click(create);
+  await waitFor(() => expect(io.thread).toHaveBeenCalledOnce());
+  expect(io.thread.mock.calls[0]?.[1]).toMatchObject({ environment: { new: { template_id: 'alternate', host_id: explicit ? null : { type: 'single', resource: { kind: 'host', id: 'quiet' } } } }, binding: { agent_id: 'a1', arrangement: 'separated' } });
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the prepared arrangement refused after a template changes its eligibility until another is deliberately chosen (%s)', async (locale) => {
+  await setLocale(locale);
+  const offer = (open: boolean) => options({ environments: [], environment_default: 'fresh', providers: [provider('p1', { agents: [agent('a1', {
+    arrangements: [arrangement('separated', 1, open, open ? null : 'executor_missing'), arrangement('credential_shared', 2)],
+  })] })] });
+  io.offered = offer(true);
+  io.preview.mockImplementation((placement) => Promise.resolve(offer(placement?.template_id !== 'alternate')));
+  const choose = vi.fn<(config: CreateThread) => void>();
+  show(<NewThreadDialog parent={plan().place} open onClose={() => undefined} prepare={{ initial: { binding: { target: providerTarget('p1'), agent_id: 'a1', arrangement: 'separated' }, model: 'm1', environment: { new: {} } }, onChoose: choose }} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.template') }));
+  await user.click(await screen.findByRole('option', { name: 'Agent ready' }));
+  const separated = await screen.findByRole('radio', { name: i18n.t('choiceCatalog.arrangement.separated.name') });
+  expect(separated).toBeChecked();
+  expect(separated).toHaveAttribute('aria-disabled', 'true');
+  const confirm = screen.getByRole('button', { name: i18n.t('sendLater.useSetup') });
+  expect(confirm).toBeDisabled();
+  expect(choose).not.toHaveBeenCalled();
+  expect(io.thread).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('radio', { name: i18n.t('choiceCatalog.arrangement.credential_shared.name') }));
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await user.click(confirm);
+  expect(choose.mock.calls[0]?.[0]).toMatchObject({ binding: { arrangement: 'credential_shared' } });
+});
+
+it('keeps a prepared start on its chosen host and template when its setup is reopened', async () => {
+  const choose = vi.fn<(config: CreateThread) => void>();
+  const creation = { host_id: { type: 'single' as const, resource: { kind: 'host' as const, id: 'quiet' } }, template_id: 'alternate', access: 'only_me' as const, files: { from_thread: 'source' } };
+  io.offered = options({ environments: [], environment_default: 'fresh', hosts: [host('quiet', 'Quiet host')] });
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={plan().place} open onClose={() => undefined} prepare={{ initial: { environment: { new: creation } }, onChoose: choose }} />);
+  const confirm = await screen.findByRole('button', { name: i18n.t('sendLater.useSetup') });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await user.click(confirm);
+  expect(choose).toHaveBeenCalledOnce();
+  expect(choose.mock.calls[0]?.[0].environment).toMatchObject({ new: creation });
+  expect(io.thread).not.toHaveBeenCalled();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) {
   for (const kind of ['topic', 'project'] as const) for (const fresh of [false, true]) for (const viewers of [false, true]) {
@@ -105,7 +301,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       const body = create.mock.calls[0]?.[1];
       expect(body).toMatchObject({
         let_into_environment: viewers,
-        environment: fresh ? { new: {} } : { use: 'e1' },
+        environment: fresh ? { new: {} } : { use: { type: 'single', resource: { kind: 'environment', id: 'e1' } } },
         first_input: { content: [{ type: 'text', text: selected.message }] },
       });
       expect(typeof body?.first_input?.client_id).toBe('string');
@@ -192,12 +388,12 @@ for (const locale of ['en', 'zh-CN'] as const) {
       expect(io.reads).not.toHaveBeenCalled();
       expect(io.environment).not.toHaveBeenCalled();
       // A later native answer updates the available setup, not the already accepted start.
-      const updated = options({ environments: [], environment_default: 'fresh', defaults: { provider_id: 'p2', agent_id: 'a2', model_name: 'm2', effort: null, locked: false } });
+      const updated = options({ environments: [], environment_default: 'fresh', defaults: { provider_id: 'p2', agent_id: 'a2', model_name: 'm2', effort: null, locks: { provider: false, agent: false, model: false, effort: false } } });
       view.rerender(<Starter selected={plan(updated)} />);
       act(() => { release(result); });
       await waitFor(() => expect(io.thread).toHaveBeenCalledOnce());
       const body = io.thread.mock.calls[0]?.[1];
-      expect(body).toMatchObject({ binding: { agent_id: 'a1', provider_id: 'p1', arrangement: 'separated' }, model: 'm1', effort: 'low', environment: { new: {} }, first_input: { content: [{ type: 'text', text: 'Only this start' }] } });
+      expect(body).toMatchObject({ binding: { agent_id: 'a1', target: providerTarget('p1'), arrangement: 'separated' }, model: 'm1', effort: 'low', environment: { new: {} }, first_input: { content: [{ type: 'text', text: 'Only this start' }] } });
       await waitFor(() => expect(io.navigate).toHaveBeenCalledOnce());
       expect(io.defaultEnvironment).not.toHaveBeenCalled();
       expect(io.defaultSetting).not.toHaveBeenCalled();
@@ -231,7 +427,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(screen.getByLabelText('Last started topic')).toHaveTextContent('new-topic');
     expect(io.topicThread.mock.calls[0]?.[0]).toBe('project');
     expect(io.topicThread.mock.calls[0]?.[1]).toMatchObject({
-      binding: { agent_id: 'a1', provider_id: 'p1', arrangement: 'separated' }, model: 'm1', effort: 'low',
+      binding: { agent_id: 'a1', target: providerTarget('p1'), arrangement: 'separated' }, model: 'm1', effort: 'low',
       environment: { new: { config: { 'env.lifetime': 'thread' } } }, first_input: { content: [{ type: 'text', text: 'Only this start' }] },
     });
     expect(io.topic).not.toHaveBeenCalled();

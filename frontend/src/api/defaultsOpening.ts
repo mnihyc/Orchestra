@@ -1,3 +1,4 @@
+import { defaultProviderId } from '@/features/settings/threadDefaults';
 /** Publish only independently authorized Defaults members into their existing readers. */
 import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import { applyRow, record } from '@/api/cache';
@@ -31,6 +32,7 @@ function publish(cache: QueryClient, key: QueryKey, data: unknown, problem: Prob
   }
 }
 function selected(setting: ResolvedSetting, key: string): unknown {
+  if (key === 'agent.default_provider_id') return defaultProviderId(setting.value);
   return key === 'search.semantic.embeddings' && record(setting.value) ? setting.value.provider_id : setting.value;
 }
 
@@ -64,7 +66,7 @@ export function seedNodeDefaults(cache: QueryClient, id: string, value: NodeDefa
         }
       }
       const shown = editableValue(definition, setting, availableShape(settingShape(definition), setting.available_values));
-      if (!choice || shown === entry.id) publish(cache, key, entry.provider, entry.problem, entry.retry_after);
+      if (!choice || defaultProviderId(shown) === entry.id) publish(cache, key, entry.provider, entry.problem, entry.retry_after);
     }
   }
   // All metadata is installed before the Node can mount its editor or the Chat can publish.

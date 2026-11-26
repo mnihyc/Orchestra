@@ -249,7 +249,11 @@ fn expected(def: &SettingDef, layers: &[Layer]) -> Option<Json> {
             Json::Array(kept)
         }
         Merge::Map => {
-            let mut merged = serde_json::Map::new();
+            // The default is the base the rows' members are put over, as the resolver joins them.
+            let mut merged = def
+                .default_value()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
             for layer in honoured(layers) {
                 for (name, value) in layer.value.as_object().cloned().unwrap_or_default() {
                     merged.insert(name, value);
@@ -314,6 +318,11 @@ fn expected(def: &SettingDef, layers: &[Layer]) -> Option<Json> {
                 })
                 .max_by_key(|(_, rank)| *rank)
                 .map_or(Json::Null, |(value, _)| value.clone())
+        }
+        Merge::MapStricter => {
+            panic!(
+                "the matrix draws no key that keeps each member's strictest value; the contract's narrowing cases do"
+            )
         }
     };
     Some(value).filter(|value| !value.is_null())

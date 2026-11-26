@@ -2,7 +2,7 @@
 
 use super::*;
 
-use orch_api_contract::ask::AskModelIdentity;
+use orch_api_contract::ask::{AskModelIdentity, AskTarget};
 
 use orch_api_contract::ask::AskModelOption;
 
@@ -36,9 +36,10 @@ async fn inputs(
         .iter()
         .copied()
         .filter(|id| {
-            providers
-                .get(id)
-                .is_some_and(|provider| provider.kind == "api" && provider.deleted_at.is_none())
+            providers.get(id).is_some_and(|provider| {
+                matches!(provider.kind.as_str(), "api" | "subscription")
+                    && provider.deleted_at.is_none()
+            })
         })
         .collect();
     let policies = orch_engine::access::resource_policies_among(conn, &valid)
@@ -51,15 +52,13 @@ async fn inputs(
             .map_err(ApiError::internal)?
             .into_iter()
             .filter_map(|(id, decision)| {
-                decision.granted().map(|granted| {
-                    (
-                        id,
-                        granted
-                            .each
-                            .iter()
-                            .map(|allowance| allowance.provider.clone())
-                            .collect(),
-                    )
+                decision.granted().and_then(|granted| {
+                    let entries: Vec<_> = granted
+                        .each
+                        .iter()
+                        .map(|allowance| allowance.provider.clone())
+                        .collect();
+                    (!entries.is_empty()).then_some((id, entries))
                 })
             })
             .collect();
@@ -78,13 +77,14 @@ async fn inputs(
         .map(|(id, rows)| {
             Ok((
                 id,
-                model_options(
+                model_options_for(
                     rows,
                     settings,
                     grants
                         .get(&id)
                         .map(|each| each.iter().collect::<Vec<_>>())
                         .as_deref(),
+                    orch_access_contract::permissions::ProviderUsePurpose::Ask,
                 )?
                 .into_iter()
                 .map(|model| (model.model_name.clone(), model))
@@ -129,9 +129,9 @@ async fn forbidden(
 }
 
 fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
-    let id = selection.provider_id;
     let mut choice = AskModelOption {
-        selection,
+        selection: AskTarget::Backend(selection.clone()),
+        pool_name: None,
         provider: None,
         model: None,
         request_option_schema: None,
@@ -139,11 +139,22 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
         is_default: false,
         unavailable_reason: Some("provider_unavailable".into()),
     };
-    let Some(provider) = inputs
-        .providers
-        .get(&id)
-        .filter(|provider| provider.kind == "api" && provider.deleted_at.is_none())
-    else {
+    let Some(offering) = selection.backend.offering.as_ref() else {
+        return choice;
+    };
+    let id = offering.provider;
+    let program = selection.backend.route == orch_api_contract::ask::PROGRAM_ROUTE;
+    if !program && selection.backend.route != orch_api_contract::ask::API_ROUTE {
+        choice.unavailable_reason = Some("generation_unsupported".into());
+        return choice;
+    }
+    let Some(provider) = inputs.providers.get(&id).filter(|provider| {
+        (if program {
+            provider.kind == "subscription"
+        } else {
+            provider.kind == "api"
+        }) && provider.deleted_at.is_none()
+    }) else {
         return choice;
     };
     let Some(grant) = inputs.grants.get(&id) else {
@@ -154,12 +165,12 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
     choice.model = inputs
         .models
         .get(&id)
-        .and_then(|models| models.get(&choice.selection.model))
+        .and_then(|models| models.get(&offering.offering))
         .cloned();
     let protocol = provider
         .protocols
         .iter()
-        .find(|protocol| orch_model_contract::generation::supported(protocol));
+        .find(|protocol| !program && orch_model_contract::generation::supported(protocol));
     choice.request_option_schema = protocol.and_then(|protocol| {
         choice
             .model
@@ -168,14 +179,32 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
             .get(protocol)
             .cloned()
     });
+    // Ask declares its own read tools and never selects hosted web search, so it is not offered.
+    if let Some(schema) = choice.request_option_schema.as_mut() {
+        if let Some(properties) = schema.get_mut("properties").and_then(Json::as_object_mut) {
+            properties.remove("web_search");
+        }
+        if let Some(required) = schema.get_mut("required").and_then(Json::as_array_mut) {
+            required.retain(|name| name.as_str() != Some("web_search"));
+        }
+    }
+    let generation = orch_provider_contract::models::ModelPurpose::Generation;
+    let model_cannot_generate = choice.model.as_ref().is_some_and(|model| {
+        model.purpose.as_ref().map_or_else(
+            || !model.parameters.supports_purpose(generation),
+            |purpose| !purpose.supports_purpose(generation),
+        )
+    });
     let reason = if provider.status == "disabled" {
         Some("disabled")
-    } else if matches!(
-        provider.status.as_str(),
-        "offline" | "error" | "needs_setup"
-    ) {
+    } else if !program
+        && matches!(
+            provider.status.as_str(),
+            "offline" | "error" | "needs_setup"
+        )
+    {
         Some("provider_unavailable")
-    } else if protocol.is_none() {
+    } else if (protocol.is_none() && !program) || model_cannot_generate {
         Some("generation_unsupported")
     } else if inputs.forbidden.contains(&id) {
         Some("excluded_by_policy")
@@ -185,6 +214,8 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
         Some(match choice.model.as_ref().and_then(|model| model.reason) {
             Some(ModelOptionReason::ExcludedByPolicy) => "excluded_by_policy",
             Some(ModelOptionReason::Disabled) => "disabled",
+            Some(ModelOptionReason::SharedForOtherWorkOnly) => "shared_for_other_work_only",
+            Some(ModelOptionReason::SharedForAskOnly) => "shared_for_ask_only",
             _ => "no_use",
         })
     } else {
@@ -203,18 +234,16 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
             orch_model_contract::parameters::resolve(protocol, &model.parameters, defaults, &empty);
         let permitted = resolved.as_ref().is_ok_and(|params| {
             orch_provider_contract::calls::requested_effort(params).is_ok_and(|effort| {
-                effort.is_none_or(|effort| {
-                    // One entry has to allow the model and its effort together.
-                    grant.iter().any(|entry| {
-                        orch_authz::options::entry_allows(
-                            entry,
-                            &orch_authz::options::Wanted {
-                                model: Some((&choice.selection.model, &model.groups)),
-                                effort: Some(effort),
-                                ..orch_authz::options::Wanted::default()
-                            },
-                        )
-                    })
+                grant.iter().any(|entry| {
+                    orch_authz::options::entry_allows_for(
+                        entry,
+                        &orch_authz::options::Wanted {
+                            model: Some((&offering.offering, &model.groups)),
+                            effort,
+                            ..orch_authz::options::Wanted::default()
+                        },
+                        orch_access_contract::permissions::ProviderUsePurpose::Ask,
+                    )
                 })
             })
         });
@@ -235,11 +264,9 @@ pub(super) async fn read(
     root: Id,
 ) -> ApiResult<Vec<AskModelOption>> {
     let ordinary = principal.ordinary(conn).await.map_err(ApiError::internal)?;
-    let configured =
-        orch_settings::get::<Vec<AskModelIdentity>>(conn, Place::Node(root), "ask.models")
-            .await
-            .map_err(ApiError::internal)?
-            .unwrap_or_default();
+    let configured = orch_engine::ask::pool::entries(conn, &ordinary, root)
+        .await
+        .map_err(ApiError::engine)?;
     if configured.is_empty() {
         return Ok(Vec::new());
     }
@@ -248,7 +275,13 @@ pub(super) async fn read(
         .map_err(ApiError::internal)?;
     let ids = configured
         .iter()
-        .map(|model| model.provider_id)
+        .filter_map(|model| {
+            model
+                .backend()?
+                .offering
+                .as_ref()
+                .map(|offering| offering.provider)
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -256,7 +289,63 @@ pub(super) async fn read(
     let mut result = Vec::with_capacity(configured.len());
     let mut marked = false;
     for selection in configured {
-        let mut option = choice(selection, &inputs);
+        let mut option = match selection {
+            AskTarget::Backend(identity) => choice(identity, &inputs),
+            AskTarget::Pool {
+                target: orch_provider_contract::pools::Target::Pool { kind, id },
+                ref model,
+            } => {
+                let Some((name, allowed)) = orch_engine::ask::pool::preview(
+                    conn,
+                    &ordinary,
+                    root,
+                    kind,
+                    id,
+                    model.as_deref(),
+                )
+                .await
+                .map_err(ApiError::engine)?
+                else {
+                    continue;
+                };
+                AskModelOption {
+                    selection,
+                    pool_name: Some(name),
+                    provider: None,
+                    model: None,
+                    request_option_schema: None,
+                    allowed,
+                    is_default: false,
+                    unavailable_reason: (!allowed)
+                        .then(|| "selected_backend_unavailable".to_owned()),
+                }
+            }
+            AskTarget::Pool { .. } => continue,
+        };
+        if let AskTarget::Backend(identity) = &option.selection
+            && option.allowed
+            && identity.backend.route == orch_api_contract::ask::PROGRAM_ROUTE
+        {
+            match orch_engine::ask::model::preview_configured(
+                conn,
+                &ordinary,
+                root,
+                identity,
+                principal.now(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(orch_engine::ask::model::Error::Denied(refusal)) => {
+                    option.allowed = false;
+                    option.unavailable_reason = Some(refusal.reason);
+                }
+                Err(orch_engine::ask::model::Error::Db(error)) => return Err(error.into()),
+                Err(orch_engine::ask::model::Error::Native(error)) => {
+                    return Err(ApiError::engine(error));
+                }
+            }
+        }
         if option.allowed && !marked {
             option.is_default = true;
             marked = true;
