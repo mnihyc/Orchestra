@@ -317,6 +317,7 @@ async fn model_suggestions_distinguish_unlisted_empty_and_a_new_model_without_ac
     let p = rig(Arc::clone(&program)).await;
     p.start_responses_provider().await;
     let command = ProviderDiscoverModels {
+        max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default().whole_bytes,
         provider_id: p.rig.provider,
         models: Some(selected(&p)),
     };
@@ -514,4 +515,35 @@ async fn source_only_facts_do_not_make_a_provider_ready_when_its_required_model_
     assert_eq!(report["facts"]["plan"], "Acme");
     assert_eq!(report["status"], "needs_setup");
     assert_ne!(report["facts"]["credential_verified"], true);
+}
+
+#[tokio::test]
+async fn a_model_read_uses_its_captured_budget_and_retains_a_readable_failure_without_accepting_models()
+ {
+    let program = Arc::new(Acme::new(false));
+    program.state.lock().unwrap().models = Some((0..469).map(|index| json!({
+        "model_name":format!("vendor/model-{index}"), "display_name":format!("Model {index}"),
+        "parameters":{}, "origins":(0..64).map(|field| (format!("/parameters/field_{field}"),json!("vendor"))).collect::<serde_json::Map<_,_>>()
+    })).collect());
+    let p = rig(program).await;
+    p.start_responses_provider().await;
+    let mut command = ProviderDiscoverModels {
+        max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default().whole_bytes,
+        provider_id: p.rig.provider,
+        models: Some(selected(&p)),
+    };
+    let whole = p.rig.succeed(&p.provider_key(), &command).await;
+    assert_eq!(whole["suggestions"].as_array().unwrap().len(), 469);
+    assert!(whole["source"]["error"].is_null());
+    command.max_report_bytes = 1024;
+    let refused = p.rig.succeed(&p.provider_key(), &command).await;
+    assert_eq!(refused["source"]["error"]["code"], "too_large");
+    assert!(
+        refused["source"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("1024")
+    );
+    assert_eq!(refused["suggestions"], json!([]));
+    assert!(refused.get("accepted").is_none());
 }

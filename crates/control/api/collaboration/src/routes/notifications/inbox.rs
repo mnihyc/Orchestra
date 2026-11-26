@@ -27,8 +27,6 @@ use orch_api_contract::common::ErrorCode;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
-
 use orch_api_contract::notifications::MeNotificationPrefsSetBody;
 
 use orch_api_contract::notifications::MePushSubscriptionCreateBody;
@@ -156,17 +154,134 @@ pub(super) fn kinds_asked(asked: Option<&str>) -> ApiResult<Vec<String>> {
 }
 
 /// The caller's notifications, newest first, of the kinds and since the moment asked for.
-pub async fn list(ctx: Ctx, query: NotificationListQuery, (): ()) -> ApiResult<Page<Notification>> {
+pub(super) fn list_limit(limit: Option<u32>) -> ApiResult<usize> {
+    let size = limit.unwrap_or(orch_api_contract::common::DEFAULT_LIMIT);
+    if size == 0 {
+        return Err(ApiError::invalid("limit", "must be greater than zero"));
+    }
+    usize::try_from(size).map_err(ApiError::internal)
+}
+
+pub(super) fn matches_search(words: &orch_db::queries::search::Query, row: &Notification) -> bool {
+    let mut fields = vec![row.title.clone(), row.body.clone()];
+    if let Some(actor) = &row.actor {
+        fields.push(format!("{} {}", actor.display_name, actor.username));
+    }
+    for place in row
+        .node
+        .iter()
+        .chain(row.thread.iter())
+        .chain(row.path.iter())
+    {
+        if !place.redacted {
+            fields.extend(place.name.clone());
+        }
+    }
+    words.matches(&fields.join(" "))
+}
+
+pub async fn list(
+    ctx: Ctx,
+    query: NotificationListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::notifications::NotificationPage> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let policy = orch_settings::retention::inbox(&mut conn, ctx.now)
+        .await
+        .map_err(ApiError::internal)?;
+    let oldest = inbox::oldest_retained(&mut conn, principal.user()).await?;
+    let retention = orch_api_contract::notifications::NotificationRetention {
+        days: policy.days,
+        source: orch_api_contract::settings::SettingSource {
+            scope: if policy.configured {
+                orch_api_contract::settings::SettingScope::System
+            } else {
+                orch_api_contract::settings::SettingScope::Default
+            },
+            node: None,
+        },
+        expires_before: Time::new(policy.expires_before),
+        actual_oldest_retained: oldest.map(Time::new),
+        measured_at: Time::new(ctx.now),
+    };
+    drop(conn);
+    let page = filtered_page(ctx, query).await?;
+    Ok(orch_api_contract::notifications::NotificationPage {
+        items: page.items,
+        next_cursor: page.next_cursor,
+        retention: Some(retention),
+    })
+}
+
+async fn filtered_page(ctx: Ctx, query: NotificationListQuery) -> ApiResult<Page<Notification>> {
     if query.group_by == Some(NotificationGrouping::Place) {
         return super::grouping::list_by_place(ctx, query).await;
     }
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    if words.terms().is_empty() {
+        return list_page(ctx, query).await;
+    }
+    let wanted = list_limit(query.limit)?;
+    let mut scan = query.clone();
+    scan.limit = Some(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT)
+            .max(orch_api_contract::common::DEFAULT_LIMIT),
+    );
+    let mut conn = ctx.app.db.acquire().await?;
+    let mut batches = orch_settings::get::<u64>(
+        &mut conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::SEARCH_HISTORY_CANDIDATE_BATCHES,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::internal("the history search work setting has no value"))?;
+    drop(conn);
+    let mut items = Vec::new();
+    loop {
+        let page = list_page(ctx.clone(), scan.clone()).await?;
+        items.extend(
+            page.items
+                .into_iter()
+                .filter(|row| matches_search(&words, row)),
+        );
+        let extra = items.len() > wanted;
+        items.truncate(wanted);
+        batches = batches.saturating_sub(1);
+        if extra {
+            return Ok(Page {
+                next_cursor: items.last().map(|row| {
+                    After {
+                        created_at: row.created_at.get(),
+                        id: row.id,
+                    }
+                    .to_cursor()
+                }),
+                items,
+            });
+        }
+        if page.next_cursor.is_none() || batches == 0 || items.len() == wanted {
+            return Ok(Page {
+                items,
+                next_cursor: page.next_cursor,
+            });
+        }
+        if page.next_cursor == scan.cursor {
+            return Err(ApiError::internal(
+                "the Inbox search repeated its native position",
+            ));
+        }
+        scan.cursor = page.next_cursor;
+    }
+}
+
+async fn list_page(ctx: Ctx, query: NotificationListQuery) -> ApiResult<Page<Notification>> {
     let kinds = kinds_asked(query.kind.as_deref())?;
     let since = query.since.map(Time::get);
-    let page = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = i64::from(page.limit());
+    let limit = i64::try_from(list_limit(query.limit)?).map_err(ApiError::internal)?;
     let after = query
         .cursor
         .as_deref()
@@ -631,7 +746,24 @@ pub async fn push_delete(ctx: Ctx, (): (), body: MePushSubscriptionDeleteBody) -
 
 /// The caller's own browsers that took push, without their endpoints or keys: each with a name
 /// from what it said of itself and the hash a browser finds itself by.
-pub async fn push_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<PushDevice>> {
+pub async fn push_list(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<Page<PushDevice>> {
+    let source = format!("personal-devices:{}", ctx.user()?.id());
+    let rows = push_snapshot(ctx, (), ()).await?;
+    crate::collection::snapshot(
+        &query,
+        &source,
+        rows,
+        |row| (row.label.clone(), row.id),
+        |row| row.label.clone(),
+        false,
+    )
+}
+
+async fn push_snapshot(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<PushDevice>> {
     let mut conn = ctx.app.db.acquire().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     Ok(pages::push_devices_of(&mut conn, principal.user())

@@ -492,6 +492,7 @@ async fn a_refusal_reaches_the_harness_as_a_result_marked_as_an_error_that_begin
             attempt: None,
             result: None,
             error: Some(ToolError {
+                rate_limit: None,
                 code: "invalid".to_owned(),
                 message: "The argument \"title\" is required.".to_owned(),
             }),

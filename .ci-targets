@@ -1,0 +1,4 @@
+# n41-defaults: the whole engine unit run and the thread-move programs on the head that places a thread's new
+# environment in its request's administrator mode and moves a thread out of a never-made environment without files
+test -p orch-engine --lib
+test -p orch-engine --test forks
