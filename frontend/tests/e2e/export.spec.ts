@@ -147,7 +147,7 @@ test.describe('one archive of a place', () => {
     const dialog = await exportFrom(page, 'Shop');
     await expect(plan(dialog)).toContainText('allowed here');
 
-    await dialog.getByRole('checkbox', { name: 'Conversations' }).click();
+    await dialog.getByRole('checkbox', { name: 'Threads' }).click();
     await dialog.getByRole('checkbox', { name: 'Chats' }).click();
     // The three documents under Shop are 21 KiB.
     await expect(plan(dialog)).toContainText('About 21 KiB of 2 GiB allowed here');
@@ -189,7 +189,7 @@ test.describe('one archive of a place', () => {
     await expect(dialog).toBeVisible();
     expect(await made()).toHaveLength(0);
 
-    await dialog.getByRole('checkbox', { name: 'Conversations' }).click();
+    await dialog.getByRole('checkbox', { name: 'Threads' }).click();
     await expect(plan(dialog)).toContainText('About 21 KiB of 30 KiB allowed here');
     await expect(exportButton(dialog)).not.toHaveAttribute('aria-disabled', 'true');
   });
@@ -198,7 +198,7 @@ test.describe('one archive of a place', () => {
     await steer('/limits', { max_bytes: 0 });
     await atShop(page);
     const dialog = await exportFrom(page, 'Shop');
-    await expect(plan(dialog)).toContainText('This place allows no export.');
+    await expect(plan(dialog)).toContainText('This place does not allow export. Ask whoever manages it.');
     await expect(exportButton(dialog)).toHaveAttribute('aria-disabled', 'true');
   });
 
@@ -209,7 +209,7 @@ test.describe('one archive of a place', () => {
     await expect(plan(dialog)).toContainText('Nothing is ticked');
     await expect(exportButton(dialog)).toHaveAttribute('aria-disabled', 'true');
     await row(dialog, /^Shop/).click();
-    await dialog.getByRole('checkbox', { name: 'Conversations' }).click();
+    await dialog.getByRole('checkbox', { name: 'Threads' }).click();
     await dialog.getByRole('checkbox', { name: 'Chats' }).click();
     await dialog.getByRole('checkbox', { name: 'Documents' }).click();
     await expect(plan(dialog)).toContainText('No kind of thing is included');
@@ -219,11 +219,11 @@ test.describe('one archive of a place', () => {
     await atShop(page);
     const dialog = await exportFrom(page, 'Shop');
     await dialog.getByRole('radio', { name: 'JSON', exact: true }).click();
-    await expect(dialog.getByRole('combobox', { name: /Conversations/ })).toBeVisible();
+    await expect(dialog.getByRole('combobox', { name: /Threads/ })).toBeVisible();
     await expect(dialog.getByRole('checkbox', { name: 'Attachments' })).toBeVisible();
     await expect(dialog.getByRole('textbox', { name: 'From', exact: true })).toBeVisible();
     await expect(dialog.getByRole('textbox', { name: 'To', exact: true })).toBeVisible();
-    await dialog.getByRole('combobox', { name: /Conversations/ }).click();
+    await dialog.getByRole('combobox', { name: /Threads/ }).click();
     await page.getByRole('option', { name: 'Full', exact: true }).click();
     await dialog.getByRole('checkbox', { name: 'Attachments' }).click();
     await dialog.getByRole('textbox', { name: 'From', exact: true }).fill('2026-10-01');
@@ -307,7 +307,7 @@ test.describe('the job and the download', () => {
     await steer('/finish', { fail: { code: 'export.too_large', message: 'the archive passed the bytes the place allows' } });
 
     const toast = notice(page, 'Shop: export failed');
-    await expect(toast).toContainText('This archive would be larger than the place allows. Choose less.');
+    await expect(toast).toContainText('This package would be larger than the place allows. Choose less.');
     await expect(statusBar(page).getByText('Export failed', { exact: true })).toBeVisible();
     await expect(statusBar(page).getByRole('button', { name: 'Export failed' })).toHaveCount(0);
     await expect(statusBar(page).getByRole('button', { name: 'Your exports' }).locator('[data-action-icon="yourExports"]')).toBeVisible();
@@ -317,7 +317,7 @@ test.describe('the job and the download', () => {
     await page.waitForURL(/\/settings\/exports/);
     const line = page.getByRole('row', { name: /Shop/ });
     await expect(line).toContainText('Failed');
-    await expect(line).toContainText('This archive would be larger than the place allows. Choose less.');
+    await expect(line).toContainText('This package would be larger than the place allows. Choose less.');
     // The person has seen it: the status bar says nothing more.
     await expect(statusBar(page).getByText('Export failed', { exact: true })).toBeHidden();
   });
@@ -348,7 +348,7 @@ test.describe('what may be read and not taken away', () => {
     await page.locator('[data-thread-header]').getByRole('button', { name: /^Actions for (Main thread|Repro)/ }).click();
     const entry = page.getByRole('menuitem', { name: /^Export…/ });
     await expect(entry).toHaveAttribute('aria-disabled', 'true');
-    await expect(entry).toContainText('Taking this away as a file is for people Ada Lovelace names');
+    await expect(entry).toContainText('Only people Ada Lovelace names');
     await entry.click({ force: true });
     await expect(page.getByRole('dialog', { name: /^Export / })).toBeHidden();
 
@@ -370,7 +370,7 @@ test.describe('what may be read and not taken away', () => {
     await expect(page.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
     await expect(page.getByText(/Checking what you can do/)).toHaveCount(0);
     await expect(page.getByRole('menuitem', { name: 'Export…' })).toHaveAttribute('aria-disabled', 'true');
-    await expect(page.getByRole('menuitem', { name: 'Export…' })).toContainText('Taking this away as a file is for people Ada Lovelace names');
+    await expect(page.getByRole('menuitem', { name: 'Export…' })).toContainText('Only people Ada Lovelace names');
     await expect(page.getByRole('menuitem', { name: 'Request access' })).toBeVisible();
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Actions for Main thread' }).first().click();
@@ -474,7 +474,7 @@ test.describe('Your exports', () => {
     await expect(table.getByRole('row', { name: /Web/ })).toContainText('Left out: attachments, comments, earlier versions');
     const full = table.getByRole('row', { name: /Infra/ });
     await expect(full).toContainText('3 attachments');
-    await expect(full).toContainText('Left out: 2 things you may not take away, 1 attachment too large');
+    await expect(full).toContainText('Left out: 2 things you may not export, 1 attachment too large');
     await expect(full).not.toContainText('comments');
     const bare = table.getByRole('row', { name: /Shop/ });
     await expect(bare).toContainText('Left out: attachments');
@@ -554,9 +554,9 @@ test.describe('by keyboard', () => {
 
     // Tab leaves the tree for the options, in the order they are read, and the dialog is closed with Escape.
     await page.keyboard.press('Tab');
-    await expect(dialog.getByRole('checkbox', { name: 'Conversations' })).toBeFocused();
+    await expect(dialog.getByRole('checkbox', { name: 'Threads' })).toBeFocused();
     await page.keyboard.press('Space');
-    await expect(dialog.getByRole('checkbox', { name: 'Conversations' })).not.toBeChecked();
+    await expect(dialog.getByRole('checkbox', { name: 'Threads' })).not.toBeChecked();
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
   });
