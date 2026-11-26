@@ -320,14 +320,14 @@ impl effects::Effect for Operations {
     ) -> BoxFuture<'a, ApiResult<(Proposal, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let request = request(&body)?;
-            if matches!(
-                request.command,
-                domain::Command::Delete | domain::Command::MoveOut
-            ) != body.deletion_plan.is_some()
+            // A deletion moves its trees to the trash at once; a plan it carries is still checked.
+            if !request
+                .command
+                .fits_deletion_plan(body.deletion_plan.is_some())
             {
                 return Err(ApiError::invalid(
                     "deletion_plan",
-                    "deletion and Move to another org require their complete native deletion plan",
+                    domain::DELETION_PLAN_MISFIT,
                 ));
             }
             let decoded = body

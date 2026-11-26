@@ -565,6 +565,7 @@ impl effects::ApplyOwned for Confirm {
                 return Err(stale());
             }
             let operation = orch_engine::notifications::NotificationOperation {
+                actor: p.user(),
                 id: observed.batch,
                 kind: "recover".into(),
                 name: String::new(),

@@ -48,7 +48,8 @@ export function CallRecoveryControls({ thread, recovery, pending, onAction }: { 
   </div>;
 }
 
-export function ThreadCallRecovery({ thread, banner = false, serviceOnly = false }: { thread: Thread; banner?: boolean; serviceOnly?: boolean }) {
+/** `place`: where the live line sets what this shows; it is called only when the line has something, never for the recovery the banner holds. */
+export function ThreadCallRecovery({ thread, banner = false, serviceOnly = false, place = (shown) => shown }: { thread: Thread; banner?: boolean; serviceOnly?: boolean; place?: (shown: ReactNode) => ReactNode }) {
   const { t } = useTranslation();
   const read = useThreadReadRef(thread.id);
   const revision = useThreadPart(thread.id, (view) => view.thread?.seq ?? null);
@@ -76,13 +77,13 @@ export function ThreadCallRecovery({ thread, banner = false, serviceOnly = false
     void refetch({ cancelRefetch: false });
   }, [revision, refetch]);
   const control = useMutation({ mutationFn: (action: CallRecoveryAction) => controlCallRecovery(read, action) });
-  if (state.isPending) return serviceOnly
+  if (state.isPending) return place(serviceOnly
     ? <StateLine compact role="status" message={t('calls.checkingRecovery')} className="text-text-muted" />
-    : <SkeletonRows read={state} rows={1} />;
+    : <SkeletonRows read={state} rows={1} />);
   if (state.isError) {
     const action = <Button size="sm" pending={state.isFetching} onClick={() => void state.refetch()}>{t('common.tryAgain')}</Button>;
-    return serviceOnly ? <ErrorState compact title={t('calls.recoveryUnavailable')} error={state.error} action={action} onRetry={() => void state.refetch()} retrying={state.isFetching} />
-      : <ErrorAlert error={state.error} action={action} />;
+    return place(serviceOnly ? <ErrorState compact title={t('calls.recoveryUnavailable')} error={state.error} action={action} onRetry={() => void state.refetch()} retrying={state.isFetching} />
+      : <ErrorAlert error={state.error} action={action} />);
   }
   const recovery = state.data.recovery;
   if (recovery === null || (serviceOnly && typeof recovery.service !== 'string')) return null;
@@ -92,8 +93,8 @@ export function ThreadCallRecovery({ thread, banner = false, serviceOnly = false
   if (!banner && attention && !pausedService) return null;
   const controls = <CallRecoveryControls thread={thread} recovery={recovery} pending={control.isPending} onAction={(action) => control.mutate(action)} />;
   const status = <span className="inline-flex min-w-0 flex-wrap items-center gap-1"><CallRecoveryStatus recovery={recovery} /><CallHelp section="recovery" /></span>;
-  return <div className="min-w-0">
+  return place(<div className="min-w-0">
     {banner ? <Banner tone="warning" action={controls} actionBelowOnMobile>{status}</Banner> : <div role="status" aria-label={t('calls.status')} className="flex min-w-0 flex-wrap items-center justify-center gap-x-2 gap-y-1 py-1 text-sm text-text-muted">{status}{(!attention || pausedService) && controls}</div>}
     {control.error !== null && <ErrorAlert error={control.error} />}
-  </div>;
+  </div>);
 }

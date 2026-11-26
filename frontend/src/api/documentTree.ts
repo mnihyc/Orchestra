@@ -5,7 +5,7 @@ import { ApiError, api, client, ok, repeatable } from '@/api/client';
 import { canonicalDirectoryRequest, documentDirectoryKey, retireDocumentDirectory } from '@/api/documentTreeCache';
 import type {
   Document, DocumentDirectory, DocumentTreeItem, DocumentTreeOperationBody,
-  DocumentTreePage, DocumentTreePlan, DocumentTreeRead, DocumentTreeReceipt, NewDocumentAccess,
+  DocumentTreePage, DocumentTreeRead, DocumentTreeReceipt, NewDocumentAccess,
 } from '@/generated/api-types';
 
 /** Match the existing document list's visible page size. Only the cursor marks the end. */
@@ -71,13 +71,9 @@ export const documentTreeEntryQuery = (item: DocumentTreeItem, cache: QueryClien
   retry: false,
 });
 
-/** Retries reuse the form's client ID. Only deletion carries a previously read complete plan. */
+/** Retries reuse the form's client ID. Deletion moves its entries to the trash at once; Move to another org carries its plan. */
 export function organizeDocuments(body: DocumentTreeOperationBody): Promise<DocumentTreeReceipt> {
   return ok(api.POST('/document-tree/operations', { body, ...repeatable(body.client_id) }));
-}
-
-export function previewDocumentDeletion(body: DocumentTreeOperationBody): Promise<DocumentTreePlan> {
-  return ok(api.POST('/document-tree/delete/preview', { body }));
 }
 
 export function createDocumentFolder(at: DocumentDirectory, name: string, key: string): Promise<DocumentTreeReceipt> {

@@ -841,7 +841,7 @@ async fn an_external_agent_share_obeys_a_tightened_lifetime_like_an_outside_pers
 
     let mut conn = w.conn().await;
     sqlx::query(
-        "INSERT INTO settings (node_id,key,value) VALUES ($1,'sharing.external_max_days','30')
+        "INSERT INTO settings (node_id,key,value) VALUES ($1,'sharing.external_max_minutes','43200')
          ON CONFLICT (node_id,key) DO UPDATE SET value=EXCLUDED.value",
     )
     .bind(w.root)
@@ -1028,7 +1028,7 @@ async fn outside_grants_are_filtered_before_an_independent_valid_grant_and_chat_
     )
     .await;
     sqlx::query(
-        "INSERT INTO settings(node_id,key,value) VALUES($1,'sharing.external_max_days','7')",
+        "INSERT INTO settings(node_id,key,value) VALUES($1,'sharing.external_max_minutes','10080')",
     )
     .bind(w.root)
     .execute(&mut *conn)
