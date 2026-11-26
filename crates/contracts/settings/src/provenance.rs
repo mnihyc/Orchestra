@@ -45,6 +45,8 @@ words! {
         ProviderOwn = "provider_own",
         /// The host's own maintenance value.
         HostOwn = "host_own",
+        /// The pool's own routing defaults.
+        PoolOwn = "pool_own",
     }
 }
 
@@ -62,7 +64,7 @@ impl SourceScope {
             Self::Project => 4,
             Self::Topic => 5,
             Self::Thread => 6,
-            Self::EnvironmentOwn | Self::ProviderOwn | Self::HostOwn => 7,
+            Self::EnvironmentOwn | Self::ProviderOwn | Self::HostOwn | Self::PoolOwn => 7,
         }
     }
 
@@ -80,7 +82,8 @@ impl SourceScope {
             | Self::Environment
             | Self::EnvironmentOwn
             | Self::ProviderOwn
-            | Self::HostOwn => None,
+            | Self::HostOwn
+            | Self::PoolOwn => None,
         }
     }
 }
@@ -97,6 +100,7 @@ impl From<Scope> for SourceScope {
             Scope::Environment => Self::EnvironmentOwn,
             Scope::Provider => Self::ProviderOwn,
             Scope::Host => Self::HostOwn,
+            Scope::Pool => Self::PoolOwn,
         }
     }
 }
@@ -273,6 +277,7 @@ impl<N> Resolved<N> {
             value: self.value,
             source: self.source,
             own,
+            inherited: None,
             locked_by: self.locked_by,
             writable,
             parts: self.supplied,
@@ -291,6 +296,15 @@ pub struct OwnRow {
     pub revision: Revision,
 }
 
+/// The value and source that apply when this place has no contribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Inherited<N> {
+    /// The inherited effective value, or none when unset.
+    pub value: Option<Json>,
+    /// Where that value comes from.
+    pub source: Source<N>,
+}
+
 /// A key as it holds at one node, with where its value comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResolvedSetting<N> {
@@ -302,6 +316,9 @@ pub struct ResolvedSetting<N> {
     pub source: Source<N>,
     /// The row at this node, when there is one.
     pub own: Option<OwnRow>,
+    /// Exact inheritance where the reader has the resolved place context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<Inherited<N>>,
     /// The place whose lock decides the key, when one does.
     pub locked_by: Option<LockedBy<N>>,
     /// Whether the caller may write the key here: they hold what writing it
@@ -320,6 +337,10 @@ impl<N> ResolvedSetting<N> {
             value: self.value,
             source: self.source.map_node(&mut to),
             own: self.own,
+            inherited: self.inherited.map(|inherited| Inherited {
+                value: inherited.value,
+                source: inherited.source.map_node(&mut to),
+            }),
             locked_by: self.locked_by.map(|lock| lock.map_node(&mut to)),
             writable: self.writable,
             parts: self

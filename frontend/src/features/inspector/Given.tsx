@@ -18,7 +18,8 @@ import { Badge, type BadgeTone } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
-import { Input } from '@/ui/Input';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { Pagination } from '@/ui/Pagination';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -48,7 +49,7 @@ export function GivenRecord({ record, search, first }: { record: ModelInput; sea
   const [copyError, setCopyError] = useState<unknown>(null);
   const copyAll = async () => { try { await copyText((await Promise.all(record.blocks.map((block) => modelInputText(record, block)))).join('\n\n')); } catch (failure) { setCopyError(failure); } };
   const whole = wholeText(record);
-  const blocks = search === '' ? record.blocks : record.blocks.filter((block) => block.text.inline.toLocaleLowerCase().includes(search));
+  const blocks = record.blocks;
   return <li className="border-b border-border py-2" data-testid="given-record">
     <details open={first || search !== ''}>
       <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
@@ -70,23 +71,22 @@ function Given({ thread, tab }: { thread: Thread; tab: ViewProps['tab'] }) {
   const { t } = useTranslation();
   const turn = tab.of?.givenThread === thread.id ? tab.of.givenTurn ?? null : null;
   const record = tab.of?.givenThread === thread.id ? tab.of.givenRecord ?? null : null;
-  const query = useInfiniteQuery(modelInputsQuery(thread.id, turn, record));
-  const [search, setSearch] = useState('');
-  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={4} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
-  const unique = new Map(query.data.pages.flatMap((page) => page.items).map((record) => [record.id, record]));
-  const wanted = search.trim().toLocaleLowerCase();
+  const search = useCollectionSearch(`given:${thread.id}:${turn ?? ''}:${record ?? ''}`);
+  const query = useInfiniteQuery(modelInputsQuery(thread.id, turn, record, search.q));
+  const unique = new Map((query.data?.pages ?? []).flatMap((page) => page.items).map((record) => [record.id, record]));
+  const wanted = search.q.toLocaleLowerCase();
   const records = [...unique.values()]
-    .sort((one, other) => other.seq_created - one.seq_created)
-    .filter((record) => wanted === '' || record.blocks.some((block) => block.text.inline.toLocaleLowerCase().includes(wanted)));
+    .sort((one, other) => other.seq_created - one.seq_created);
   return <ScrollArea className="focus-inset h-full" data-testid="thread-given" role="region" tabIndex={0} aria-label={t('threadViews.given.title')}>
     <InstructionSources threadId={thread.id} />
     <div className="flex flex-wrap items-end gap-2 border-b border-border p-2">
-      <Input label={t('threadViews.given.search')} value={search} onChange={(event) => setSearch(event.target.value)} />
+      <CollectionSearch name={t('threadViews.given.search')} {...search} />
       {(turn !== null || record !== null) && <Button size="sm" variant="ghost" onClick={() => clearGiven(tab.id)}>{t('threadViews.given.showAll')}</Button>}
     </div>
     {(turn !== null || record !== null) && <p className="px-3 pt-2 text-sm text-text-muted"><span className="font-medium">{thread.name}</span> · {t('threadViews.given.narrowed')}</p>}
     <div className="p-2">
-      {records.length === 0 && <EmptyState compact icon={<ScrollText aria-hidden />} title={t(unique.size === 0 ? 'threadViews.given.empty' : 'threadViews.given.noMatches')} />}
+      {query.data === undefined && (query.error === null ? <SkeletonRows read={query} rows={4} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />)}
+      {query.data !== undefined && records.length === 0 && <EmptyState compact icon={<ScrollText aria-hidden />} title={t(wanted === '' ? 'threadViews.given.empty' : 'threadViews.given.noMatches')} />}
       <ol aria-label={t('threadViews.given.title')}>{records.map((record, index) => <GivenRecord key={record.id} record={record} search={wanted} first={index === 0} />)}</ol>
       <Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.error} onMore={() => void query.fetchNextPage()} />
     </div>

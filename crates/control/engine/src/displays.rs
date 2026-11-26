@@ -1,8 +1,6 @@
 //! Display lifecycle checks the environment door and audits only safe committed facts.
 
-pub use crate::browsers::{
-    BrowserFailure as DisplayFailure, CLOSED_LIST_KEPT, Requester, SITTING_GAP,
-};
+pub use crate::browsers::{BrowserFailure as DisplayFailure, Requester, SITTING_GAP};
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
@@ -59,6 +57,17 @@ pub struct OpenDisplay {
     /// The agent's purpose line.
     pub note: Option<String>,
     /// The request's safe audit origin.
+    pub origin: Origin,
+}
+
+/// A person or agent registering an existing VNC server.
+pub struct AdoptDisplay {
+    pub environment: Id,
+    pub requester: Requester,
+    pub thread: Option<Id>,
+    pub target: orch_link_contract::display::DisplayTarget,
+    pub password: Option<String>,
+    pub note: Option<String>,
     pub origin: Origin,
 }
 
@@ -138,6 +147,9 @@ impl Displays {
         }
         if orch_db::queries::environment_facts::refuses(conn, site.id, "environment.vnc").await? {
             return Ok(Some(BrowsersOff::MachinePolicy));
+        }
+        if site.stopping {
+            return Ok(Some(BrowsersOff::EnvironmentStopping));
         }
         if site.status != "running"
             || site.machine_id.is_none()
@@ -385,18 +397,19 @@ impl Displays {
         }
     }
 
-    /// Announces only an agent's verified local server, sealing its password before any durable write.
-    pub async fn adopt(
-        &self,
-        environment: Id,
-        thread: Id,
-        endpoint: String,
-        password: Option<String>,
-        note: Option<String>,
-    ) -> Result<rows::DisplayRow, DisplayFailure> {
+    /// Registers a verified local server and seals its credential before persistence.
+    pub async fn adopt(&self, request: AdoptDisplay) -> Result<rows::DisplayRow, DisplayFailure> {
+        let AdoptDisplay {
+            environment,
+            requester,
+            thread,
+            target,
+            password,
+            note,
+            origin,
+        } = request;
         validate_note(note.as_deref())?;
         let id = crate::tools::source::resource_id("display.announce", new_id());
-        let requester = Requester::Agent(thread);
         let sealed = match password.as_deref() {
             Some(password) => {
                 if password.len() > orch_settings::secrets::SECRET_MAX_BYTES {
@@ -424,11 +437,18 @@ impl Displays {
                 .await?
                 .ok_or(DisplayFailure::NotFound)?;
             self.check(&mut tx, &site, &requester).await?;
+            if let Some(thread) = thread
+                && !threads::thread(&mut tx, thread)
+                    .await?
+                    .is_some_and(|t| t.environment_id == Some(site.id) && t.deleted_at.is_none())
+            {
+                return Err(DisplayFailure::NotFound);
+            }
             if let Some(row) = rows::get(&mut tx, id).await? {
                 if row.environment_id != environment
                     || row.env_generation != site.generation
-                    || row.thread_id != Some(thread)
-                    || row.opened_by.is_some()
+                    || row.thread_id != thread
+                    || row.opened_by != requester.person()
                     || row.origin != "announced"
                     || row.state == "closed"
                 {
@@ -446,8 +466,8 @@ impl Displays {
                         generation: site.generation,
                         name: "",
                         origin: "announced",
-                        person: None,
-                        thread: Some(thread),
+                        person: requester.person(),
+                        thread,
                         note: note.as_deref(),
                         password: sealed.as_deref(),
                     },
@@ -455,6 +475,15 @@ impl Displays {
                 )
                 .await?;
             }
+            orch_db::idempotency::creation::observe_with_status(
+                &mut tx,
+                requester.person(),
+                "display_creation",
+                id,
+                json!({"environment":site.id}),
+                201,
+            )
+            .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
             site
         };
@@ -466,7 +495,7 @@ impl Displays {
                 &DisplayAdopt {
                     environment_id: environment,
                     display_id: id,
-                    endpoint: endpoint.clone(),
+                    target,
                     password: sealed.as_ref().map(|_| Secret::Ref(id)),
                 },
             )
@@ -477,11 +506,11 @@ impl Displays {
                     &site,
                     id,
                     &requester,
-                    &endpoint,
+                    &result.endpoint,
                     None,
                     result.name.as_deref(),
                     result.geometry.as_deref(),
-                    &Origin::default(),
+                    &origin,
                 )
                 .await
             }
@@ -748,13 +777,7 @@ impl Displays {
         site: &rows::Site,
         found: &[orch_link_contract::browser::ScreenLookDisplay],
     ) -> Result<(), EngineError> {
-        for row in rows::list(
-            conn,
-            site.id,
-            self.engine.inner.clock.now() - CLOSED_LIST_KEPT,
-        )
-        .await?
-        {
+        for row in rows::list(conn, site.id).await? {
             if row.state == "open"
                 && row.env_generation == site.generation
                 && !found.iter().any(|d| d.display_id == row.id)
@@ -788,7 +811,8 @@ impl Displays {
             let reason = match &site {
                 None => Some("environment_stopped"),
                 Some(site)
-                    if site.generation != row.env_generation
+                    if site.stopping
+                        || site.generation != row.env_generation
                         || !matches!(site.status.as_str(), "running" | "offline") =>
                 {
                     Some("environment_stopped")

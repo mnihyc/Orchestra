@@ -396,7 +396,12 @@ async fn accepted_owner_use(scoped: bool) -> TestResult {
         .machine
         .handler
         .on(CommandKind::NodeRuntimeStart, |_| {
-            Ok(CommandResult::NodeRuntimeStart(Empty {}))
+            Ok(CommandResult::NodeRuntimeStart(
+                orch_link_contract::commands::NodeRuntimeStartResult {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
+                    reused: false,
+                },
+            ))
         });
     let recreate = Recreating::of(&s.job.row().await?)?;
     assert_eq!(
