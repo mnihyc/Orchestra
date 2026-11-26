@@ -1238,3 +1238,158 @@ async fn a_program_that_dies_in_a_turn_is_lost_by_how_it_ended_and_what_it_wrote
         );
     }
 }
+
+#[tokio::test]
+async fn an_acting_side_completes_its_turn_while_the_main_session_waits_for_permission() {
+    let agent = Agent::new();
+    agent.script(vec![
+        tool_call("main-call", "bash", json!({"command":"pwd"})),
+        permission("main-call", "main-choice"),
+    ]);
+    agent.script(vec![
+        tool_call("side-call", "bash", json!({"command":"pwd"})),
+        tool_done("side-call", "completed", "workspace\n[exit code: 0]"),
+    ]);
+    let mut rig = Rig::start(
+        program(json!({"command_exit_marker":"[exit code:"})),
+        agent.clone(),
+    )
+    .await;
+    let main = rig.session().await;
+    let main_turn = rig.begin(&main, "show the working directory").await;
+    let events = rig.until(|event| event.is("approval.requested")).await;
+    let request = events.last().unwrap().body["request_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let side = rig.session().await;
+    assert_ne!(side.native, main.native);
+    let events = rig.say(&side, "inspect this workspace").await;
+    assert!(events.iter().any(|event| event.thread == Some(side.thread)
+        && event.is("item.completed")
+        && event.body["payload"]["tool"]["kind"] == "command"));
+    assert!(agent.answer("main-choice").is_none());
+    rig.adapter
+        .resolve_approval(
+            main.thread,
+            &request,
+            ApprovalDecision::Option {
+                option_id: "allow-once".into(),
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+    let events = rig.until(|event| event.is("turn.completed")).await;
+    assert_eq!(events.last().unwrap().body["turn_id"], json!(main_turn));
+}
+
+// The CLI's legacy ACP envelope with protocolVersion 2 is also observed in
+// T3 Code's packages/effect-acp/test/fixtures/antigravity-initialize.json.
+// Session options and the prompt are synthetic and carry no account data.
+#[tokio::test]
+async fn an_antigravity_subscription_discovers_the_agents_models_and_uses_the_selected_one() {
+    let registry = orch_agent_programs::Programs::builtin();
+    let manifest = registry.program("antigravity").unwrap();
+    let program = orch_adapter_acp::programs::for_manifest(manifest).unwrap();
+    let agent = Agent::new();
+    {
+        let mut behavior = agent.behavior.lock().unwrap();
+        behavior.version = "1.5.1".into();
+        behavior.initialization = Some(json!({
+            "protocolVersion":2,"agentInfo":{"name":"antigravity-acp","version":"agy_acp_server_1.1.1"},
+            "agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true},"sessionCapabilities":{"resume":{},"list":{}}},
+            "authMethods":[{"id":"oauth-personal","name":"Log in with Google"}]
+        }));
+        behavior.options = json!([{"id":"model","category":"model","name":"Model","type":"select",
+            "currentValue":"first","options":[{"value":"first","name":"First"},{"value":"second","name":"Second"}]}]);
+        behavior.modes = None;
+    }
+    let mut rig = Rig::start(program, agent.clone()).await;
+    assert!(rig.started.descriptor.native_provider.is_some());
+    use orch_agent_contract::login::{LoginRequest, LoginValues};
+    rig.adapter
+        .login(LoginRequest {
+            method: "oauth-personal".into(),
+            values: Default::default(),
+            config: json!({}),
+        })
+        .await
+        .unwrap();
+    let prompt = rig
+        .until(|event| event.body["state"] == "awaiting_user")
+        .await;
+    assert!(
+        prompt.last().unwrap().body["shows"][0]["value"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://accounts.google.com/")
+    );
+    rig.adapter
+        .login_input(LoginValues(
+            [("code".into(), json!("one-use-example"))].into(),
+        ))
+        .await
+        .unwrap();
+    rig.until(|event| event.body["state"] == "completed").await;
+    let launches = agent.record.lock().unwrap().launches.clone();
+    let login = launches
+        .iter()
+        .find(|r| r.args.contains(&"--login".into()))
+        .unwrap();
+    assert!(login.env["GEMINI_HOME"].starts_with(rig.home.path().to_str().unwrap()));
+    assert!(!login.env.contains_key("GEMINI_API_KEY"));
+    assert!(!login.args.iter().any(|arg| arg.contains("one-use-example")));
+    assert_eq!(
+        rig.adapter
+            .discover_models()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.model_name.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    let mut spec = rig.spec(SessionMode::New);
+    spec.provider = orch_agent_contract::session::ProviderAccess::Native {
+        provider_id: rig.provider,
+    };
+    spec.settings.model = "second".into();
+    spec.settings.arrangement = orch_agent_contract::descriptor::ArrangementType::Together;
+    let session = rig.open(spec).await;
+    let mut turn = rig.turn_of(&session, "Hello");
+    turn.model = "second".into();
+    rig.adapter.start_turn(turn).await.unwrap();
+    rig.until(|event| event.is("turn.completed")).await;
+    assert!(
+        agent
+            .frames("session/set_config_option")
+            .iter()
+            .any(|f| f["params"]["value"] == "second")
+    );
+    let prompts = agent.frames("session/prompt");
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0]["params"].get("_meta").is_none());
+    assert!(
+        agent
+            .frames("session/new")
+            .iter()
+            .all(|frame| frame["params"].pointer("/_meta/orch").is_none())
+    );
+    agent.behavior.lock().unwrap().fails_new = Some((-32000, "Authentication required".into()));
+    assert!(matches!(
+        rig.adapter.discover_models().await,
+        Err(orch_agent_contract::adapter::AdapterError::LoginRequired)
+    ));
+    assert_eq!(
+        agent
+            .record
+            .lock()
+            .unwrap()
+            .launches
+            .iter()
+            .filter(|r| r.args.iter().any(|a| a == "--login"))
+            .count(),
+        1
+    );
+}

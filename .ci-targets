@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test thread_opening_scopes

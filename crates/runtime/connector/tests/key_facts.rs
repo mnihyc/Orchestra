@@ -9,6 +9,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::get;
+use orch_connector_core::key_facts::Client;
 use orch_connector_core::upstream::Upstream;
 use orch_plugin_contract::Secret;
 use orch_provider_contract::builtins::VendorClient;
@@ -77,7 +78,7 @@ async fn vendor() -> Vendor {
 #[tokio::test]
 async fn the_key_goes_as_a_bearer_token_to_the_vendors_own_path_and_its_json_answer_is_read() {
     let vendor = vendor().await;
-    let client = Upstream::new(Arc::new(SystemClock)).unwrap();
+    let client = Client(Upstream::new(Arc::new(SystemClock)).unwrap());
     let key = Secret::new("made-up-key");
     let answer = client.get(&vendor.base, "/api/v1/key", &key, 1024).await;
     assert_eq!(answer, Some(json!({"data": {"usage": 3.0}})));
@@ -91,7 +92,7 @@ async fn the_key_goes_as_a_bearer_token_to_the_vendors_own_path_and_its_json_ans
 #[tokio::test]
 async fn a_refusal_or_an_answer_that_is_no_json_tells_nothing() {
     let vendor = vendor().await;
-    let client = Upstream::new(Arc::new(SystemClock)).unwrap();
+    let client = Client(Upstream::new(Arc::new(SystemClock)).unwrap());
     let key = Secret::new("made-up-key");
     assert_eq!(
         client
@@ -134,7 +135,7 @@ async fn declared_admin_headers_and_query_cursors_use_the_same_bounded_origin_wi
         asked: Arc::default(),
         task,
     };
-    let client = Upstream::new(Arc::new(SystemClock)).unwrap();
+    let client = Client(Upstream::new(Arc::new(SystemClock)).unwrap());
     let headers = std::collections::BTreeMap::from([
         (
             "x-fixture-admin".into(),
