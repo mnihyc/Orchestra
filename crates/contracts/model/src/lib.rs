@@ -13,6 +13,7 @@
 pub mod credentials;
 pub mod declared_usage;
 pub mod endpoint;
+pub mod features;
 pub mod generation;
 pub mod parameters;
 pub mod protocol;

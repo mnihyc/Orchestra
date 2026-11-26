@@ -40,6 +40,8 @@ type ChartId = 'threads' | 'turns' | 'turnTime' | 'machines' | 'events' | 'waiti
 interface ChartDef {
   id: ChartId;
   unit: Unit;
+  /** Stored series drawn by this chart, for its actual source-resolution label. */
+  measures: readonly string[];
   /** The lines it draws, from the series of the span. */
   groups: (series: readonly MetricSeries[]) => Group[];
   /** The places its lines take in the colours, by what they are. */
@@ -53,15 +55,16 @@ const ROOM_ORDER = ['pinned', 'cache', 'free'] as const;
 const by = (measure: string, label: string | null, how: Aggregate) => (series: readonly MetricSeries[]) => groupSeries(series, measure, label, how);
 
 const CHARTS: readonly ChartDef[] = [
-  { id: 'threads', unit: 'count', groups: by('threads', 'state', 'sum'), order: THREAD_STATES, name: (value, _chart, translate) => translate(`state.${value}`, value) },
-  { id: 'turns', unit: 'count', groups: by('turns_total', 'status', 'sum'), order: TURN_RESULTS, name: (value, _chart, translate) => translate(`admin.overview.results.${value}`, value) },
-  { id: 'turnTime', unit: 'seconds', groups: by('turn_seconds', null, 'mean'), order: [], name: (_value, chart, translate) => translate(`admin.overview.charts.${chart}`, chart) },
-  { id: 'machines', unit: 'count', groups: by('link_sessions', null, 'sum'), order: [], name: (_value, chart, translate) => translate(`admin.overview.charts.${chart}`, chart) },
-  { id: 'events', unit: 'count', groups: by('outbox_pending', null, 'sum'), order: [], name: (_value, chart, translate) => translate(`admin.overview.charts.${chart}`, chart) },
-  { id: 'waiting', unit: 'count', groups: by('turns_waiting', 'reason', 'sum'), order: WAITS, name: (value, _chart, translate) => translate(`admin.overview.waits.${value}`, value) },
+  { id: 'threads', unit: 'count', measures: ['threads'], groups: by('threads', 'state', 'sum'), order: THREAD_STATES, name: (value, _chart, translate) => translate(`state.${value}`, value) },
+  { id: 'turns', unit: 'count', measures: ['turns_total'], groups: by('turns_total', 'status', 'sum'), order: TURN_RESULTS, name: (value, _chart, translate) => translate(`admin.overview.results.${value}`, value) },
+  { id: 'turnTime', unit: 'seconds', measures: ['turn_seconds'], groups: by('turn_seconds', null, 'mean'), order: [], name: (_value, chart, translate) => translate(`admin.overview.charts.${chart}`, chart) },
+  { id: 'machines', unit: 'count', measures: ['link_sessions'], groups: by('link_sessions', null, 'sum'), order: [], name: (_value, chart, translate) => translate(`admin.overview.charts.${chart}`, chart) },
+  { id: 'events', unit: 'count', measures: ['outbox_pending'], groups: by('outbox_pending', null, 'sum'), order: [], name: (_value, chart, translate) => translate(`admin.overview.charts.${chart}`, chart) },
+  { id: 'waiting', unit: 'count', measures: ['turns_waiting'], groups: by('turns_waiting', 'reason', 'sum'), order: WAITS, name: (value, _chart, translate) => translate(`admin.overview.waits.${value}`, value) },
   {
     id: 'room',
     unit: 'bytes',
+    measures: ['blob_store_bytes', 'blob_store_free_bytes'],
     groups: (series) => {
       const used = groupSeries(series, 'blob_store_bytes', 'class', 'sum');
       const free = groupSeries(series, 'blob_store_free_bytes', null, 'sum')[0];
@@ -99,11 +102,13 @@ function ChartCard({ def, series, from, to, stale }: { def: ChartDef; series: re
     keys: t('admin.overview.chartKeys'),
   };
   const title = t(`admin.overview.charts.${def.id}`);
+  const resolutions = [...new Set(series.filter((one) => def.measures.includes(one.name) && one.points.length > 0).map((one) => one.resolution))];
   return (
     <section aria-labelledby={`chart-${def.id}`} className={cx(boxClasses, 'flex min-w-0 flex-col gap-3 p-4')}>
-      <h3 id={`chart-${def.id}`} className="text-base font-medium text-text">
-        {title}
-      </h3>
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+        <h3 id={`chart-${def.id}`} className="text-base font-medium text-text">{title}</h3>
+        {resolutions.length > 0 && <span className={cx('text-sm text-text-muted', stale && 'opacity-60')}>{resolutions.map((resolution) => t(`admin.overview.resolution.${resolution}`)).join(' · ')}</span>}
+      </div>
       <TimeSeriesChart label={title} lines={lines} format={format} from={from} to={to} words={words} stale={stale} empty={t('admin.overview.nothingStored')} />
     </section>
   );

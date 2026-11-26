@@ -40,8 +40,9 @@ for (const width of [1440, 400]) for (const kind of kinds) {
           && url.searchParams.get('parent') === 'resources' && url.searchParams.get('kinds') === INVENTORY_KINDS[kind]
           && url.searchParams.get('resource_details') === 'true';
       }));
-      // The shell's one admission read carries the authority; the cold path reads /me/authority no more (below).
-      const checked = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/me/bootstrap');
+      // The shell's one admission read carries the authority; the cold path reads /me/authority no more (below). The page's
+      // document asks for it together with the session.
+      const checked = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/auth/session/open');
       await page.goto(path);
       const response = await own;
       expect(response.status()).toBe(200);
@@ -57,7 +58,7 @@ for (const width of [1440, 400]) for (const kind of kinds) {
       if (tab === null || panel === null) throw new Error('The inventory lost its native tab and panel.');
       const body = page.locator(`[id=${JSON.stringify(panel)}]`);
       for (const name of new Set(identities)) await expect(body.getByText(name, { exact: true }).first()).toBeVisible();
-      if (width === 1440) await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads' })).toBeVisible();
+      if (width === 1440) await expect(page.getByRole('tree', { name: 'Organizations, projects, topics and threads' })).toBeVisible();
       await page.waitForLoadState('networkidle');
       cold = [...reads];
       coldComplete = true;
@@ -82,7 +83,8 @@ for (const width of [1440, 400]) for (const kind of kinds) {
       await info.attach('frame-warm', { body: await page.screenshot(), contentType: 'image/png' });
       expect(cold.length, cold.join('\n')).toBeLessThanOrEqual(8);
       expect(cold.filter((read) => read === 'GET /api/v1/meta')).toHaveLength(0);
-      expect(cold.filter((read) => read === 'GET /api/v1/me/bootstrap')).toHaveLength(1);
+      expect(cold.filter((read) => read.startsWith('POST /api/v1/auth/session/open?read=%2Fme%2Fbootstrap'))).toHaveLength(1);
+      expect(cold.filter((read) => read === 'GET /api/v1/me/bootstrap')).toHaveLength(0);
       expect(cold.filter((read) => read === 'GET /api/v1/me/authority')).toHaveLength(0);
       expect(cold.filter((read) => /^GET \/api\/v1\/(?:me|me\/admin-mode|orgs)$/.test(read))).toEqual([]);
       expect(cold.filter((read) => /^GET \/api\/v1\/nodes\/[^/]+\/documents\?/.test(read))).toEqual([]);

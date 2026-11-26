@@ -9,6 +9,7 @@ mod common;
 
 use common::{World, eventually, turn_ended};
 use orch_agent_contract::events::{OutputRef, RawCall, ToolCallPayload, ToolPayload};
+use orch_api_contract::threads::{InputState, QueueEligibility};
 use orch_link_contract::events::{
     EmittedItemKind, Event, ItemCompleted, ItemStarted, ItemUpdated, TurnOutcome,
 };
@@ -22,7 +23,7 @@ async fn a_late_cleanup_changes_only_its_stopped_turn_and_preserves_the_queue_ho
     let thread = world.thread("Late native cleanup").await;
     let (start, _) = world.running_turn(thread, "Run").await;
     let caller = orch_authz::Caller::session(world.ada);
-    world
+    let waiting = world
         .engine()
         .submit_input(
             &caller,
@@ -49,6 +50,8 @@ async fn a_late_cleanup_changes_only_its_stopped_turn_and_preserves_the_queue_ho
         .await;
     world.wait_turn(start.turn_id, "interrupted").await;
     let held = world.sync(thread).await.thread.queue;
+    assert!(held.held);
+    assert_eq!(held.held_inputs, 1);
     world
         .say(
             thread,
@@ -83,10 +86,23 @@ async fn a_late_cleanup_changes_only_its_stopped_turn_and_preserves_the_queue_ho
         orch_api_contract::threads::TurnState::Interrupted
     );
     assert_eq!(stopped.command_cleanup.unwrap().unknown, 1);
-    assert_eq!(
-        sync.thread.queue, held,
-        "cleanup never resumes or changes a Stop-held queue"
-    );
+    let queue = &sync.thread.queue;
+    assert!(queue.held);
+    assert_eq!(queue.by, held.by);
+    assert_eq!(queue.at, held.at);
+    assert_eq!(queue.held_inputs, held.held_inputs);
+    assert_eq!(queue.revision, held.revision);
+    assert!(!matches!(
+        queue.eligibility,
+        Some(QueueEligibility::Selected { .. })
+    ));
+    let pending = sync
+        .inputs
+        .iter()
+        .find(|row| row.id == waiting.input.id)
+        .unwrap();
+    assert_eq!(pending.state, InputState::Pending);
+    assert!(pending.queue_held);
 }
 
 fn command(background: bool, exit_code: Option<i64>, started_at: orch_types::Time) -> ItemPayload {
