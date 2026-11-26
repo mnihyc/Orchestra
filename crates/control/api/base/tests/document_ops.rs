@@ -737,7 +737,7 @@ async fn naming_people_in_a_block_does_not_notify_them() {
 /// writes no legacy scope fallback; one hour fits ordinary place lifetime bounds without moving time.
 async fn document_operation_key(desk: &Desk, document: Id, allow: serde_json::Value) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 
     let scope: KeyScope = serde_json::from_value(json!({
@@ -752,14 +752,15 @@ async fn document_operation_key(desk: &Desk, document: Id, allow: serde_json::Va
         "a valid bound operation policy"
     );
     let stored = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let now = desk.world.now();
     let mut conn = desk.world.conn().await;
     create_api_token_scoped(
         &mut conn,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "Document receipt control",
             token_hash: &hash,

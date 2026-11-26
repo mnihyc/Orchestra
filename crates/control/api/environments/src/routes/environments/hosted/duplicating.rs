@@ -772,7 +772,11 @@ async fn prepare_native(
             .managed
             .as_ref()
             .map_or(source.template_id, |choice| choice.template_id);
-        let host_id = body.managed.as_ref().map(|choice| choice.host_id);
+        let host_id = body.managed.as_ref().map(|choice| {
+            choice
+                .host_id
+                .map(orch_provider_contract::pools::Target::host)
+        });
         let requested = NewEnvironment {
             name: Some(name),
             home_node_id: Some(home),
@@ -789,15 +793,27 @@ async fn prepare_native(
         let input = prepare_input(ctx, conn, &principal, requested, None)
             .await
             .map_err(|error| creation::sparse(caller, error))?;
-        let native = match orch_engine::environments::prepare_creation_bounded(
-            conn,
-            ctx.app.clock.now(),
-            &principal,
-            &input.request(&principal),
-            Some(known.shared()),
-        )
-        .await
-        {
+        let request = input.request(&principal);
+        let prepared = if preview {
+            orch_engine::environments::preview_creation_bounded(
+                conn,
+                ctx.app.clock.now(),
+                &principal,
+                &request,
+                Some(known.shared()),
+            )
+            .await
+        } else {
+            orch_engine::environments::prepare_creation_bounded(
+                conn,
+                ctx.app.clock.now(),
+                &principal,
+                &request,
+                Some(known.shared()),
+            )
+            .await
+        };
+        let native = match prepared {
             Ok(native) => native,
             Err(error) => {
                 return Err(creation::sparse(
@@ -812,6 +828,7 @@ async fn prepare_native(
             native.template(),
             native.host(),
             native.mounts(),
+            &native.pools(),
             Some((None, source.id)),
         )
         .await?;
@@ -935,6 +952,7 @@ impl native::Selected for Preview {
     type Query = EnvironmentDuplicateBody;
     type Value = Ready;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &declarations::MOVE_MANAGED_PREVIEW;
     const WATCH_ORDINARY: bool = true;
     fn declaration(_: &EnvironmentDuplicateBody, value: &Ready) -> &'static Declaration<Source> {

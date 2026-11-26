@@ -121,3 +121,13 @@ pub const CREATE: Declaration<Source> = Declaration {
     operation: "StorageCleanupCreate",
     bindings: CLEANUP_BINDINGS,
 };
+
+/// Mount deletion reads and confirms the same actual governors through its own canonical operations.
+pub const MOUNT_DELETE_PREFLIGHT: Declaration<Source> = Declaration {
+    operation: "MountDeletePreflight",
+    bindings: CLEANUP_BINDINGS,
+};
+pub const MOUNT_DELETE: Declaration<Source> = Declaration {
+    operation: "MountDelete",
+    bindings: CLEANUP_BINDINGS,
+};
