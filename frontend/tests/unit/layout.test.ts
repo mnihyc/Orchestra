@@ -1,15 +1,15 @@
-/** Observable workbench choices survive changes, device storage and the upgrade from tab bars. */
+/** Observable workbench choices survive changes and current-format device storage. */
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { ARRANGEMENTS, shippedLayout } from '@/features/workbench/Arrangements';
 import {
-  activeContainer, allTabs, canMove, carryKept, close, expandSection,
-  findTab, findView, keepOffered, type Layout, LAYOUT_VERSION, mainGroups,
+  activate, activeContainer, allTabs, canMove, carryKept, close, expandSection,
+  findTab, findView, type Layout, LAYOUT_VERSION, leaveEmptyContainers, mainGroups,
   makeGroup, move, normalize, open, parse, resizeBar, resizeSections,
   resizeSplit, selectContainer, serialize, setBarOpen, setKept, showSection,
   toggleBar, toggleMaximized,
 } from '@/features/workbench/layout';
-import { loadKept, saveKept } from '@/features/workbench/persistence';
+import { loadWorkspace, saveWorkspace, type Workspace } from '@/features/workbench/persistence';
 import { registerShippedViews } from '@/features/workbench/shippedViews';
 import { useWorkbench } from '@/features/workbench/store';
 import { readViewChoice } from '@/lib/viewChoices';
@@ -21,6 +21,22 @@ import { registerInspectorViews } from '@/features/inspector/Inspector';
 beforeAll(() => { registerShippedViews(() => null); registerInspectorViews(); });
 const SIZES = { left: 280, right: 400, bottom: 240 };
 const thread = (): Layout => shippedLayout('thread', 'conversation', SIZES);
+
+it('selects the next conversation without replacing another pane or bar', () => {
+  const second = { id: 'second', view: 'page' };
+  const group = makeGroup([{ id: 'first', view: 'page' }, second]);
+  const other = makeGroup([{ id: 'beside', view: 'page' }]);
+  const before: Layout = { ...thread(), main: { kind: 'split', id: 'pair', direction: 'row', children: [group, other], sizes: [50, 50] } };
+  const after = activate(before, second.id);
+  expect(mainGroups(after.main)[0]?.active).toBe(second.id);
+  expect(mainGroups(after.main)[1]).toBe(other);
+  expect(after.left).toBe(before.left);
+  expect(after.right).toBe(before.right);
+  expect(after.bottom).toBe(before.bottom);
+  expect(activate(after, second.id)).toBe(after);
+});
+const workspace = (layout: Layout): Workspace => ({ arrangement: 'conversation', layout, focusedGroup: null, focusedTab: null,
+  focusedMainGroup: null, focusedMainTab: null, activeContent: null, focusMode: false, closedTabs: [] });
 const tabOf = (layout: Layout, view: string): string => {
   const place = findView(layout, view);
   if (place === null) throw new Error(`no ${view} in the layout`);
@@ -75,6 +91,22 @@ it('hides a section while retaining its order, expansion and resized share', () 
   const shown = showSection(hidden, chat, true);
   expect(findTab(shown, chat)?.section).toMatchObject({ hidden: false, open: false, size: 3 });
   expect(viewsOf(shown, 'right')).toEqual(viewsOf(before, 'right'));
+});
+
+it('moves a bar off a container left with no shown section, so a closed Ask leaves no empty tab (C1122)', () => {
+  const opened = open(thread(), 'ask', 'right');
+  const ask = tabOf(opened, 'ask');
+  const container = findTab(opened, ask)?.container?.name;
+  expect(opened.right.active).toBe(container);
+  const closed = close(opened, ask);
+  expect(findTab(closed, ask)?.section?.hidden ?? true).toBe(true);
+  const after = leaveEmptyContainers(closed);
+  const shown = activeContainer(after.right);
+  const leftEmpty = !after.right.open || (shown?.name !== container && shown?.sections.some((section) => !section.hidden) === true);
+  expect(leftEmpty).toBe(true);
+  // A bar that still shows something is left as it was.
+  const base = thread();
+  expect(leaveEmptyContainers(base)).toBe(base);
 });
 
 it('switches one activity container and toggles it closed and open', () => {
@@ -157,22 +189,13 @@ const oldLayout = () => ({
 });
 
 describe('device storage', () => {
-  it('reads old choices into containers without losing any tab, target, bar, split, active choice or size', () => {
-    const old = oldLayout();
-    const layout = parse(JSON.stringify(old), 'thread');
-    if (layout === null) throw new Error('old layout refused');
-    expect(layout.version).toBe(LAYOUT_VERSION);
-    expect(layout.main).toEqual(old.main);
-    expect(layout.maximized).toBe('editor');
-    expect(layout.bottom).toEqual(old.bottom);
-    expect(layout.left).toMatchObject({ size: 333, open: true, active: 'code' });
-    expect(layout.right).toMatchObject({ size: 367, open: false, active: 'code' });
-    for (const id of ['files', 'nav', 'history', 'changes', 'extension', 'chat', 'screen', 'file']) expect(findTab(layout, id)).not.toBeNull();
-    expect(findTab(layout, 'files')?.area).toBe('left');
-    expect(findTab(layout, 'changes')?.section?.open).toBe(true);
+  it('reads only the current layout format and leaves obsolete per-kind storage alone', () => {
+    expect(parse(JSON.stringify(oldLayout()))).toBeNull();
+    const layout = thread();
+    for (const version of [1, 2, 3]) expect(parse(JSON.stringify({ ...layout, version }))).toBeNull();
     expect(parse(serialize(layout))).toEqual(layout);
-    localStorage.setItem('orch.migration.workbench.thread', JSON.stringify({ arrangement: 'code', layout: JSON.stringify(old) }));
-    expect(loadKept('migration', 'thread').dropped).toBe(false);
+    localStorage.setItem('orch.previous.workbench.thread', JSON.stringify({ arrangement: 'code', layout: JSON.stringify(oldLayout()) }));
+    expect(loadWorkspace('previous')).toEqual({ kept: null, dropped: false });
   });
 
   it('retains hidden sections, expansion, relative sizes and another-container moves on a round trip', () => {
@@ -181,10 +204,9 @@ describe('device storage', () => {
     layout = move(layout, chat, { to: 'container', bar: 'right', container: 'code' });
     layout = resizeSections(layout, 'right', 'code', { [chat]: 7 });
     layout = showSection(expandSection(layout, chat, false), chat, false);
-    saveKept('reader', 'thread', { arrangement: 'conversation', layout });
-    expect(loadKept('reader', 'thread')).toEqual({ kept: { arrangement: 'conversation', layout }, dropped: false });
-    expect(loadKept('someone-else', 'thread').kept).toBeNull();
-    expect(loadKept('reader', 'topic').kept).toBeNull();
+    saveWorkspace('reader', workspace(layout));
+    expect(loadWorkspace('reader').kept?.layout).toEqual(layout);
+    expect(loadWorkspace('someone-else').kept).toBeNull();
   });
 
   it('resets choices to the shipped arrangement and forgets the stored one', () => {
@@ -198,7 +220,7 @@ describe('device storage', () => {
     expect(findView(useWorkbench.getState().layout, 'chat')?.container?.name).toBe('team');
     expect(readViewChoice('reset-reader', 'global', 'rightOpen', false)).toBe(true);
     expect(readViewChoice('reset-reader', 'global', 'mobileContainer', 'old')).toBe('');
-    expect(loadKept('reset-reader', 'thread').kept).toBeNull();
+    expect(loadWorkspace('reset-reader').kept?.layout).toEqual(useWorkbench.getState().layout);
   });
 
   it('rejects corrupt and future shapes and reports the reset once', () => {
@@ -209,15 +231,19 @@ describe('device storage', () => {
     expect(parse(JSON.stringify({ ...layout, bottom: { ...layout.bottom, group: makeGroup(first === undefined ? [] : [first]) } }))).toBeNull();
     expect(parse('null')).toBeNull();
     expect(parse('{')).toBeNull();
-    localStorage.setItem('orch.corrupt.workbench.thread', 'broken');
-    expect(loadKept('corrupt', 'thread')).toEqual({ kept: null, dropped: true });
-    expect(loadKept('corrupt', 'thread')).toEqual({ kept: null, dropped: false });
+    localStorage.setItem('orch.corrupt.workbench.workspace', 'broken');
+    expect(loadWorkspace('corrupt')).toEqual({ kept: null, dropped: true });
+    useWorkbench.getState().enter('corrupt', 'thread');
+    expect(useWorkbench.getState().dropped).toBe(true);
+    expect(loadWorkspace('corrupt').dropped).toBe(false);
   });
 
-  it('projects unavailable views without mutating the saved choices', () => {
+  it('keeps unavailable views and targets in the saved choices', () => {
     const before = thread();
-    const read = keepOffered(before, (view) => view !== 'chat');
-    expect(findView(read, 'chat')).toBeNull();
+    const read = parse(serialize(before));
+    expect(read).not.toBeNull();
+    if (read === null) return;
+    expect(findView(read, 'chat')).not.toBeNull();
     expect(findView(before, 'chat')).not.toBeNull();
     expect(normalize(read).version).toBe(LAYOUT_VERSION);
   });

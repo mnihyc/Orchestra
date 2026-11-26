@@ -1,13 +1,14 @@
 /** AI-12: readable resources retain applicable management controls without lending their authority. */
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Resources from '@/api/resources';
+import type * as Environments from '@/api/environments';
 import type * as Tools from '@/api/resource-tools';
 import type * as Skills from '@/api/skills';
 import type * as Auth from '@/api/auth';
-import type { Agent, McpServer, Mount, ResourceAccess, Skill } from '@/generated/api-types';
-import { HeadingActs, managedAct } from '@/features/resources/acts';
+import type { Agent, Environment, McpServer, Mount, ResourceAccess, Skill } from '@/generated/api-types';
+import { HeadingActs, managedAct, RowPrimaryCell, RowMenuCell } from '@/features/resources/acts';
 import { useAgentActs } from '@/features/resources/agents/acts';
 import { AgentScreen } from '@/features/resources/agents/Profile';
 import { useProviderActs } from '@/features/resources/providers/acts';
@@ -24,7 +25,8 @@ import { ADA } from '../doubles/chat-rows';
 import { me } from '../doubles/fixtures';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ agent: vi.fn<() => Promise<Agent>>(), mount: vi.fn<() => Promise<Mount>>(), mcp: vi.fn<() => Promise<McpServer>>(), skill: vi.fn<() => Promise<Skill>>(), writes: vi.fn() }));
+const calls = vi.hoisted(() => ({ agent: vi.fn<() => Promise<Agent>>(), mount: vi.fn<() => Promise<Mount>>(), mcp: vi.fn<() => Promise<McpServer>>(), skill: vi.fn<() => Promise<Skill>>(), writes: vi.fn(), stop: vi.fn<() => Promise<Environment>>() }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<typeof Environments>(), stopEnvironment: calls.stop }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof Resources>(), updateAgent: calls.writes,
   agentQuery: (id: string) => ({ queryKey: ['implicit-agent', id], queryFn: calls.agent }),
   harnessKindsQuery: { queryKey: ['implicit-harnesses'], queryFn: () => Promise.resolve([]) },
@@ -38,7 +40,7 @@ vi.mock('@/api/skills', async (original) => ({ ...await original<typeof Skills>(
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(), meQuery: { queryKey: ['implicit-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/agents/Edit', () => ({ EditAgent: () => <div role="dialog" aria-label="Profile editor" /> }));
 vi.mock('@/features/resources/ResourceAccess', () => ({ ResourceAccess: () => null }));
 vi.mock('@/features/resources/mcp/Enabled', () => ({ McpEnabledIn: () => null }));
@@ -63,7 +65,7 @@ function Probe({ kind, allowed = false }: { kind: Kind; allowed?: boolean }) {
     <Menu label="Row actions" trigger={<button type="button">Row actions</button>} entries={selected.row.entries} />
   </div>{selected.dialogs}</>;
 }
-beforeEach(() => { vi.clearAllMocks(); calls.agent.mockResolvedValue({ ...detailAgent, access: readonly }); calls.mount.mockResolvedValue({ ...detailMount, access: readonly }); calls.mcp.mockResolvedValue({ ...detailMcp, access: readonly }); calls.skill.mockResolvedValue(skill); });
+beforeEach(() => { vi.clearAllMocks(); calls.stop.mockResolvedValue({ ...detailEnvironment, status: 'stopped' }); calls.agent.mockResolvedValue({ ...detailAgent, access: readonly }); calls.mount.mockResolvedValue({ ...detailMount, access: readonly }); calls.mcp.mockResolvedValue({ ...detailMcp, access: readonly }); calls.skill.mockResolvedValue(skill); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
@@ -97,6 +99,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(edit).toHaveAttribute('aria-disabled', 'true'); await user.click(edit); expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     view.unmount(); show(<McpScreen id={detailMcp.id} />);
     expect(await screen.findByRole('button', { name: i18n.t('resources.act.editButton') })).toHaveAttribute('aria-disabled', 'true');
+    await user.click(within(screen.getByRole('heading', { name: detailMcp.name, level: 1 }).closest('header')!).getByRole('button', { name: i18n.t('common.details') }));
     await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: detailMcp.name }) }));
     expect(screen.getByRole('menuitem', { name: new RegExp(i18n.t('resourceDetails.remove')) })).toHaveAttribute('aria-disabled', 'true');
     expect(calls.writes).not.toHaveBeenCalled();
@@ -114,3 +117,65 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(await screen.findByRole('dialog', { name: 'Profile editor' })).toBeInTheDocument();
   });
 }
+
+
+function EnvironmentLifecycleProbe({ row }: { row: Environment }) {
+  const acts=useEnvironmentActs();
+  const rowActs=acts.list.of(row);
+  return <><section aria-label="Environment page actions"><HeadingActs name={row.name} {...acts.page(row)} /></section>
+    <section aria-label="Environment row actions"><RowPrimaryCell name={row.name} acts={rowActs} /><RowMenuCell name={row.name} acts={rowActs} working={false} /></section>
+    <output data-testid="environment-bulk-stop">{String(acts.list.bulk?.find((act)=>act.id==='stop')?.can(row)??false)}</output>{acts.dialogs}</>;
+}
+
+for (const locale of ['en','zh-CN'] as const) {
+  it.each(['queued','running'] as const)(`keeps Stop available for an environment's own %s provisioning across page, row and selection (${locale})`,async(state)=>{
+    await setLocale(locale);
+    const row:Environment={...detailEnvironment,status:'provisioning',facts:{environment_descriptor:{lifecycle:'unit'}},job:{id:'own-provision',kind:'environment_provision',state,phase:'Starting',percent:30}};
+    show(<EnvironmentLifecycleProbe row={row} />);
+    const stop=i18n.t('resources.act.stop');
+    const page=within(screen.getByRole('region',{name:'Environment page actions'}));
+    expect(page.getByRole('button',{name:stop})).toBeEnabled();
+    const list=within(screen.getByRole('region',{name:'Environment row actions'}));
+    expect(list.getByRole('button',{name:i18n.t('resources.act.of',{act:stop,name:row.name})})).toBeEnabled();
+    expect(screen.getByTestId('environment-bulk-stop')).toHaveTextContent('true');
+    await userEvent.click(page.getByRole('button',{name:stop}));
+    await waitFor(()=>expect(calls.stop).toHaveBeenCalledExactlyOnceWith(row.id,false));
+  });
+  it(`keeps unit controls for a reported managed machine and does not turn a missing directory machine into a unit (${locale})`,async()=>{
+    await setLocale(locale);
+    const row:Environment={...detailEnvironment,facts:{environment_descriptor:{lifecycle:'unit'}}};
+    const view=show(<EnvironmentLifecycleProbe row={row} />);
+    expect(within(screen.getByRole('region',{name:'Environment page actions'})).getByRole('button',{name:i18n.t('resources.act.stop')})).toBeEnabled();
+    view.rerender(<EnvironmentLifecycleProbe row={{...row,machine:null,facts:{environment_descriptor:{lifecycle:'attach'}}}} />);
+    expect(screen.queryByRole('button',{name:i18n.t('resources.act.stop')})).not.toBeInTheDocument();
+    expect(screen.getByTestId('environment-bulk-stop')).toHaveTextContent('false');
+    expect(calls.stop).not.toHaveBeenCalled();
+  });
+  it(`does not lend a pending environment's Stop to a viewer or an unrelated replacement job (${locale})`,async()=>{
+    await setLocale(locale);
+    const row:Environment={...detailEnvironment,status:'provisioning',facts:{environment_descriptor:{lifecycle:'unit'}},job:{id:'own-provision',kind:'environment_provision',state:'running',phase:'Starting',percent:30},access:readonly};
+    const view=show(<EnvironmentLifecycleProbe row={row} />);
+    const list=within(screen.getByRole('region',{name:'Environment row actions'}));
+    await userEvent.click(list.getByRole('button',{name:i18n.t('resources.act.menuOf',{name:row.name})}));
+    const stop=screen.getByRole('menuitem',{name:new RegExp(i18n.t('resources.act.stop'))});
+    expect(stop).toHaveAttribute('aria-disabled','true');
+    await userEvent.click(stop);
+    expect(calls.stop).not.toHaveBeenCalled();
+    expect(screen.getByTestId('environment-bulk-stop')).toHaveTextContent('false');
+    view.rerender(<EnvironmentLifecycleProbe row={{...row,access:detailAccess,job:{id:'replacement',kind:'environment_recreate',state:'running',phase:'Copying',percent:30}}} />);
+    expect(within(screen.getByRole('region',{name:'Environment page actions'})).queryByRole('button',{name:i18n.t('resources.act.stop')})).not.toBeInTheDocument();
+    expect(screen.getByTestId('environment-bulk-stop')).toHaveTextContent('false');
+  });
+}
+
+
+it('does not advertise unit actions from an empty machine reference without a recipe or declaration',async()=>{
+  await setLocale('en');
+  const row:Environment={...detailEnvironment,machine:null,template:null,facts:{},status:'stopped',job:null};
+  show(<EnvironmentLifecycleProbe row={row} />);
+  expect(within(screen.getByRole('region',{name:'Environment page actions'})).queryByRole('button',{name:i18n.t('resources.act.start')})).not.toBeInTheDocument();
+  await userEvent.click(within(screen.getByRole('region',{name:'Environment row actions'})).getByRole('button',{name:i18n.t('resources.act.menuOf',{name:row.name})}));
+  expect(screen.queryByRole('menuitem',{name:i18n.t('resources.act.start')})).not.toBeInTheDocument();
+  expect(screen.getByTestId('environment-bulk-stop')).toHaveTextContent('false');
+  expect(calls.stop).not.toHaveBeenCalled();
+});

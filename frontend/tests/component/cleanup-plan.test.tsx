@@ -2,9 +2,10 @@
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { ApiError } from '@/api/client';
 import { Cleanup } from '@/features/storage/Cleanup';
 import type { CleanupPlan, CleanupRequest, CleanupStart, Job } from '@/generated/api-types';
-import { setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 import { storageReport } from '../doubles/storage-report';
 import { show } from './support';
 
@@ -13,10 +14,13 @@ const calls = vi.hoisted(() => ({
   start: vi.fn<(body: CleanupStart) => Promise<Job>>(),
   read: vi.fn<(id: string) => Promise<Job>>(),
   cancel: vi.fn<(id: string) => Promise<void>>(),
+  deletePlan: vi.fn<(id: string) => Promise<CleanupPlan>>(),
+  deleteMount: vi.fn<(id: string, body: CleanupStart) => Promise<Job>>(),
 }));
 vi.mock('@/api/storage', () => ({ planCleanup: calls.plan, startCleanup: calls.start }));
 vi.mock('@/api/exports', async (original) => ({ ...await original<object>(), readJob: calls.read, cancelJob: calls.cancel }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/api/resource-tools', async (original) => ({ ...await original<object>(), planMountDeletion: calls.deletePlan, deleteMount: calls.deleteMount }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const request: CleanupRequest = { scope: 'me', resource: null, items: ['image', 'recovery', 'tool'] };
 const now = '2026-10-01T00:00:00Z';
@@ -41,16 +45,72 @@ beforeEach(() => {
   calls.start.mockResolvedValue(job());
   calls.read.mockResolvedValue(job());
   calls.cancel.mockResolvedValue();
+  calls.deletePlan.mockResolvedValue({ ...plan(), items: [] });
+  calls.deleteMount.mockResolvedValue(job());
 });
 afterEach(async () => { cleanup(); vi.resetAllMocks(); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`deletes a mount through its own operation while keeping every data item without typing a name in ${locale}`, async () => {
+    await setLocale(locale);
+    const preview = plan();
+    preview.items = preview.items.map((item) => ({ ...item, choices: ['keep'], selected: 'keep' }));
+    calls.deletePlan.mockResolvedValue(preview);
+    const user = userEvent.setup();
+    show(<Cleanup intent="delete-mount" request={{ scope: 'me', resource: { kind: 'mount', id: 'mount' }, items: [] }} onClose={vi.fn()} />);
+    await screen.findByRole('table', { name: i18n.t('storage.cleanup.plan') });
+    const submit = screen.getByRole('button', { name: i18n.t('resourceDetails.remove') });
+    expect(submit).toBeEnabled();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await user.click(submit);
+    await waitFor(() => expect(calls.deleteMount).toHaveBeenCalledExactlyOnceWith('mount', {
+      plan_id: preview.id, choices: preview.items.map((item) => ({ id: item.record.id, choice: 'keep' })), confirmation_name: null, notify: false,
+    }));
+    expect(calls.start).not.toHaveBeenCalled();
+    expect(calls.plan).not.toHaveBeenCalled();
+  });
+
+  it(`allows deletion of an empty mount through the same plan and retained job in ${locale}`, async () => {
+    await setLocale(locale);
+    const user = userEvent.setup();
+    show(<Cleanup intent="delete-mount" request={{ scope: 'me', resource: { kind: 'mount', id: 'empty' }, items: [] }} onClose={vi.fn()} />);
+    await screen.findByRole('table', { name: i18n.t('storage.cleanup.plan') });
+    await user.click(screen.getByRole('button', { name: i18n.t('resourceDetails.remove') }));
+    await waitFor(() => expect(calls.deleteMount).toHaveBeenCalledExactlyOnceWith('empty', expect.objectContaining({ choices: [], confirmation_name: null })));
+    expect(await screen.findByRole('button', { name: i18n.t('storage.cleanup.cancelRemaining') })).toBeVisible();
+  });
+}
+
+for(const locale of ['en','zh-CN'] as const) it(`keeps a generated volume handle behind Copy ID throughout cleanup without changing its removal target in ${locale}`,async()=>{
+  await setLocale(locale);
+  const preview=plan(),base=preview.items[0];
+  if(base===undefined)throw new Error('The fixture has a retained source.');
+  const record={...base.record,id:'native-volume',kind:'volume' as const,name:'orch-ws-00000000-0000-4000-8000-000000000001'};
+  preview.items=[{...base,record}];
+  calls.plan.mockResolvedValue(preview);
+  calls.read.mockResolvedValue({...job('succeeded'),result:{cleanup:[{id:record.id,outcome:'removed',reason:null}]}});
+  const user=userEvent.setup();
+  show(<Cleanup request={{...request,items:[record.id]}} onClose={vi.fn()} />);
+  const table=await screen.findByRole('table',{name:i18n.t('storage.cleanup.plan')});
+  expect(table).toHaveTextContent(i18n.t('storage.kinds.volume'));
+  expect(table.outerHTML).not.toContain(record.name);
+  expect(within(table).getByRole('combobox',{name:i18n.t('storage.cleanup.fateFor',{name:i18n.t('storage.kinds.volume')})})).toBeVisible();
+  await user.click(within(table).getByRole('button',{name:i18n.t('common.copyId')}));
+  expect(await navigator.clipboard.readText()).toBe(record.name);
+  await user.click(screen.getByRole('button',{name:i18n.t('storage.clean')}));
+  await waitFor(()=>expect(calls.start).toHaveBeenCalledExactlyOnceWith({plan_id:preview.id,confirmation_name:null,notify:false,choices:[{id:record.id,choice:'remove'}]}));
+  const results=await screen.findByRole('table',{name:i18n.t('storage.cleanup.results')});
+  expect(results).toHaveTextContent(i18n.t('storage.kinds.volume'));
+  expect(results.outerHTML).not.toContain(record.name);
+});
 
 it('shows an away item as blocked and keeps its data without adding an impossible fate', async () => {
   show(<Cleanup request={request} onClose={vi.fn()} />);
   const table = await screen.findByRole('table', { name: 'Cleanup plan' });
-  const row = within(table).getByText('Connector version').closest('tr');
+  const row = within(table).getByText('Tool version').closest('tr');
   if (row === null) throw new Error('Every cleanup item is a table row.');
   expect(within(row).getByText('Node away')).toBeVisible();
-  expect(within(row).queryByRole('combobox', { name: 'Fate of Connector version' })).not.toBeInTheDocument();
+  expect(within(row).queryByRole('combobox', { name: 'Fate of Tool version' })).not.toBeInTheDocument();
   expect(within(row).getByText('Keep', { exact: true })).toBeVisible();
   expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
 });
@@ -84,9 +144,9 @@ it('cancel waits for the server result and retains the completed item beside kep
   await user.click(cancel);
   await waitFor(() => expect(calls.cancel).toHaveBeenCalledExactlyOnceWith('cleanup-job'));
   const results = await screen.findByRole('table', { name: 'Cleanup results' });
-  expect(within(results).getByText('Cached image').closest('tr')).toHaveTextContent('Removed');
+  expect(within(results).getByText('Image').closest('tr')).toHaveTextContent('Removed');
   expect(within(results).getByText('Workspace recovery').closest('tr')).toHaveTextContent('Kept');
-  expect(within(results).getByText('Connector version').closest('tr')).toHaveTextContent('Blocked');
+  expect(within(results).getByText('Tool version').closest('tr')).toHaveTextContent('Blocked');
   expect(screen.queryByRole('button', { name: 'Cancel remaining' })).not.toBeInTheDocument();
   expect(close).not.toHaveBeenCalled();
 });
@@ -118,4 +178,90 @@ it('operator-owned files offer their exact copyable command without an API erase
   await waitFor(()=>expect(written).toHaveBeenCalledExactlyOnceWith(command));
   expect(calls.start).not.toHaveBeenCalled();
   written.mockRestore();
+});
+
+it('searches a large retained plan without narrowing what its confirmation executes', async () => {
+  const preview = plan(), base = preview.items[0];
+  if (base === undefined) throw new Error('The fixture contains a cleanup choice.');
+  preview.items = Array.from({ length: 13 }, (_, index) => ({ ...base, record: {
+    ...base.record, id: `export-${index}`, kind: 'export' as const, name: `Reviewed export ${index}`, resource: null, facts: null,
+  } }));
+  calls.plan.mockResolvedValue(preview);
+  const user = userEvent.setup();
+  show(<Cleanup request={request} onClose={vi.fn()} />);
+  const search = await screen.findByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('storage.cleanup.plan') }) });
+  await user.click(search); await user.paste('Reviewed export 12');
+  expect(screen.getByText('Reviewed export 12')).toBeVisible();
+  expect(screen.queryByText('Reviewed export 0')).toBeNull();
+  await user.click(screen.getByRole('button', { name: i18n.t('storage.clean') }));
+  await waitFor(() => expect(calls.start).toHaveBeenCalledExactlyOnceWith({
+    plan_id: preview.id, confirmation_name: null, notify: false,
+    choices: preview.items.map((item) => ({ id: item.record.id, choice: item.selected })),
+  }));
+});
+
+function planWithPlaces(): CleanupPlan {
+  return { ...plan(), items: [], other_people: 1, effects: {
+    subject: { kind: 'resource', object: { kind: 'mount', id: 'mount' } }, as_of: now, uses: null, dependents_complete: true,
+    dependents: [{ relation: 'explicit_giving', count: 2, hidden: 1, until: null,
+      visible: [{ name: 'Workbench', object: { kind: 'topic', id: 'topic' }, relation: 'explicit_giving', until: null }] }],
+  } };
+}
+
+it('lists visible and hidden mount uses before switching them off and deleting in one act', async () => {
+  const preview = planWithPlaces();
+  calls.deletePlan.mockResolvedValue(preview);
+  show(<Cleanup intent="delete-mount" request={{scope:'me',resource:{kind:'mount',id:'mount'},items:[]}} onClose={vi.fn()} />);
+  expect(await screen.findByText('Workbench')).toBeVisible();
+  expect(screen.getByText(i18n.t('storage.hidden', { number: '1' }))).toBeVisible();
+  expect(screen.getByRole('checkbox')).not.toBeChecked();
+  await userEvent.click(screen.getByRole('button', { name: 'Switch off and delete' }));
+  await waitFor(() => expect(calls.deleteMount).toHaveBeenCalledExactlyOnceWith('mount', { plan_id:preview.id, choices:[], confirmation_name:null, notify:false }));
+});
+
+it('names the place that prevents switching off a mount and keeps the delete action disabled', async () => {
+  const preview = planWithPlaces();
+  preview.mount_switch_off_blocked = { relation:'explicit_giving',count:1,hidden:0,until:null,
+    visible:[{name:'Workbench',object:{kind:'topic',id:'topic'},relation:'explicit_giving',until:null}] };
+  calls.deletePlan.mockResolvedValue(preview);
+  show(<Cleanup intent="delete-mount" request={{scope:'me',resource:{kind:'mount',id:'mount'},items:[]}} onClose={vi.fn()}/>);
+  expect(await screen.findByText('You cannot switch off this mount in Workbench')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Switch off and delete' })).toBeDisabled();
+  expect(calls.deleteMount).not.toHaveBeenCalled();
+});
+
+function refuseMountConfirmation() {
+  calls.deleteMount.mockRejectedValueOnce(new ApiError({
+    type: 'orch:error:authz.denied', code: 'authz.denied', title: 'Access denied',
+    detail: 'Access changed', status: 403, request_id: 'mount-confirmation',
+  }, null));
+}
+
+it('reads the changed place permissions after a refused confirmation and names the blocked topic', async () => {
+  const latest = planWithPlaces();
+  latest.mount_switch_off_blocked = {
+    relation: 'explicit_giving', count: 1, hidden: 0, until: null,
+    visible: [{ name: 'Workbench', object: { kind: 'topic', id: 'topic' }, relation: 'explicit_giving', until: null }],
+  };
+  calls.deletePlan.mockResolvedValueOnce(planWithPlaces()).mockResolvedValue(latest);
+  refuseMountConfirmation();
+  show(<Cleanup intent="delete-mount" request={{ scope: 'me', resource: { kind: 'mount', id: 'mount' }, items: [] }} onClose={vi.fn()} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Switch off and delete' }));
+  expect(await screen.findByText('You cannot switch off this mount in Workbench')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Switch off and delete' })).toBeDisabled();
+  expect(calls.deleteMount).toHaveBeenCalledOnce();
+  expect(calls.deletePlan).toHaveBeenCalledTimes(2);
+});
+
+it('keeps a refused deletion unavailable until the changed places can be read again', async () => {
+  calls.deletePlan.mockResolvedValueOnce(planWithPlaces()).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+  refuseMountConfirmation();
+  show(<Cleanup intent="delete-mount" request={{ scope: 'me', resource: { kind: 'mount', id: 'mount' }, items: [] }} onClose={vi.fn()} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Switch off and delete' }));
+  const retry = await screen.findByRole('button', { name: i18n.t('common.tryAgain') });
+  expect(screen.getByRole('button', { name: 'Switch off and delete' })).toBeDisabled();
+  calls.deletePlan.mockResolvedValue(planWithPlaces());
+  await userEvent.click(retry);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Switch off and delete' })).toBeEnabled());
+  expect(calls.deleteMount).toHaveBeenCalledOnce();
 });
