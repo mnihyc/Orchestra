@@ -17,6 +17,16 @@ pub struct FactTarget {
     pub model_id: Option<Id>,
 }
 
+/// The resource change whose application is being reviewed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceImpactQuery {
+    /// For a skill publication, count current deliveries following Latest, excluding pinned versions.
+    /// Absent or false keeps all current deliveries for a resource-wide change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_publication: Option<bool>,
+}
+
 /// Optional lifecycle choices for a resource patch, applied only when its switch changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +37,70 @@ pub struct ResourcePauseQuery {
     /// On Enable, run eligible waiting messages; absent or false keeps them held for Resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_waiting: Option<bool>,
+}
+
+/// A model switch keeps its own explicit notice choice and waiting-message behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelPauseQuery {
+    /// A short note beside the stopped model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Enable runs waiting messages only when explicitly selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_waiting: Option<bool>,
+    /// Disable tells this model's affected people once; omitted is silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+}
+
+/// Deletion keeps notices an explicit choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceDeleteQuery {
+    /// Tell affected people once; omitted is silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+}
+
+/// The current affected people and the configured initial notification choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceOperationNotification {
+    /// The caller-bound review that commits this audience.
+    pub preview_id: Id,
+    /// Number of eligible people across the reviewed places.
+    pub people: i64,
+    /// Visible people and the count whose association remains private.
+    pub audience: crate::forks::UpdateAudience,
+    /// The inherited Operation notices default; the confirmer may change it.
+    pub default_on: bool,
+}
+
+/// Explicit choice for this deletion, off unless the person selects its reviewed audience.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceNotificationQuery {
+    /// Tell the reviewed affected people once for this operation. Absent or false tells nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    /// The caller-bound audience from the current impact review; required when notify is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_review: Option<Id>,
+}
+
+/// Provider stop choices, with notification separately selected for this act.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceStopQuery {
+    /// A short one-line note shown to people whose threads wait on the resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Tell the reviewed affected people once for this operation. Absent or false tells nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    /// The caller-bound audience from the current impact review; required when notify is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_review: Option<Id>,
 }
 
 /// Enable keeps waiting messages held unless the person explicitly asks to run them.
@@ -64,6 +138,47 @@ pub struct ActivityFacts {
     pub stopped: ActivityGroup,
 }
 
+/// The boundary at which a resource change reaches an existing native dependent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceApplicationWhen {
+    /// Existing calls through a switched-off MCP resource are refused immediately.
+    Now,
+    /// The next turn reads the changed tool or skill configuration.
+    BeforeNextTurn,
+    /// A running unit still holds resource inputs that its Update plan must apply.
+    Updated,
+}
+
+/// The existing plan that applies pending resource inputs to a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceApplicationAction {
+    /// Review and apply the unit's pending configuration through its ordinary Update plan.
+    Update,
+}
+
+/// Current native dependents affected at one boundary, counted before their names are projected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceApplicationGroup {
+    /// When this change reaches these existing dependents.
+    pub when: ResourceApplicationWhen,
+    /// The unit of the count: threads, environments or providers, never their sum.
+    pub object_kind: orch_access_contract::permissions::ObjectKind,
+    /// Distinct native dependents, including those whose names remain private.
+    pub count: i64,
+    /// Authorized names, each present only once within this boundary.
+    pub visible: Vec<VisibleDependent>,
+    /// Other dependents whose identities and names remain private.
+    pub hidden: i64,
+    /// The existing unit operation that applies this configuration; absent for turn/call boundaries.
+    pub apply: Option<ResourceApplicationAction>,
+    /// Named dependents this current reader may manage; the normal plan still rechecks authority.
+    pub apply_targets: Vec<ObjectRef>,
+}
+
 /// A pause, resumption or deletion reads the same current facts before its one confirmation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceImpact {
@@ -75,8 +190,15 @@ pub struct ResourceImpact {
     pub facts: ResourceFacts,
     /// The exact work that stops or waits.
     pub activity: ActivityFacts,
+    /// Current tool/skill delivery and running-unit consequences, with empty groups omitted.
+    pub applications: Vec<ResourceApplicationGroup>,
+    /// False when a native source cannot account for every delivery or attachment.
+    pub application_complete: bool,
     /// A previously accepted stop still has native work to finish.
     pub stopping: bool,
+    /// A provider-wide pause, provider deletion or MCP deletion can notify this current audience.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<ResourceOperationNotification>,
     /// Current reader-specific status for visible bound threads with content access.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub thread_displays: std::collections::BTreeMap<Id, crate::threads::ThreadDisplay>,
@@ -84,7 +206,7 @@ pub struct ResourceImpact {
 
 crate::endpoints! {
     /// Reads current consequences using the resource's native view or management authority.
-    ResourceImpactRead: POST "/resources/impact", crate::routes::Access::User, none, json FactTarget, json ResourceImpact, 200,
+    ResourceImpactRead: POST "/resources/impact", crate::routes::Access::User, query ResourceImpactQuery, json FactTarget, json ResourceImpact, 200,
         operation Op::facets(&crate::resource_facts_sources::IMPACT_FACETS);
 }
 

@@ -1,5 +1,8 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
 /** A group's Share surface is its native roster and visibility, inside the existing Access dialog. */
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -9,7 +12,7 @@ import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import { linkTo } from '@/lib/links';
 import { PlacePicker, type PickedPlace } from '@/features/settings/PlacePicker';
 import { UserMinus } from 'lucide-react';
-import { addMember, chatKey, chatQuery, orgChatsKey, removeMember, setGroupManager, updateGroup } from '@/api/chats';
+import { addMember, chatKey, chatMembersPageQuery, chatQuery, orgChatsKey, removeMember, setGroupManager, updateGroup } from '@/api/chats';
 import { client, ReceiptAcknowledged } from '@/api/client';
 import { acknowledgeReceipt } from '@/features/chat/acts';
 import { PeoplePicker } from '@/features/chat/NewChat';
@@ -64,7 +67,11 @@ function GroupAccessForReader({ chat, membersHeading = true }: GroupAccessProps)
   const [chosen, setChosen] = useState<UserRef[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const members = chat.members ?? [];
+  const search = useCollectionSearch('chat-members:' + chat.id);
+  const allMembers = chat.members ?? [];
+  const paged = allMembers.length > 50 || search.q !== '';
+  const page = useInfiniteQuery({ ...chatMembersPageQuery(chat.id, search.q), enabled: paged && chat.members !== null });
+  const members = paged ? page.data?.pages.flatMap((part) => part.items) ?? [] : allMembers;
   const managers = new Set(chat.managers ?? []);
   const manage = chat.can.manage === true;
   const manageReason = manage ? undefined : t('chat.group.managerNeeded');
@@ -124,7 +131,8 @@ function GroupAccessForReader({ chat, membersHeading = true }: GroupAccessProps)
         <h3 className={membersHeading ? "text-sm font-medium" : "sr-only"}>{t('chat.group.people')}</h3>
         <Tooltip content={manageReason}><Button size="sm" variant="ghost" blocked={!manage} disabled={pending} onClick={() => setAdding(!adding)}>{t('chat.group.add')}</Button></Tooltip>
       </div>
-      {members.length === 0 ? <p className="text-sm text-text-muted">{chat.members === null ? '–' : t('chat.group.noMembers')}</p> : <Table label={t('chat.group.people')} rows={members} rowKey={(user) => user.id}
+      {chat.members !== null && <CollectionSearch name={t('chat.group.people')} {...search} />}
+      {paged && page.isPending ? <SkeletonRows read={page} rows={3} /> : paged && page.isError && !page.isFetchNextPageError ? <ErrorState compact error={page.error} onRetry={() => void page.refetch()} /> : members.length === 0 ? <p className="text-sm text-text-muted">{chat.members === null ? '–' : t('chat.group.noMembers')}</p> : <Table label={t('chat.group.people')} virtual rows={members} rowKey={(user) => user.id}
         columns={[
           { id: 'name', header: t('chat.group.person'), grow: true, cell: (user) => {
             const expires = chat.membership_expiries?.[user.id];
@@ -149,9 +157,10 @@ function GroupAccessForReader({ chat, membersHeading = true }: GroupAccessProps)
             pending={pending} blocked={!manage || managers.has(user.id) && managers.size === 1} reason={managers.has(user.id) && managers.size === 1 ? t('chat.group.keepManager') : manageReason}
             onClick={() => void run(() => removeMember(chat.id, user.id))} /> },
         ]} />}
+      <Pagination hasMore={paged && page.hasNextPage} loading={page.isFetchingNextPage} error={paged && page.isFetchNextPageError ? page.error : null} onMore={() => void page.fetchNextPage()} />
     </section>
     {adding && <div className="flex min-w-0 flex-col gap-2">
-      <PeoplePicker orgId={chat.org_id} chosen={chosen} onToggle={(user) => { if (!pending) setChosen((before) => before.some((held) => held.id === user.id) ? before.filter((held) => held.id !== user.id) : [...before, user]); }} exclude={new Set(members.map((user) => user.id))} guests me={me} disabled={pending} />
+      <PeoplePicker orgId={chat.org_id} chosen={chosen} onToggle={(user) => { if (!pending) setChosen((before) => before.some((held) => held.id === user.id) ? before.filter((held) => held.id !== user.id) : [...before, user]); }} exclude={new Set(allMembers.map((user) => user.id))} guests me={me} disabled={pending} />
       <div className="flex justify-end gap-2">
         <Button size="sm" variant="ghost" disabled={pending} onClick={() => setAdding(false)}>{t('common.cancel')}</Button>
         <Tooltip content={manageReason ?? (chosen.length === 0 ? t('chat.group.choosePeople') : undefined)}><Button size="sm" variant="primary" pending={pending} blocked={chosen.length === 0 || !manage} onClick={() => void run(add)}>{t('common.add')}</Button></Tooltip>

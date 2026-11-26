@@ -105,7 +105,8 @@ it('adds duplicate resource instances in the focused group without replacing ano
   expect(spatialMainGroups(next.main)).toHaveLength(8);
 });
 
-it('migrates a version-two split layout without changing valid targets, sizes or identities', () => {
-  const old = { ...layout([tab('a')]), version: 2 }, restored = parse(serialize(old));
-  expect(restored).toEqual({ ...old, version: LAYOUT_VERSION });
+it('restores current split targets sizes and identities while refusing obsolete layout formats', () => {
+  const current = applyGrid(layout([tab('a'), tab('b')]), '2x4', 'b');
+  expect(parse(serialize(current))).toEqual(current);
+  for (const version of [1, 2, 3]) expect(parse(serialize({ ...current, version }))).toBeNull();
 });

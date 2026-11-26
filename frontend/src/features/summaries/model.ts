@@ -1,5 +1,7 @@
 /** A summary view is supplied by its ordinary authorized page reader. */
+import type { SummaryWait } from '@/generated/api-types';
 import type { ResourceSubject } from '@/features/resource-facts/facts';
+import type { RecordedModelSubject } from '@/features/resource-facts/ResourceFacts';
 
 export interface SummaryTarget {
   kind: 'thread' | 'topic' | 'document' | 'chat' | 'chat_title' | 'help' | 'search_results';
@@ -18,6 +20,7 @@ export type SummaryState = 'empty' | 'fresh' | 'stale' | 'scheduled' | 'updating
 export type SummaryProducer =
   | { kind: 'written' }
   | Extract<ResourceSubject, { kind: 'model' }>
+  | RecordedModelSubject
   | { kind: 'extension'; name: string };
 
 export interface SummarySnapshot {
@@ -29,7 +32,7 @@ export interface SummarySnapshot {
   producer: SummaryProducer | null;
   updated_at: string | null;
   /** Actual native waiting reason/eligibility, independent of the previous paragraph's age. */
-  wait?: { reason: 'interval' | 'recovery' | 'queue'; until: string | null } | null;
+  wait?: SummaryWait | null;
   /** The ordinary request error, rendered by the shared error component. */
   error?: unknown;
 }
