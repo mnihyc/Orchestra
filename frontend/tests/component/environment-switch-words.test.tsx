@@ -14,7 +14,7 @@ import { marker } from '../doubles/thread-rows';
 import { resourcePlan } from './plan-resource-fixtures';
 import { show } from './support';
 
-const context: TimelineContext = { threadId: 'work', threadName: 'Work', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: 'work', threadName: 'Work', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const plan = resourcePlan('work');
 if (plan.from.kind !== 'agent' || plan.from.environment === null) throw new Error('The environment-switch fixture needs its actual source workspace');
@@ -39,7 +39,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const accepted = { ...plan, to: { ...plan.to, environment: destination.environment } };
     const words = changeJobWords(accepted, false, true, i18n.t.bind(i18n), planContext, [destination]);
     const heading = locale === 'en' ? 'Switching to Main on Build host' : '正在切换到 Build host 上的 Main';
-    const done = locale === 'en' ? 'This thread now runs in Main.' : '此线程现在在 Main 中运行。';
+    const done = locale === 'en' ? 'This thread now runs in Main.' : '此会话现在在 Main 中运行。';
     const view = show(<div style={{ width }}><JobProgress job={nativeJob} heading={words.heading} reconnecting={false} /></div>);
     expect(screen.getByRole('heading', { name: heading })).toBeVisible();
     expect(screen.getByText(locale === 'en' ? 'Running after-start commands' : '正在运行启动后的命令')).toBeVisible();

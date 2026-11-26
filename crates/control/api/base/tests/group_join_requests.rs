@@ -31,6 +31,38 @@ fn reference(id: Id) -> ReferencePreviewGetQuery {
 }
 
 #[tokio::test]
+async fn a_very_long_join_request_policy_keeps_the_request_open_within_the_supported_clock() {
+    let room = Room::new().await;
+    room.world
+        .set_at(
+            orch_settings::Target::System,
+            "access.request_expiry_minutes",
+            serde_json::json!(i64::MAX),
+        )
+        .await;
+    let chat = room
+        .group(&room.bea, &[&room.cai], Some("Group"))
+        .await
+        .base
+        .id;
+    let made = room
+        .world
+        .app
+        .call(ChatJoinRequest, &[&chat])
+        .token(&room.gus.token)
+        .body(&ChatJoinRequestBody::default())
+        .send()
+        .await
+        .full_request()
+        .ok();
+    assert_eq!(
+        made.approvals[0].expires_at,
+        Some("9999-12-31T23:59:00.000Z".parse().unwrap())
+    );
+    assert_eq!(made.approvals[0].state, ApprovalState::Pending);
+}
+
+#[tokio::test]
 async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
     let room = Room::new().await;
     let chat = room
@@ -262,7 +294,11 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             .full_approval()
             .ok();
         assert_eq!(decided.state, ApprovalState::Approved);
-        let expected = days.map(|days| decided.decided_at.unwrap().get() + Duration::days(days));
+        let expected = days.map(|days| {
+            Time::new(decided.decided_at.unwrap().get() + Duration::days(days))
+                .to_minute()
+                .get()
+        });
         let member: (
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
