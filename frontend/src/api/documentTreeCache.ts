@@ -17,14 +17,21 @@ function inDirectory(key: QueryKey, request: DocumentDirectoryRequest): boolean 
   return key[0] === 'document-directory' && key[2] === request.at.kind && key[3] === request.at.id && key[4] === (request.deleted === true);
 }
 
-/** Erasure is synchronous and applies to every old cursor, even if its last view just left. */
-export function retireDocumentDirectory(cache: QueryClient, request: DocumentDirectoryRequest, reader: number | undefined, error?: Error, options: { keep?: QueryKey; settled?: QueryKey } = {}): void {
+/** Erasure is synchronous and applies to every old cursor, even if its last view just left. A page on screen (`shown`)
+ * that is only read again stays, its pending read retired, until the fresh answer replaces it whole; a refusal (`error`)
+ * erases it with the rest. */
+export function retireDocumentDirectory(cache: QueryClient, request: DocumentDirectoryRequest, reader: number | undefined, error?: Error, options: { keep?: QueryKey; settled?: QueryKey; shown?: QueryKey } = {}): void {
   if (reader !== client.session.getState().readerVersion) return;
   const keep = options.keep === undefined ? null : JSON.stringify(options.keep);
   const settled = options.settled === undefined ? null : JSON.stringify(options.settled);
+  const shown = options.shown === undefined || error !== undefined ? null : JSON.stringify(options.shown);
   for (const query of cache.getQueryCache().findAll({ predicate: (query) => inDirectory(query.queryKey, request) && JSON.stringify(query.queryKey) !== keep })) {
     // Capture this query instance. Cancellation must not later restore its previous data.
     if (JSON.stringify(query.queryKey) !== settled) void query.cancel({ revert: false, silent: true });
+    if (JSON.stringify(query.queryKey) === shown && query.state.data !== undefined) {
+      query.setState({ dataUpdatedAt: 0, error: null, status: 'success', fetchStatus: 'idle' });
+      continue;
+    }
     query.setState({ data: undefined, dataUpdatedAt: 0, error: error ?? null, status: error === undefined ? 'pending' : 'error', fetchStatus: 'idle' });
   }
 }

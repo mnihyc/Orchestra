@@ -2,7 +2,7 @@
 
 use super::*;
 use http::StatusCode;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::{RawReply, TestApp};
 use orch_types::{Json, new_id};
 
@@ -565,11 +565,12 @@ async fn channel_update_publication_keeps_the_committed_receipt_and_does_not_rea
 async fn channel_update_preserves_the_native_legacy_settings_management_response() {
     let o = Outside::new().await;
     let id = Owner::Org.make(&o).await;
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     orch_db::queries::identity::create_api_token(
         &mut *o.world.conn().await,
         &orch_db::queries::identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: o.bea.id(),
             name: "Legacy channel management fixture",
             token_hash: &token_hash(&token),

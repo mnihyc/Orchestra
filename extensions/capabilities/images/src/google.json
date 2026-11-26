@@ -98,8 +98,8 @@
             "additionalProperties": false
           }
         },
-        "gemini-3-pro-image-preview": {
-          "title": "gemini-3-pro-image-preview",
+        "gemini-3-pro-image": {
+          "title": "gemini-3-pro-image",
           "kind": "service",
           "endpoint": "images",
           "enabled": false,
@@ -116,7 +116,7 @@
             }
           },
           "parameters": {
-            "model": "gemini-3-pro-image-preview"
+            "model": "gemini-3-pro-image"
           },
           "options": {
             "type": "object",
@@ -125,7 +125,7 @@
             ],
             "properties": {
               "model": {
-                "const": "gemini-3-pro-image-preview"
+                "const": "gemini-3-pro-image"
               },
               "prompt": {
                 "type": "string",
