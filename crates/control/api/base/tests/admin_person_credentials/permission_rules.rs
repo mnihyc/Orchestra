@@ -49,7 +49,7 @@ async fn session_revocation_rechecks_the_original_key_after_the_native_person_ro
         tokio::time::timeout(WAIT, async {
             loop {
                 assert!(!pending.is_finished(), "the native target-account lock must be reached");
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query='SELECT * FROM users WHERE id = $1 FOR UPDATE')")
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query='SELECT * FROM users WHERE id = $1 FOR NO KEY UPDATE')")
                     .fetch_one(&world.db.pool).await?;
                 if waiting { break Ok::<(), sqlx::Error>(()); }
                 tokio::task::yield_now().await;
