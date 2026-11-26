@@ -128,6 +128,13 @@ pub(crate) async fn prepare(
                 K::Mount => {
                     View::Mount(mounts::prepare_inventory(ctx, conn, principal, &[id]).await?)
                 }
+                K::Pool => {
+                    let native = seen(conn, principal, object).await?;
+                    View::Pool(
+                        orch_api_base::routes::resources::pools::prepare_inventory(conn, &[native])
+                            .await?,
+                    )
+                }
                 K::Skill => {
                     View::Skill(skills::prepare_single_projection(conn, principal, id).await?)
                 }
@@ -222,6 +229,7 @@ fn resource(rows: Rendered) -> ApiResult<Resource> {
         Rendered::Machine(rows) => Resource::Machine(one(rows)?),
         Rendered::Mount(rows) => Resource::Mount(one(rows)?),
         Rendered::Skill(rows) => Resource::Skill(one(rows)?),
+        Rendered::Pool(rows) => Resource::Pool(one(rows)?),
     })
 }
 orch_api_base::__api_bind_07ede148ea!();

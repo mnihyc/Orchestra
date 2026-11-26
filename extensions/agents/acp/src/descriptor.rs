@@ -129,9 +129,13 @@ pub fn baseline(program: &AcpProgram, learned: &Learned) -> Capabilities {
             UsageContext::None
         },
         phases: learned.has(Extra::Compaction),
-        provider_facts: Vec::new(),
+        provider_facts: if crate::antigravity::offered(&program.kind, &learned.initialized) {
+            vec![orch_agent_contract::descriptor::ProviderFactKind::CredentialVerification]
+        } else {
+            vec![]
+        },
         provider_fact_fields: Default::default(),
-        model_discovery: false,
+        model_discovery: crate::antigravity::offered(&program.kind, &learned.initialized),
         title: false,
         auxiliary_models: AuxiliaryModels::Uncontrolled,
         telemetry_off: false,
@@ -270,17 +274,24 @@ pub fn descriptor(program: &AcpProgram, learned: &Learned) -> AgentDescriptor {
             status: classify_version(&learned.version, &program.supported_range, true),
         },
         arrangements: arrangements(program, learned),
-        native_provider: None,
+        native_provider: crate::antigravity::offered(&program.kind, &learned.initialized)
+            .then(crate::antigravity::provider),
         native_providers: Vec::new(),
-        text: program.text.clone(),
+        text: if program.kind == crate::antigravity::KIND {
+            crate::antigravity::words(program.text.clone())
+        } else {
+            program.text.clone()
+        },
         forwarded_protocols: program.protocol_order(),
         direct_protocols: Vec::new(),
         credentials: orch_agent_contract::credentials::CredentialSupport::default(),
         runtime_template: None,
+        approval_auto: None,
         approval_modes,
         sandbox_modes: program.sandbox_modes.clone(),
         side_thread_modes: Vec::new(),
         capabilities,
+        features: Default::default(),
         parameters,
         extensions,
     }

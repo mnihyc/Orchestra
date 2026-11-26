@@ -5,11 +5,13 @@
  * what a person does to their own sign-in: the password, the second step by an authenticator app and
  * by a mailed code, the sessions that are open, linked identities, and API tokens.
  */
+import { READ_NOW } from '@/api/freshness';
 import { queryOptions } from '@tanstack/react-query';
 
 import { meQuery } from '@/api/auth';
 import { accepted, api, client, done, ok, repeatable } from '@/api/client';
 import { queryClient } from '@/api/query';
+import { collectionQuery, readAllPages } from '@/api/collection';
 import type {
   ApiTokenCreateBody,
   ApiTokenActivityPage,
@@ -57,7 +59,7 @@ export const invitationsQuery = (orgId: string) =>
   queryOptions({
     queryKey: invitationsKey(orgId),
     queryFn: ({ signal }): Promise<Invitation[]> =>
-      ok(api.GET('/invitations', { params: { query: { org_id: orgId } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/invitations', { params: { query: { org_id: orgId, ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /**
@@ -78,7 +80,7 @@ export function revokeInvitation(id: string): Promise<void> {
 /** A bodyless security act needs the server's current account facts, even when the old profile is fresh. */
 async function refreshMe(): Promise<Me> {
   await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
-  return queryClient.query({ ...meQuery, staleTime: 0 });
+  return queryClient.query({ ...meQuery, ...READ_NOW });
 }
 
 /** Changes the password; every other session of the person ends with it. */
@@ -119,7 +121,6 @@ export function enableAuthenticator(code: string): Promise<MeTotpEnableReply> {
 export const recoveryCodesQuery = queryOptions({
   queryKey: ['recovery-codes'],
   queryFn: ({ signal }): Promise<RecoveryCodeStatus> => ok(api.GET('/me/recovery-codes', { signal })),
-  staleTime: 0,
 });
 
 /** Replaces every older saved code; the caller shows this batch once, outside persistent caches. */
@@ -171,7 +172,7 @@ export const sessionsKey = ['sessions'] as const;
 /** The sessions open for the person, this one marked. */
 export const sessionsQuery = queryOptions({
   queryKey: sessionsKey,
-  queryFn: ({ signal }): Promise<SessionInfo[]> => ok(api.GET('/me/sessions', { signal })),
+  queryFn: ({ signal }): Promise<SessionInfo[]> => readAllPages((cursor) => ok(api.GET('/me/sessions', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 /** Ends one of the person's sessions; its browser is signed out at its next request. */
@@ -191,7 +192,7 @@ export function tokenActivityQuery(id: string, query: ApiTokenActivityQuery) {
   return queryOptions<ApiTokenActivityPage>({
     queryKey: ['token-activity', 'personal', id, query.limit ?? null, query.cursor ?? null] as const,
     queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/me/tokens/{id}/activity', { params: { path: { id }, query }, signal })),
-    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
 }
 
@@ -204,7 +205,7 @@ export const tokenOperationsQuery = queryOptions({
 /** The API tokens the person has made, with what each may do. Their secrets were shown once and are not kept. */
 export const tokensQuery = queryOptions({
   queryKey: tokensKey,
-  queryFn: ({ signal }): Promise<ApiTokenInfo[]> => ok(api.GET('/me/tokens', { signal })),
+  queryFn: ({ signal }): Promise<ApiTokenInfo[]> => readAllPages((cursor) => ok(api.GET('/me/tokens', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 /** Makes an API token. The answer holds its secret, which is never given again. */
@@ -225,10 +226,13 @@ export function revokeToken(id: string): Promise<void> {
 
 /** The people whose names begin with, or hold, what was typed; among an org's members when `orgId` is given. */
 export function searchUsers(q: string, orgId?: string, signal?: AbortSignal): Promise<UserRef[]> {
-  return ok(
-    api.GET('/users/search', {
-      params: { query: { q, ...(orgId === undefined ? {} : { org_id: orgId }) } },
-      ...(signal ? { signal } : {}),
-    }),
-  );
+  const reading=signal??new AbortController().signal;
+  return readAllPages((cursor)=>ok(api.GET('/users/search',{
+    params:{query:{q,...(orgId===undefined?{}:{org_id:orgId}),...(cursor===null?{}:{cursor})}},signal:reading,
+  })),reading);
 }
+
+export const sessionsPageQuery = (q: string) => collectionQuery(sessionsKey, q, (query, signal) => ok(api.GET('/me/sessions', { params: { query }, signal })));
+export const tokensPageQuery = (q: string) => collectionQuery(tokensKey, q, (query, signal) => ok(api.GET('/me/tokens', { params: { query }, signal })));
+
+export const invitationsPageQuery = (orgId: string, q: string) => collectionQuery(invitationsKey(orgId), q, (query, signal) => ok(api.GET('/invitations', { params: { query: { ...query, org_id: orgId, active: true } }, signal })));
