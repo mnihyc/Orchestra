@@ -1,4 +1,5 @@
 /** Stars this person's current project view or the place alone, and opens a saved view through its ordinary address. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Folder, Star, StarOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -42,7 +43,7 @@ export function ProjectStar({ projectId, name, view, readableTags, path = [] }: 
           ...(current === undefined ? [] : [{ id: 'remove', label: t('day100.views.removeStar'), icon: <StarOff aria-hidden />, disabled: save.isPending ? t('day100.views.saving') : false as const, onSelect: () => save.mutate('remove') }]),
         ]}
       />
-      {safeSaved !== null && <Button size="sm" variant="ghost" asChild><a href={projectViewAddress(projectId, safeSaved)}>{t('day100.views.openStarred')}</a></Button>}
+      {safeSaved !== null && <Button size="sm" variant="ghost" asChild><PathLink href={projectViewAddress(projectId, safeSaved)}>{t('day100.views.openStarred')}</PathLink></Button>}
       {save.error !== null && <ErrorAlert error={save.error} />}
       {favorites.isError && <ErrorState compact error={favorites.error} onRetry={() => void favorites.refetch()} />}
     </div>

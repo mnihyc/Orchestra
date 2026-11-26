@@ -166,21 +166,21 @@ impl Engine {
         for file in &files.files {
             let hash = Hash::of(&file.bytes);
             let size = i64::try_from(file.bytes.len()).unwrap_or(i64::MAX);
-            if store
-                .size(&hash)
+            let _publication = match store
+                .existing(&hash)
                 .await
                 .map_err(EngineError::unreadable)?
-                .is_none()
             {
-                store
+                Some(existing) => existing,
+                None => store
                     .put(
                         &hash,
                         Some(size),
                         stream_of(vec![Bytes::from(file.bytes.clone())]),
                     )
                     .await
-                    .map_err(EngineError::unreadable)?;
-            }
+                    .map_err(EngineError::unreadable)?,
+            };
             storage::register_blob(conn, &hash, size, now).await?;
             entries.push(Entry {
                 path: file.path.clone(),
@@ -334,6 +334,7 @@ impl Engine {
                 machine,
                 SerialKey::Environment(snap.environment.id),
                 &FsMaterialize {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: snap.environment.id,
                     job_id: None,
@@ -544,6 +545,7 @@ impl Engine {
             machine,
             SerialKey::Environment(environment),
             &FsRemove {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 path: within(&row.workspace_dir, relative),
                 recursive: true,
@@ -577,21 +579,23 @@ impl Engine {
             .ok_or_else(|| EngineError::unreadable("this system has no store for files"))?;
         let hash = Hash::of(bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        if store
-            .size(&hash)
-            .await
-            .map_err(EngineError::unreadable)?
-            .is_none()
-        {
-            store
-                .put(
-                    &hash,
-                    Some(size),
-                    stream_of(vec![Bytes::copy_from_slice(bytes)]),
-                )
+        let mut publication = Some(
+            match store
+                .existing(&hash)
                 .await
-                .map_err(EngineError::unreadable)?;
-        }
+                .map_err(EngineError::unreadable)?
+            {
+                Some(existing) => existing,
+                None => store
+                    .put(
+                        &hash,
+                        Some(size),
+                        stream_of(vec![Bytes::copy_from_slice(bytes)]),
+                    )
+                    .await
+                    .map_err(EngineError::unreadable)?,
+            },
+        );
         storage::register_blob(conn, &hash, size, self.inner.clock.now()).await?;
         let target = within(&row.workspace_dir, path);
         // Same-call retries keep one native command; another source/ref checks the actual target again.
@@ -608,6 +612,7 @@ impl Engine {
             machine,
             SerialKey::Environment(environment.id),
             &FsWrite {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: environment.id,
                 path: target.clone(),
@@ -616,7 +621,8 @@ impl Engine {
                 expected_hash: Some(ExpectedHash::Absent),
             },
         )?;
-        let command = crate::tools::source::issue(self, command).await?;
+        let command =
+            crate::tools::source::issue_published(self, command, &mut publication).await?;
         let command_id = command.id;
         let hash = serde_json::from_value(command.body["blob"].clone())?;
         let outcome =
@@ -661,6 +667,7 @@ impl Engine {
             machine,
             SerialKey::None,
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: target.to_owned(),

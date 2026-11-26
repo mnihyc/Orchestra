@@ -22,7 +22,7 @@ use orch_api_contract::users::{
     InvitationLookup, UserGet, UserSearch, UserSearchQuery,
 };
 use orch_settings::Target;
-use orch_types::Id;
+use orch_types::{Id, Time};
 use places::{Who, join, make_org, make_project, person};
 use serde_json::json;
 use support::World;
@@ -58,7 +58,7 @@ fn org_invitation(org: Id) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -76,6 +76,82 @@ async fn invite(
         .send()
         .await
         .full_invitation()
+}
+
+#[tokio::test]
+async fn pending_invitations_are_searched_before_paging_and_expired_links_do_not_hide_them() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    for index in 0..13 {
+        invite(
+            &world,
+            &s.boss,
+            &InvitationCreateBody {
+                note: Some(format!("Invitation {index:02}")),
+                ..org_invitation(s.acme)
+            },
+        )
+        .await
+        .ok();
+    }
+    let expired = invite(
+        &world,
+        &s.boss,
+        &InvitationCreateBody {
+            note: Some("Newest expired".into()),
+            ..org_invitation(s.acme)
+        },
+    )
+    .await
+    .ok();
+    sqlx::query("UPDATE invitations SET expires_at=$2 WHERE id=$1")
+        .bind(expired.invitation.id)
+        .bind(world.now() - Duration::minutes(1))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let last = world
+        .app
+        .call(InvitationList, &[])
+        .token(&s.boss.token)
+        .query(&InvitationListQuery {
+            org_id: Some(s.acme),
+            active: Some(true),
+            q: Some("Invitation 12".into()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].note, "Invitation 12");
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(InvitationList, &[])
+            .token(&s.boss.token)
+            .query(&InvitationListQuery {
+                org_id: Some(s.acme),
+                active: Some(true),
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
 }
 
 async fn accept(
@@ -111,11 +187,12 @@ async fn people_are_found_among_those_who_share_an_org_and_by_exact_name_anywher
             .query(&UserSearchQuery {
                 q: q.to_owned(),
                 org_id: org,
+                ..Default::default()
             })
             .send()
     };
-    let names = |found: Vec<orch_api_contract::users::UserRef>| -> Vec<String> {
-        found.into_iter().map(|user| user.username).collect()
+    let names = |found: orch_api_contract::users::UserSearchReply| -> Vec<String> {
+        found.items.into_iter().map(|user| user.username).collect()
     };
     // Dan shares Acme with Alice and not with Alicia.
     assert_eq!(names(search(&s.dan, "ali", None).await.ok()), vec!["alice"]);
@@ -129,7 +206,7 @@ async fn people_are_found_among_those_who_share_an_org_and_by_exact_name_anywher
         vec!["alicia"]
     );
     // Nobody is found by the start of a name outside the orgs they share.
-    assert!(search(&stranger, "bo", None).await.ok().is_empty());
+    assert!(search(&stranger, "bo", None).await.ok().items.is_empty());
     // Too short.
     assert_eq!(
         search(&s.dan, "a", None).await.problem().code,
@@ -163,6 +240,61 @@ async fn people_are_found_among_those_who_share_an_org_and_by_exact_name_anywher
             .problem()
             .code,
         ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn a_five_minute_invitation_ends_on_its_displayed_minute_and_is_refused_at_that_instant() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    world.advance(Duration::milliseconds(45_678));
+    let body: InvitationCreateBody = serde_json::from_value(json!({
+        "kind":"org", "org_id":s.acme, "expires_in_minutes":5
+    }))
+    .unwrap();
+    let made = invite(&world, &s.boss, &body).await.ok();
+    let end = Time::new(world.now() + Duration::minutes(5)).to_minute();
+    assert_eq!(made.invitation.expires_at, end);
+    world.advance(end.get() - world.now() - Duration::milliseconds(1));
+    world
+        .app
+        .call(InvitationLookup, &[&made.token])
+        .send()
+        .await
+        .ok();
+    world.advance(Duration::milliseconds(1));
+    assert_eq!(
+        world
+            .app
+            .call(InvitationLookup, &[&made.token])
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::Gone
+    );
+}
+
+#[tokio::test]
+async fn a_very_long_default_invitation_stays_readable_without_changing_the_policy() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    for key in ["invitations.default_minutes", "invitations.max_minutes"] {
+        world
+            .set_at(orch_settings::Target::System, key, json!(i64::MAX))
+            .await;
+    }
+    let mut body = org_invitation(s.acme);
+    let made = invite(&world, &s.boss, &body).await.ok();
+    assert_eq!(
+        made.invitation.expires_at,
+        "9999-12-31T23:59:00.000Z".parse().unwrap()
+    );
+    body.expires_in_minutes = Some(i64::MAX);
+    assert_eq!(
+        invite(&world, &s.boss, &body).await.problem().code,
+        ErrorCode::RequestInvalid,
+        "an explicitly requested length must fit the public clock"
     );
 }
 
@@ -258,7 +390,7 @@ async fn an_invitation_is_made_only_by_whoever_manages_the_members_and_within_wh
         "the max_uses field must report the policy's exact bound"
     );
     let mut long = org_invitation(s.acme);
-    long.expires_in_hours = Some(721);
+    long.expires_in_minutes = Some(43260);
     let problem = invite(&world, &s.boss, &long).await.problem();
     assert_eq!(problem.code, ErrorCode::RequestInvalid);
     assert!(
@@ -267,10 +399,10 @@ async fn an_invitation_is_made_only_by_whoever_manages_the_members_and_within_wh
             .unwrap()
             .iter()
             .any(|fault| {
-                fault["path"] == "expires_in_hours"
+                fault["path"] == "expires_in_minutes"
                     && fault["message"]
                         .as_str()
-                        .is_some_and(|message| message.contains("720"))
+                        .is_some_and(|message| message.contains("43200"))
             }),
         "the lifetime field must report the policy's exact bound"
     );
@@ -443,7 +575,7 @@ async fn a_node_invitation_names_a_person_on_one_place_and_makes_them_no_member(
         permissions: Some(vec!["project.view".to_owned()]),
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: Some("for the audit".to_owned()),
     };
     assert_eq!(
@@ -521,7 +653,7 @@ async fn the_system_invites_through_its_admins_alone() {
         permissions: None,
         email: None,
         max_uses: Some(3),
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     assert_eq!(
@@ -571,10 +703,13 @@ async fn invitations_are_listed_for_whoever_manages_them_and_taken_back() {
             .app
             .call(InvitationList, &[])
             .token(&who.token)
-            .query(&InvitationListQuery { org_id: org })
+            .query(&InvitationListQuery {
+                org_id: org,
+                ..Default::default()
+            })
             .send()
     };
-    let listed = list(&s.boss, Some(s.acme)).await.ok();
+    let listed = list(&s.boss, Some(s.acme)).await.ok().items;
     assert_eq!(
         listed.iter().map(|each| each.id).collect::<Vec<_>>(),
         vec![second.invitation.id, first.invitation.id],
@@ -585,8 +720,8 @@ async fn invitations_are_listed_for_whoever_manages_them_and_taken_back() {
         "members.manage"
     );
     // Without an org, what the caller made.
-    assert_eq!(list(&s.boss, None).await.ok().len(), 2);
-    assert!(list(&s.dan, None).await.ok().is_empty());
+    assert_eq!(list(&s.boss, None).await.ok().items.len(), 2);
+    assert!(list(&s.dan, None).await.ok().items.is_empty());
     // Taken back: it is marked, and no longer serves.
     let gone = world
         .app
@@ -595,7 +730,7 @@ async fn invitations_are_listed_for_whoever_manages_them_and_taken_back() {
         .send()
         .await;
     assert_eq!(gone.status, 204);
-    let listed = list(&s.boss, Some(s.acme)).await.ok();
+    let listed = list(&s.boss, Some(s.acme)).await.ok().items;
     assert!(
         listed
             .iter()
@@ -667,7 +802,7 @@ fn system_invitation(uses: i64) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: Some(uses),
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -733,12 +868,13 @@ async fn independent_account_document_and_team(personal: bool) {
         .query(&UserSearchQuery {
             q: "newcomer".to_owned(),
             org_id: None,
+            ..Default::default()
         })
         .send()
         .await
         .ok();
     assert_eq!(
-        found.iter().map(|user| user.id).collect::<Vec<_>>(),
+        found.items.iter().map(|user| user.id).collect::<Vec<_>>(),
         [person]
     );
     assert_eq!(
@@ -1210,7 +1346,7 @@ async fn an_expired_composed_invitation_makes_no_account_while_open_standalone_r
     let s = setup(&world).await;
     world.set("registration.mode", json!("open")).await;
     let mut offer = org_invitation(s.acme);
-    offer.expires_in_hours = Some(1);
+    offer.expires_in_minutes = Some(60);
     let made = invite(&world, &s.boss, &offer).await.ok();
     world.advance(Duration::hours(2));
     assert_eq!(
@@ -1346,4 +1482,187 @@ async fn an_invitation_keeps_its_issuers_explicit_admin_mode_without_elevating_t
         after, 0,
         "delegation never adds the issuer as a team member"
     );
+}
+
+#[tokio::test]
+async fn a_person_picker_finds_every_page_from_one_letter_with_private_recent_choices_first() {
+    use orch_api_contract::personal::{MePickerRecentChoice, MePickerRecentCreate};
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let mut ids = Vec::new();
+    for index in 0..13 {
+        let who = person(&world, &format!("directory{index:02}")).await;
+        join(&world, s.acme, s.acme, &who, "viewer", &s.boss).await;
+        ids.push(who.id());
+    }
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&s.dan.token)
+        .body(&MePickerRecentChoice {
+            kind: "user".to_owned(),
+            key: ids[12].to_string(),
+        })
+        .send()
+        .await
+        .ok();
+    let mut ask = UserSearchQuery {
+        q: "D".to_owned(),
+        org_id: Some(s.acme),
+        picker: Some(true),
+        include_external: None,
+        limit: Some(1),
+        cursor: None,
+    };
+    let first = world
+        .app
+        .call(UserSearch, &[])
+        .token(&s.dan.token)
+        .query(&ask)
+        .send()
+        .await
+        .ok();
+    // Search keeps native name order; an empty opening uses the person's private recent order.
+    ask.q = String::new();
+    let opening = world
+        .app
+        .call(UserSearch, &[])
+        .token(&s.dan.token)
+        .query(&ask)
+        .send()
+        .await
+        .ok();
+    assert_eq!(opening.items[0].id, ids[12]);
+    ask.q = "directory".to_owned();
+    let mut found = Vec::new();
+    loop {
+        let page = world
+            .app
+            .call(UserSearch, &[])
+            .token(&s.dan.token)
+            .query(&ask)
+            .send()
+            .await
+            .ok();
+        found.extend(page.items.iter().map(|row| row.id));
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        ask.cursor = Some(cursor);
+    }
+    found.sort();
+    ids.sort();
+    assert_eq!(found, ids);
+    assert!(!first.items.is_empty());
+    ask.q = "different".to_owned();
+    ask.cursor = first.next_cursor;
+    assert_eq!(
+        world
+            .app
+            .call(UserSearch, &[])
+            .token(&s.dan.token)
+            .query(&ask)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::RequestInvalid
+    );
+}
+
+#[tokio::test]
+async fn a_chat_people_picker_gets_actual_membership_with_each_page_and_keeps_guests_optional() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let late = person(&world, "late_member").await;
+    let guest = person(&world, "late_guest").await;
+    join(&world, s.acme, s.acme, &late, "viewer", &s.boss).await;
+    let query = format!(
+        "q=l&org_id={}&picker=true&limit=1&include_external=true",
+        s.acme
+    );
+    let first = world
+        .app
+        .call(UserSearch, &[])
+        .token(&s.dan.token)
+        .raw_query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        first.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [late.id()]
+    );
+    let wire = serde_json::to_value(&first).unwrap();
+    assert_eq!(wire["org_member_ids"], json!([late.id()]));
+    let exact = format!(
+        "q=late_guest&org_id={}&picker=true&include_external=true",
+        s.acme
+    );
+    let outside = world
+        .app
+        .call(UserSearch, &[])
+        .token(&s.dan.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        outside.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [guest.id()]
+    );
+    assert_eq!(
+        serde_json::to_value(outside).unwrap()["org_member_ids"],
+        json!([])
+    );
+    let members_only = format!("q=late_guest&org_id={}&picker=true", s.acme);
+    assert!(
+        world
+            .app
+            .call(UserSearch, &[])
+            .token(&s.dan.token)
+            .raw_query(&members_only)
+            .send()
+            .await
+            .ok()
+            .items
+            .is_empty()
+    );
+    let private = person(&world, "private").await;
+    let hidden = make_org(&world, &private, "Hidden", "hidden").await;
+    let denied = format!(
+        "q=late_guest&org_id={}&picker=true&include_external=true",
+        hidden.base.id
+    );
+    assert_eq!(
+        world
+            .app
+            .call(UserSearch, &[])
+            .token(&s.dan.token)
+            .raw_query(&denied)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::AuthzDenied
+    );
+}
+
+#[tokio::test]
+async fn a_shared_invitation_keeps_more_than_a_thousand_uses_when_the_policy_allows_them() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    world.set("invitations.max_uses", json!(i32::MAX)).await;
+    for uses in [1_001, i64::from(i32::MAX)] {
+        let mut body = org_invitation(s.acme);
+        body.max_uses = Some(uses);
+        let made = invite(&world, &s.boss, &body).await.ok();
+        assert_eq!(made.invitation.max_uses, uses);
+        let stored: i32 = sqlx::query_scalar("SELECT max_uses FROM invitations WHERE id=$1")
+            .bind(made.invitation.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(i64::from(stored), uses);
+    }
 }
