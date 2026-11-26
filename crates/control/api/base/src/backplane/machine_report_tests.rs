@@ -268,6 +268,7 @@ impl Office {
                 self.other,
                 stream,
                 &[DeliveredEvent {
+                    native_opening_id: None,
                     seq,
                     at: self.app.clock.time(),
                     kind: event.kind().as_str().to_owned(),
@@ -306,7 +307,42 @@ async fn an_old_segments_machine_cannot_report_usage_for_a_new_segments_turn() {
         thread_id: thread,
         segment_id: current,
     };
-    owner.send(&office.app, &stream, 1, &report).await;
+    let opening = new_id();
+    let mut conn = office.db.pool.acquire().await.unwrap();
+    for (id, kind, body) in [
+        (
+            opening,
+            "session.open",
+            json!({"thread_id":thread,"segment_id":current,
+            "provider":{"path":"native","provider_id":office.provider},"mcp":[],"skills":[]}),
+        ),
+        (
+            new_id(),
+            "turn.start",
+            json!({"thread_id":thread,"turn_id":turn}),
+        ),
+    ] {
+        orch_db::queries::link::insert_command(
+            &mut conn,
+            &orch_db::queries::link::NewCommand {
+                content_transit: false,
+                native_target: None,
+                id,
+                machine_id: office.owner,
+                kind,
+                body: &body,
+                serial_key: None,
+                deadline_at: office.app.clock.now() + chrono::Duration::minutes(2),
+            },
+            office.app.clock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    owner
+        .send_from(&office.app, &stream, 1, &report, Some(opening))
+        .await;
     owner.ack(&stream, 1).await;
     assert_eq!(
         office
@@ -544,6 +580,7 @@ async fn twenty_foreign_reports_are_acknowledged_counted_and_audited_once_withou
     let mut other = Wire::new(&office.app.app.link, office.other).await;
     let events = (1..=20)
         .map(|seq| EvbEntry {
+            native_opening_id: None,
             seq,
             at: office.app.clock.time(),
             kind: "raw.frame".to_owned(),
@@ -863,6 +900,7 @@ async fn a_harness_and_provider_take_reports_only_from_their_registered_machine(
     let mut owner = Wire::new(&office.app.app.link, office.owner).await;
     let reports = [
         Event::HarnessStatus(HarnessStatus {
+                home: None,
             status: "online".to_owned(),
             detail: None,
             harness_version: Some("1.0".to_owned()),
@@ -898,11 +936,15 @@ async fn a_harness_and_provider_take_reports_only_from_their_registered_machine(
             .await;
         owner.ack(&stream, index as i64 + 1).await;
     }
+    let mut expected_descriptor = reports[1].body().unwrap();
+    expected_descriptor["approval_auto"] = json!({
+        "declared": false, "state": "unavailable", "check_available": false
+    });
     assert_eq!(
         office
             .value("SELECT descriptor FROM agents WHERE id = $1", office.agent)
             .await,
-        reports[1].body().unwrap()
+        expected_descriptor
     );
     let stream = Stream::Provider {
         provider_id: office.provider,
@@ -952,6 +994,7 @@ async fn a_managed_profile_reports_from_a_requested_colocated_harness_and_a_pinn
     };
     let mut other = Wire::new(&office.app.app.link, office.other).await;
     let report = Event::HarnessStatus(HarnessStatus {
+        home: None,
         status: "online".to_owned(),
         detail: None,
         harness_version: Some("1.0".to_owned()),
@@ -990,6 +1033,7 @@ async fn a_node_cannot_report_another_hosts_runtime_or_job_and_the_registered_no
     let mut other = Wire::new(&office.app.app.link, office.other).await;
     let mut owner = Wire::new(&office.app.app.link, office.owner).await;
     let runtime = Event::NodeRuntime(NodeRuntime {
+        source: orch_link_contract::native_target::RuntimeSource::untracked(),
         runtime_id: office.runtime,
         state: "absent".to_owned(),
         detail: None,
@@ -1055,10 +1099,16 @@ pub fn __api_run_a_node_cannot_report_another_hosts_runtime_or_job_and_the_regis
 }
 
 #[cfg(any(test, feature = "test-support"))]
-async fn a_foreign_report_in_a_node_batch_applies_none_of_the_batch() {
+async fn a_hosts_own_reports_are_taken_from_a_batch_whose_report_on_another_hosts_runtime_is_refused()
+ {
+    // A host installed again on the same Docker reports the units an earlier install left there beside what it
+    // reports about itself: its drivers, capacity and load are taken at once, and only the report on a runtime of
+    // another host is refused, as it would be alone.
     let office = Office::new().await;
     let mut other = Wire::new(&office.app.app.link, office.other).await;
     let own_load = json!({"cpu_percent":99.0,"memory_used_mb":1,"disk_used_gb":1,"disk_free_gb":1});
+    let own_facts = json!({"capacity":{"cpus":8,"memory_mb":16384,"disk_gb":200},
+        "drivers":{"docker":{"name":"docker","version":"1","title":"Docker"}},"storages":[]});
     other
         .frame(
             &office.app,
@@ -1066,51 +1116,70 @@ async fn a_foreign_report_in_a_node_batch_applies_none_of_the_batch() {
                 stream: Stream::Node.to_string(),
                 events: vec![
                     EvbEntry {
+                        native_opening_id: None,
                         seq: 1,
                         at: office.app.clock.time(),
-                        kind: "node.load".to_owned(),
-                        body: own_load.clone(),
+                        kind: "node.facts".to_owned(),
+                        body: own_facts,
                     },
                     EvbEntry {
+                        native_opening_id: None,
                         seq: 2,
                         at: office.app.clock.time(),
                         kind: "node.runtime".to_owned(),
-                        body: json!({"runtime_id":office.runtime,"state":"absent","detail":null}),
+                        body: json!({"runtime_id":office.runtime,"source":{"incarnation":null},"state":"absent","detail":null}),
+                    },
+                    EvbEntry {
+                        native_opening_id: None,
+                        seq: 3,
+                        at: office.app.clock.time(),
+                        kind: "node.load".to_owned(),
+                        body: own_load.clone(),
                     },
                 ],
             }),
         )
         .await;
-    other.ack(&Stream::Node, 2).await;
-    let load: Json = sqlx::query_scalar("SELECT load FROM hosts WHERE machine_id = $1")
-        .bind(office.other)
-        .fetch_one(&office.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(load, json!({}));
-    assert_eq!(office.cursor(office.other, &Stream::Node).await, None);
-    other
-        .send(
-            &office.app,
-            &Stream::Node,
-            3,
-            &Event::decode("node.load", own_load.clone()).unwrap(),
-        )
-        .await;
     other.ack(&Stream::Node, 3).await;
-    let load: Json = sqlx::query_scalar("SELECT load FROM hosts WHERE machine_id = $1")
-        .bind(office.other)
-        .fetch_one(&office.db.pool)
-        .await
-        .unwrap();
+    let (drivers, load): (Json, Json) =
+        sqlx::query_as("SELECT drivers, load FROM hosts WHERE machine_id = $1")
+            .bind(office.other)
+            .fetch_one(&office.db.pool)
+            .await
+            .unwrap();
+    assert!(drivers.get("docker").is_some(), "its drivers: {drivers}");
     assert_eq!(load, own_load);
     assert_eq!(office.cursor(office.other, &Stream::Node).await, Some(3));
+    assert_eq!(
+        office
+            .value(
+                "SELECT to_jsonb(state) FROM runtimes WHERE id = $1",
+                office.runtime
+            )
+            .await,
+        "running",
+        "the other host's runtime is untouched"
+    );
+    assert_eq!(
+        office
+            .app
+            .app
+            .link
+            .inner
+            .refusals
+            .total(office.other, StreamFamily::Node)
+            .await,
+        1,
+        "only the foreign report is refused"
+    );
 }
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub fn __api_run_a_foreign_report_in_a_node_batch_applies_none_of_the_batch()
+pub fn __api_run_a_hosts_own_reports_are_taken_from_a_batch_whose_report_on_another_hosts_runtime_is_refused()
 -> ::futures::future::LocalBoxFuture<'static, ()> {
-    ::std::boxed::Box::pin(self::a_foreign_report_in_a_node_batch_applies_none_of_the_batch())
+    ::std::boxed::Box::pin(
+        self::a_hosts_own_reports_are_taken_from_a_batch_whose_report_on_another_hosts_runtime_is_refused(),
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1118,6 +1187,7 @@ async fn discarding_a_foreign_runtime_does_not_block_the_nodes_next_own_report()
     let office = Office::new().await;
     let mut other = Wire::new(&office.app.app.link, office.other).await;
     let foreign = Event::NodeRuntime(NodeRuntime {
+        source: orch_link_contract::native_target::RuntimeSource::untracked(),
         runtime_id: office.runtime,
         state: "absent".to_owned(),
         detail: None,
@@ -1360,6 +1430,7 @@ async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
     let mut other = Wire::new(&office.app.app.link, office.other).await;
     let mut owner = Wire::new(&office.app.app.link, office.owner).await;
     let report = Ev {
+        native_opening_id: None,
         stream: Stream::Node.to_string(),
         seq: 41,
         at: office.app.clock.time(),
@@ -1380,4 +1451,62 @@ async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
 pub fn __api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding()
 -> ::futures::future::LocalBoxFuture<'static, ()> {
     ::std::boxed::Box::pin(self::a_runtime_network_report_obeys_the_runtime_hosts_source_binding())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+ {
+    let office = Office::new().await;
+    // The unit enrolled for the environment's runtime, and the environment does not name it yet.
+    sqlx::query("UPDATE environments SET machine_id = NULL, status = 'provisioning' WHERE id = $1")
+        .bind(office.other_environment)
+        .execute(&office.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runtimes SET state = 'creating' WHERE environment_id = $1")
+        .bind(office.other_environment)
+        .execute(&office.db.pool)
+        .await
+        .unwrap();
+    let stream = Stream::Env {
+        environment_id: office.other_environment,
+    };
+    let mut unit = Wire::new(&office.app.app.link, office.other).await;
+    unit.send(&office.app, &stream, 1, &facts("/workspace"))
+        .await;
+    assert!(
+        unit.is_silent(),
+        "nothing is answered, so that the unit sends the report again"
+    );
+    assert_eq!(office.cursor(office.other, &stream).await, None);
+    assert_eq!(
+        office
+            .app
+            .app
+            .link
+            .inner
+            .refusals
+            .total(office.other, StreamFamily::Env)
+            .await,
+        0
+    );
+    // The environment names the unit now, and the report that is sent again is taken.
+    sqlx::query("UPDATE environments SET machine_id = $2, status = 'running' WHERE id = $1")
+        .bind(office.other_environment)
+        .bind(office.other)
+        .execute(&office.db.pool)
+        .await
+        .unwrap();
+    unit.send(&office.app, &stream, 1, &facts("/workspace"))
+        .await;
+    unit.ack(&stream, 1).await;
+    assert_eq!(office.cursor(office.other, &stream).await, Some(1));
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+-> ::futures::future::LocalBoxFuture<'static, ()> {
+    ::std::boxed::Box::pin(
+        self::the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted(),
+    )
 }

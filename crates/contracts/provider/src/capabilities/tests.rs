@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, reason = "a test fails by panicking")]
 use super::*;
-use orch_types::new_id;
+use orch_types::{Id, new_id};
 
 fn fixture() -> (Registry, ThreadContext, OfferingRef) {
     let provider = new_id();
@@ -45,6 +45,193 @@ fn fixture() -> (Registry, ThreadContext, OfferingRef) {
         .credential_roles
         .insert(provider, vec!["model".into()]);
     (registry, context, reference)
+}
+
+#[test]
+fn a_backend_keeps_its_identity_when_object_members_are_reordered() {
+    let first: BackendRef = serde_json::from_str(
+        r#"{"route":"delegated","config":{"environment_id":"first","options":{"a":1,"b":2}},"offering":null,"future":{"x":1,"y":2}}"#,
+    )
+    .unwrap();
+    let reordered: BackendRef = serde_json::from_str(
+        r#"{"future":{"y":2,"x":1},"offering":null,"config":{"options":{"b":2,"a":1},"environment_id":"first"},"route":"delegated"}"#,
+    )
+    .unwrap();
+    assert_eq!(first.identity().unwrap(), reordered.identity().unwrap());
+    let mut elsewhere = reordered;
+    elsewhere.config["environment_id"] = json!("second");
+    assert_ne!(first.identity().unwrap(), elsewhere.identity().unwrap());
+}
+
+#[test]
+fn a_declared_executor_without_its_consumer_codec_is_not_offered() {
+    let (mut registry, mut context, reference) = fixture();
+    let mut declared = registry.extension("fixture").unwrap().clone();
+    let required = ExecutionSupport {
+        input: "fixture.request".into(),
+        result: "fixture.result".into(),
+        streaming: true,
+        read_tools: true,
+        confined_tools: true,
+    };
+    declared.routes.get_mut("auxiliary").unwrap().execution = Some(required.clone());
+    registry.register("fixture", declared).unwrap();
+    context
+        .choices
+        .insert("lookup".into(), Some("service".into()));
+    context.backends.insert(
+        "lookup".into(),
+        BackendRef {
+            route: "auxiliary".into(),
+            offering: Some(reference),
+            ..BackendRef::default()
+        },
+    );
+    assert_eq!(
+        registry.resolve(&context)[0].reason.as_deref(),
+        Some("execution_codec_unavailable")
+    );
+    let mut incomplete = required.clone();
+    incomplete.confined_tools = false;
+    context
+        .executor_support
+        .insert("model-backed".into(), vec![incomplete]);
+    assert!(registry.resolve(&context)[0].route.is_none());
+    context
+        .executor_support
+        .insert("model-backed".into(), vec![required.clone()]);
+    let route = registry.resolve(&context)[0].route.clone().unwrap();
+    assert_eq!(route.execution.as_ref(), Some(&required));
+    context
+        .executor_support
+        .insert("another-executor".into(), vec![required]);
+    context.executor_support.remove("model-backed");
+    assert!(
+        registry.resolve(&context)[0].route.is_none(),
+        "another route's codec never enables this choice"
+    );
+}
+
+#[test]
+fn an_incomplete_backend_cannot_become_a_valid_model_choice() {
+    let mut backend = BackendRef {
+        route: "fixture".into(),
+        offering: Some(OfferingRef {
+            provider: Id::nil(),
+            offering: "model".into(),
+        }),
+        ..BackendRef::default()
+    };
+    assert!(backend.validate().is_err());
+    backend.offering.as_mut().unwrap().provider = new_id();
+    assert!(backend.validate().is_ok());
+    backend.offering.as_mut().unwrap().offering = " ".into();
+    assert!(backend.validate().is_err());
+    backend.offering = None;
+    backend.route.clear();
+    assert!(backend.validate().is_err());
+}
+
+#[test]
+fn a_program_placement_keeps_explicit_references_and_rejects_invalid_ones() {
+    let environment = new_id();
+    let topic = new_id();
+    let placement =
+        ProgramPlacement::read(&json!({"environment_id":environment,"helper_topic_id":topic}))
+            .unwrap();
+    assert_eq!(placement.environment_id, Some(environment));
+    assert_eq!(placement.helper_topic_id, Some(topic));
+    assert_eq!(
+        ProgramPlacement::read(&Json::Null).unwrap(),
+        ProgramPlacement::default()
+    );
+    for bad in [
+        json!({"environment_id":Id::nil()}),
+        json!({"helper_topic_id":"not-an-id"}),
+        json!({"api_key":"not a placement"}),
+        json!("first online"),
+    ] {
+        assert!(ProgramPlacement::read(&bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_native_execution_failure_keeps_its_original_cause_without_disclosing_it() {
+    let failure = crate::capabilities::CapabilityError::native(
+        crate::SourceError::new(
+            crate::SourceErrorCode::Unavailable,
+            "The program could not finish.",
+        ),
+        std::io::Error::other("private native cause"),
+    );
+    assert_eq!(failure.code, crate::SourceErrorCode::Unavailable);
+    assert!(!format!("{failure:?}").contains("private native cause"));
+    let (portable, native) = failure.into_parts();
+    assert_eq!(portable.message, "The program could not finish.");
+    let original = native.unwrap().downcast::<std::io::Error>().unwrap();
+    assert_eq!(original.to_string(), "private native cause");
+}
+
+#[test]
+fn a_thousand_capability_resolutions_compile_one_route_declaration_and_check_each_offering() {
+    use orch_types::schema::{CacheLimits, check, testing::observe_compilations};
+    use std::sync::atomic::Ordering;
+
+    let (mut registry, mut context, _) = fixture();
+    let mut bundle = registry.extension("fixture").unwrap().clone();
+    let schema = json!({"$comment":new_id().to_string(), "required":["available_here"],
+        "properties":{"available_here":{"const":true}}});
+    let count = observe_compilations(&schema);
+    bundle
+        .interfaces
+        .get_mut("fixture-generation")
+        .unwrap()
+        .native_tools
+        .get_mut("lookup")
+        .unwrap()
+        .eligible_when = schema.clone();
+    bundle.routes.get_mut("native").unwrap().eligible_when = schema;
+    registry.register("fixture", bundle).unwrap();
+
+    for i in 0..1_000 {
+        if i == 1 {
+            // A live declaration still belongs to its registry after unrelated forms fill the idle cache.
+            for field in 0..=CacheLimits::default().entries {
+                check(&json!({"const":field})).unwrap();
+            }
+        }
+        let available = i % 2 == 0;
+        context.facts = json!({"available_here":available});
+        let result = registry.resolve(&context);
+        assert_eq!(result[0].route.is_some(), available);
+        if !available {
+            assert_eq!(result[0].reason.as_deref(), Some("route_not_applicable"));
+        }
+    }
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+
+    let previous = registry.clone();
+    let mut edited = registry.extension("fixture").unwrap().clone();
+    edited.routes.get_mut("native").unwrap().eligible_when = json!(false);
+    registry.register("fixture", edited).unwrap();
+    context.facts = json!({"available_here":true});
+    assert!(registry.resolve(&context)[0].route.is_none());
+    assert!(previous.resolve(&context)[0].route.is_some());
+}
+
+#[test]
+fn the_shipped_schema_check_includes_endpoint_predicates_while_unrelated_routes_remain_usable() {
+    let (mut registry, context, _) = fixture();
+    let mut extra = Declarations::default();
+    extra.endpoint_rules.push(EndpointRule {
+        when: json!({"type":"invalid"}),
+        ..EndpointRule::default()
+    });
+    registry.register("extra", extra).unwrap();
+    assert!(registry.check_route_schemas().is_err());
+    assert!(registry.resolve(&context)[0].route.is_some());
+    assert!(registry.remove("extra"));
+    assert!(registry.check_route_schemas().is_ok());
 }
 
 #[test]
@@ -437,7 +624,7 @@ fn fallback_previews_use_call_rules_without_selecting_a_service_or_exposing_priv
         .unwrap()
         .recovery_purpose = Some("web_search".into());
     registry.register("fixture", declaration).unwrap();
-    let candidate = json!({"provider_id":reference.provider,"model":"","route":{"route":"auxiliary","offering":reference,"config":{"private":"never-publish"}},"params":{"private":"never-publish"}});
+    let candidate = json!({"target":{"type":"single","resource":{"kind":"model","backend":{"route":"auxiliary","offering":reference,"config":{"private":"never-publish"}}}},"params":{"private":"never-publish"}});
     context.recovery=Some(RecoveryPolicy { scope:"org".into(),rules:crate::calls::validate(&json!([{"id":"lookup-fallback","when":{"kind":"unavailable","purpose":"web_search"},"steps":[{"type":"failover","candidate":candidate}]}])).unwrap() });
     let rows = registry.resolve(&context);
     assert_eq!(rows[0].route.as_ref().unwrap().kind, "native-model");
@@ -1243,6 +1430,7 @@ fn a_selected_backend_uses_its_actual_endpoint_and_ceiling_without_rebinding_the
         "service",
         "auxiliary",
         true,
+        &registry.predicates,
     )
     .unwrap();
     assert_eq!(
@@ -1275,6 +1463,7 @@ fn a_selected_backend_uses_its_actual_endpoint_and_ceiling_without_rebinding_the
         "live",
         "native",
         true,
+        &registry.predicates,
     )
     .unwrap();
     assert_eq!(native.facts["endpoint"]["interface"], "fixture-generation");
@@ -1428,4 +1617,77 @@ fn a_native_delegated_backend_has_no_wire_endpoint_and_keeps_its_own_denial() {
         registry.declarations().providers[&reference.provider],
         primary
     );
+}
+
+#[test]
+fn a_host_pool_cannot_be_submitted_as_a_model_choice() {
+    use crate::pools::{Kind, Target};
+    let target = Target::Pool {
+        id: new_id(),
+        kind: Kind::Host,
+    };
+    assert!(target.validate(Kind::Model).is_err());
+    assert!(target.validate(Kind::Host).is_ok());
+}
+
+#[test]
+fn two_native_placements_of_one_model_remain_distinct_choices() {
+    use crate::pools::{Leaf, Target};
+    let (_, _, offering) = fixture();
+    let first = Target::Single {
+        resource: Leaf::Model {
+            backend: BackendRef {
+                route: "program-session".into(),
+                offering: Some(offering.clone()),
+                config: json!({"environment_id": new_id()}),
+                ..BackendRef::default()
+            },
+        },
+    };
+    let second = Target::Single {
+        resource: Leaf::Model {
+            backend: BackendRef {
+                route: "program-session".into(),
+                offering: Some(offering),
+                config: json!({"environment_id": new_id()}),
+                ..BackendRef::default()
+            },
+        },
+    };
+    assert_ne!(first.identity().unwrap(), second.identity().unwrap());
+    let reordered: Target = serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+    assert_eq!(first.identity().unwrap(), reordered.identity().unwrap());
+}
+
+#[test]
+fn a_pool_member_cannot_change_the_kind_of_its_parent() {
+    use crate::pools::{Kind, Leaf, MemberRule};
+    let member = MemberRule::Single {
+        resource: Leaf::Host { id: new_id() },
+    };
+    assert!(member.validate(Kind::Environment).is_err());
+    assert!(member.validate(Kind::Host).is_ok());
+    let nested = MemberRule::Pool {
+        id: new_id(),
+        kind: Kind::Provider,
+    };
+    assert!(nested.validate(Kind::Model).is_err());
+}
+
+#[test]
+fn an_enabled_pool_needs_an_explicit_selection_policy() {
+    use crate::pools::{Definition, Kind, Policy};
+    let mut pool = Definition {
+        kind: Kind::Model,
+        enabled: false,
+        policy: None,
+        lend_members: false,
+        members: vec![],
+        config: json!({}),
+    };
+    assert!(pool.validate().is_ok());
+    pool.enabled = true;
+    assert!(pool.validate().is_err());
+    pool.policy = Some(Policy::Ordered);
+    assert!(pool.validate().is_ok());
 }

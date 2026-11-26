@@ -130,7 +130,7 @@ async fn fetch(
 /// Runs the checks that are wanted, all at once, since one of them waits a minute.
 pub async fn checks(edge: &Edge<'_>) -> Vec<Line> {
     let one = |id: &'static str| (edge.wanted)(id);
-    let (page, api, body, socket, link, endpoints) = tokio::join!(
+    let (page, api, body, socket, link, endpoints, human) = tokio::join!(
         async {
             if one("edge-page") {
                 vec![page(edge).await]
@@ -173,13 +173,20 @@ pub async fn checks(edge: &Edge<'_>) -> Vec<Line> {
                 Vec::new()
             }
         },
+        async {
+            if one("edge-human-check") {
+                vec![human_check(edge).await]
+            } else {
+                Vec::new()
+            }
+        },
     );
     let ports = if one("edge-ports") {
         vec![ports_names(edge).await]
     } else {
         Vec::new()
     };
-    [page, api, body, socket, link, endpoints, ports].concat()
+    [page, api, body, socket, link, endpoints, ports, human].concat()
 }
 
 /// A port's stable name under the ports domain reaches the system and lets nobody in by the name alone: the
@@ -306,6 +313,75 @@ async fn page(edge: &Edge<'_>) -> Line {
             ),
         )
     }
+}
+
+/// The human check the system asks, if it asks one, and whether the edge's content policy lets the page reach its
+/// service: without that, the widget is blocked by the browser and nobody can pass.
+async fn human_check(edge: &Edge<'_>) -> Line {
+    const ID: &str = "edge-human-check";
+    let meta = match meta(edge).await {
+        Ok(meta) => meta,
+        Err(error) => return fail(ID, error),
+    };
+    let Some(check) = meta.get("human_check").filter(|check| !check.is_null()) else {
+        return said(
+            ID,
+            Status::Ok,
+            "no human check is on: the policy needs nothing of a service".to_owned(),
+        );
+    };
+    let provider = check.get("provider").and_then(Value::as_str).unwrap_or("?");
+    let alternate = check
+        .get("alternate_host")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let Some(hosts) = orch_human_check::edge_hosts_of(provider, alternate) else {
+        return fail(
+            ID,
+            format!("the human check names a service this tool does not know: {provider}"),
+        );
+    };
+    let reply = match fetch(edge, http::Method::GET, "/", &[], Bytes::new()).await {
+        Ok(reply) => reply,
+        Err(error) => return fail(ID, format!("GET / failed: {error}")),
+    };
+    // Every policy the answer carries is enforced by a browser, a front of the operator's own that adds one included.
+    let policies: Vec<String> = reply
+        .headers
+        .get_all("content-security-policy")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .collect();
+    if policies.is_empty() {
+        return fail(ID, "GET / carries no content policy".to_owned());
+    }
+    let lacking = orch_human_check::lacking(&policies, &hosts);
+    if lacking.is_empty() {
+        return said(
+            ID,
+            Status::Ok,
+            format!("the content policy lets the page reach {provider}"),
+        );
+    }
+    let word = match (provider, alternate) {
+        ("recaptcha", true) => "recaptcha-net",
+        (other, _) => other,
+    };
+    let list = lacking
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let kept = orch_human_check::nginx_line_of(provider, alternate)
+        .map(|line| format!("; where nginx.conf was kept from an earlier release (an update keeps it), replace its add_header Content-Security-Policy line with: {line} and run `docker compose restart frontend`"))
+        .unwrap_or_default();
+    fail(
+        ID,
+        format!(
+            "the human check is {provider} and the content policy of the edge lacks {list}: the browser blocks the widget, so people are let in or turned away by `human_check.when_unreachable` and nobody can pass the check; where the edge's files are those of this release, set ORCH_FRONTEND_HUMAN_CHECK={word} in .env and run `docker compose up -d`{kept}; where a front of your own sets a policy, add those hosts to it (the operator guide's human check page has the table)"
+        ),
+    )
 }
 
 /// The meta of the system, as the edge passes it on.

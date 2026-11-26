@@ -27,14 +27,14 @@ pub(super) async fn load(
             conn,
             place,
             orch_provider_contract::calls::Purpose::Summary,
-            request.id,
+            request.call_id,
         )
         .await
         .map_err(ApiError::engine)?
     } else {
         None
     };
-    Ok(project(
+    let mut follow = project(
         Some((
             request.state.as_str(),
             request.origin.as_str(),
@@ -45,7 +45,22 @@ pub(super) async fn load(
             .map(|recovery| (recovery.state.as_str(), recovery.due_at)),
         now,
         seconds,
-    ))
+    );
+    if request.origin == "automatic"
+        && request.state == "queued"
+        && let Some(wait) = &mut follow.wait
+    {
+        match request
+            .problem
+            .as_ref()
+            .and_then(|value| value["reason"].as_str())
+        {
+            Some("usage_measurement") => wait.reason = SummaryWaitReason::UsageMeasurement,
+            Some("plan_reserve") => wait.reason = SummaryWaitReason::PlanReserve,
+            _ => {}
+        }
+    }
+    Ok(follow)
 }
 
 fn project(
