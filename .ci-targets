@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web-e2e tests/e2e/documents-places.spec.ts tests/accessibility/places.spec.ts --project=chromium --retries=0 --grep "Documents has one page tab on a topic|a topic’s tabs, one after the other"

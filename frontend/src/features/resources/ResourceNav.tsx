@@ -6,7 +6,7 @@
  */
 import { useViewLocation } from '@/features/workbench/pageContext';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { Bot, Box, Boxes, Cpu, GraduationCap, Laptop, Plug, PlugZap, Server, type LucideIcon } from 'lucide-react';
+import { Bot, Box, Boxes, Cpu, GraduationCap, Laptop, Layers3, Plug, PlugZap, Server, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { ResourceKind } from '@/features/resources/trail';
@@ -23,6 +23,7 @@ export const KINDS = [
   { to: '/resources/mcp', name: 'mcp', icon: Plug },
   { to: '/resources/mounts', name: 'mounts', icon: Box },
   { to: '/resources/skills', name: 'skills', icon: GraduationCap },
+  { to: '/resources/pools', name: 'pools', icon: Layers3 },
 ] as const satisfies readonly { to: string; name: ResourceKind; icon: LucideIcon }[];
 
 /** All kind destinations while the native Resources navigation is hidden; never a duplicate of its tree. */

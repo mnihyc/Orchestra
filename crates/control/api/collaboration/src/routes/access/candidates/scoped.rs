@@ -37,9 +37,6 @@ const GROUP: KeyTargetKind = KeyTargetKind::Identity(KeyIdentityKind::Group);
 
 const ACCOUNT: KeyTargetKind = KeyTargetKind::Identity(KeyIdentityKind::Account);
 
-const PEOPLE_WINDOW: i64 = 30;
-
-// The native holder search's existing account window.
 const NAMES: &[(ObjectKind, Source)] = &[
     (ObjectKind::Org, Source::OrgNames),
     (ObjectKind::Project, Source::ProjectNames),
@@ -150,6 +147,7 @@ impl Frame {
         query: &HolderSearchQuery,
         words: &Words,
         places: &[access::HolderPlaceRow],
+        recent: &BTreeMap<String, Vec<String>>,
     ) -> ApiResult<Self> {
         let limited = native::modern(caller);
         let plan = OperationPlan::new(ctx.route, sources::HOLDER_SEARCH.operation)?;
@@ -184,7 +182,12 @@ impl Frame {
             .filter(|place| place.kind == "org")
             .map(|place| place.id)
             .collect::<Vec<_>>();
-        let mut groups = access::groups_in_orgs(conn, &orgs).await?;
+        let mut groups = if super::includes_kind(query, "group") && query.list_places != Some(true)
+        {
+            access::groups_in_orgs(conn, &orgs).await?
+        } else {
+            Vec::new()
+        };
         if limited {
             let identities = super::super::operations::group_targets(
                 conn,
@@ -209,13 +212,12 @@ impl Frame {
             groups.retain(|group| permitted.contains(&group.id));
         }
         let mut people = Vec::new();
-        let (path, tail) = words.parts();
+        let path = words.text.as_str();
         if query.list_places != Some(true)
             && !words.members
             && !words.every
-            && tail.is_empty()
-            && !path.is_empty()
-            && role_word(path).is_none()
+            && super::includes_kind(query, "user")
+            && (!path.is_empty() || query.picker.unwrap_or(false))
         {
             let is_mail = path.contains('@') && !path.starts_with('@');
             let username = if is_mail {
@@ -226,22 +228,46 @@ impl Frame {
                     .unwrap_or(path)
                     .trim_start_matches('@')
             };
-            let mut after: Option<(String, Id)> = None;
+            let batch = i64::from(
+                query
+                    .limit
+                    .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT)
+                    .max(orch_api_contract::common::DEFAULT_LIMIT),
+            );
+            let recent = recent
+                .get("user")
+                .into_iter()
+                .flatten()
+                .filter_map(|key| key.parse::<Id>().ok())
+                .collect::<Vec<_>>();
+            let rank = |id: Id| {
+                recent
+                    .iter()
+                    .position(|key| *key == id)
+                    .and_then(|index| i64::try_from(index).ok())
+                    .map_or(i64::MAX, |index| index + 1)
+            };
+            let mut after: Option<(i64, String, Id)> = None;
             loop {
-                let rows = identity::search_user_rows(
+                let rows = identity::search_user_page_rows(
                     conn,
-                    caller.user(),
-                    username,
-                    None,
-                    PEOPLE_WINDOW,
-                    after.as_ref().map(|(name, id)| (name.as_str(), *id)),
+                    &identity::UserSearchPage {
+                        caller: caller.user(),
+                        text: username,
+                        org: None,
+                        limit: batch,
+                        after: after
+                            .as_ref()
+                            .map(|(rank, name, id)| (*rank, name.as_str(), *id)),
+                        recent: &recent,
+                        include_external: false,
+                    },
                 )
                 .await?;
-                let exhausted =
-                    rows.len() < usize::try_from(PEOPLE_WINDOW).map_err(ApiError::internal)?;
+                let exhausted = rows.len() < usize::try_from(batch).map_err(ApiError::internal)?;
                 let next = rows
                     .last()
-                    .map(|row| (row.user.username.clone(), row.user.id));
+                    .map(|row| (rank(row.user.id), row.user.username.clone(), row.user.id));
                 let exact =
                     path.starts_with('@') && rows.iter().any(|row| row.user.username == username);
                 let rows = rows
@@ -249,8 +275,12 @@ impl Frame {
                     .filter(|row| !exact || row.user.username == username)
                     .collect::<Vec<_>>();
                 if !limited {
-                    people = rows;
-                    break;
+                    people.extend(rows);
+                    if exhausted || exact {
+                        break;
+                    }
+                    after = next;
+                    continue;
                 }
                 let identities = targets::account_identities(
                     conn,
@@ -274,17 +304,9 @@ impl Frame {
                     )? {
                         targets.insert((ACCOUNT, row.user.id), target.clone());
                         people.push(row);
-                        if people.len()
-                            == usize::try_from(PEOPLE_WINDOW).map_err(ApiError::internal)?
-                        {
-                            break;
-                        }
                     }
                 }
-                if people.len() == usize::try_from(PEOPLE_WINDOW).map_err(ApiError::internal)?
-                    || exhausted
-                    || exact
-                {
+                if exhausted || exact {
                     break;
                 }
                 after = next;
@@ -389,6 +411,24 @@ impl Frame {
             .and_then(|id| places.get(&id))
             .map_or_else(Vec::new, |place| place.path.clone());
         self.record((ACCOUNT, id), vec![path], known);
+    }
+
+    pub(super) fn retain(&mut self, items: &[HolderCandidate]) {
+        let keep = items
+            .iter()
+            .filter_map(|item| match &item.input {
+                HolderInput::User { id } => Some((ACCOUNT, *id)),
+                HolderInput::Group { id } => Some((GROUP, *id)),
+                HolderInput::Members { id }
+                | HolderInput::Node { id }
+                | HolderInput::Agents { id }
+                | HolderInput::Role { at: Some(id), .. } => {
+                    self.nodes.get(id).map(|kind| (*kind, *id))
+                }
+                HolderInput::Role { at: None, .. } | HolderInput::Everyone => None,
+            })
+            .collect::<BTreeSet<_>>();
+        self.used.retain(|key, _| keep.contains(key));
     }
 
     pub(super) fn finish(

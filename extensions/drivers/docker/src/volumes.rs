@@ -26,8 +26,12 @@ use crate::client::{Daemon, DaemonFacts, map_error, status_of};
 use crate::config::DockerConfig;
 use crate::units::{LABEL_PREPARE, driver_labels, is_driver_label_set};
 
-/// How many bytes a GB is in this system: 2^30, as a MB of memory is 2^20, and as the daemon's own `size=10G`.
+/// How many bytes a GB of a disk limit is: 2^30, as a MB of memory is 2^20, and as the daemon's own `size=10G`.
 pub const BYTES_PER_GB: u64 = 1 << 30;
+
+/// How many bytes a GB of a storage's room is in its report: decimal, as the node, the connector and every other
+/// driver measure a storage, so that one disk reads the same whichever host reports it.
+const STORAGE_BYTES_PER_GB: u64 = 1_000_000_000;
 
 /// Where the volumes of a helper container are mounted, one directory for each.
 const HELPER_ROOT: &str = "/v";
@@ -397,21 +401,6 @@ pub async fn exists(
 
 /// The storages of the host with their sizes, as the node reports them.
 pub fn storages(config: &DockerConfig, facts: &DaemonFacts) -> Vec<StorageInfo> {
-    #[cfg(unix)]
-    let measure = |path: &std::path::Path| -> (i64, i64) {
-        match rustix::fs::statvfs(path) {
-            Ok(stat) => {
-                let unit = stat.f_frsize.max(1);
-                let gb = |blocks: u64| {
-                    i64::try_from(blocks.saturating_mul(unit) / BYTES_PER_GB).unwrap_or(i64::MAX)
-                };
-                (gb(stat.f_blocks), gb(stat.f_bavail))
-            }
-            Err(_) => (0, 0),
-        }
-    };
-    #[cfg(not(unix))]
-    let measure = |_path: &std::path::Path| -> (i64, i64) { (0, 0) };
     let private_views = facts.private_views();
     if config.storages.is_empty() {
         // The daemon's own directory when the node sees it, otherwise the node's root: in a container that
@@ -443,6 +432,28 @@ pub fn storages(config: &DockerConfig, facts: &DaemonFacts) -> Vec<StorageInfo> 
             }
         })
         .collect()
+}
+
+/// The size and the free room of the file system that holds `path`, in whole decimal gigabytes (a storage's report);
+/// nothing where it cannot be measured.
+#[cfg(unix)]
+fn measure(path: &std::path::Path) -> (i64, i64) {
+    match rustix::fs::statvfs(path) {
+        Ok(stat) => {
+            let unit = stat.f_frsize.max(1);
+            let gb = |blocks: u64| {
+                i64::try_from(blocks.saturating_mul(unit) / STORAGE_BYTES_PER_GB)
+                    .unwrap_or(i64::MAX)
+            };
+            (gb(stat.f_blocks), gb(stat.f_bavail))
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+#[cfg(not(unix))]
+fn measure(_path: &std::path::Path) -> (i64, i64) {
+    (0, 0)
 }
 
 /// A volume whose top directory is to be given to a user.
@@ -755,5 +766,33 @@ mod tests {
         assert_eq!(lookup_user(passwd, "root"), Some((0, 0)));
         assert_eq!(lookup_user(passwd, "nobody"), None);
         assert_eq!(lookup_user("garbage", "agent"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_storage_reports_its_room_in_decimal_gigabytes_as_every_other_host_does() {
+        let dir = std::env::temp_dir();
+        let config = DockerConfig {
+            storages: vec![StorageConfig {
+                name: "here".into(),
+                path: dir.clone(),
+                default: true,
+            }],
+            ..DockerConfig::default()
+        };
+        let stat = rustix::fs::statvfs(&dir).unwrap();
+        let unit = stat.f_frsize.max(1);
+        let decimal = |blocks: u64| i64::try_from(blocks * unit / 1_000_000_000).unwrap();
+        let reported = storages(&config, &DaemonFacts::default());
+        assert_eq!(reported.len(), 1);
+        // The same disk a connector or a node reports with these figures: not in binary units under the name GB.
+        // (What is free may move a little between the two looks; the size does not.)
+        assert_eq!(reported[0].capacity_gb, decimal(stat.f_blocks));
+        assert!(
+            (reported[0].free_gb - decimal(stat.f_bavail)).abs() <= 1,
+            "{reported:?}"
+        );
+        // A disk limit keeps the daemon's binary gigabyte.
+        assert_eq!(BYTES_PER_GB, 1 << 30);
     }
 }
