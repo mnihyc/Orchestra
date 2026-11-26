@@ -88,6 +88,9 @@ const CANDIDATES_PER_TRY: usize = 16;
 /// Why a run of the outbox stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxError {
+    /// The configured recheck interval exceeds the clock's representation.
+    #[error("the quiet-hours recheck interval cannot be represented by the clock")]
+    QuietHoldInterval,
     /// The database refused.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -525,15 +528,39 @@ impl Outbox {
                 fail_all(conn, &unit, "the channel is switched off", Also::Nothing).await?,
             ));
         }
-        if let Some(until) = quiet_hours::outward_held_until(
+        match quiet_hours::outward_held_until(
             &person.timezone,
             person.quiet_window(),
             person.pause_until,
             now,
         ) {
-            db_outbox::hold_unreserved(conn, &ids, until).await?;
-            routes::set_held(conn, route.id, true).await?;
-            return Ok(Step::Settled(Run::one(Done::Held)));
+            Ok(Some(until)) => {
+                db_outbox::hold_unreserved(conn, &ids, until, None).await?;
+                routes::clear_quiet_problem(conn, route.id).await?;
+                routes::set_held(conn, route.id, true).await?;
+                return Ok(Step::Settled(Run::one(Done::Held)));
+            }
+            Ok(None) => {
+                routes::clear_quiet_problem(conn, route.id).await?;
+            }
+            Err(problem) => {
+                // Recheck on an existing configured retry pause; a hold spends no delivery try.
+                let pause = inner
+                    .retry
+                    .iter()
+                    .copied()
+                    .find(|pause| !pause.is_zero())
+                    .unwrap_or(crate::schedule::Job::Routes.default_interval());
+                let until = chrono::Duration::from_std(pause)
+                    .ok()
+                    .and_then(|pause| now.checked_add_signed(pause))
+                    .ok_or(OutboxError::QuietHoldInterval)?;
+                let message = problem.to_string();
+                db_outbox::hold_unreserved(conn, &ids, until, Some(&message)).await?;
+                let _ = routes::record_failure(conn, route.id, None, &serde_json::json!({"code":"invalid_timezone","message":message,"timezone":problem.name}), now).await?;
+                routes::set_held(conn, route.id, true).await?;
+                return Ok(Step::Settled(Run::one(Done::Held)));
+            }
         }
         let Some(notifier) = inner.notifiers.get(&channel.kind).cloned() else {
             return Ok(Step::Settled(
@@ -547,8 +574,9 @@ impl Outbox {
             ));
         };
         let declared = notifier.describe();
-        let (snapshots, read, sources) =
-            self.still_to_tell(conn, now, route.user_id, &unit).await?;
+        let (snapshots, read, sources) = self
+            .still_to_tell(conn, now, route.user_id, channel.id, &unit)
+            .await?;
         if snapshots.is_empty() {
             let reason = if read { "read" } else { "lost_access" };
             for id in &ids {
@@ -648,6 +676,7 @@ impl Outbox {
         conn: &mut Conn,
         now: DateTime<Utc>,
         user: Id,
+        channel: Id,
         unit: &[OutboxRow],
     ) -> Result<(Vec<Snapshot>, bool, Vec<person_notices::Opened>), OutboxError> {
         let merged = merged_notifications(unit);
@@ -718,7 +747,15 @@ impl Outbox {
             match person_notices::load(conn, self.inner.clock.as_ref(), user, &snapshot).await? {
                 person_notices::Loaded::Legacy => {}
                 person_notices::Loaded::Closed => continue,
-                person_notices::Loaded::Source(source) => sources.push(*source),
+                person_notices::Loaded::Source(mut source) => {
+                    if !source
+                        .through(conn, self.inner.clock.as_ref(), channel)
+                        .await?
+                    {
+                        continue;
+                    }
+                    sources.push(*source);
+                }
             }
             snapshots.push(snapshot);
         }
@@ -1430,6 +1467,12 @@ impl Outbox {
         (snapshots, sources): (&[Snapshot], &[person_notices::Opened]),
     ) -> Result<Result<render::Message, render::RenderFault>, OutboxError> {
         let surroundings = &self.inner.surroundings;
+        let addresses = orch_db::queries::public_addresses::read(
+            conn,
+            &surroundings.address_seed,
+            self.inner.clock.now(),
+        )
+        .await?;
         let node_ids: Vec<Id> = snapshots.iter().filter_map(|each| each.node_id).collect();
         let places = people::places(conn, &node_ids).await?;
         let org_name = match snapshots.last() {
@@ -1472,7 +1515,7 @@ impl Outbox {
                 notifications: snapshots,
                 places: &places,
                 org_name: &org_name,
-                public_url: &self.inner.surroundings.public_url,
+                public_url: &addresses.addresses.public_url,
             },
             &bounds,
         ))

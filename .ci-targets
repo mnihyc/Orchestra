@@ -1,0 +1,14 @@
+test -p orch-api-core --test chat_duplicates
+test -p orch-api-core --test kmounts_files
+test -p orch-api-core --test kmounts_mcp
+test -p orch-api-core --test mcp_delete_scopes
+test -p orch-api-core --test providers
+test -p orch-api-core --test resource_resume -- --skip a_provider_stop_notifies_each_person_once_only_when_that_operation_was_chosen
+test -p orch-api-core --test everything_resources -- figures_scopes::
+test -p orch-api-core --lib
+test -p orch-engine --lib -- notifications::
+test -p orch-settings-contract --lib
+web typecheck
+web lint
+web test
+web-e2e --grep 'an archive that stops nothing|a topic is moved into a folder at once|a folder is moved into another folder|how deep folders may lie|a phone selection archives at once|a changed subtree refuses its row alone|a selected deletion keeps its own recovery group|a selected move goes at once|a member is moved to another domain|the host form saves its three explicit|every dialog about the|a row has its menu by right click|Enable (provider|model|agent|environment) [0-9]+px|disable (provider|model|agent|environment) [0-9]+px|sends a link without granting anyone access|lists who reaches it|list of who reaches it|a speed, an access program and a context are chosen|the parameters show the model with where it comes from'

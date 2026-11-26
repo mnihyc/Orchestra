@@ -22,6 +22,7 @@
  * the "+" of an org, a project or a folder are the lists of `NodeMenu`, made only for the row that is
  * asked; a document's are a document's own.
  */
+import { PathLink as RoutedPathLink } from '@/shell/TrailLink';
 import { useGroupActions } from '@/features/chat/groupActions';
 import { linkTo } from '@/lib/links';
 import { Link } from '@tanstack/react-router';
@@ -33,10 +34,10 @@ import { useTranslation } from 'react-i18next';
 import type { DocumentRef } from '@/api/documents';
 import { isPlainClick, useOpenPath } from '@/features/chat/open';
 import { DocContextMenu, DocMenuButton } from '@/features/navigation/DocMenu';
-import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { NodeContextMenu, NodeMakeButton, NodeMenuButton, useIsPending } from '@/features/navigation/NodeMenu';
-import { destinationsFor } from '@/features/org/Move';
+import { crossesOrganization, destinationsFor, type MoveAsked, useMovePlace } from '@/features/org/Move';
 import { kindWord, PlaceLink, type PlaceRef, placeOfRow, placePath } from '@/features/navigation/places';
+import { loadMoreTree } from '@/realtime/live';
 import { loadMoreDocs, retryDocs } from '@/features/navigation/treeDocs';
 import { buildRows, type ChatMark, type NavItem, nameOf, newLayoutMemory, type TreeView, visibleNodeSiblings } from '@/features/navigation/treeRows';
 import type { AdminAccess, TreeNode } from '@/generated/api-types';
@@ -111,7 +112,7 @@ export const chatPath = (node: Pick<TreeNode, 'id' | 'kind' | 'address'>): strin
 function PathLink({ path, className, label, children }: { path: string; className: string; label?: string; children: ReactNode }) {
   const open = useOpenPath();
   return (
-    <a
+    <RoutedPathLink
       href={path}
       tabIndex={-1}
       className={className}
@@ -124,7 +125,7 @@ function PathLink({ path, className, label, children }: { path: string; classNam
       }}
     >
       {children}
-    </a>
+    </RoutedPathLink>
   );
 }
 
@@ -156,11 +157,12 @@ function ChatGlyph({ node, mark, mentions }: { node: TreeNode; mark: Exclude<Cha
 /** What a row is carried as when it is dragged: the place, to be moved where it is dropped. */
 const DRAGGED_PLACE = 'application/x-orch-place';
 
-/** What a dropped row needs of the tree it is drawn in, read when it is dropped: the nodes, the rows of a parent in the order they stand, and the way to keep an order of one's own. */
+/** What a dropped row needs of the tree it is drawn in, read when it is dropped: the nodes, the rows of a parent in the order they stand, the way to keep an order of one's own and the one move of the tree. */
 interface TreeDrop {
   nodes: ReadonlyMap<string, TreeNode>;
   siblingsOf: (parentId: string) => string[];
   arrange: ((parentId: string, siblings: readonly string[], moved: string, before: string | null) => void) | undefined;
+  move: (asked: MoveAsked) => void;
 }
 
 /** One object for the whole life of a tree, so that no row is drawn again for it; what it holds is the tree's latest. */
@@ -169,15 +171,16 @@ const TreeDropRef = createContext<RefObject<TreeDrop | null> | null>(null);
 /** Flat rows use the same move-plan checks, without treating their time order as a sibling order. */
 export function NavigationDropProvider({ nodes, children }: { nodes: ReadonlyMap<string, TreeNode>; children: ReactNode }) {
   const drop = useRef<TreeDrop | null>(null);
-  useEffect(() => { drop.current = { nodes, siblingsOf: () => [], arrange: undefined }; }, [nodes]);
+  const { mutate: move } = useMovePlace({ refusalNotice: true });
+  useEffect(() => { drop.current = { nodes, siblingsOf: () => [], arrange: undefined, move }; }, [nodes, move]);
   return <TreeDropRef.Provider value={drop}>{children}</TreeDropRef.Provider>;
 }
 
 /**
- * What dropping a dragged place on this row does: a drop is never a move by itself. Between two rows of the same parent,
- * near the edge of one, it puts the row there and makes the reader's order their own, from the order they saw. On a
- * place that can hold it, Move to… opens with this place chosen and the whole plan shown; where it cannot go, the reason
- * is said and nothing is written.
+ * What dropping a dragged place on this row does. Between two rows of the same parent, near the edge of one, it puts the
+ * row there and makes the reader's order their own, from the order they saw. On a place that can hold it, it moves
+ * there at once and the notice offers Undo; into another organization the notice also says how many people lost access.
+ * Where it cannot go, the reason is said and nothing is written.
  */
 function useDropOnto(target: TreeNode) {
   const { t } = useTranslation();
@@ -221,7 +224,7 @@ function useDropOnto(target: TreeNode) {
         toast({ tone: 'info', title: t(`places.move.why.${destination.why}`) });
         return;
       }
-      openNodeDialog({ type: 'move', node: dragged, to: target.id });
+      drop.move({ place: dragged, to: target.id, where: destination.path, across: crossesOrganization(drop.nodes, dragged, target.id) });
     },
   };
 }
@@ -549,6 +552,7 @@ function bring(id: string): void {
 }
 
 export interface NodeTreeProps {
+  orgId?:string;
   tree: OrgTree;
   /** The place the tree begins at: the root org, or the place its reader narrowed it to. */
   rootId: string;
@@ -574,7 +578,8 @@ export interface NodeTreeProps {
   onArrange?: (parentId: string, siblings: readonly string[], moved: string, before: string | null) => void;
 }
 
-export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, currentId, currentRow = null, locale, me, orgSlug = null, onShowThere, nothing, onArrange }: NodeTreeProps) {
+export function NodeTree({ tree, rootId, orgId, view, expanded, onExpandedChange, currentId, currentRow = null, locale, me, orgSlug = null, onShowThere, nothing, onArrange }: NodeTreeProps) {
+  const orgRoot=orgId??[...tree.nodes.values()].find((node)=>node.parent_id===null)?.id??rootId;
   const { t } = useTranslation();
   // What the last laying out was made from is kept: a row whose item did not change is not drawn again, and nodes that
   // did not move are not sorted again.
@@ -582,11 +587,13 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
   const rows = useMemo(() => buildRows(tree, rootId, expanded, locale, view, memory), [tree, rootId, expanded, locale, view, memory]);
   // What a drop reads of the tree, the latest after each drawing, without drawing a row again for it.
   const drop = useRef<TreeDrop | null>(null);
+  const { mutate: move } = useMovePlace({ refusalNotice: true });
   useEffect(() => {
     drop.current = {
       nodes: tree.nodes,
       siblingsOf: (parentId) => visibleNodeSiblings(rows, parentId),
       arrange: onArrange,
+      move,
     };
   });
   const groupPath = useCallback((chatId: string) => `/org/${orgSlug ?? rootId}/messages?chat=${chatId}`, [orgSlug, rootId]);
@@ -605,6 +612,8 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return <NodeRow item={item} />;
         case 'doc':
           return <DocRow doc={item.doc} me={me} />;
+        case 'children':
+          return <button type="button" disabled={item.state==='loading'||item.state==='loadingMore'} className="focus-inset text-sm text-text-muted underline" onClick={()=>loadMoreTree(orgRoot,item.nodeId)}>{t(item.state==='failed'?'common.tryAgain':item.state==='more'?'ui.pagination.more':'common.loading')}</button>;
         case 'docs':
           return <DocsRow nodeId={item.nodeId} state={item.state} />;
         case 'chat':
@@ -642,7 +651,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return null;
       }
     },
-    [me, t, groupPath, onShow],
+    [me, t, groupPath, onShow,orgRoot],
   );
   // The whole row answers a right click, not only what it holds.
   const wrapRow = useCallback(
@@ -675,6 +684,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
               {element}
             </GroupContextMenu>
           );
+        case 'children': return item.state==='more'||item.state==='failed'?pressed(()=>loadMoreTree(orgRoot,item.nodeId)):element;
         case 'docs':
           return item.state === 'more' ? pressed(() => loadMoreDocs(item.nodeId)) : item.state === 'failed' ? pressed(() => retryDocs(item.nodeId)) : element;
         case 'outside':
@@ -684,7 +694,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return element;
       }
     },
-    [t, groupPath, onShow],
+    [t, groupPath, onShow,orgRoot],
   );
   // The row of the screen in view is the document's own where it stands in the tree, and its place's where it does not.
   const current = useMemo(() => (currentRow !== null && rows.some((row) => row.id === currentRow) ? currentRow : currentId), [currentRow, currentId, rows]);

@@ -9,7 +9,7 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const crumbs = (page: Page) => page.getByRole('navigation', { name: 'Where this is' });
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 const main = (page: Page) => mainArea(page);
@@ -130,7 +130,7 @@ test('a tree three folders deep is walked by keyboard, and what was closed stays
   await expect(row(page, 'Payments')).toHaveAttribute('aria-expanded', 'true');
 });
 
-test('a topic is moved into a folder with its plan read first, and out of it again, and the tree and the place it names follow', async ({ page }) => {
+test('a topic is moved into a folder at once, and out of it again, and the tree and the place it names follow', async ({ page }) => {
   await open(page, `/topic/${ACME.cartRewrite}`);
   await expect(page.getByRole('heading', { name: 'Cart rewrite' })).toBeVisible();
   expect(await level(page, 'Cart rewrite')).toBe('3');
@@ -139,7 +139,7 @@ test('a topic is moved into a folder with its plan read first, and out of it aga
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const dialog = page.getByRole('dialog', { name: /^Move the topic Cart rewrite, in / });
   await expect(dialog).toContainText('To another project or folder of the same tree, with its threads.');
-  // Nothing can be confirmed before somebody has chosen where, and what that would change has been read.
+  // Nothing can be confirmed before somebody has chosen where.
   const confirm = dialog.getByRole('button', { name: 'Move', exact: true });
   await expect(confirm).toHaveAttribute('aria-disabled', 'true');
 
@@ -151,16 +151,10 @@ test('a topic is moved into a folder with its plan read first, and out of it aga
   await expect(places.getByRole('radio', { name: 'Acme', exact: true })).toHaveCount(0);
   await places.getByRole('radio', { name: 'Payments' }).check();
 
-  // The plan, in words, before anything moves.
-  await expect(dialog.getByText('Cart rewrite moves from Checkout to Payments.')).toBeVisible();
-  await expect(dialog.getByText('On the 1 page inside it that follows the defaults: 1 person gains access, 1 person loses it.')).toBeVisible();
-  await expect(dialog.getByText('Roles it has from the place above: 1 person starts to hold one, 1 person stops.')).toBeVisible();
-  await expect(dialog.getByText('Linus Pauling').first()).toBeVisible();
-  await expect(dialog.getByText('gains View Topic, Contribute to Topic on 2 pages')).toBeVisible();
-  await expect(dialog.getByText('loses View Topic, Contribute to Topic on 1 page')).toBeVisible();
-  await expect(dialog.getByText('env.recycle_idle_minutes')).toBeVisible();
-  await expect(dialog.getByText('a lock at Checkout decides it')).toBeVisible();
-  await expect(dialog.getByText('Its threads, its documents and the homes of its environments go with it.')).toBeVisible();
+  // Inside one organization nothing about access, roles or settings is read or said; Move is ready at once.
+  await expect(dialog.getByText('Linus Pauling')).toHaveCount(0);
+  await expect(dialog.getByText('env.recycle_idle_minutes')).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Move Cart rewrite to Payments' })).not.toHaveAttribute('aria-disabled', 'true');
   // The dialog is modal, so the tree behind it is found by its markup and not by its role: nothing has moved yet.
   await expect(page.locator(`[data-tree-row="${ACME.cartRewrite}"]`)).toHaveAttribute('aria-level', '3');
 
@@ -179,7 +173,8 @@ test('a topic is moved into a folder with its plan read first, and out of it aga
   await screenMenu(page, 'Cart rewrite');
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   await dialog.getByRole('radio', { name: 'Shop' }).check();
-  await expect(dialog.getByText('Nothing changes for anybody: no access, no setting and no address.')).toBeVisible();
+  // Inside one organization a move says nothing about access, settings or addresses.
+  await expect(dialog.getByRole('status')).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Move Cart rewrite to Shop' }).click();
   await expect(notices(page).getByText('Cart rewrite moved to Acme / Shop', { exact: true })).toBeVisible();
   await expect(tree(page).getByRole('treeitem', { name: /^Cart rewrite/ })).toHaveAttribute('aria-level', '2');
@@ -195,38 +190,26 @@ test('a folder is moved into another folder, to a project and to an org, and is 
   await screenMenu(page, 'Checkout');
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const dialog = page.getByRole('dialog', { name: /^Move the folder Checkout, in / });
-  await expect(dialog).toContainText('To another org, or into another project or folder, of the same tree.');
+  await expect(dialog).toContainText('To another organization, or into another project or folder, of the same tree.');
   const places = dialog.getByRole('radiogroup', { name: 'Move to' });
   for (const name of ['Shop', 'Checkout', 'Payments']) await expect(places.getByRole('radio', { name })).toBeDisabled();
   await expect(places.getByText('It is here already')).toBeVisible();
   await expect(places.getByText('It lies inside what is moved')).toHaveCount(2);
   await expect(places.getByRole('radio', { name: 'Receipts' })).toBeEnabled();
-  // Into the folder beside it: its plan is read, and then it is done.
+  // Into the folder beside it, at once.
   await places.getByRole('radio', { name: 'Receipts' }).check();
-  await expect(dialog.getByText('Checkout moves from Shop to Receipts.')).toBeVisible();
   await dialog.getByRole('button', { name: 'Move Checkout to Receipts' }).click();
   await expect(notices(page).getByText('Checkout moved to Acme / Shop / Receipts', { exact: true })).toBeVisible();
   expect(await level(page, 'Checkout')).toBe('3');
   expect(await level(page, 'Payments')).toBe('4');
 
-  // A folder is called one by where it lies: archiving it says it holds folders.
-  await row(page, 'Checkout').click({ button: 'right' });
-  await page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ }).getByRole('menuitem', { name: 'Archive…' }).click();
-  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).toContainText('Archive makes these places, their chats and documents read-only');
-  await page.keyboard.press('Escape');
-
   // Out of every project to the org itself, where it is a project like the others and is no folder any more.
   await screenMenu(page, 'Checkout');
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   await dialog.getByRole('radio', { name: 'Acme', exact: true }).check();
-  await expect(dialog.getByText('Checkout moves from Receipts to Acme.')).toBeVisible();
   await dialog.getByRole('button', { name: 'Move Checkout to Acme' }).click();
   await expect(notices(page).getByText('Checkout moved to Acme', { exact: true })).toBeVisible();
   await expect(tree(page).getByRole('treeitem', { name: /^Checkout/ })).toHaveAttribute('aria-level', '1');
-  await row(page, 'Checkout').click({ button: 'right' });
-  await page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ }).getByRole('menuitem', { name: 'Archive…' }).click();
-  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).toContainText('Archive makes these places, their chats and documents read-only');
-  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).not.toContainText('folders');
 });
 
 test('how deep folders may lie is refused in words, where one is made and where one is moved', async ({ page }) => {
@@ -256,14 +239,15 @@ test('how deep folders may lie is refused in words, where one is made and where 
   await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('One too many');
   await page.keyboard.press('Escape');
 
-  // Moving a project there says it in the plan, before anything moves, and cannot be confirmed.
+  // Moving a project there is refused by the move itself, in the same words, and nothing moves.
   await page.goto(`/project/${ACME.infra}`);
   await screenMenu(page, 'Infra');
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const move = page.getByRole('dialog', { name: /^Move the project Infra, in / });
   await move.getByRole('radio', { name: 'Level 8' }).check();
+  await move.getByRole('button', { name: /^Move Infra to / }).click();
   await expect(move.getByRole('alert')).toContainText('Folders cannot be nested any deeper here.');
-  await expect(move.getByRole('button', { name: /^Move Infra to / })).toHaveAttribute('aria-disabled', 'true');
+  await expect(move).toBeVisible();
 });
 
 test('somebody who may not open topics in a project sees no “New folder”, and is told what it takes; a developer makes one, and is refused in words when the right was taken away', async ({ page }) => {

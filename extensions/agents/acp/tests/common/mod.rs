@@ -73,6 +73,8 @@ pub enum Action {
 pub struct Behavior {
     /// What it answers to `initialize` under `agentCapabilities`.
     pub capabilities: Json,
+    /// An observed initialize response for an agent with its own handshake.
+    pub initialization: Option<Json>,
     /// The options it lists.
     pub options: Json,
     /// The modes it lists.
@@ -96,6 +98,7 @@ pub struct Behavior {
 impl Default for Behavior {
     fn default() -> Self {
         Self {
+            initialization: None,
             capabilities: json!({
                 "mcpCapabilities": { "http": true },
                 "promptCapabilities": { "image": true },
@@ -414,6 +417,11 @@ async fn handle(agent: &Arc<Agent>, shared: &Arc<Shared>, frame: Json, kill: &Ar
     let reply = |result: Json| json!({ "jsonrpc": "2.0", "id": id, "result": result });
     match method.as_str() {
         "initialize" => {
+            let initialization = agent.behavior.lock().unwrap().initialization.clone();
+            if let Some(initialization) = initialization {
+                shared.send(&reply(initialization)).await;
+                return;
+            }
             let (capabilities, hello) = {
                 let behavior = agent.behavior.lock().unwrap();
                 (
@@ -577,6 +585,38 @@ impl Launcher for Starter {
             .unwrap()
             .launches
             .push(request.clone());
+        if request.args.iter().any(|arg| arg == "--login") {
+            struct Login(tokio::task::JoinHandle<bool>);
+            #[async_trait]
+            impl ProcessControl for Login {
+                async fn wait(&mut self) -> ProcessExit {
+                    ProcessExit {
+                        code: Some(if (&mut self.0).await.unwrap_or(false) {
+                            0
+                        } else {
+                            1
+                        }),
+                        detail: String::new(),
+                    }
+                }
+                fn kill(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let (stdin, input) = tokio::io::duplex(256);
+            let task = tokio::spawn(async move {
+                let mut code = String::new();
+                BufReader::new(input).read_line(&mut code).await.is_ok()
+                    && code == "one-use-example\n"
+            });
+            let challenge = "Open https://accounts.google.com/o/oauth2/auth?response_type=code&state=example&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback\n";
+            return Ok(HarnessProcess {
+                stdin: Box::new(stdin),
+                stdout: Box::new(tokio::io::empty()),
+                stderr: Some(Box::new(std::io::Cursor::new(challenge.as_bytes()))),
+                control: Box::new(Login(task)),
+            });
+        }
         if request.args == ["--version"] {
             let version = format!("{}\n", self.agent.behavior.lock().unwrap().version);
             struct Done;
@@ -663,7 +703,10 @@ pub fn program(extra: Json) -> AcpProgram {
 pub fn spec_in(work: &Path, agent_id: Id, provider: Id, mode: SessionMode) -> SessionSpec {
     let directory = work.display().to_string();
     SessionSpec {
+        opening_id: orch_types::new_id(),
+        opening_command: None,
         settings: SessionSettings {
+            output_capture_bytes: 67_108_864,
             native_model: None,
             agent_id,
             thread_id: new_id(),
@@ -686,6 +729,7 @@ pub fn spec_in(work: &Path, agent_id: Id, provider: Id, mode: SessionMode) -> Se
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
