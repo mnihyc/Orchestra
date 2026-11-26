@@ -99,6 +99,8 @@ struct ToolState {
     progress_title: Option<String>,
     native_terminal: Option<ItemStatus>,
     origin_turn: Option<TurnId>,
+    /// For a sub-agent: the model its own messages name, which is the one it runs on.
+    child_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +175,8 @@ struct StoredTool {
     async_launched: bool,
     #[serde(default)]
     origin_turn: Option<TurnId>,
+    #[serde(default)]
+    child_model: Option<String>,
 }
 
 impl From<ToolState> for StoredTool {
@@ -193,6 +197,7 @@ impl From<ToolState> for StoredTool {
             item_started: tool.item_started,
             async_launched: tool.async_launched,
             origin_turn: tool.origin_turn,
+            child_model: tool.child_model,
         }
     }
 }
@@ -213,6 +218,7 @@ impl From<StoredTool> for ToolState {
             progress_title: None,
             native_terminal: tool.native_web_terminal,
             origin_turn: tool.origin_turn,
+            child_model: tool.child_model,
         }
     }
 }
@@ -229,6 +235,10 @@ pub(crate) struct HistoryMapper {
 }
 
 impl HistoryMapper {
+    pub(crate) fn set_output_capture_bytes(&mut self, bytes: u64) {
+        self.mapper.set_output_capture_bytes(bytes);
+    }
+
     pub(crate) fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
         self.mapper.set_image_outputs(directory);
     }
@@ -581,6 +591,7 @@ pub struct EventMapper {
     native_counts: orch_provider_contract::capabilities::counters::NativeCounters,
     native_counter_declarations: BTreeMap<String, orch_provider_contract::capabilities::Counter>,
     image_outputs: Option<std::path::PathBuf>,
+    output_capture_bytes: u64,
     requests: crate::performance::Requests,
     request_reports: Vec<(TurnId, UsageRequest)>,
     child_heard: Vec<crate::child_usage::Heard>,
@@ -686,6 +697,7 @@ impl EventMapper {
     pub fn new(settings: MapperSettings, clock: Arc<dyn Clock>) -> Self {
         Self {
             image_outputs: None,
+            output_capture_bytes: orch_agent_contract::output::DEFAULT_CAPTURE_BYTES,
             requests: crate::performance::Requests::default(),
             request_reports: Vec::new(),
             child_heard: Vec::new(),
@@ -1194,6 +1206,11 @@ impl EventMapper {
     }
 
     /// The same hash-named output directory the host uses for retained native outputs.
+    /// Retention accepted by the native session, including exact produced-byte coordinates.
+    pub fn set_output_capture_bytes(&mut self, bytes: u64) {
+        self.output_capture_bytes = bytes;
+    }
+
     pub fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
         self.image_outputs = Some(directory);
     }
@@ -1356,6 +1373,8 @@ impl EventMapper {
         ToolContext {
             directory: &self.settings.directory,
             cwd: &self.settings.cwd,
+            outputs: self.image_outputs.as_deref(),
+            output_capture_bytes: self.output_capture_bytes,
         }
     }
 
@@ -1471,11 +1490,11 @@ impl EventMapper {
                             .and_then(|delta| delta.get("partial_json"))
                             .and_then(Json::as_str)
                             .unwrap_or_default();
-                        if let Some(tool) = self
-                            .tool_of_block(&key)
-                            .and_then(|id| self.tools.get_mut(&id))
+                        if let Some(id) = self.tool_of_block(&key)
+                            && let Some(tool) = self.tools.get_mut(&id)
                         {
                             tool.partial_input.push_str(piece);
+                            self.sub_agent_named_early(&id, out);
                         }
                     }
                     _ => {}
@@ -1935,6 +1954,9 @@ impl EventMapper {
             return;
         }
         let parent = frame.parent_tool_use_id();
+        if let Some(parent) = parent {
+            self.sub_agent_model(parent, frame, out);
+        }
         let (stream, parent_ref) = stream_of(parent);
         let message_id = frame
             .message()
@@ -2069,6 +2091,7 @@ impl EventMapper {
             progress_title: None,
             native_terminal: None,
             origin_turn: self.turn_id(),
+            child_model: None,
         };
         if matches!(family, Family::Subagent) && !id.is_empty() {
             let origin = match parent {
@@ -2106,6 +2129,12 @@ impl EventMapper {
         } else {
             tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx)
         };
+        // What a sub-agent runs on is what its own messages say, over the alias its call may have asked for.
+        if let ToolPayload::Subagent { model, .. } = &mut tool
+            && let Some(child) = &state.child_model
+        {
+            *model = Some(child.clone());
+        }
         if outcome.is_none()
             && let ToolPayload::Subagent {
                 state: native_state,
@@ -2121,6 +2150,9 @@ impl EventMapper {
         }
         let duration_ms = outcome
             .map(|_| (self.clock.time().unix_millis() - state.started_at.unix_millis()).max(0));
+        let mut raw = raw_call(&state.name, &state.input, outcome);
+        raw.input = ctx.output(&state.input.to_string());
+        raw.output = outcome.map(|outcome| ctx.output(&outcome.text));
         ToolCallPayload {
             tool,
             title: outcome
@@ -2136,7 +2168,7 @@ impl EventMapper {
                 }),
             started_at: state.started_at,
             duration_ms,
-            raw: raw_call(&state.name, &state.input, outcome),
+            raw,
         }
     }
 
@@ -2488,30 +2520,6 @@ impl EventMapper {
                         .map(str::to_owned);
                     self.report_model_reroute(out);
                 }
-                for server in frame
-                    .get("mcp_servers")
-                    .and_then(Json::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let status = server
-                        .get("status")
-                        .and_then(Json::as_str)
-                        .unwrap_or_default();
-                    if matches!(status, "failed" | "needs-auth") {
-                        let name = server
-                            .get("name")
-                            .and_then(Json::as_str)
-                            .unwrap_or("an MCP server");
-                        self.error_item(
-                            "mcp_server_failed",
-                            &format!("The tool server {name} could not be used ({status})."),
-                            false,
-                            frame.uuid().unwrap_or(name),
-                            out,
-                        );
-                    }
-                }
             }
             Some("status") => {
                 let compacting = frame.text("status") == Some("compacting");
@@ -2655,16 +2663,6 @@ impl EventMapper {
         let Some(key) = key else { return };
         let identity = serde_json::json!([key.task_id, key.run_id]).to_string();
         let prior = self.background_records.get(&identity);
-        if prior.is_none()
-            && self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS
-        {
-            self.background_records
-                .retain(|_, task| task.state == BackgroundTaskState::Running);
-            if self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS {
-                return;
-            }
-        }
-        let prior = self.background_records.get(&identity);
         let is_background = tool.async_launched
             || frame.get("is_backgrounded").and_then(Json::as_bool) == Some(true)
             || frame
@@ -2704,13 +2702,7 @@ impl EventMapper {
             .or_else(|| tool.input.get("description").and_then(Json::as_str))
             .or_else(|| tool.input.get("command").and_then(Json::as_str))
             .unwrap_or(&key.task_id);
-        let mut end = label
-            .len()
-            .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
-        while !label.is_char_boundary(end) {
-            end -= 1;
-        }
-        let label = label[..end].to_owned();
+        let label = label.to_owned();
         let task = BackgroundTask {
             id: key.task_id,
             run_id: key.run_id,
@@ -2746,10 +2738,7 @@ impl EventMapper {
         let Some(tasks) = frame.get("tasks").and_then(Json::as_array) else {
             return;
         };
-        for task in tasks
-            .iter()
-            .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
-        {
+        for task in tasks {
             if task.get("ambient").and_then(Json::as_bool) == Some(true) {
                 continue;
             }
@@ -2790,17 +2779,6 @@ impl EventMapper {
         }
         self.native_tasks
             .retain(|_, task| self.tools.contains_key(&task.tool_ref));
-        if !self.native_tasks.contains_key(&key.task_id)
-            && self.native_tasks.len() == orch_agent_contract::background::SNAPSHOT_COMMANDS
-        {
-            return false;
-        }
-        let weight = |task: &NativeTask| {
-            std::mem::size_of::<NativeTask>()
-                .saturating_add(task.key.task_id.capacity().saturating_mul(2))
-                .saturating_add(task.key.run_id.as_ref().map_or(0, String::capacity))
-                .saturating_add(task.tool_ref.capacity())
-        };
         let task = NativeTask {
             key,
             tool_ref: id.to_owned(),
@@ -2808,15 +2786,6 @@ impl EventMapper {
             resumed,
             tool_reused,
         };
-        let used = self
-            .native_tasks
-            .values()
-            .map(weight)
-            .fold(0usize, usize::saturating_add)
-            .saturating_sub(self.native_tasks.get(&task.key.task_id).map_or(0, weight));
-        if used.saturating_add(weight(&task)) > crate::config::FRAME_MAX_BYTES {
-            return false;
-        }
         self.native_tasks.insert(task.key.task_id.clone(), task);
         true
     }
@@ -2982,13 +2951,7 @@ impl EventMapper {
             state.native_terminal = Some(terminal);
         }
         if let Some(title) = title.filter(|title| !title.is_empty()) {
-            let mut end = title
-                .len()
-                .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
-            while !title.is_char_boundary(end) {
-                end -= 1;
-            }
-            let title = title[..end].to_owned();
+            let title = title.to_owned();
             changed |= state.progress_title.as_ref() != Some(&title);
             state.progress_title = Some(title);
         }
@@ -3165,7 +3128,37 @@ impl EventMapper {
             self.clock.now(),
             &chrono::Local,
         );
-        self.complete_message(status == TurnOutcome::Completed, out);
+        let structured = frame
+            .get("structured_output")
+            .filter(|value| value.is_object());
+        self.complete_message(
+            status == TurnOutcome::Completed && structured.is_none(),
+            out,
+        );
+        if status == TurnOutcome::Completed
+            && let Some(structured) = structured
+        {
+            let text = structured.to_string();
+            let text_len = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+            let native_ref = format!("{turn_id}:structured-output");
+            out.push(SessionEvent::ItemStarted(ItemStarted {
+                turn_id,
+                native_ref: native_ref.clone(),
+                stream: MAIN_STREAM.into(),
+                parent_native_ref: None,
+                content: ItemContent::AgentMessage(AgentMessagePayload {
+                    text: text.clone(),
+                    text_len,
+                    phase: Some(AgentMessagePhase::Final),
+                }),
+            }));
+            out.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref,
+                status: ItemStatus::Completed,
+                payload: json!({"text":text,"text_len":text_len,"phase":"final"}),
+                output_blob: None,
+            }));
+        }
         // Whatever was left open is closed: a call the agent made and never saw the end of.
         self.close_open_items(
             if self.interrupted {
@@ -3452,6 +3445,74 @@ fn step_status(status: Option<&str>) -> PlanStepStatus {
 
 /// A diagnostic for a frame; a frame larger than a diagnostic may be is kept as a stub.
 fn raw_event(direction: &str, frame: &Json) -> SessionEvent {
+    use orch_agent_contract::events::NativeTraceText;
+    let kind = frame.get("type").and_then(Json::as_str).unwrap_or_default();
+    let event = frame.get("event").unwrap_or(&Json::Null);
+    let native = event.get("type").and_then(Json::as_str).unwrap_or_default();
+    let index = event.get("index").and_then(Json::as_u64).unwrap_or(0);
+    let parent = frame
+        .get("parent_tool_use_id")
+        .and_then(Json::as_str)
+        .unwrap_or("main");
+    let stream = format!("{parent}:block:{index}");
+    let mut spans = Vec::new();
+    let pointer = match (native, event.pointer("/delta/type").and_then(Json::as_str)) {
+        ("content_block_delta", Some("text_delta")) => Some("/event/delta/text"),
+        ("content_block_delta", Some("thinking_delta")) => Some("/event/delta/thinking"),
+        ("content_block_delta", Some("input_json_delta")) => Some("/event/delta/partial_json"),
+        ("content_block_start", _)
+            if event.pointer("/content_block/type").and_then(Json::as_str) == Some("text") =>
+        {
+            Some("/event/content_block/text")
+        }
+        ("content_block_start", _)
+            if event.pointer("/content_block/type").and_then(Json::as_str) == Some("thinking") =>
+        {
+            Some("/event/content_block/thinking")
+        }
+        _ => None,
+    };
+    if pointer.is_some() || native == "content_block_start" {
+        spans.push(NativeTraceText {
+            start: native == "content_block_start",
+            stream: stream.clone(),
+            pointer: pointer.map(str::to_owned),
+            end: false,
+        });
+    }
+    if native == "content_block_stop" {
+        spans.push(NativeTraceText {
+            start: false,
+            stream,
+            pointer: None,
+            end: true,
+        });
+    }
+    let complete = direction == TO_HARNESS
+        || if kind == "stream_event" {
+            pointer.is_some()
+                || matches!(
+                    native,
+                    "message_start"
+                        | "content_block_start"
+                        | "content_block_stop"
+                        | "message_delta"
+                        | "message_stop"
+                )
+        } else {
+            matches!(
+                kind,
+                "assistant"
+                    | "user"
+                    | "system"
+                    | "result"
+                    | "control_request"
+                    | "control_response"
+                    | "control_cancel_request"
+                    | "keep_alive"
+                    | "rate_limit_event"
+            )
+        };
     let size = frame.to_string().len();
     let payload = if size > RAW_FRAME_MAX_BYTES {
         json!({
@@ -3464,6 +3525,8 @@ fn raw_event(direction: &str, frame: &Json) -> SessionEvent {
         frame.clone()
     };
     SessionEvent::RawFrame(RawFrame {
+        text: spans,
+        text_complete: complete && size <= RAW_FRAME_MAX_BYTES,
         direction: direction.to_owned(),
         payload,
     })
@@ -3693,6 +3756,67 @@ fn exact_set(candidates: &[(usize, Side)], target: Side) -> Option<Vec<usize>> {
 
 impl EventMapper {
     /// A sub-agent has ended: every message it printed has.
+    /// A sub-agent's message names the model it runs on: its call's step says so, once, where it says another or none.
+    fn sub_agent_model(&mut self, parent: &str, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(model) = frame
+            .message()
+            .and_then(|message| message.get("model"))
+            .and_then(Json::as_str)
+            .filter(|model| !model.is_empty() && *model != "<synthetic>")
+        else {
+            return;
+        };
+        let Some(state) = self.tools.get_mut(parent) else {
+            return;
+        };
+        if !matches!(state.family, Family::Subagent) || state.child_model.as_deref() == Some(model) {
+            return;
+        }
+        state.child_model = Some(model.to_owned());
+        let state = state.clone();
+        if state.item_started {
+            self.tool_brought_up_to_date(&state, parent, out);
+        }
+    }
+
+    /// A sub-agent's call is written piece by piece, its long prompt included: it is named by what it is for and its kind as
+    /// soon as those are written, so that sub-agents started together do not stand nameless while the rest is.
+    fn sub_agent_named_early(&mut self, id: &str, out: &mut Vec<SessionEvent>) {
+        let Some(state) = self.tools.get_mut(id) else {
+            return;
+        };
+        if !matches!(state.family, Family::Subagent) || !state.item_started {
+            return;
+        }
+        let mut named = false;
+        for member in ["description", "subagent_type"] {
+            if state.input.get(member).is_some() {
+                continue;
+            }
+            if let Some(text) = crate::tools::partial_text(&state.partial_input, member)
+                && let Json::Object(input) = &mut state.input
+            {
+                input.insert(member.to_owned(), Json::String(text));
+                named = true;
+            }
+        }
+        if named {
+            let state = state.clone();
+            self.tool_brought_up_to_date(&state, id, out);
+        }
+    }
+
+    /// Tells what is known of a call that is under way: its step, its title.
+    fn tool_brought_up_to_date(&self, state: &ToolState, id: &str, out: &mut Vec<SessionEvent>) {
+        let payload = self.call_payload(state, id, None);
+        if let Ok(payload) = serde_json::to_value(&payload) {
+            out.push(SessionEvent::ItemUpdated(ItemUpdated {
+                native_ref: id.to_owned(),
+                payload: json!({ "tool": payload["tool"], "title": payload["title"] }),
+            }));
+        }
+    }
+
     fn sub_agent_ended(&mut self, parent: &str) {
         if self.awaited.iter().any(|known| known.key.0 == parent) {
             self.ended_parents.insert(parent.to_owned());
@@ -4117,6 +4241,47 @@ mod tests {
     }
 
     #[test]
+    fn a_structured_program_reply_is_kept_as_one_final_main_message() {
+        let (mut mapper, _) = mapper(false);
+        let reply = json!({"text":"A checked answer.","tool_calls":[]});
+        let result = result_frame(json!({"structured_output":reply}));
+        let mut events = feed(
+            &mut mapper,
+            text_stream("preface", 0, &["Preparing the structured reply."]),
+        );
+        events.extend(feed(&mut mapper, vec![result.clone()]));
+        let answers: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ItemCompleted(item) if item.payload["phase"] == "final" => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.len(), 1);
+        let actual: Json =
+            serde_json::from_str(answers[0].payload["text"].as_str().unwrap()).unwrap();
+        assert_eq!(actual, reply);
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemStarted(item) if item.native_ref == answers[0].native_ref && item.stream == MAIN_STREAM && item.parent_native_ref.is_none())));
+        assert!(
+            feed(&mut mapper, vec![result]).is_empty(),
+            "repeating the same native completion cannot add another answer"
+        );
+    }
+
+    #[test]
+    fn a_failed_structured_program_reply_never_becomes_a_final_answer() {
+        let (mut mapper, _) = mapper(false);
+        let events = feed(
+            &mut mapper,
+            vec![result_frame(
+                json!({"subtype":"error_max_structured_output_retries","is_error":true,"structured_output":{"text":"Not accepted"}}),
+            )],
+        );
+        assert!(!events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.payload["phase"] == "final")));
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::TurnCompleted(turn) if turn.status == TurnOutcome::Failed)));
+    }
+
+    #[test]
     fn the_last_text_of_a_message_that_ends_the_turn_is_the_answer_and_the_rest_is_said_on_the_way()
     {
         let (mut mapper, _) = mapper(false);
@@ -4238,6 +4403,59 @@ mod tests {
             );
             assert_eq!(kinds(&result), ["item.completed"]);
         }
+    }
+
+    #[test]
+    fn a_sub_agent_is_named_and_kinded_as_soon_as_its_call_says_so_before_its_prompt_is_written() {
+        let (mut mapper, _) = mapper(false);
+        let delta = |piece: &str| json!({ "type": "stream_event", "api_message_id": "m", "parent_tool_use_id": null,
+            "event": { "type": "content_block_delta", "index": 1, "delta": { "type": "input_json_delta", "partial_json": piece } } });
+        let started = feed(&mut mapper, vec![json!({ "type": "stream_event", "api_message_id": "m", "parent_tool_use_id": null,
+            "event": { "type": "content_block_start", "index": 1, "content_block": { "type": "tool_use", "id": "toolu_agent", "name": "Agent", "input": {} } } })]);
+        assert_eq!(kinds(&started), ["item.started"]);
+        assert!(feed(&mut mapper, vec![delta(r#"{"descri"#)]).is_empty(), "nothing is named by half a member");
+        let named = feed(&mut mapper, vec![delta(r#"ption":"Find the login flow","prompt":"Look at"#)]);
+        let [SessionEvent::ItemUpdated(update)] = named.as_slice() else {
+            panic!("one update names it: {named:?}");
+        };
+        assert_eq!(update.native_ref, "toolu_agent");
+        assert_eq!(update.payload["tool"]["kind"], "subagent");
+        assert_eq!(update.payload["tool"]["name"], "Find the login flow");
+        assert_eq!(update.payload["title"], "Find the login flow");
+        assert!(feed(&mut mapper, vec![delta(" src/login.ts")]).is_empty(), "the prompt growing says nothing new");
+        let kinded = feed(&mut mapper, vec![delta(r#"","subagent_type":"Explore"}"#)]);
+        let [SessionEvent::ItemUpdated(update)] = kinded.as_slice() else {
+            panic!("one update gives its kind: {kinded:?}");
+        };
+        assert_eq!(update.payload["tool"]["role"], "Explore");
+        assert_eq!(update.payload["tool"]["name"], "Find the login flow");
+    }
+
+    #[test]
+    fn a_sub_agent_runs_on_the_model_its_own_messages_name() {
+        let (mut mapper, _) = mapper(false);
+        feed(&mut mapper, vec![json!({ "type": "assistant", "parent_tool_use_id": null,
+            "message": { "id": "m", "model": "claude-opus-5-5", "content": [{ "type": "tool_use", "id": "toolu_agent", "name": "Agent",
+                "input": { "description": "Find the login flow", "prompt": "Look at src", "subagent_type": "Explore" } }] } })]);
+        let spoke = feed(&mut mapper, vec![json!({ "type": "assistant", "parent_tool_use_id": "toolu_agent",
+            "message": { "id": "msg_sub", "model": "claude-haiku-5-5", "content": [{ "type": "text", "text": "Looking." }] } })]);
+        let updates: Vec<_> = spoke.iter().filter_map(|event| match event {
+            SessionEvent::ItemUpdated(update) if update.native_ref == "toolu_agent" => Some(update),
+            _ => None,
+        }).collect();
+        assert_eq!(updates.len(), 1, "{spoke:?}");
+        assert_eq!(updates[0].payload["tool"]["model"], "claude-haiku-5-5");
+        // A second message on the same model says nothing new; the end of the call keeps it.
+        let again = feed(&mut mapper, vec![json!({ "type": "assistant", "parent_tool_use_id": "toolu_agent",
+            "message": { "id": "msg_sub2", "model": "claude-haiku-5-5", "content": [{ "type": "text", "text": "Done." }] } })]);
+        assert!(!again.iter().any(|event| matches!(event, SessionEvent::ItemUpdated(update) if update.native_ref == "toolu_agent")));
+        let ended = feed(&mut mapper, vec![json!({ "type": "user", "parent_tool_use_id": null,
+            "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_agent", "content": "Done.", "is_error": false }] } })]);
+        let Some(SessionEvent::ItemCompleted(done)) = ended.iter().find(|event| matches!(event, SessionEvent::ItemCompleted(done) if done.native_ref == "toolu_agent")) else {
+            panic!("the call ends: {ended:?}");
+        };
+        assert_eq!(done.payload["tool"]["model"], "claude-haiku-5-5");
+        assert_eq!(done.payload["tool"]["state"], "completed");
     }
 
     #[test]
@@ -5859,15 +6077,39 @@ mod tests {
             vec![json!({ "type": "system", "subtype": "init", "uuid": "i1",
                 "mcp_servers": [{ "name": "orch", "status": "connected" }, { "name": "tmux", "status": "failed" }] })],
         );
-        assert_eq!(kinds(&events), ["item.started", "item.completed"]);
-        let SessionEvent::ItemStarted(notice) = &events[0] else {
-            panic!("a notice");
-        };
-        let ItemContent::Error(error) = &notice.content else {
-            panic!("an error item");
-        };
+        let errors = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ItemStarted(item) => match &item.content {
+                    ItemContent::Error(error) => Some(error),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errors.len(),
+            1,
+            "the failed server has one actionable error beside passive connection facts"
+        );
+        let error = errors[0];
         assert_eq!(error.code, "mcp_server_failed");
         assert!(error.message.contains("tmux"));
+        assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.payload["data"]["change"]=="mcp_startup"&&item.payload["data"]["subject"]=="tmux"&&item.payload["data"]["value"]["status"]=="failed")));
+    }
+
+    #[test]
+    fn a_failed_unnamed_tool_server_keeps_one_error_without_inventing_a_connection_name() {
+        let (mut mapper, _) = mapper(false);
+        let events = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"init","uuid":"unnamed-mcp","mcp_servers":[{"status":"failed"}]}),
+            ],
+        );
+        let errors=events.iter().filter(|event|matches!(event,SessionEvent::ItemStarted(item) if matches!(&item.content,ItemContent::Error(error) if error.code=="mcp_server_failed"))).count();
+        assert_eq!(errors, 1);
+        assert!(!events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.payload["data"]["change"]=="mcp_startup")));
     }
 
     #[test]

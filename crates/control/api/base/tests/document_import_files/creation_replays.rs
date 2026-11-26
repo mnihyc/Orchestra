@@ -388,6 +388,7 @@ async fn an_import_retry_keeps_its_total_byte_allowance_and_original_source_orde
             )
             .token(&desk.ada.token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value: json!(bytes),
                 locked: None,
                 expected_revision: None,

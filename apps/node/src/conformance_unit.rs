@@ -62,7 +62,41 @@ fn error(error: impl std::fmt::Display) -> DriverError {
     DriverError::Internal(format!("native check unit: {error}"))
 }
 
-/// Creates, waits for and always removes the driver-owned unit; no image is pulled here.
+async fn image(docker: &Docker, config: &DockerConfig) -> Result<String, DriverError> {
+    let reference = config
+        .conformance_image
+        .clone()
+        .unwrap_or_else(|| format!("orch-env-base:{}", env!("ORCH_RELEASE_VERSION")));
+    match docker.inspect_image(&reference).await {
+        Ok(found) => found
+            .id
+            .ok_or_else(|| error("the check image has no immutable identity")),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) if config.conformance_image.is_none() => {
+            // The release carries this same recipe. Its ordinary driver cache builds it once,
+            // so a newly enrolled host needs neither a manually loaded tag nor a weaker runner.
+            let driver =
+                orch_driver_docker::DockerDriver::connect_for_inventory(config.clone()).await?;
+            let ensured = driver
+                .ensure_image_reporting(
+                    &serde_json::json!({"build": {
+                        "dockerfile": include_str!("../../../images/orch-env-base/Dockerfile")
+                    }}),
+                    &orch_driver_docker::progress::Silent,
+                )
+                .await?;
+            ensured
+                .digest
+                .ok_or_else(|| error("the prepared check image has no immutable identity"))
+        }
+        Err(cause) => Err(DriverError::Unavailable(format!(
+            "native check image {reference}: {cause}"
+        ))),
+    }
+}
+
+/// Prepares the shipped image, then creates, waits for and always removes the driver-owned unit.
 ///
 /// # Errors
 /// The driver could not create the isolated unit, the runner timed out, or its evidence was unreadable.
@@ -73,6 +107,8 @@ pub async fn run(
     program: &Path,
     cancel: &CancellationToken,
 ) -> Result<NodeToolConformanceResult, DriverError> {
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(u64::from(request.timeout_secs));
     if !cfg!(target_os = "linux") {
         return Err(DriverError::Unsupported(
             "native harness checks need a Linux isolation driver".to_owned(),
@@ -88,13 +124,6 @@ pub async fn run(
             "native checks need the shipped static node runner".to_owned(),
         ));
     }
-    let image = config
-        .conformance_image
-        .clone()
-        .unwrap_or_else(|| format!("orch-env-base:{}", env!("ORCH_RELEASE_VERSION")));
-    docker.inspect_image(&image).await.map_err(|_| {
-        DriverError::Unsupported(format!("native checks need the preloaded image {image}"))
-    })?;
     let fallback = program
         .parent()
         .ok_or_else(|| error("the cached executable has no directory"))?;
@@ -109,6 +138,10 @@ pub async fn run(
     let relative = canonical
         .strip_prefix(root)
         .map_err(|_| error("the executable points outside its verified build"))?;
+    let image = tokio::select! {
+        () = cancel.cancelled() => return Err(DriverError::Internal("the native check was cancelled".to_owned())),
+        prepared = tokio::time::timeout_at(deadline, image(docker, config)) => prepared.map_err(|_| DriverError::Timeout)??,
+    };
     let name = format!("orchprobe-conform-{}", orch_types::new_id().simple());
     let mut labels: std::collections::HashMap<_, _> = config.labels.clone().into_iter().collect();
     labels
@@ -154,19 +187,19 @@ pub async fn run(
         }),
         ..Default::default()
     };
-    docker
-        .create_container(
-            Some(CreateContainerOptionsBuilder::default().name(&name).build()),
-            body,
-        )
-        .await
-        .map_err(error)?;
     let mut owned = OwnedUnit {
         docker: docker.clone(),
         name: name.clone(),
         removed: false,
     };
     let work = async {
+        docker
+            .create_container(
+                Some(CreateContainerOptionsBuilder::default().name(&name).build()),
+                body,
+            )
+            .await
+            .map_err(error)?;
         docker.start_container(&name, None).await.map_err(error)?;
         let mut wait = docker.wait_container(
             &name,
@@ -208,7 +241,7 @@ pub async fn run(
     };
     let result = tokio::select! {
         () = cancel.cancelled() => Err(DriverError::Internal("the native check was cancelled".to_owned())),
-        result = tokio::time::timeout(Duration::from_secs(u64::from(request.timeout_secs)), work) => result.unwrap_or(Err(DriverError::Timeout)),
+        result = tokio::time::timeout_at(deadline, work) => result.unwrap_or(Err(DriverError::Timeout)),
     };
     let removed = docker
         .remove_container(

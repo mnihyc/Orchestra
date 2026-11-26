@@ -3,6 +3,7 @@
 
 mod places;
 mod resources;
+mod rig;
 mod support;
 
 use orch_access_contract::{decisions::ObjectRef, permissions::ResourceKind};
@@ -82,4 +83,187 @@ async fn confirmed_program_versions_are_listed_without_threads_or_unconfirmed_di
         builds.iter().all(|build| build.harness.is_some()),
         "the existing registry supplies localized harness names"
     );
+}
+
+#[tokio::test]
+async fn an_installed_program_no_catalogue_build_matches_shows_its_own_check_while_it_is_the_same_file()
+ {
+    install_master_key(orch_db::secrets::MasterKey::new([7; 32]));
+    orch_api_core::routes::settings::install_master_key(orch_db::secrets::MasterKey::new([7; 32]));
+    let world = World::new().await;
+    let owner = places::person(&world, "ada").await;
+    let reader = places::person(&world, "reader").await;
+    let manager = places::person(&world, "manager").await;
+    let org = places::make_org(&world, &owner, "Workshop", "workshop").await;
+    let mut conn = world.conn().await;
+    let id = fixtures::insert_environment(
+        &mut conn,
+        owner.id(),
+        Some(org.base.id),
+        "Programs",
+        "connected",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Environment.into(),
+            id,
+        },
+        owner.id(),
+        NewAccess::Defaults,
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    let machine: Id = sqlx::query_scalar("SELECT machine_id FROM environments WHERE id=$1")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("machine", machine, "live"),
+        "any",
+        "machine.manage",
+        ("user", Some(manager.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    let at = Time::new(world.now());
+    let facts = |current: String| {
+        json!({
+            "policy":{"agent.harnesses":[{"kind":"codex","path":"/controlled/codex"},{"kind":"fake","path":"/controlled/orch-connector"}]},
+            "harnesses":[
+                {"kind":"codex","path":"/controlled/codex","version":"0.165.0","sha256":current,"daemon":false},
+                {"kind":"fake","path":"/controlled/orch-connector","version":"unknown","daemon":false}
+            ],
+            "program_checks":[
+                {"kind":"codex","path":"/controlled/codex","sha256":"e".repeat(64),"builtin":false,"at":at,
+                 "status":"failed","version":"0.165.0","missing":["turn/steer"],"off":[],"error":null},
+                {"kind":"fake","path":"/controlled/orch-connector","sha256":null,"builtin":true,"at":at,
+                 "status":"checked","version":null,"missing":[],"off":[],"error":null}
+            ]
+        })
+    };
+    sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+        .bind(machine)
+        .bind(facts("e".repeat(64)))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    for person in [&reader, &manager] {
+        resources::name_person(&world, "environment", id, "environment.view", person.id()).await;
+    }
+    let rows = |by: &places::Who| {
+        let token = by.token.clone();
+        let world = &world;
+        async move {
+            let rows = world
+                .app
+                .call(EnvironmentHarnessBuildList, &[&id])
+                .token(&token)
+                .send()
+                .await
+                .ok();
+            serde_json::to_value(rows).unwrap()
+        }
+    };
+    let of = |rows: &serde_json::Value, kind: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == kind)
+            .cloned()
+            .unwrap()
+    };
+    let seen = rows(&reader).await;
+    let codex = of(&seen, "codex");
+    assert_eq!(codex["build"], serde_json::Value::Null);
+    assert_eq!(codex["installed"]["machine_id"], json!(machine));
+    assert_eq!(codex["installed"]["path"], "/controlled/codex");
+    assert_eq!(codex["installed"]["can_check"], false);
+    assert_eq!(codex["installed"]["check"]["status"], "failed");
+    assert_eq!(
+        codex["installed"]["check"]["missing"],
+        json!(["turn/steer"])
+    );
+    let example = of(&seen, "fake");
+    assert_eq!(example["installed"]["check"]["builtin"], true);
+    assert_eq!(example["installed"]["check"]["status"], "checked");
+    assert_eq!(
+        of(&rows(&manager).await, "codex")["installed"]["can_check"],
+        true
+    );
+    // Different bytes at the same path are another program: what was found of the earlier ones does not stand for it.
+    sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+        .bind(machine)
+        .bind(facts("f".repeat(64)))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let changed = of(&rows(&reader).await, "codex");
+    assert_eq!(changed["installed"]["path"], "/controlled/codex");
+    assert_eq!(changed["installed"]["check"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn a_program_a_thread_reported_the_version_of_keeps_one_row_with_its_own_check() {
+    let s = rig::Scene::new().await;
+    s.thread().await;
+    let environment = s.on.environment;
+    let pool = s.rig.db.pool();
+    sqlx::query("UPDATE environments SET placement='connected',template_id=NULL WHERE id=$1")
+        .bind(environment)
+        .execute(pool)
+        .await
+        .unwrap();
+    // The harness of the thread's provider and agent on this machine reported its version, as a started one does.
+    sqlx::query(
+        "INSERT INTO harnesses (provider_id, agent_id, machine_id, harness_version) VALUES ($1, $2, $3, '1.0.0')
+         ON CONFLICT (provider_id, agent_id, machine_id) DO UPDATE SET harness_version = EXCLUDED.harness_version",
+    )
+    .bind(s.on.provider)
+    .bind(s.on.agent)
+    .bind(s.rig.machine_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    // The machine lists the Example agent built into its connector with no version of its own; a thread's report says
+    // which version it is.
+    sqlx::query("UPDATE machines SET facts=facts || $2 WHERE id=$1")
+        .bind(s.rig.machine_id)
+        .bind(json!({
+            "policy":{"agent.harnesses":[{"kind":"fake","path":"/usr/local/bin/orch-connector"}]},
+            "harnesses":[{"kind":"fake","path":"/usr/local/bin/orch-connector","version":"unknown","daemon":false}],
+            "program_checks":[{"kind":"fake","path":"/usr/local/bin/orch-connector","sha256":null,"builtin":true,
+                "at":Time::new(s.rig.world.now()),"status":"checked","version":null,"missing":[],"off":[],"error":null}]
+        }))
+        .execute(pool)
+        .await
+        .unwrap();
+    let rows = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentHarnessBuildList, &[&environment])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let rows = serde_json::to_value(rows).unwrap();
+    let example: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "fake")
+        .collect();
+    assert_eq!(example.len(), 1, "{rows}");
+    assert_eq!(example[0]["version"], "1.0.0");
+    assert_eq!(example[0]["installed"]["check"]["builtin"], true);
+    assert_eq!(example[0]["installed"]["check"]["status"], "checked");
 }
