@@ -183,6 +183,23 @@ async fn returned_prompt_summaries_are_batched_without_delivered_input_or_versio
         reread.payload, frozen.payload,
         "a source update cannot rewrite inherited bytes"
     );
+    let reopened = app
+        .call(ThreadOpeningGet, &[&thread])
+        .token(&scene.ada.token)
+        .query(&ThreadOpeningGetQuery {
+            continuation_id: Some(view.child),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let inherited = reopened
+        .sync
+        .items
+        .iter()
+        .find(|item| item.id == view.prefix_item)
+        .ok_or("the reopened child lost its inherited item")?;
+    assert_eq!(inherited.payload, frozen.payload);
     let original = app
         .call(ThreadItemGet, &[&thread, &view.prefix_item])
         .token(&scene.ada.token)

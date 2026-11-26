@@ -19,7 +19,7 @@ const PLACES = [
 ] as const;
 
 /** The acts of a place's menu that open a dialog about the place itself. */
-const ACTS = ['Rename…', 'Move to…', 'Colour…', 'Archive…', 'Delete…', 'Recently deleted…'] as const;
+const ACTS = ['Rename…', 'Move to…', 'Colour…', 'Archive…', 'Delete', 'Trash…'] as const;
 
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -57,7 +57,7 @@ for (const place of PLACES) {
       await expect(page.getByRole('dialog').or(page.getByRole('alertdialog'))).toHaveCount(0);
     }
     // Every place offers at least its name, its place and its removal to whoever manages it.
-    expect(opened).toEqual(expect.arrayContaining(['Rename…', 'Delete…']));
+    expect(opened).toEqual(expect.arrayContaining(['Rename…', 'Delete']));
   });
 }
 

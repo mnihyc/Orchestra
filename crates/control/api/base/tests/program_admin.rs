@@ -129,6 +129,18 @@ async fn one_build_page_and_platform_summary_do_not_depend_on_loading_the_full_b
     assert_eq!(page.items[0].version, "1.0.99");
     assert!(page.next_cursor.is_some());
     assert!(page.items.iter().all(|b| b.carry.is_some()));
+    let searched = world
+        .app
+        .call(AdminProgramBuildList, &[&"external"])
+        .token(&c.root.token)
+        .raw_query("q=1.0.0&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(searched.items.len(), 1);
+    assert_eq!(searched.items[0].version, "1.0.0");
+    assert_eq!(searched.next_cursor, None);
+
     let detail = world
         .app
         .call(AdminProgramGet, &[&"external"])
