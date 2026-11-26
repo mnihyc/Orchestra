@@ -15,7 +15,7 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({ save: vi.fn<typeof ResourcesApi.updateModel>() }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourcesApi>(), updateModel: calls.save }));
 vi.mock('@/features/resources/providers/Caps', async (original) => ({ ...await original<Record<string, unknown>>(), ModelLimits: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const model: ProviderModel = { ...MODEL_ESTIMATE, id: 'family-model', model_name: 'family-model', display_name: 'Family model', enabled: true, source: 'manual', groups: ['kept'], parameters: {} };
 const provider = planProvider({ models: [model], model_groups_max: 8 });
 const observed = (line = 'vendor-family'): ModelSuggestion => ({ model_name: model.model_name, display_name: model.display_name, listed: true,
@@ -41,7 +41,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(model.groups).toEqual(['kept']);
   });
 
-  it('saves only after explicit confirmation and keeps the captured draft when source data refreshes', async () => {
+  it('saves groups without guessing an unknown window and keeps the draft when source data refreshes', async () => {
     const draw = (line: string) => <ModelGroupProposal provider={provider} model={model} observed={observed(line)} manage />;
     const rendered = show(draw('vendor-family'));
     const user = userEvent.setup();
@@ -51,7 +51,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(within(dialog).getByRole('list', { name: i18n.t('models.groups.of') })).toHaveTextContent('vendor-family');
     expect(within(dialog).getByRole('list', { name: i18n.t('models.groups.of') })).not.toHaveTextContent('new-family');
     await user.click(within(dialog).getByRole('button', { name: i18n.t('providers.models.save') }));
-    await waitFor(() => expect(calls.save).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { parameters: {}, groups: ['kept', 'vendor-family'] }));
+    await waitFor(() => expect(calls.save).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { expected: { parameters: model.parameters, groups: model.groups }, parameters: {}, groups: ['kept', 'vendor-family'] }));
   });
 
   it('keeps a lowered zero limit, while allowing removal of the proposal and unchanged old membership', async () => {

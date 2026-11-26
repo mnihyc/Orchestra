@@ -1,44 +1,36 @@
-/** Move to…: an org that lies in another taken elsewhere in its tree, with who gains and who loses what, what resolves differently and how many addresses change said first.
+/** Move to…: a project or a folder, a topic, or an org that lies in another, to another place of its tree, at once.
  *
  * What is moved is a project or a folder, a topic, or an org that lies in another. A project and a folder go
  * to another org or into another project or folder; a topic to another project or folder; an org to another
- * org: every one of them within its own tree. The destination is chosen from the places of the tree that
- * can hold it; as soon as one is, the server is asked what the move would change and the answer is written
- * out before anything is moved: who would gain and who lose what on the pages that follow the defaults,
- * which settings would resolve differently and which of those a lock above decides, how many people and
- * resources get another address, and what stops it, with what is missing and whom to ask. Nothing inside what
- * is moved is moved or renamed.
+ * org: every one of them within its own tree. Links, shortcuts, threads' places and settings' scopes follow a place by
+ * its identity, so a move inside one organization says nothing. Into another organization one line says how many
+ * people lose access, with their names on Show: it is read beside the choice and never holds the move up. Whatever
+ * the tree itself refuses (a cycle, a depth) is the server's refusal at the move. The result offers Undo.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
-import { ArrowRight } from 'lucide-react';
-import { type TFunction } from 'i18next';
 import { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '@/api/client';
-import { moveNode, type MovableKind, nodeQuery, previewMove } from '@/api/nodes';
+import { moveNode, type MovableKind, nodeKey, nodeQuery, previewMove, readNode } from '@/api/nodes';
 import { depthWords } from '@/features/navigation/depth';
 import { useNamedPlace } from '@/features/navigation/namedPlace';
 import type { PlaceRef } from '@/features/navigation/places';
-import type { NodeMovePlan, PlanBlocker, PreviewPerson, TreeNode } from '@/generated/api-types';
-import { i18n } from '@/i18n';
-import { permissionLabel } from '@/lib/permissions';
+import type { Node, PagePreview, TreeNode } from '@/generated/api-types';
+import { newActKey } from '@/lib/requests';
 import { useOrgTree } from '@/realtime/stores/tree';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
-import { ErrorAlert, ErrorState, MissingAccessList } from '@/ui/ErrorState';
-import { InlineAlert } from '@/ui/InlineAlert';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { NodeIcon } from '@/ui/NodeIcon';
-import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 import { toast } from '@/ui/Toast';
+import { useErrorText } from '@/ui/errorText';
 import { UserChip } from '@/ui/UserChip';
 
 export interface MoveDialogProps {
   /** The project, folder, topic, or org that lies in another, that is moved. */
   place: PlaceRef;
-  /** The place it is moved to, chosen already: where a row of the tree was dropped. The plan is shown, and nothing moves until it is confirmed. */
-  to?: string;
   open: boolean;
   onClose: () => void;
 }
@@ -184,146 +176,127 @@ export function PlaceChooser({ label, rows, value, onChange, hint }: { label: st
   );
 }
 
-/** What a blocker says: the words the catalogue has for its code, else what the system said. */
-function blockerWords(blocker: PlanBlocker, t: TFunction): string {
-  const key = `errors.${blocker.code}`;
-  // The key is built from a code the system gave, so it is not one the catalogue's types know.
-  return i18n.exists(key) ? (t as (key: string) => string)(key) : blocker.message;
+/** What is moved, as the routes name it. */
+export function movableKind(place: PlaceRef): MovableKind {
+  return place.kind === 'topic' ? 'topic' : place.kind === 'project' ? 'project' : 'org';
 }
 
-/** What a person would gain or lose, in words: the permissions by name, the first few, and on how many pages. */
-function Change({ entry, change }: { entry: PreviewPerson; change: 'gains' | 'loses' }) {
-  const { t } = useTranslation();
-  const shown = entry.permissions.slice(0, 3).map(permissionLabel);
-  const rest = entry.permissions.length - shown.length;
-  const named = shown.join(t('places.counts.join'));
-  const what = rest > 0 ? t('folders.move.plan.andMore', { what: named, count: rest }) : named;
-  return (
-    <li className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <UserChip user={entry.user} size={24} />
-      <span className="text-text-muted">{t(`folders.move.plan.${change}`, { what, count: entry.pages })}</span>
-    </li>
-  );
-}
-
-/** What a move would change, written out. */
-function Plan({ plan, place }: { plan: NodeMovePlan; place: PlaceRef }) {
-  const { t } = useTranslation();
-  const lines: string[] = [];
-  const { access, roles, addresses } = plan;
-  const joined = (...parts: (string | null)[]) => parts.filter((part): part is string => part !== null).join(t('folders.move.plan.join'));
-  // What changes for people, in sentences that read right for one person and for many.
-  const accessChange = joined(
-    access.gaining.length > 0 ? t('folders.move.plan.peopleGain', { count: access.gaining.length }) : null,
-    access.losing.length > 0 ? t('folders.move.plan.peopleLose', { count: access.losing.length }) : null,
-  );
-  if (accessChange !== '') lines.push(t('folders.move.plan.accessOn', { count: access.pages, what: accessChange }));
-  const roleChange = joined(
-    roles.gaining > 0 ? t('folders.move.plan.rolesStart', { count: roles.gaining }) : null,
-    roles.losing > 0 ? t('folders.move.plan.rolesStop', { count: roles.losing }) : null,
-  );
-  if (roleChange !== '') lines.push(t('folders.move.plan.rolesFrom', { what: roleChange }));
-  if (addresses.members + addresses.resources > 0) {
-    lines.push(t('places.move.plan.addresses', { members: addresses.members, resources: addresses.resources }));
+/** The organization a place belongs to: itself for an org, else the nearest org above it; `null` when the tree does not hold it. */
+export function organizationOf(nodes: ReadonlyMap<string, TreeNode>, id: string | null): string | null {
+  for (let at = id, steps = 0; at !== null && steps < 64; steps += 1) {
+    const row = nodes.get(at);
+    if (row === undefined) return null;
+    if (row.kind === 'org') return row.id;
+    at = row.parent_id;
   }
-  const stops = plan.blockers;
-  const people = access.gaining.length + access.losing.length > 0 || access.more > 0;
+  return null;
+}
+
+/** Whether a move takes the place into another organization: an org always changes the org it lies in, and an unknown side counts as another. */
+export function crossesOrganization(nodes: ReadonlyMap<string, TreeNode>, place: PlaceRef, destination: string): boolean {
+  if (place.kind === 'org') return true;
+  const from = organizationOf(nodes, place.parentId);
+  const to = organizationOf(nodes, destination);
+  return from === null || to === null || from !== to;
+}
+
+/** People who lose access by a move into another organization: one line, the names on Show; nothing while it is read or when it cannot be. */
+export function LossLine({ preview }: { preview: PagePreview | undefined }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const losing = preview?.losing ?? [];
+  if (losing.length === 0) return null;
   return (
-    <div className="flex flex-col gap-3 text-base">
-      <p className="text-sm text-text-muted">
-        {t('folders.move.plan.where', { name: plan.node.name ?? place.name, from: plan.from.name ?? '', to: plan.to.name ?? '' })}
+    <div className="flex min-w-0 flex-col gap-2">
+      <p className="flex flex-wrap items-center gap-2 text-sm text-text-muted">
+        <span role="status">{t('places.move.loses', { count: losing.length })}</span>
+        <Button size="sm" variant="ghost" aria-expanded={open} onClick={() => setOpen(!open)}>{t(open ? 'actions.hide.label' : 'actions.show.label')}</Button>
       </p>
-      {stops.map((blocker) => (
-        <InlineAlert key={blocker.code} tone="danger">
-          <p>{blockerWords(blocker, t)}</p>
-          <MissingAccessList missing={blocker.missing ?? []} className="mt-1" />
-        </InlineAlert>
-      ))}
-      {stops.length === 0 && (
-        <>
-          <ul className="flex list-disc flex-col gap-1 pl-6">
-            {lines.length === 0 && plan.settings.length === 0 && <li>{t('places.move.plan.nothing')}</li>}
-            {lines.map((line) => (
-              <li key={line}>{line}</li>
-            ))}
-            {plan.settings.length > 0 && <li>{t('places.move.plan.settings', { count: plan.settings.length })}</li>}
-          </ul>
-          {people && (
-            <ul className="flex flex-col gap-2 text-sm">
-              {access.gaining.map((entry) => (
-                <Change key={`gain-${entry.user.id}`} entry={entry} change="gains" />
-              ))}
-              {access.losing.map((entry) => (
-                <Change key={`lose-${entry.user.id}`} entry={entry} change="loses" />
-              ))}
-              {access.more > 0 && <li className="text-text-muted">{t('places.move.plan.more', { count: access.more })}</li>}
-            </ul>
-          )}
-          {plan.settings.length > 0 && (
-            <ul className="flex flex-col gap-1 text-sm text-text-muted">
-              {plan.settings.map((setting) => (
-                <li key={setting.key}>
-                  <span className="font-mono text-text">{setting.key}</span>
-                  {': '}
-                  {JSON.stringify(setting.from)} <ArrowRight className="inline" aria-hidden /> {JSON.stringify(setting.to)}
-                  {setting.locked_by !== null &&
-                    ` · ${
-                      setting.locked_by === 'system' || !('name' in setting.locked_by) || setting.locked_by.name === null
-                        ? t('places.move.plan.locked')
-                        : t('folders.move.plan.lockedAt', { place: setting.locked_by.name })
-                    }`}
-                </li>
-              ))}
-            </ul>
-          )}
-          {place.kind === 'topic' && <p className="text-sm text-text-muted">{t('folders.move.plan.topicGoes')}</p>}
-          <p className="text-sm text-text-muted">{t('places.move.plan.untouched')}</p>
-        </>
-      )}
+      {open && <ul className="flex flex-col gap-2 text-sm">{losing.map((entry) => <li key={entry.user.id}><UserChip user={entry.user} size={24} /></li>)}</ul>}
     </div>
   );
 }
 
-export function MoveDialog({ place, to, open, onClose }: MoveDialogProps) {
+export interface MoveAsked {
+  place: PlaceRef;
+  /** The destination's id and the words for where it lies. */
+  to: string;
+  where: string;
+  /** The place as the person saw it, with its revision and where it lay; a drop reads the current one first. */
+  before?: Node;
+  /** Into another organization; a drop reads who loses access first, the dialog has shown it already as `lost`. */
+  across: boolean;
+  lost?: number;
+}
+
+/** One move, its notice and its Undo, for the dialog and for a row dropped in the tree. */
+export function useMovePlace() {
   const { t } = useTranslation();
-  const named = useNamedPlace(place);
   const navigate = useNavigate();
-  const kind: MovableKind = place.kind === 'topic' ? 'topic' : place.kind === 'project' ? 'project' : 'org';
-  const node = useQuery(nodeQuery(place.id));
-  const tree = useOrgTree(node.data?.org_id ?? null);
-  const [destination, setDestination] = useState(to ?? '');
-  const options = useMemo(() => destinationsFor(tree.nodes, place, t('places.pathJoin')), [tree.nodes, place, t]);
-  const choices = useMemo(() => chooserRows(tree.nodes, options), [tree.nodes, options]);
-  const chosen = options.find((option) => option.id === destination);
-  // What is moved is called by the word its place has: a project that lies in a project is a folder.
-  const word: 'org' | 'project' | 'folder' | 'topic' = place.kind === 'topic' ? 'topic' : place.kind === 'org' ? 'org' : place.folder ? 'folder' : 'project';
-
-  const plan = useQuery({
-    queryKey: ['move-preview', place.id, destination],
-    queryFn: () => previewMove(kind, place.id, destination),
-    enabled: open && destination !== '',
-    // What a move would change is what it changes now: a plan is never kept.
-    gcTime: 0,
-    retry: false,
-  });
-
-  const move = useMutation({
-    mutationFn: () => {
-      if (plan.data === undefined) throw new Error(t('placeReview.reviewAgain'));
-      return moveNode(kind, place.id, destination, plan.data.revision, plan.data);
+  const cache = useQueryClient();
+  const describe = useErrorText();
+  const undo = async (place: PlaceRef, from: string, fromName: string) => {
+    try {
+      const current = await readNode(place.id);
+      await moveNode(movableKind(place), place.id, from, current.revision, undefined, newActKey());
+      void cache.invalidateQueries({ queryKey: nodeKey(place.id) });
+      toast({ tone: 'success', title: t('places.toast.moved', { name: place.name, where: fromName }) });
+    } catch (error: unknown) {
+      toast({ tone: 'danger', title: t('placeReview.undoChanged'), description: describe(error).message });
+    }
+  };
+  return useMutation({
+    mutationFn: async ({ place, to, before, across, lost }: MoveAsked): Promise<{ moved: Node; from: Node; lost: number }> => {
+      const from = before ?? await readNode(place.id);
+      // The count is a line in the notice; a read that fails leaves it out and the move still runs.
+      const losing = lost ?? (across ? await previewMove(movableKind(place), place.id, to).then((plan) => plan.access.losing.length, () => 0) : 0);
+      const moved = await moveNode(movableKind(place), place.id, to, from.revision, undefined, newActKey());
+      return { moved, from, lost: losing };
     },
-    onError: (error) => {
-      if (error instanceof ApiError && (error.code === 'conflict.stale_revision' || error.code === 'preflight.expired')) void plan.refetch();
-    },
-    onSuccess: (moved) => {
-      onClose();
-      toast({ tone: 'success', title: t('places.toast.moved', { name: place.name, where: chosen?.path ?? '' }) });
+    onSuccess: ({ moved, from, lost }, { place, where }) => {
+      void cache.invalidateQueries({ queryKey: nodeKey(place.id) });
+      const parent = from.parent_id;
+      const parentName = from.path.at(-2)?.name ?? '';
+      toast({ tone: 'success', title: t('places.toast.moved', { name: place.name, where }),
+        ...(lost > 0 ? { description: t('places.move.lost', { count: lost }) } : {}),
+        ...(parent === null ? {} : { action: { label: t('places.toast.undo'), run: () => void undo(place, parent, parentName) } }) });
       // An org's address follows its place, so its screen is asked for again by its id.
       if (moved.kind === 'org') void navigate({ to: '/org/$slug', params: { slug: moved.id } });
     },
   });
+}
 
-  const blocked = plan.isError || plan.isFetching || plan.data === undefined || plan.data.blockers.length > 0;
+export function MoveDialog({ place, open, onClose }: MoveDialogProps) {
+  const { t } = useTranslation();
+  const named = useNamedPlace(place);
+  const kind = movableKind(place);
+  const node = useQuery(nodeQuery(place.id));
+  const tree = useOrgTree(node.data?.org_id ?? null);
+  const [destination, setDestination] = useState('');
+  const options = useMemo(() => destinationsFor(tree.nodes, place, t('places.pathJoin')), [tree.nodes, place, t]);
+  const choices = useMemo(() => chooserRows(tree.nodes, options), [tree.nodes, options]);
+  const chosen = options.find((option) => option.id === destination && option.why === null);
+  // What is moved is called by the word its place has: a project that lies in a project is a folder.
+  const word: 'org' | 'project' | 'folder' | 'topic' = place.kind === 'topic' ? 'topic' : place.kind === 'org' ? 'org' : place.folder ? 'folder' : 'project';
+  const across = chosen !== undefined && crossesOrganization(tree.nodes, place, chosen.id);
+
+  // Only who loses access is read, and only into another organization; it is a line beside the choice, never a gate.
+  const loss = useQuery({
+    queryKey: ['move-loss', place.id, destination],
+    queryFn: () => previewMove(kind, place.id, destination),
+    enabled: open && across,
+    gcTime: 0,
+    retry: false,
+  });
+
+  const move = useMovePlace();
+  const send = () => {
+    if (chosen === undefined || node.data === undefined) return;
+    move.mutate({ place, to: chosen.id, where: chosen.path, before: node.data, across, lost: loss.data?.access.losing.length ?? 0 }, {
+      onSuccess: onClose,
+      onError: (error) => { if (error instanceof ApiError && error.code === 'conflict.stale_revision') void node.refetch(); },
+    });
+  };
   const moveError = move.error;
 
   return (
@@ -338,7 +311,7 @@ export function MoveDialog({ place, to, open, onClose }: MoveDialogProps) {
           <Button disabled={move.isPending} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" blocked={blocked} pending={move.isPending} className="max-w-full" onClick={() => move.mutate()}>
+          <Button variant="primary" blocked={chosen === undefined || node.data === undefined} pending={move.isPending} className="max-w-full" onClick={send}>
             {/* The way to the place is written under the field; the button names the place alone, so that it fits however deep that is. */}
             <span className="truncate">{chosen === undefined ? t('places.move.submit') : t('places.move.confirm', { name: place.name, where: chosen.name })}</span>
           </Button>
@@ -353,21 +326,11 @@ export function MoveDialog({ place, to, open, onClose }: MoveDialogProps) {
             label={t('places.move.to')}
             rows={choices}
             value={destination}
-            onChange={setDestination}
+            onChange={(next) => { setDestination(next); move.reset(); }}
             hint={chosen === undefined ? t(`folders.move.choose.${word}`) : chosen.path}
           />
         )}
-        {destination !== '' &&
-          (plan.isPending ? (
-            <SkeletonGroup read={plan} className="flex flex-col gap-2">
-              <Skeleton className="h-4 w-3/4" />
-              <Skeleton className="h-4 w-1/2" />
-            </SkeletonGroup>
-          ) : plan.isError ? (
-            <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} />
-          ) : (
-            <Plan plan={plan.data} place={place} />
-          ))}
+        {across && <LossLine preview={loss.data?.access} />}
         {moveError !== null && (
           <ErrorAlert error={moveError} message={moveError instanceof ApiError ? depthWords(moveError, t) : undefined} />
         )}

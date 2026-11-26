@@ -325,3 +325,109 @@ async fn each_resource_enable_continues_the_stopped_task_as_its_author_then_runs
         assert_eq!(after, position);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_stop_notifies_each_person_once_only_when_that_operation_was_chosen() {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_api_contract::resource_facts::{FactTarget, ResourceImpactRead};
+    for notify in [false, true] {
+        let s = Scene::new().await;
+        s.rig.machine.handler.on(CommandKind::AgentStop, |_| {
+            Ok(CommandResult::AgentStop(Empty {}))
+        });
+        s.rig.machine.handler.on(CommandKind::ProviderStop, |_| {
+            Ok(CommandResult::ProviderStop(Empty {}))
+        });
+        for person in [&s.ada, &s.eve] {
+            s.rig
+                .lets_use(
+                    "provider",
+                    s.on.provider,
+                    "provider.manage",
+                    person,
+                    json!({}),
+                )
+                .await;
+        }
+        let mut threads = Vec::new();
+        let mut turns = Vec::new();
+        // The owner's simultaneous ten threads share one resource operation and one audience.
+        for index in 0..10 {
+            let thread = s.thread().await.base.id;
+            s.say(
+                &s.ada,
+                thread,
+                "Working",
+                Delivery::Queue,
+                &format!("running-{index}"),
+            )
+            .await
+            .ok();
+            let running = s.rig.turn_start(thread, 0).await;
+            s.rig.say(thread, rig::turn_began(running.turn_id)).await;
+            s.rig.wait_turn(running.turn_id, "running").await;
+            s.say(
+                &s.ada,
+                thread,
+                "Waiting",
+                Delivery::Queue,
+                &format!("waiting-{index}"),
+            )
+            .await
+            .ok();
+            threads.push(thread);
+            turns.push((thread, running.turn_id));
+        }
+        let target = FactTarget {
+            object: ObjectRef {
+                kind: ObjectKind::Provider,
+                id: s.on.provider,
+            },
+            model_id: None,
+        };
+        let plan = s
+            .rig
+            .world
+            .app
+            .call(ResourceImpactRead, &[])
+            .query(&json!({"operation_notice":true}))
+            .token(&s.ada.token)
+            .body(&target)
+            .send()
+            .await
+            .ok();
+        let plan = plan.notification.unwrap();
+        assert!(!plan.default_on);
+        assert!(plan.people >= 2);
+        let query = serde_json::from_value::<orch_api_contract::resource_facts::ResourceStopQuery>(
+            json!({"notify":notify,"notification_review":plan.preview_id}),
+        )
+        .unwrap();
+        s.rig
+            .world
+            .app
+            .call(ProviderDisable, &[&s.on.provider])
+            .token(&s.ada.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        for (thread, turn) in turns {
+            s.rig
+                .say(thread, rig::turn_ended(turn, TurnOutcome::Interrupted))
+                .await;
+            s.rig.wait_turn(turn, "interrupted").await;
+        }
+        eventually("the grouped resource stop settles", || async {
+            !sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM jobs WHERE kind='resource_quiesce' AND state IN ('queued','running'))").fetch_one(s.rig.db.pool()).await.unwrap()
+        }).await;
+        let duplicates:i64=sqlx::query_scalar("SELECT count(*) FROM notifications WHERE node_id=ANY($1) AND kind IN ('thread.blocked','turn.completed','turn.failed')").bind(&threads).fetch_one(s.rig.db.pool()).await.unwrap();
+        assert_eq!(
+            duplicates, 0,
+            "child work must not bypass the per-operation choice"
+        );
+        let grouped:Vec<(Id,i64)>=sqlx::query_as("SELECT user_id,count(*) FROM notifications WHERE kind='environment.attention' AND data ? 'operation_id' GROUP BY user_id").fetch_all(s.rig.db.pool()).await.unwrap();
+        assert!(grouped.iter().all(|(_, count)| *count == 1));
+        assert_eq!(!grouped.is_empty(), notify);
+    }
+}

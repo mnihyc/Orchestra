@@ -1,4 +1,5 @@
 /** A paged flat Navigation list using the tree's rows, menus, marks and keyboard. */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Ellipsis, ListTree, MessageSquare } from 'lucide-react';
 import { Fragment, type ReactElement, useCallback, useEffect, useMemo, useRef } from 'react';
@@ -116,7 +117,7 @@ export function RecentList({ reader, parent, orgId, filter, tree, current, needs
       body = <NodeRow item={item} where={where} end={time} endTitle={exact} extraEntries={extra(row)} />;
     } else {
       const doc = row.kind === 'document' ? docOf(row) : null;
-      body = <><a href={row.href ?? undefined} tabIndex={-1} title={row.place_label === null ? row.name ?? '' : `${row.name ?? ''} · ${row.place_label}`}
+      body = <><PathLink href={row.href ?? undefined} tabIndex={-1} title={row.place_label === null ? row.name ?? '' : `${row.name ?? ''} · ${row.place_label}`}
         data-row-name-place={where !== null || undefined}
         aria-label={row.place_label === null ? row.name ?? '' : t('everything.placedName', { name: row.name, place: row.place_label })}
         className="flex min-w-0 flex-1 items-center gap-2 self-stretch outline-none" onClick={(event) => {
@@ -127,7 +128,7 @@ export function RecentList({ reader, parent, orgId, filter, tree, current, needs
           : row.kind === 'chat' ? <MessageSquare className="size-4 shrink-0 text-text-muted" aria-hidden /> : <NodeIcon kind={row.kind === 'org' || row.kind === 'project' || row.kind === 'topic' ? row.kind : 'document'} />}
         <span className={cx('truncate', row.document_unread === true && 'font-semibold text-text')}>{row.name}</span>
         <RowPlace value={where} />
-      </a><RowEnd time={time} title={exact}>{doc !== null ? <DocMenuButton doc={doc} skipTab extraEntries={extra(row)} />
+      </PathLink><RowEnd time={time} title={exact}>{doc !== null ? <DocMenuButton doc={doc} skipTab extraEntries={extra(row)} />
         : <Menu label={t('places.menu.of', { name: row.name })} entries={chatEntries(row)} trigger={<IconButton size="sm" label={t('places.menu.more', { name: row.name })} icon={<Ellipsis aria-hidden />} tabIndex={-1} />} />}</RowEnd></>;
     }
     return body;

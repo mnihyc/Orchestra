@@ -1,4 +1,5 @@
 /** The page at a person's username: visible pins and work beside their own words. */
+import { PathLink } from '@/shell/TrailLink';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { UserRound } from 'lucide-react';
@@ -28,7 +29,7 @@ export function ProfileContents({ profile, preview = false }: { profile: UserPro
   return <div className="flex min-w-0 flex-col gap-6"><InspectionBand profile={profile} /><div className="grid min-w-0 gap-6 md:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)]"><aside aria-label={t(preview ? 'profile.page.previewAbout' : 'profile.page.about')}><Identity profile={profile} heading={!preview} /></aside><div className="flex min-w-0 flex-col gap-6"><section aria-label={t(preview ? 'profile.page.previewPinned' : 'profile.page.pinned')}><PinsHeading className="mb-3 text-lg font-semibold">{t(preview ? 'profile.page.previewPinned' : 'profile.page.pinned')}</PinsHeading>{profile.pins.length === 0 ? <EmptyState compact title={t('profile.page.noPins')} /> : <ul className="grid gap-3 sm:grid-cols-2">{profile.pins.map((pin) => {
     const object = pin.node ?? pin.document;
     if (object === null) return null;
-    return <li key={object.id} className="rounded-lg border border-border bg-surface p-4">{pin.node !== null ? <><PlaceLink place={pin.node} className="font-medium text-accent-text hover:underline">{pin.node.name}</PlaceLink><p className="mt-1 text-sm text-text-muted">{t(`finder.kinds.${pin.node.kind}`)}</p>{pin.node.description !== '' && <p className="mt-2 line-clamp-2 text-sm text-text-muted">{pin.node.description}</p>}</> : pin.document !== null && <><a href={documentPath(pin.document.id)} className="font-medium text-accent-text hover:underline">{pin.document.title}</a><p className="mt-1 text-sm text-text-muted">{t('profile.page.document')} · {pin.document.node.name}</p></>}</li>;
+    return <li key={object.id} className="rounded-lg border border-border bg-surface p-4">{pin.node !== null ? <><PlaceLink place={pin.node} className="font-medium text-accent-text hover:underline">{pin.node.name}</PlaceLink><p className="mt-1 text-sm text-text-muted">{t(`finder.kinds.${pin.node.kind}`)}</p>{pin.node.description !== '' && <p className="mt-2 line-clamp-2 text-sm text-text-muted">{pin.node.description}</p>}</> : pin.document !== null && <><PathLink href={documentPath(pin.document.id)} className="font-medium text-accent-text hover:underline">{pin.document.title}</PathLink><p className="mt-1 text-sm text-text-muted">{t('profile.page.document')} · {pin.document.node.name}</p></>}</li>;
   })}</ul>}</section>{profile.activity && !preview && <Activity username={profile.user.username} />}</div></div></div>;
 }
 
