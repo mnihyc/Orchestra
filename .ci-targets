@@ -1,0 +1,23 @@
+# Claude Code's sandbox where it runs, the tool access permission, the approval choices
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-claude-code --test plan_facts
+test -p orch-adapter-claude-code --test upgrade_tolerance
+test -p orch-agent-contract --lib
+test -p orch-api-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-settings --lib
+test -p orch-engine --lib -- sessions
+test -p orch-engine --test approval_rules
+test -p orch-engine --test matrix_confinement
+test -p orch-engine --test d417_feedback
+test -p orch-adapter-acp --lib
+test -p orch-adapter-codex --lib -- approvals
+test -p orch-adapter-fake --lib
+test -p orch-api-core --test kfix_settings
+test -p orch-api-core --test threads_settings
+test -p orch-api-core --test environment_readiness
+fmt
+clippy
+contracts
+web typecheck
+web test -- tests/component/composer-sandbox-shortfall.test.tsx tests/component/approval-options-note.test.tsx tests/component/composer-approval-mode.test.tsx tests/component/machine-program-version-blocked.test.tsx tests/component/approval-rules-state.test.tsx tests/component/thread-approval-keyboard.test.tsx tests/component/sandbox-readiness.test.tsx tests/component/composer-controls.test.tsx tests/component/viewer-composer.test.tsx

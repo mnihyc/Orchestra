@@ -213,10 +213,18 @@ async fn independently_opened_fixture_connections_bound_statements_and_detect_di
             "SELECT (extract(epoch FROM current_setting('statement_timeout')::interval)*1000)::bigint,
                     (extract(epoch FROM current_setting('client_connection_check_interval')::interval)*1000)::bigint",
         )
-        .fetch_one(conn)
+        .fetch_one(&mut *conn)
         .await
         .unwrap();
         assert_eq!(limits, (600_000, 5_000));
+        let jit: String = sqlx::query_scalar("SELECT current_setting('jit')")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            jit, "off",
+            "fixture and independent pools use the deployed query engine"
+        );
     }
     drop(pooled);
     // Exercise cancellation with a shorter local limit instead of sleeping for ten minutes.
@@ -237,4 +245,57 @@ async fn independently_opened_fixture_connections_bound_statements_and_detect_di
     );
     independent.close().await.unwrap();
     fixture.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_fixture_queued_behind_long_running_work_keeps_its_place_until_capacity_is_released() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = tokio::time::timeout(
+        PATIENCE,
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_queued_fixture_survives_five_minutes_of_occupied_capacity",
+                "--nocapture",
+            ])
+            .env(CONNECTION_BUDGET_VARIABLE, "32")
+            .env(CONNECTION_RESERVATION_VARIABLE, "32")
+            .env(LEASE_DIRECTORY_VARIABLE, directory.path())
+            .env(RUN_ID_VARIABLE, new_id().to_string())
+            .env("ORCH_TESTKIT_ONE_SLOT", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("queued fixtures finish without hanging")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = records(directory.path());
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|record| record["state"] == "dropped"));
+}
+
+#[tokio::test]
+async fn a_queued_fixture_survives_five_minutes_of_occupied_capacity() {
+    if std::env::var_os("ORCH_TESTKIT_ONE_SLOT").is_none() {
+        return;
+    }
+    let first = TestDb::fresh().await;
+    // Only admission is polled while time is paused: database I/O and cleanup
+    // run with the real clock. Advancing time exercises the former five-minute
+    // rejection without making the hosted runner wait for five minutes.
+    tokio::time::pause();
+    let queued = TestDb::fresh();
+    tokio::pin!(queued);
+    assert!(futures::poll!(&mut queued).is_pending());
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert!(futures::poll!(&mut queued).is_pending());
+    tokio::time::resume();
+    first.close().await.unwrap();
+    queued.await.close().await.unwrap();
 }
