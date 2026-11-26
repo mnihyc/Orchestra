@@ -771,7 +771,7 @@ pub(super) struct ServiceRows;
 
 impl native::Selected for ServiceRows {
     type Source = Source;
-    type Query = ();
+    type Query = orch_api_contract::common::CollectionQuery;
     type Value = Vec<identity::ServiceRow>;
     type Reply = Vec<orch_api_contract::directory::ServiceAccount>;
     const DECLARATION: &'static Declaration<Source> = &sources::SERVICE_LIST;
@@ -780,7 +780,7 @@ impl native::Selected for ServiceRows {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a (),
+        _query: &'a orch_api_contract::common::CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
         Box::pin(select_services(ctx, conn, caller))
     }

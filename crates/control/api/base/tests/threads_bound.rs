@@ -9,12 +9,14 @@ use orch_api_core::registry::Registry;
 use std::collections::BTreeSet;
 
 /// The requests of the threads part that this part serves, by the step of the work they came in.
-const SERVED: [&str; 67] = [
+const SERVED: [&str; 69] = [
     "ThreadCreate",
     "ThreadSyncGet",
     "ThreadOpeningGet",
+    "ThreadScreenFactsGet",
     "ThreadItemList",
     "ThreadItemGet",
+    "ThreadItemRawGet",
     "ThreadItemOutputGet",
     "ThreadOutlineGet",
     "ThreadSegmentList",
@@ -97,6 +99,11 @@ fn every_request_of_a_thread_is_served() {
         .map(|route| route.name)
         .collect();
     let known: BTreeSet<&str> = SERVED.iter().copied().collect();
+    assert_eq!(
+        known.len(),
+        SERVED.len(),
+        "each served route is listed once"
+    );
     let unplaced: Vec<_> = declared.difference(&known).collect();
     assert!(unplaced.is_empty(), "{unplaced:?} are not in the list");
 }

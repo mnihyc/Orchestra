@@ -134,7 +134,8 @@ its small sign-in document before creating the measured tree, so a second abando
 - `attention.ts`: What is unread for the person: how far they have read each thread and which places they follow, kept current by their own feed, and the rule that makes a thread unread from the two.
 - `counts.tsx`: How many of the person's chats in an org are unread: the number on Messages in the left bar and the dot on the org in the rail.
 - `treeDocs.ts`: The documents written beside the places that are open in the tree: read when a place is opened, a page at a time, and read again when the place says it holds another number of them.
-- `NodeDialogs.tsx`: The dialogs that make a place or change one: a new org, department, project and topic, rename, archive, delete, move, what was deleted, and joining by a link.
+- `NodeDialogs.tsx` keeps the place action requested by a menu until the frame displays it.
+- `NodeDialogHost.tsx`: The dialogs that make a place or change one: a new org, department, project and topic, rename, archive, delete, move, what was deleted, and joining by a link.
 - `PlaceDetails.tsx`: Descriptions and tags on demand for the compact headers of orgs, departments and projects. Header and named row disclosures keep the full value, existing guarded edit and native settings destination reachable; closed disclosures mount no tag reader. Collection headers opt into the compact place menu, keeping only secondary container creation there and leaving the one primary action visible.
 
 Org headers use the same metadata body in their page-menu dialog. Every org menu includes the served

@@ -102,7 +102,17 @@ impl Footprint {
                     value
                         .managed
                         .insert((ObjectKind::Provider, recipe.provider));
-                    value.used.insert((ObjectKind::Host, recipe.host));
+                    match &recipe.host {
+                        orch_provider_contract::pools::Target::Single {
+                            resource: orch_provider_contract::pools::Leaf::Host { id },
+                        } => {
+                            value.used.insert((ObjectKind::Host, *id));
+                        }
+                        orch_provider_contract::pools::Target::Pool { id, .. } => {
+                            value.used.insert((ObjectKind::Pool, *id));
+                        }
+                        _ => {}
+                    }
                     value.used.insert((ObjectKind::Template, recipe.template));
                 }
             }

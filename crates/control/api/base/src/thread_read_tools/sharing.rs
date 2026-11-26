@@ -107,6 +107,10 @@ impl Before {
             .fetch_one(&mut *conn)
             .await
             .map_err(orch_db::DbError::from)?;
+            let copied = orch_db::queries::capability_work::copied_source_count(conn, *id).await?;
+            let count = count
+                .checked_add(copied)
+                .ok_or_else(|| ApiError::internal("the disclosure count is too large"))?;
             if count == 0 {
                 continue;
             }

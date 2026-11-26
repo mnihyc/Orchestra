@@ -188,7 +188,7 @@ test("a largest context below the model's own window is refused at its field, an
   await expect(context.getByText(/The largest context cannot be less/)).toHaveCount(0);
   await context.getByRole('radio', { name: 'Custom' }).click();
   await context.getByLabel('Threads start with, in tokens').fill('500000');
-  await expect(context.getByText('A thread cannot start with more than the largest (300,000).')).toBeVisible();
+  await expect(context.getByText('A thread cannot start with more context than the largest (300,000).')).toBeVisible();
   await context.getByLabel('Threads start with, in tokens').fill('280000');
   await expect(context.getByText(/A thread cannot start with more than/)).toHaveCount(0);
 
@@ -226,7 +226,7 @@ test("a model's groups are chips: put in by typing, taken from the provider's ot
   await expect(chips.getByText('small')).toBeVisible();
   await groups.getByLabel('Put it in a group').fill('Big Group');
   await groups.getByLabel('Put it in a group').press('Enter');
-  await expect(groups.getByText('A group is named by 1 to 40 of a to z, 0 to 9, - and _, beginning with a letter or a digit.')).toBeVisible();
+  await expect(groups.getByText('A group is named by 1 to 40 characters: letters a to z, digits 0 to 9, - and _. It must begin with a letter or a digit.')).toBeVisible();
   await groups.getByLabel('Put it in a group').fill('vision');
   await groups.getByLabel('Put it in a group').press('Enter');
   await expect(chips.getByText('vision')).toBeVisible();
@@ -265,7 +265,7 @@ test('the limits that cover a model are listed by its name, its family and its g
   const family = list.getByRole('listitem').filter({ hasText: 'gpt-5.5*' });
   await expect(family.getByText('Each person', { exact: true })).toBeVisible();
   await expect(family.getByText('2,000,000 tokens a day', { exact: true })).toBeVisible();
-  await expect(limits.getByText('2 caps on the whole provider cover it as well.')).toBeVisible();
+  await expect(limits.getByText('2 limits on the whole provider cover it as well.')).toBeVisible();
   await limits.getByRole('button', { name: 'Add a limit…' }).click();
   const add = page.getByRole('dialog', { name: 'Add a limit', exact: true });
   await expect(add).toBeVisible();
@@ -274,7 +274,7 @@ test('the limits that cover a model are listed by its name, its family and its g
   await expect(add).toHaveCount(0);
 });
 
-test('a suggestion that lists a faster speed, a program and a larger context is added with all of it offered and none of it on', async ({ page }) => {
+test('a suggestion that lists a faster speed, a program and a larger context is added with all of it switched on', async ({ page }) => {
   await control('/resources/model-observation', {
     provider_id: CODEX,
     at: MADE_AT,
@@ -293,18 +293,21 @@ test('a suggestion that lists a faster speed, a program and a larger context is 
   await openModels(page, CODEX);
   const suggestion = page.getByRole('checkbox', { name: /GPT-6 Sol \(A\)/ });
   await expect(suggestion).toBeVisible();
-  await expect(page.getByText('Offered, not switched on: Fast, Daybreak Blue, context up to 1M')).toBeVisible();
+  await expect(page.getByText('Offers: Fast, Daybreak Blue, context up to 1M')).toBeVisible();
   await suggestion.check();
   await page.getByRole('button', { name: 'Add selected' }).click();
   await expect(page.getByText('1 model was added', { exact: true })).toBeVisible();
 
+  // Adding a model switches on what it offers, as the organization's settings ship.
   const row = page.getByRole('row', { name: /GPT-6 Sol \(A\)/ });
-  await expect(row).toContainText('Offered, not switched on: Fast, Daybreak Blue, context up to 1M');
-  await expect(row).not.toContainText('Speeds');
+  await expect(row).toContainText('Context 272K, up to 1M');
+  await expect(row).toContainText('Speeds Fast');
+  await expect(row).toContainText('Programs Daybreak Blue');
+  await expect(row).not.toContainText('Offered, not switched on');
   await openEditor(page, 'GPT-6 Sol (A)');
-  await expect(editor(page).getByRole('switch', { name: 'Fast' })).not.toBeChecked();
-  await expect(editor(page).getByRole('switch', { name: 'Daybreak Blue' })).not.toBeChecked();
-  await expect(editor(page).getByLabel('Largest, in tokens')).toHaveValue('');
+  await expect(editor(page).getByRole('switch', { name: 'Fast' })).toBeChecked();
+  await expect(editor(page).getByRole('switch', { name: 'Daybreak Blue' })).toBeChecked();
+  await expect(editor(page).getByLabel('Largest, in tokens')).toHaveValue('1000000');
 });
 
 test('the editor is worked by the keyboard alone: opened from a row, a switch turned on, what a thread starts with chosen, saved', async ({ page }) => {
@@ -579,12 +582,12 @@ test('a speed, an access program and a context are chosen for the thread, each s
   await expect(speed.locator('[data-runs-with="speed"]')).toHaveText('Standard · as this model starts');
   await speed.getByRole('radio', { name: 'Fast', exact: true }).hover();
   await expect(page.locator('[data-tooltip-content]').filter({ hasText: 'Fast: quicker answers, counted at twice the rate here' })).toBeVisible();
-  await expect(speed.getByText('Takes effect from the next turn.')).toBeVisible();
+  await expect(speed.getByText('Takes effect from the next turn.')).not.toBeVisible();
   const access = card(page).getByRole('region', { name: 'Access' });
   await expect(access.locator('[data-runs-with="access"]')).toHaveText('None · as this model starts');
   const context = card(page).getByRole('region', { name: 'Context' });
   await expect(context.locator('[data-runs-with="context"]')).toHaveText('1M · as this model starts');
-  await expect(context.getByText('Takes effect in a new session.')).toBeVisible();
+  await expect(context.getByText('Takes effect in a new session.')).not.toBeVisible();
   // Where the conversation is shortened is in the adapter's words, and nobody sets it.
   await expect(context.getByText(/Codex shortens the conversation before it reaches that size/)).toBeVisible();
 
