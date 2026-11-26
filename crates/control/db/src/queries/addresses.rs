@@ -22,3 +22,28 @@ pub async fn environment_segments(
     .fetch_all(conn)
     .await?)
 }
+
+/// The address of a known environment. A bounded reader sees only admitted organization
+/// names along its home path; the public owner and the environment segment identify the rest.
+pub async fn environment_address(
+    conn: &mut Conn,
+    id: Id,
+    allowed_orgs: Option<&[Id]>,
+) -> Result<Option<String>, DbError> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT concat_ws('.', (
+             SELECT string_agg(o.slug, '.' ORDER BY p.ord)
+               FROM unnest(n.path) WITH ORDINALITY p(id, ord)
+               JOIN orgs o ON o.node_id=p.id
+              WHERE $2::uuid[] IS NULL OR o.node_id=ANY($2)
+         ), u.username, {ENVIRONMENT_SEGMENT_SQL})
+         FROM environments r
+         LEFT JOIN nodes n ON n.id=r.home_node_id
+         LEFT JOIN users u ON u.id=r.owner_id
+         WHERE r.id=$1"
+    )))
+    .bind(id)
+    .bind(allowed_orgs)
+    .fetch_optional(conn)
+    .await?)
+}

@@ -1,0 +1,27 @@
+{
+  "supported_range": "*",
+  "home_scope": "profile",
+  "arrangements": [
+    "together"
+  ],
+  "approvals": {
+    "ask": {}
+  },
+  "sandbox_modes": [
+    "open"
+  ],
+  "env": {
+    "HOME": "{profile_home}",
+    "USERPROFILE": "{profile_home}",
+    "GEMINI_HOME": "{profile_home}/.gemini",
+    "XDG_CONFIG_HOME": "{profile_home}/config",
+    "AGY_ACP_FORCE_FILE_STORAGE": "1",
+    "AGY_CLI_DISABLE_AUTO_UPDATE": "1",
+    "SSH_CONNECTION": "127.0.0.1 0 127.0.0.1 0"
+  },
+  "directories": [
+    "{profile_home}/.gemini",
+    "{profile_home}/config"
+  ],
+  "effort_option": "thought_level"
+}

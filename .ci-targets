@@ -1,0 +1,1 @@
+web-e2e tests/e2e/layout-pane-resize.spec.ts tests/e2e/resource-summaries.spec.ts --project=chromium --retries=0 --grep "pane borders preserve|co-mounted thread and catch-up actions name their subjects \(en/light|a personal default refresh needs no automatic configuration and explains unavailable models \(en/light|native summary headers and Ask on four pages \(en/light"

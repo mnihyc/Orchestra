@@ -50,6 +50,12 @@ export class NetworkError extends Error {
   }
 }
 
+interface FailureDetails { readonly limitMs: number; readonly responseStarted: boolean }
+const details = new WeakMap<NetworkError, FailureDetails>();
+
+/** Facts of the admitted request for its existing failure line, without changing the error or its retry policy. */
+export function networkFailureDetails(error: NetworkError): FailureDetails | null { return details.get(error) ?? null; }
+
 /** The statuses whose answer never has a body. */
 const BODILESS = new Set([101, 103, 204, 205, 304]);
 
@@ -63,10 +69,16 @@ class Silence extends Error {
  */
 export async function sendUntilSilent(
   request: Request,
-  send: (request: Request) => Promise<Response>,
+  send: (request: Request, moved?: () => void) => Promise<Response>,
   limitMs: number = SILENCE_LIMIT_MS,
 ): Promise<Response> {
   const quiet = new AbortController();
+  let responseStarted = false;
+  const failed = (cause: unknown): NetworkError => {
+    const error = asNetworkError(cause, request.signal);
+    if (!details.has(error)) details.set(error, { limitMs, responseStarted });
+    return error;
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const moved = () => {
     clearTimeout(timer);
@@ -87,11 +99,12 @@ export async function sendUntilSilent(
   moved();
   let response: Response;
   try {
-    response = await Promise.race([send(new Request(request, { signal })), ended]);
+    response = await Promise.race([send(new Request(request, { signal }), moved), ended]);
   } catch (cause) {
     settled();
-    throw asNetworkError(cause, request.signal);
+    throw failed(cause);
   }
+  responseStarted = true;
   // An answer that has no body by its status is complete as it is. Some browsers hand out an empty
   // stream for one all the same, and no answer of such a status can be made round a stream.
   if (response.body === null || BODILESS.has(response.status)) {
@@ -114,7 +127,7 @@ export async function sendUntilSilent(
         const chunk = await reader.read();
         if (signal.aborted) {
           finished();
-          controller.error(asNetworkError(signal.reason, request.signal));
+          controller.error(failed(signal.reason));
         } else if (chunk.done) {
           finished();
           controller.close();
@@ -124,7 +137,7 @@ export async function sendUntilSilent(
         }
       } catch (cause) {
         finished();
-        controller.error(asNetworkError(cause, request.signal));
+        controller.error(failed(cause));
       }
     },
     cancel(reason) {
@@ -175,4 +188,34 @@ export function newActKey(): string {
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** The authenticated client selects this only for binary upload pieces. XHR exposes actual
+ * outbound progress, so a long upload renews the same silence timer as an incoming stream. */
+export async function sendFilePiece(request: Request, moved: () => void, sent?: (started: number) => void): Promise<Response> {
+  const body = await request.blob(); request.signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const finish = () => request.signal.removeEventListener('abort', abort);
+    xhr.open(request.method, request.url);
+    xhr.responseType = 'arraybuffer'; xhr.withCredentials = request.credentials === 'include';
+    request.headers.forEach((value, name) => xhr.setRequestHeader(name, value));
+    xhr.upload.onprogress = moved;
+    xhr.onprogress = moved;
+    xhr.onerror = () => { finish(); reject(new NetworkError('failed')); };
+    xhr.onabort = () => { finish(); const reason: unknown = request.signal.reason; reject(reason instanceof Error ? reason : new DOMException('Upload cancelled', 'AbortError')); };
+    xhr.onload = () => {
+      finish();
+      const headers = new Headers();
+      for (const line of xhr.getAllResponseHeaders().trim().split(/[\r\n]+/u)) {
+        const colon = line.indexOf(':'); if (colon > 0) headers.append(line.slice(0, colon), line.slice(colon + 1).trim());
+      }
+      resolve(new Response(xhr.response as ArrayBuffer, { status: xhr.status, statusText: xhr.statusText, headers }));
+    };
+    request.signal.addEventListener('abort', abort, { once: true });
+    const started = performance.now();
+    xhr.upload.onload = () => { moved(); sent?.(started); };
+    xhr.send(body);
+  });
 }

@@ -26,8 +26,6 @@ use orch_authz::ownership;
 
 use orch_blob_contract::store::BlobStore;
 
-use orch_blob_contract::store::stream_of;
-
 use orch_db::queries::access;
 
 use orch_db::queries::identity;
@@ -37,7 +35,7 @@ const TEXT: &[u8] = b"actual native reference file\nsecond file line\n";
 
 struct ReaderPeer {
     native: Arc<Native>,
-    blobs: Arc<dyn BlobStore>,
+    relays: crate::relay::Relays,
     hold: bool,
     reached: Notify,
     release: Notify,
@@ -69,6 +67,7 @@ impl CommandHandler for ReaderPeer {
                 }
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.clone(),
                             path: body.path,
@@ -86,7 +85,7 @@ impl CommandHandler for ReaderPeer {
                     },
                 ))
             }
-            Command::FsFetch(body)
+            Command::FsRelaySend(body)
                 if body.environment_id == self.native.environment
                     && body.mount.is_none()
                     && body.path == "preview.txt"
@@ -97,27 +96,21 @@ impl CommandHandler for ReaderPeer {
                     .map_err(|_| CommandError::new(ErrorCode::NotFound, "file missing"))?;
                 let size = i64::try_from(data.len())
                     .map_err(|_| CommandError::new(ErrorCode::TooLarge, "file size"))?;
-                if body.max_bytes.is_none_or(|limit| limit < size) {
-                    return Err(CommandError::new(ErrorCode::TooLarge, "file limit"));
+                if body.offset != 0 || body.len != size || body.hash != Hash::of(&data) {
+                    return Err(CommandError::new(
+                        ErrorCode::Changed,
+                        "the native file changed",
+                    ));
                 }
-                let hash = Hash::of(&data);
-                self.blobs
-                    .put(&hash, Some(size), stream_of(vec![bytes::Bytes::from(data)]))
-                    .await
-                    .map_err(|_| CommandError::new(ErrorCode::Internal, "file upload failed"))?;
+                let relay = self.relays.get(body.relay_id).ok_or_else(|| {
+                    CommandError::new(ErrorCode::NotFound, "the native memory receiver is absent")
+                })?;
                 self.fetches.fetch_add(1, Ordering::SeqCst);
-                Ok(CommandResult::FsFetch(
-                    orch_link_contract::commands::FsFetchResult {
-                        hash,
-                        size,
-                        mtime_ns: self
-                            .native
-                            .clock
-                            .now()
-                            .timestamp_nanos_opt()
-                            .ok_or_else(|| CommandError::new(ErrorCode::Internal, "file time"))?,
-                    },
-                ))
+                relay.push(0, bytes::Bytes::from(data)).await.map_err(|_| {
+                    CommandError::new(ErrorCode::Internal, "the native memory receiver ended")
+                })?;
+                relay.finish();
+                Ok(CommandResult::FsRelaySend(Empty {}))
             }
             command => self.native.handle(context, command).await,
         }
@@ -152,6 +145,7 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
                 build: old.build,
                 blobs: old.blobs.clone(),
                 cache: crate::cache::Cache::new(&old.config),
+                metrics_listener_failed: old.metrics_listener_failed.clone(),
                 host_ports: old.host_ports.clone(),
                 builtin_sources: old.builtin_sources.clone(),
             }),
@@ -180,10 +174,8 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
         .await?;
         let policy: KeyScope = serde_json::from_value(rules(transport.environment))?;
         assert!(policy.validate().is_empty());
-        let token = crate::middleware::authentication::new_token(
-            crate::middleware::authentication::API_TOKEN_PREFIX,
-        );
         let id = new_id();
+        let token = crate::middleware::authentication::new_api_token(id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {
@@ -201,9 +193,10 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
         .await?;
         drop(conn);
         tokio::fs::write(transport._directory.path().join("preview.txt"), TEXT).await?;
+        let store: Arc<dyn BlobStore> = app.app.blobs.store();
         let reader = Arc::new(ReaderPeer {
             native: transport.native.clone(),
-            blobs: app.app.blobs.store(),
+            relays: app.app.blobs.relays().clone(),
             hold: change != "none",
             reached: Notify::new(),
             release: Notify::new(),
@@ -297,7 +290,7 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
                     .contains("actual native reference file")
             );
             assert_eq!(reader.fetches.load(Ordering::SeqCst), 1);
-            let saved:Vec<(String,bool)>=sqlx::query_as("SELECT kind,authority_required FROM commands WHERE machine_id=$1 AND kind IN ('fs.stat','fs.fetch') ORDER BY kind").bind(transport.machine).fetch_all(&transport.test.pool).await?;
+            let saved:Vec<(String,bool)>=sqlx::query_as("SELECT kind,authority_required FROM commands WHERE machine_id=$1 AND kind IN ('fs.stat','fs.relay.send') ORDER BY kind").bind(transport.machine).fetch_all(&transport.test.pool).await?;
             assert_eq!(saved.len(), 2);
             assert!(saved.iter().all(|(_, required)| *required));
         } else {
@@ -307,13 +300,17 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
             );
             assert!(!String::from_utf8_lossy(&reply.raw).contains("actual native reference file"));
             assert_eq!(reader.fetches.load(Ordering::SeqCst), 0);
-            let cached: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM file_cache WHERE environment_id=$1")
-                    .bind(environment)
-                    .fetch_one(&transport.test.pool)
-                    .await?;
-            assert_eq!(cached, 0);
         }
+        let cached: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM file_cache WHERE environment_id=$1")
+                .bind(environment)
+                .fetch_one(&transport.test.pool)
+                .await?;
+        assert_eq!(cached, 0);
+        assert!(
+            !store.exists(&Hash::of(TEXT)).await?,
+            "the memory relay leaves no physical copy in the server store"
+        );
         transport.close().await?;
     }
     Ok(())
