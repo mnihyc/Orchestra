@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::EngineError;
 
 pub mod activity;
+pub mod applications;
 pub mod custody;
 pub mod library;
 
@@ -302,6 +303,7 @@ fn view(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpView,
         ObjectKind::Mount => Permission::MountView,
         ObjectKind::Skill => Permission::SkillView,
+        ObjectKind::Pool => Permission::PoolView,
         _ => return None,
     })
 }
@@ -317,6 +319,7 @@ fn manage(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpManage,
         ObjectKind::Mount => Permission::MountManage,
         ObjectKind::Skill => Permission::SkillManage,
+        ObjectKind::Pool => Permission::PoolManage,
         _ => return None,
     })
 }
@@ -596,7 +599,9 @@ pub async fn target_dependents(
                     .map(|object| object.id)
             })
             .collect();
-        let models = orch_settings::resolver::get_at_nodes::<String>(
+        let models = orch_settings::resolver::get_at_nodes::<
+            orch_settings_contract::thread_defaults::ModelDefault,
+        >(
             conn,
             &threads,
             orch_settings_contract::registry::keys::AGENT_MODEL,
@@ -607,7 +612,11 @@ pub async fn target_dependents(
             edge.relation == DependentRelation::Binding
                 && edge.object.is_some_and(|object| {
                     name.is_some()
-                        && models.get(&object.id).and_then(Option::as_ref) == name.as_ref()
+                        && models
+                            .get(&object.id)
+                            .and_then(Option::as_ref)
+                            .and_then(|target| target.offering())
+                            == name.as_deref()
                 })
         });
         row.uses = None;
@@ -631,7 +640,7 @@ async fn read_inner(
         .collect();
     let ids: Vec<_> = objects.iter().map(|object| object.id).collect();
     let mut edges = HashMap::<(String, Id), Vec<Dependent>>::new();
-    for edge in references(conn, &ids).await? {
+    for edge in references(conn, &ids, at).await? {
         edges
             .entry((edge.subject_kind.clone(), edge.subject_id))
             .or_default()
@@ -1073,9 +1082,10 @@ impl EdgeRow {
     }
 }
 
-async fn references(conn: &mut Conn, ids: &[Id]) -> Result<Vec<EdgeRow>, EngineError> {
+async fn references(conn: &mut Conn, ids: &[Id], at: Time) -> Result<Vec<EdgeRow>, EngineError> {
     let mut rows: Vec<EdgeRow> = sqlx::query_as(include_str!("resource_facts.sql"))
         .bind(ids)
+        .bind(at.get())
         .fetch_all(&mut *conn)
         .await
         .map_err(DbError::from)?;

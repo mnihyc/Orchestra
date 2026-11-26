@@ -398,12 +398,8 @@ pub(super) async fn require(
     Ok(())
 }
 
-pub(super) fn deadline(now: Time, options: Options) -> Result<DateTime<Utc>, Error> {
-    let duration = chrono::Duration::from_std(options.retention)
-        .map_err(|_| Error::Invalid("the retention interval is outside its supported range"))?;
-    now.get().checked_add_signed(duration).ok_or(Error::Invalid(
-        "the restoration deadline is outside its supported range",
-    ))
+pub(super) fn deadline(now: Time, options: Options) -> DateTime<Utc> {
+    orch_settings::retention::purge_at(now.get(), options.deleted_keep_days)
 }
 
 pub(super) async fn stamp(
@@ -564,7 +560,7 @@ pub async fn complete_deletion_plan_in(
     let (_, losing) = super::audience::difference(&audience, &HashMap::new(), &[]);
     Ok(Plan {
         stamp,
-        restore_until: deadline(now, options)?,
+        restore_until: deadline(now, options),
         gaining: 0,
         losing,
     })

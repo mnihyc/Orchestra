@@ -59,7 +59,7 @@ async fn configure(room: &Room) -> Provider {
         .call(ProviderCreate, &[])
         .token(&room.ada.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Selected private provider".into(),
             home_id: home.base.id,
             access: None,
@@ -86,7 +86,8 @@ async fn configure(room: &Room) -> Provider {
         .call(NodeSettingSet, &[&room.root, &"agent.default_provider_id"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
-            value: json!(provider.base.id),
+            model_choice: None,
+            value: json!({"type":"single","resource":{"kind":"provider","id":provider.base.id}}),
             locked: None,
             expected_revision: None,
         })
@@ -313,7 +314,7 @@ async fn name_readers_are_only_included_when_their_existing_controls_demand_them
             .unwrap()
             .iter()
             .any(|row| row["key"] == "agent.default_provider_id"
-                && row["value"] == json!(provider.base.id))
+                && row["value"]["resource"]["id"] == json!(provider.base.id))
     );
     assert!(projection["secrets"].is_null() && projection["secrets_problem"].is_null());
     assert!(projection["providers"].as_array().unwrap().is_empty());

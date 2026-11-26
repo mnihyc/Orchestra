@@ -220,13 +220,13 @@ async fn run(
         .token(&scene.ada.token)
         .body(&CreateThread {
             name: Some(format!("General {}", case.tag())),
-            binding: Some(CreateThreadBinding {
-                agent_id: scene.on.agent,
-                provider_id: scene.on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                scene.on.agent,
+                scene.on.provider,
+                None,
+            )),
             model: Some(MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(scene.on.environment)),
+            environment: Some(EnvironmentChoice::existing(scene.on.environment)),
             access: Some(ThreadAccess::Change(preset(
                 catalogue,
                 topic,

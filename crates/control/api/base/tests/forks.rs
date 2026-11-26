@@ -263,6 +263,7 @@ impl Forks {
         let reported = declared.clone();
         handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(reported.clone()).unwrap(),
@@ -316,7 +317,12 @@ impl Forks {
 
     /// A thread of Ada's that has said something and been answered.
     async fn thread_with_history(&self, name: &str) -> Id {
-        let thread = self.s.thread_by(&self.s.ada, name).await.base.id;
+        self.thread_with_history_by(&self.s.ada, name).await
+    }
+
+    /// A thread of `owner`'s that has said something (Ada says it) and been answered.
+    async fn thread_with_history_by(&self, owner: &Who, name: &str) -> Id {
+        let thread = self.s.thread_by(owner, name).await.base.id;
         self.s
             .exchange(thread, 0, "Plan the work", "The plan is ready")
             .await;
@@ -574,13 +580,13 @@ impl Forks {
             .token(&self.s.ada.token)
             .body(&CreateThread {
                 name: Some(name.to_owned()),
-                binding: Some(CreateThreadBinding {
-                    agent_id: self.s.on.agent,
-                    provider_id: self.s.on.provider,
-                    arrangement: None,
-                }),
+                binding: Some(CreateThreadBinding::provider(
+                    self.s.on.agent,
+                    self.s.on.provider,
+                    None,
+                )),
                 model: Some(MODEL.to_owned()),
-                environment: Some(EnvironmentChoice::Use(self.s.on.environment)),
+                environment: Some(EnvironmentChoice::existing(self.s.on.environment)),
                 directory: Some("web".to_owned()),
                 ..CreateThread::default()
             })
@@ -1209,6 +1215,7 @@ async fn a_side_thread_is_started_by_one_request_listed_and_closed_and_it_refuse
     let s = &w.s;
     let parent = w.thread_with_history("Parent").await;
     let say = |text: &str, client: &str| ThreadSideCreateBody {
+        acting: false,
         content: vec![ContentPart::Text {
             text: text.to_owned(),
         }],
@@ -1364,6 +1371,7 @@ async fn side_threads_are_limited_by_the_setting_of_the_place_and_the_refusal_li
             .call(ThreadSideCreate, &[&parent])
             .token(&s.ada.token)
             .body(&ThreadSideCreateBody {
+                acting: false,
                 content: vec![ContentPart::Text {
                     text: "Hm".to_owned(),
                 }],
@@ -1415,7 +1423,7 @@ async fn profile_and_model_thread_selectors_use_current_bindings_while_the_sourc
         (first, name.as_str()),
         (second, "a-different-current-selection"),
     ] {
-        sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,'agent.model',$2) ON CONFLICT(node_id,key) DO UPDATE SET value=excluded.value").bind(thread).bind(json!(name)).execute(w.s.rig.db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,'agent.model',$2) ON CONFLICT(node_id,key) DO UPDATE SET value=excluded.value").bind(thread).bind(json!({"type":"offering","name":name})).execute(w.s.rig.db.pool()).await.unwrap();
     }
     sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
         .bind(w.s.on.provider)
@@ -1614,6 +1622,7 @@ async fn switching_away_from_a_disabled_provider_or_environment_keeps_queue_posi
                     .put_bytes(bytes::Bytes::from(manifest.bytes))
                     .await
                     .unwrap();
+            let archive_hash = archive.hash;
             for blob in [content, archive] {
                 orch_db::queries::storage::register_blob(
                     &mut w.s.rig.db.acquire().await.unwrap(),
@@ -1635,7 +1644,7 @@ async fn switching_away_from_a_disabled_provider_or_environment_keeps_queue_posi
                     assert_eq!(snapshot.environment_id, original);
                     assert!(!snapshot.selection.include.is_empty());
                     Ok(CommandResult::FsSnapshot(FsSnapshotResult {
-                        manifest_blob: archive.hash,
+                        manifest_blob: archive_hash,
                         file_count: 1,
                         total_bytes: 9,
                         uploaded_bytes: 9,
@@ -2034,4 +2043,189 @@ async fn a_quick_fork_honors_the_confirmed_agent_choice_instead_of_replacing_it_
         assert_eq!(thread.base.owner.id, w.s.ada.id());
         assert!(thread.base.access.owns);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_acting_side_opens_a_port_while_the_main_turn_keeps_running() {
+    use orch_api_contract::ports::EnvironmentPortCapabilityGrant;
+    use orch_link_contract::commands::{OrchTool, SessionMode};
+    use orch_link_contract::events::{Event, OrchToolCall};
+
+    let mut s = Scene::new().await;
+    s.on.environment = queue_environment(&s).await;
+    let env = s.on.environment;
+    let rig = &s.rig;
+    let policy = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
+        allowed: vec![orch_api_contract::ports::PortOpeningKind::Place],
+        publish: None,
+        limits: None,
+    };
+    sqlx::query("UPDATE machines SET platform_os='linux',facts=jsonb_set(facts,'{policy}',(facts->'policy') || jsonb_build_object('ports',$2::jsonb)) WHERE id=$1")
+        .bind(rig.machine_id).bind(json!(policy)).execute(rig.db.pool()).await.unwrap();
+    rig.tools_of_agents(json!("mcp")).await;
+    rig.world
+        .app
+        .call(EnvironmentPortCapabilityGrant, &[&env, &"port_place"])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let parent = s.thread().await.base.id;
+    s.exchange(parent, 0, "Keep the confirmed context", "Earlier answer")
+        .await;
+    s.say(
+        &s.ada,
+        parent,
+        "Continue the main task",
+        Delivery::Queue,
+        "main-working",
+    )
+    .await
+    .ok();
+    let main = rig.turn_start(parent, 1).await;
+    rig.say(parent, rig::turn_began(main.turn_id)).await;
+    rig.wait_turn(main.turn_id, "running").await;
+    sqlx::query(
+        "UPDATE agents SET descriptor=jsonb_set(descriptor,'{side_thread_modes}','[]') WHERE id=$1",
+    )
+    .bind(s.on.agent)
+    .execute(rig.db.pool())
+    .await
+    .unwrap();
+    let side = rig
+        .world
+        .app
+        .call(ThreadSideCreate, &[&parent])
+        .token(&s.ada.token)
+        .body(&ThreadSideCreateBody {
+            acting: true,
+            content: vec![ContentPart::Text {
+                text: "Open the preview".into(),
+            }],
+            client_id: "acting".into(),
+            to_turn: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .thread;
+    assert_eq!(side.side_of.unwrap().id, parent);
+    assert_eq!(
+        side.side_reading,
+        Some(orch_api_contract::threads::SideReading::Acting)
+    );
+    assert!(
+        side.base
+            .access
+            .permissions
+            .iter()
+            .any(|permission| permission == "thread.interact")
+    );
+    let side = side.base.id;
+    // Keep the parent visible as its separate driving grant is given and withdrawn.
+    rig.lets_use("node", parent, "thread.view", &s.cai, json!({}))
+        .await;
+    rig.lets_use("node", parent, "thread.interact", &s.cai, json!({}))
+        .await;
+    let visible = rig
+        .world
+        .app
+        .call(NodeGet, &[&side])
+        .token(&s.cai.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        matches!(visible, Node::Thread(side) if side.base.access.permissions.iter().any(|p| p == "thread.interact"))
+    );
+    sqlx::query("DELETE FROM permission_entries WHERE object_kind='node' AND object_id=$1 AND permission='thread.interact' AND holder_id=$2")
+        .bind(parent).bind(s.cai.id()).execute(rig.db.pool()).await.unwrap();
+    let viewed = places::read(&rig.world, &s.cai, side).await;
+    assert!(
+        matches!(viewed, Node::Thread(side) if !side.base.access.permissions.iter().any(|p| p == "thread.interact"))
+    );
+    rig.lets_use("provider", s.on.provider, "provider.use", &s.cai, json!({}))
+        .await;
+    let denied = s
+        .say(
+            &s.cai,
+            side,
+            "After my grant ended",
+            Delivery::Queue,
+            "revoked",
+        )
+        .await;
+    assert_eq!(denied.problem().code, ErrorCode::AuthzDenied);
+    let different = rig
+        .world
+        .app
+        .call(ThreadSideCreate, &[&parent])
+        .token(&s.ada.token)
+        .body(&ThreadSideCreateBody {
+            acting: false,
+            client_id: "acting".into(),
+            content: vec![ContentPart::Text {
+                text: "Open the preview".into(),
+            }],
+            to_turn: None,
+        })
+        .send()
+        .await;
+    assert_eq!(different.problem().code, ErrorCode::RequestInvalid);
+    let start = rig.turn_start(side, 0).await;
+    assert!(start.text.contains("Earlier answer"));
+    let opened = rig
+        .seen
+        .all()
+        .into_iter()
+        .find_map(|command| {
+            let open = match command {
+                Command::SessionOpen(open) => open,
+                Command::SessionOpenFenced(open) => *open.session,
+                _ => return None,
+            };
+            (open.thread_id == side).then_some(open)
+        })
+        .unwrap();
+    assert_eq!(opened.mode, SessionMode::New);
+    assert_eq!(opened.agent_id, s.on.agent);
+    assert_eq!(opened.exec.environment_id, env);
+    assert_eq!(opened.directory, "/workspace/web");
+    assert_eq!(opened.side_reading, None);
+    assert!(opened.orch_tools.contains(&OrchTool::OpenPort));
+    rig.say(side, rig::turn_began(start.turn_id)).await;
+    rig.wait_turn(start.turn_id, "running").await;
+    rig.say(
+        side,
+        Event::OrchToolCall(OrchToolCall {
+            turn_id: start.turn_id,
+            call_ref: "open-preview".into(),
+            attempt: None,
+            deadline: None,
+            tool: OrchTool::OpenPort,
+            arguments: json!({"kind":"place","port":9082,"reason":"Share the preview"}),
+        }),
+    )
+    .await;
+    eventually("the side owns the opening in the same environment", || async {
+        sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM port_openings WHERE environment_id=$1 AND requested_by_thread=$2 AND port=9082 AND kind='place' AND state IN ('opening','open','not_listening'))")
+            .bind(env).bind(side).fetch_one(rig.db.pool()).await.unwrap()
+    }).await;
+    rig.say(parent, rig::message_began(main.turn_id, "main-progress"))
+        .await;
+    rig.say(
+        parent,
+        rig::message_done("main-progress", "Still working here"),
+    )
+    .await;
+    eventually("main output arrives while the side is running", || async {
+        sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM items WHERE thread_id=$1 AND turn_id=$2 AND native_ref='main-progress' AND status='completed' AND payload->>'text'='Still working here')")
+            .bind(parent).bind(main.turn_id).fetch_one(rig.db.pool()).await.unwrap()
+    }).await;
+    assert_eq!(rig.turn_state(main.turn_id).await, "running");
+    assert_eq!(rig.turn_state(start.turn_id).await, "running");
+    assert_eq!(rig.commands.issued_of("turn.interrupt"), 0);
 }

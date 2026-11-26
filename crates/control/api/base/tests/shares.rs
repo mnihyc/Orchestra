@@ -100,13 +100,13 @@ async fn thread_in(s: &Scene, by: &Who, topic: Id, name: &str) -> Thread {
         .token(&by.token)
         .body(&CreateThread {
             name: Some(name.to_owned()),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: s.on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                s.on.agent,
+                s.on.provider,
+                None,
+            )),
             model: Some(rig::MODEL.to_owned()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("web".to_owned()),
             ..CreateThread::default()
         })

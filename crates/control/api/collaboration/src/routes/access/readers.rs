@@ -50,8 +50,6 @@ use orch_api_contract::access as api;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
-
 use orch_api_contract::nodes::NodeOrSystem;
 
 use orch_api_contract::users::UserRef;
@@ -300,11 +298,6 @@ pub async fn people(
     (): (),
 ) -> ApiResult<api::PermissionPeopleListReply> {
     let named = subject::named(&ctx)?;
-    let page_query = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = usize::try_from(page_query.limit()).unwrap_or(usize::MAX);
     let mut conn = ctx.app.db.begin_snapshot().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     let (graph, site, policy) = found(&mut conn, &named).await?;
@@ -353,43 +346,42 @@ pub async fn people(
                 .into_iter()
                 .map(|(_, user)| user)
                 .collect();
-            people.extend(access::system_admin_people(&mut conn, holders::SCAN_MOST).await?);
+            people.extend(access::system_admin_people(&mut conn, i64::MAX).await?);
             people
         }
-        Chip::SystemAdmins => access::system_admin_people(&mut conn, holders::SCAN_MOST).await?,
+        Chip::SystemAdmins => access::system_admin_people(&mut conn, i64::MAX).await?,
         Chip::Held(holder) => {
             if !shown(&holder) {
                 return Err(ApiError::not_found());
             }
-            holders::people_of(&mut conn, &frame, &site, &holder)
-                .await
-                .map_err(ApiError::internal)?
+            match holder {
+                stored::Holder::Members { id } => {
+                    access::org_member_people(&mut conn, id, i64::MAX).await?
+                }
+                holder => holders::people_of(&mut conn, &frame, &site, &holder)
+                    .await
+                    .map_err(ApiError::internal)?,
+            }
         }
     };
     let mut distinct: Vec<Id> = people;
     distinct.sort_unstable();
     distinct.dedup();
     let described = refusals::user_refs(&mut conn, &distinct).await?;
-    let mut listed: Vec<UserRef> = described.into_values().collect();
-    listed.sort_by(|first, second| {
-        (first.display_name.to_lowercase(), first.id)
-            .cmp(&(second.display_name.to_lowercase(), second.id))
-    });
-    let start = match query.cursor.as_deref() {
-        None => 0,
-        Some(cursor) => {
-            let last: Id = cursor
-                .parse()
-                .map_err(|_| invalid("cursor", "is not a cursor of this list"))?;
-            listed
-                .iter()
-                .position(|user| user.id == last)
-                .map_or(0, |at| at + 1)
-        }
-    };
-    let rest: Vec<UserRef> = listed.into_iter().skip(start).collect();
-    let more = rest.len() > limit;
-    let items: Vec<UserRef> = rest.into_iter().take(limit).collect();
+    let page = crate::collection::snapshot(
+        &query.collection(),
+        &format!(
+            "permission-people:{}:{:?}:{}",
+            principal.user(),
+            named.thing,
+            query.holder
+        ),
+        described.into_values().collect(),
+        |row: &UserRef| (row.display_name.to_lowercase(), row.id),
+        |row| format!("{} {}", row.display_name, row.username),
+        false,
+    )?;
+    let items = page.items;
     // One native ownership expansion for the whole response, including nested owner groups.
     // A person's place in a Viewer chip says nothing about their highest access.
     let owner_people: HashSet<Id> = holders::owner_people(&mut conn, &frame, site.id, site.root)
@@ -403,9 +395,7 @@ pub async fn people(
             .filter(|user| owner_people.contains(&user.id))
             .map(|user| user.id)
             .collect(),
-        next_cursor: more
-            .then(|| items.last().map(|user| user.id.to_string()))
-            .flatten(),
+        next_cursor: page.next_cursor,
         items,
     };
     conn.commit().await.map_err(orch_db::DbError::from)?;
@@ -474,6 +464,42 @@ async fn lines(
     lines_with_names(conn, principal, rows, None).await
 }
 
+/// Permission summaries in the audit log can name the original holder. Build the
+/// History fallback from the same disclosed facts as its localized wording.
+fn history_text(
+    summary: &str,
+    wording: Option<&api::HistoryWording>,
+    actor: Option<&api::HistoryActor>,
+) -> String {
+    let change = match wording.map(|words| words.verb.as_str()) {
+        Some("access") => "access",
+        Some("defaults") => "access defaults",
+        Some("agentAccess") => "agent access",
+        Some("agentDefaults") => "agent access defaults",
+        _ => return summary.to_owned(),
+    };
+    let target = wording
+        .and_then(|words| words.target.as_ref())
+        .filter(|place| !place.redacted)
+        .and_then(|place| place.name.as_deref())
+        .unwrap_or("this place");
+    match actor {
+        Some(api::HistoryActor::User(user)) => {
+            format!("{} changed {change} for {target}", user.display_name)
+        }
+        Some(api::HistoryActor::Agent(actor)) => match actor
+            .agent
+            .name
+            .as_deref()
+            .filter(|_| !actor.agent.redacted)
+        {
+            Some(name) => format!("The agent of {name} changed {change} for {target}"),
+            None => format!("An agent changed {change} for {target}"),
+        },
+        None => format!("Changed {change} for {target}"),
+    }
+}
+
 async fn lines_with_names(
     conn: &mut Conn,
     principal: &Principal,
@@ -505,32 +531,37 @@ async fn lines_with_names(
     Ok(rows
         .iter()
         .filter(|row| thread_of(row).is_none_or(|thread| viewable.contains(&thread)))
-        .map(|row| api::HistoryLine {
-            id: row.id,
-            at: Time::new(row.at),
-            actor: match (row.actor_kind.as_str(), row.actor_id) {
+        .map(|row| {
+            let actor = match (row.actor_kind.as_str(), row.actor_id) {
                 ("user", Some(user)) => people.get(&user).cloned().map(api::HistoryActor::User),
                 ("agent", Some(thread)) => named_threads
                     .get(&thread)
                     .cloned()
                     .map(|agent| api::HistoryActor::Agent(api::HistoryAgent { agent })),
                 _ => None,
-            },
-            action: row.action.clone(),
-            text: row.summary.clone(),
-            wording: history::wording_of(
+            };
+            let wording = history::wording_of(
                 &row.action,
                 &row.details,
                 row.node_id.and_then(|node| targets.get(&node).cloned()),
-            ),
-            about: history::about_of(
-                &row.details,
-                thread_of(row).and_then(|thread| named_threads.get(&thread).cloned()),
-            ),
-            upload: row
-                .details
-                .get("upload")
-                .and_then(|value| serde_json::from_value(value.clone()).ok()),
+            );
+            let text = history_text(&row.summary, wording.as_ref(), actor.as_ref());
+            api::HistoryLine {
+                id: row.id,
+                at: Time::new(row.at),
+                actor,
+                action: row.action.clone(),
+                text,
+                wording,
+                about: history::about_of(
+                    &row.details,
+                    thread_of(row).and_then(|thread| named_threads.get(&thread).cloned()),
+                ),
+                upload: row
+                    .details
+                    .get("upload")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+            }
         })
         .collect())
 }
@@ -636,6 +667,8 @@ async fn history_rows(
             after,
             upload_offset(query.cursor.as_deref())?,
             batch,
+            &orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""))
+                .like_patterns(),
         )
         .await
         .map_err(|error| match error {
@@ -648,11 +681,37 @@ async fn history_rows(
         return Ok(page.rows);
     }
     let summary = query.depth == Some(orch_api_contract::nodes::ActivityDepth::Summary);
-    let meaningful: Option<Vec<String>> = summary.then(|| {
+    let environment =
+        matches!(named.thing, Thing::Other(object) if object.kind == ObjectKind::Environment);
+    let audit_kinds = if environment {
+        None
+    } else {
+        query
+            .kinds
+            .as_ref()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|kind| {
+                        serde_json::from_value::<orch_access_contract::audit::AuditKind>(
+                            serde_json::Value::String(kind.trim().to_owned()),
+                        )
+                        .map_err(|_| invalid("kinds", "contains an unknown audit kind"))
+                    })
+                    .collect::<ApiResult<Vec<_>>>()
+            })
+            .transpose()?
+    };
+    let meaningful: Option<Vec<String>> = (summary || audit_kinds.is_some()).then(|| {
         orch_access_contract::audit::AuditAction::ALL
             .iter()
             .copied()
-            .filter(|action| crate::routes::nodes::activity::meaningful(*action))
+            .filter(|action| !summary || crate::routes::nodes::activity::meaningful(*action))
+            .filter(|action| {
+                audit_kinds
+                    .as_ref()
+                    .is_none_or(|kinds| kinds.contains(&action.kind()))
+            })
             .map(|action| action.as_str().to_owned())
             .collect()
     });

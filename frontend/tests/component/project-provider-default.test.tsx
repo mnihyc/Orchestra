@@ -1,6 +1,7 @@
+import { providerTarget } from '@/lib/resourceTargets';
 /** The project setting uses provider names and keeps native revision, lock, failure and Undo semantics. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -38,9 +39,9 @@ vi.mock('@/api/client', async (load) => {
   } } };
 });
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ kind, onCreated }: { kind: string; onCreated?: (id: string) => void }) => {
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: ({ kind, onCreated }: { kind: string; onCreated?: (id: string) => void }) => {
   return <button type="button" data-create-kind={kind} onClick={() => {
     calls.create();
     if (calls.created !== null) { calls.list.mockResolvedValue([calls.created]); onCreated?.(calls.created.id); }
@@ -72,11 +73,11 @@ function draw(content: ReactNode, cache = nativeNames()) {
 }
 function definition(): KeyDef {
   return { key: KEY, title: i18n.t('day100.builtin.agent.default_provider_id.title'), description: i18n.t('day100.builtin.agent.default_provider_id.description'),
-    group: 'agent', class: 'parameter', scopes: ['org', 'project', 'topic'], merge: 'replace', default: null, example: SAMPLE,
-    schema: { type: 'string', format: 'uuid' }, text_key: null, keywords: [] };
+    group: 'agent', class: 'parameter', scopes: ['org', 'project', 'topic'], merge: 'replace', default: null, example: providerTarget(SAMPLE),
+    schema: { oneOf: [{ type:'object' },{ type:'object' }] }, text_key: null, keywords: [] };
 }
 function value(id = FIRST, own = false): ResolvedSetting {
-  return { key: KEY, value: id, own: own ? { value: id, revision: 7, locked: false } : null,
+  return { key: KEY, value: providerTarget(id), own: own ? { value: providerTarget(id), revision: 7, locked: false } : null,
     source: { scope: own ? 'project' : 'default', node: null }, locked_by: null, writable: true, parts: [] };
 }
 const appearance = useAppearance.getState();
@@ -88,6 +89,49 @@ beforeEach(() => {
   });
 });
 afterEach(async () => { cleanup(); for (const cache of caches.splice(0)) cache.clear(); useAppearance.setState(appearance); await setLocale('en'); });
+
+it('names the different provider inheritance gives when its first choice is opened', async () => {
+  const setting: ResolvedSetting = { ...value(FIRST, true), inherited: { value: providerTarget(SECOND), source: { scope: 'org', node: { id: HOME, kind: 'org', name: 'Acme', redacted: false } } } };
+  const cache = nativeNames();
+  draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>, cache);
+  expect(calls.read).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('combobox', { name: definition().title }));
+  const first = screen.getAllByRole('option')[0]!;
+  await waitFor(() => expect(first).toHaveTextContent('Review AI'));
+  expect(first).toHaveTextContent('As Acme decides');
+  expect(calls.read.mock.calls.some(([id]) => id === SECOND)).toBe(true);
+  expect(putSetting).not.toHaveBeenCalled();
+});
+
+it('does not borrow a historical provider name while the inherited name is being authorized', async () => {
+  const denied = new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', status: 403, title: 'No access', detail: 'No access', request_id: 'inherited-name' }, null);
+  calls.list.mockResolvedValue([rows[0]!]);
+  calls.read.mockImplementation((id) => id === SECOND ? Promise.reject(denied) : Promise.resolve(rows[0]!));
+  const setting: ResolvedSetting = { ...value(FIRST, true), inherited: { value: providerTarget(SECOND), source: { scope: 'org', node: { id: HOME, kind: 'org', name: 'Acme', redacted: false } } } };
+  const cache = nativeNames();
+  cache.setQueryData(providerKey(SECOND), { ...rows[1]!, name: 'Historical private provider' });
+  const view = draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>, cache);
+  await userEvent.click(screen.getByRole('combobox', { name: definition().title }));
+  const first = screen.getAllByRole('option')[0]!;
+  await waitFor(() => expect(first).toHaveTextContent(i18n.t('settings.compact.managed')));
+  expect(view.container).not.toHaveTextContent('Historical private provider');
+  expect(first).not.toHaveTextContent(SECOND);
+});
+
+it('keeps a failed inherited name plain so retry controls cannot also select the choice', async () => {
+  const unavailable = new ApiError({ type: 'orch:error:internal', code: 'internal', status: 500, title: 'Unavailable', detail: 'Unavailable', request_id: 'inherited-name' }, null);
+  calls.list.mockResolvedValue([rows[0]!]);
+  calls.read.mockImplementation((id) => id === SECOND ? Promise.reject(unavailable) : Promise.resolve(rows[0]!));
+  const setting: ResolvedSetting = { ...value(FIRST, true), inherited: { value: providerTarget(SECOND), source: { scope: 'org', node: { id: HOME, kind: 'org', name: 'Acme', redacted: false } } } };
+  vi.mocked(clearSetting).mockResolvedValue({ ...setting, own: null, value: providerTarget(SECOND) });
+  draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>);
+  await userEvent.click(screen.getByRole('combobox', { name: definition().title }));
+  const first = screen.getAllByRole('option')[0]!;
+  await waitFor(() => expect(first).toHaveTextContent(i18n.t('places.providerDefault.unavailable')));
+  expect(within(first).queryByRole('button')).not.toBeInTheDocument();
+  await userEvent.click(first);
+  await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, 7));
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`commits one named choice at project scope and undoes its acknowledged revision (${locale}/${theme})`, async () => {
@@ -109,7 +153,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(calls.list).not.toHaveBeenCalled(); expect(putSetting).not.toHaveBeenCalled();
     await user.keyboard('{Escape}'); await user.click(choose);
     await user.click(await screen.findByRole('option', { name: 'Review AI' }));
-    await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, { value: SECOND, expectedRevision: null }));
+    await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, { value: providerTarget(SECOND), expectedRevision: null }));
     await waitFor(() => expect(screen.getByRole('combobox', { name: def.title })).toHaveValue('Review AI'));
     expect(calls.read).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: i18n.t('settings.compact.undoNamed', { name: def.title }) }));
@@ -120,7 +164,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     const source = { scope: 'org' as const, node: { id: HOME, kind: 'org' as const, name: 'Acme', redacted: false } };
     // Even a local stored choice and manage authority cannot replace an ancestor's effective lock.
-    const setting: ResolvedSetting = { ...value(), own: { value: SECOND, revision: 7, locked: false }, source, locked_by: source };
+    const setting: ResolvedSetting = { ...value(), own: { value: providerTarget(SECOND), revision: 7, locked: false }, source, locked_by: source };
     const view = draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>, nativeNames('reference'));
     expect(await screen.findByText('Release AI', { exact: true })).toBeVisible();
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
@@ -152,7 +196,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
 it('retains a refused named choice and retries under the original own revision', async () => {
   await setLocale('en'); const def = definition();
   vi.mocked(putSetting).mockRejectedValueOnce(new Error('the setting could not be changed'))
-    .mockResolvedValue({ ...value(SECOND, true), own: { value: SECOND, revision: 8, locked: false } });
+    .mockResolvedValue({ ...value(SECOND, true), own: { value: providerTarget(SECOND), revision: 8, locked: false } });
   draw(<ul><SettingRow def={def} setting={value(FIRST, true)} target={target} place={place} /></ul>);
   const choose = await screen.findByRole('combobox', { name: def.title });
   await waitFor(() => expect(choose).toHaveValue('Release AI'));
@@ -162,8 +206,8 @@ it('retains a refused named choice and retries under the original own revision',
   expect(screen.getByRole('combobox', { name: def.title })).toHaveValue('Review AI');
   await user.click(retry);
   await waitFor(() => expect(putSetting).toHaveBeenCalledTimes(2));
-  expect(putSetting).toHaveBeenNthCalledWith(1, target, KEY, { value: SECOND, expectedRevision: 7 });
-  expect(putSetting).toHaveBeenNthCalledWith(2, target, KEY, { value: SECOND, expectedRevision: 7 });
+  expect(putSetting).toHaveBeenNthCalledWith(1, target, KEY, { value: providerTarget(SECOND), expectedRevision: 7 });
+  expect(putSetting).toHaveBeenNthCalledWith(2, target, KEY, { value: providerTarget(SECOND), expectedRevision: 7 });
   expect(await screen.findByRole('button', { name: i18n.t('settings.compact.undoNamed', { name: def.title }) })).toBeEnabled();
 });
 
@@ -196,12 +240,12 @@ it('returns an empty-list creation answer to the picker and waits for an explici
   await waitFor(() => expect(calls.list).toHaveBeenCalledTimes(2)); // Initial empty page, then native admission after creation.
   await user.click(choose);
   await user.click(await screen.findByRole('option', { name: 'Review AI' }));
-  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, { value: SECOND, expectedRevision: null }));
+  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, { value: providerTarget(SECOND), expectedRevision: null }));
 });
 
 it('does not fetch an illustrative UUID, and a lost read-only provider exposes no raw identifier', async () => {
   await setLocale('en'); const def = definition();
-  const sample = draw(<SettingSummary def={def} value={SAMPLE} example />, nativeNames('unread'));
+  const sample = draw(<SettingSummary def={def} value={providerTarget(SAMPLE)} example />, nativeNames('unread'));
   expect(screen.getByText(i18n.t('places.providerDefault.example'))).toBeVisible();
   expect(calls.read).not.toHaveBeenCalled(); sample.unmount();
   const cache = nativeNames('unread');
@@ -209,7 +253,7 @@ it('does not fetch an illustrative UUID, and a lost read-only provider exposes n
     status: 'error', data: undefined,
     error: new ApiError({ type: 'about:blank', title: 'Unavailable', status: 503, code: 'provider.unavailable', detail: 'The provider name could not be read.', request_id: 'provider-name-unavailable' }, null),
   });
-  const unavailable = draw(<SettingSummary def={def} value={SAMPLE} />, cache);
+  const unavailable = draw(<SettingSummary def={def} value={providerTarget(SAMPLE)} />, cache);
   expect(await screen.findByText(i18n.t('places.providerDefault.unavailable'))).toBeVisible();
   expect(unavailable.container).not.toHaveTextContent(SAMPLE);
   expect(calls.read).not.toHaveBeenCalled();

@@ -76,10 +76,156 @@ async fn put(
 
 fn value(value: Value) -> NodeSettingSetBody {
     NodeSettingSetBody {
+        model_choice: None,
         value,
         locked: None,
         expected_revision: None,
     }
+}
+
+#[tokio::test]
+async fn project_policies_hold_at_the_topic_on_read_and_write() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let topic = make_topic(&world, &s.boss, s.web, "Design").await.base.id;
+    for (key, local, held, loose, path) in [
+        (
+            "terminal.record",
+            json!(false),
+            json!(true),
+            json!(false),
+            "value",
+        ),
+        (
+            "redaction.mask_secrets",
+            json!(false),
+            json!(true),
+            json!(false),
+            "value",
+        ),
+        (
+            "agent.features",
+            json!({"some":true}),
+            json!({"some":false}),
+            json!({"some":true}),
+            "value.some",
+        ),
+        (
+            "environments.runtimes",
+            json!({"kata":"allow"}),
+            json!({"*":"forbid"}),
+            json!({"kata":"require"}),
+            "value.kata",
+        ),
+        (
+            "capability.policy",
+            json!({"kvm":{"decision":"allow","approver_scope":"environment"}}),
+            json!({"kvm":{"decision":"deny","approver_scope":"system"}}),
+            json!({"kvm":{"decision":"allow","approver_scope":"system"}}),
+            "value.kvm.decision",
+        ),
+    ] {
+        put(&world, &s.boss, topic, key, &value(local)).await.ok();
+        put(&world, &s.boss, s.web, key, &value(held.clone()))
+            .await
+            .ok();
+        let list = settings(&world, &s.boss, topic).await;
+        let effective = one(&list, key).value.as_ref().unwrap();
+        if key == "environments.runtimes" {
+            assert_eq!(effective["kata"], "forbid");
+        } else if key == "capability.policy" {
+            assert_eq!(effective["kvm"], held["kvm"]);
+        } else {
+            assert_eq!(effective, &held);
+        }
+        let error = put(&world, &s.boss, topic, key, &value(loose))
+            .await
+            .problem();
+        assert_eq!(error.code, ErrorCode::RequestInvalid, "{key}");
+        assert_eq!(error.extra["errors"][0]["path"], path, "{key}");
+    }
+}
+
+#[tokio::test]
+async fn a_topic_can_lower_its_projects_message_ceiling_and_a_wider_write_names_the_project() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let topic = make_topic(&world, &s.boss, s.web, "Design").await.base.id;
+    let key = "broadcast.thread_messages_per_hour";
+
+    // The shipped count is a default. A ceiling comes from an explicit ancestor.
+    put(&world, &s.boss, topic, key, &value(json!(1000)))
+        .await
+        .ok();
+    put(&world, &s.boss, s.web, key, &value(json!(10)))
+        .await
+        .ok();
+    let list = settings(&world, &s.boss, topic).await;
+    assert_eq!(one(&list, key).value, Some(json!(10)));
+    assert_eq!(one(&list, key).source.node.as_ref().unwrap().id, s.web);
+
+    let error = put(&world, &s.boss, topic, key, &value(json!(1001)))
+        .await
+        .problem();
+    assert_eq!(error.code, ErrorCode::RequestInvalid);
+    assert_eq!(error.extra["errors"][0]["path"], "value");
+    assert_eq!(
+        error.extra["errors"][0]["message"],
+        "exceeds the inherited maximum"
+    );
+    let ceiling: orch_api_contract::settings::SettingInheritance =
+        serde_json::from_value(error.extra["ceiling"].clone()).unwrap();
+    assert_eq!(ceiling.value, Some(json!(10)));
+    assert_eq!(ceiling.source.scope, SettingScope::Project);
+    let project = ceiling.source.node.unwrap();
+    assert_eq!(project.id, s.web);
+    assert_eq!(project.name.as_deref(), Some("Web"));
+    let list = settings(&world, &s.boss, topic).await;
+    assert_eq!(one(&list, key).own.as_ref().unwrap().value, json!(1000));
+    let lower = put(&world, &s.boss, topic, key, &value(json!(0)))
+        .await
+        .ok();
+    assert_eq!(lower.value, Some(json!(0)));
+    assert_eq!(lower.source.scope, SettingScope::Topic);
+}
+
+#[tokio::test]
+async fn the_summarizer_editor_is_given_registered_choices_and_their_configuration_fields() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let defs = world
+        .app
+        .call(SettingRegistryGet, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    let summarizer = defs
+        .iter()
+        .find(|def| def.key == "auto.summarizer")
+        .unwrap();
+    let kinds = summarizer.schema["x-summarizers"]
+        .as_array()
+        .expect("registered kinds are offered as choices");
+    let model = kinds.iter().find(|kind| kind["name"] == "model").unwrap();
+    assert!(!model["title"].as_str().unwrap().is_empty());
+    let schema = &model["config_schema"];
+    let mut selection = json!({"backend": {
+        "route": "summarizer-model.complete",
+        "offering": {"provider": orch_types::new_id(), "offering": "small"}
+    }});
+    assert!(orch_types::schema::validate(schema, &selection).is_ok());
+    let mut wrong_provider = selection.clone();
+    wrong_provider["backend"]["offering"]["provider"] = json!("invalid");
+    assert!(orch_types::schema::validate(schema, &wrong_provider).is_err());
+    selection["backend"]["offering"]["offering"] = json!(17);
+    assert!(orch_types::schema::validate(schema, &selection).is_err());
+    let fields = &schema["properties"];
+    assert!(fields.get("context_tokens").is_some());
+    // The answer allowance is kept by field: paragraphs, titles and goal verdicts each have their own.
+    assert!(fields.get("answer_max_output_tokens").is_some());
+    assert!(fields.get("title_max_output_tokens").is_some());
+    assert!(fields.get("goal_max_output_tokens").is_some());
 }
 
 #[tokio::test]
@@ -240,19 +386,22 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
         &alice,
         topic,
         "agent.model",
-        &value(json!("qa-r3b")),
+        &value(json!({"type":"offering","name":"qa-r3b"})),
     )
     .await
     .ok();
     assert!(saved.writable);
-    assert_eq!(saved.value, Some(json!("qa-r3b")));
+    assert_eq!(
+        saved.value,
+        Some(orch_settings_contract::thread_defaults::named("qa-r3b"))
+    );
     assert!(!saved.own.as_ref().unwrap().locked);
     let policy = put(&world, &alice, topic, "chat.enabled", &value(json!(false)))
         .await
         .problem();
     assert_eq!(policy.code, ErrorCode::AuthzDenied);
     assert_eq!(policy.extra["required"], "settings.manage");
-    let mut lock = value(json!("qa-r3b"));
+    let mut lock = value(orch_settings_contract::thread_defaults::named("qa-r3b"));
     lock.locked = Some(true);
     lock.expected_revision = Some(saved.own.as_ref().unwrap().revision);
     let refused = put(&world, &alice, topic, "agent.model", &lock)
@@ -267,12 +416,15 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
             .locked
     );
     // Undo may restore an unchanged false lock flag; it does not acquire policy authority.
-    let mut undo = value(json!("before"));
+    let mut undo = value(orch_settings_contract::thread_defaults::named("before"));
     undo.locked = Some(false);
     undo.expected_revision = Some(saved.own.as_ref().unwrap().revision);
     let restored = put(&world, &alice, topic, "agent.model", &undo).await.ok();
     assert!(restored.writable);
-    assert_eq!(restored.value, Some(json!("before")));
+    assert_eq!(
+        restored.value,
+        Some(orch_settings_contract::thread_defaults::named("before"))
+    );
     assert!(!restored.own.as_ref().unwrap().locked);
     let viewer = settings(&world, &s.dan, topic).await;
     assert!(!one(&viewer, "agent.model").writable);
@@ -281,7 +433,7 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
         &s.dan,
         topic,
         "agent.model",
-        &value(json!("another")),
+        &value(json!({"type":"offering","name":"another"})),
     )
     .await
     .problem();
@@ -308,7 +460,7 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
         &alice,
         topic,
         "agent.model",
-        &value(json!("another")),
+        &value(json!({"type":"offering","name":"another"})),
     )
     .await
     .problem();
@@ -400,6 +552,40 @@ async fn a_value_that_does_not_fit_and_a_key_that_is_not_there_are_refused() {
     .await
     .problem();
     assert_eq!(refused.code, ErrorCode::RequestInvalid);
+}
+
+#[tokio::test]
+async fn a_provider_that_does_not_exist_is_refused_at_save_with_its_kind_in_the_sentence() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let missing = orch_types::new_id();
+    for (key, body) in [
+        (
+            "agent.default_provider_id",
+            json!({"type":"single","resource":{"kind":"provider","id":missing}}),
+        ),
+        (
+            "search.semantic.embeddings",
+            json!({"provider_id": missing, "model_name": "small"}),
+        ),
+    ] {
+        let refused = put(&world, &s.boss, s.acme, key, &value(body))
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid, "{key}");
+        let message = refused.extra["errors"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("no provider with this identifier exists"),
+            "{key}: {message}"
+        );
+        assert!(
+            refused.extra["errors"][0]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("value"),
+            "{key}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -665,4 +851,108 @@ async fn a_secret_is_written_once_listed_by_name_down_the_hierarchy_and_its_name
         .await
         .problem();
     assert_eq!(missing.code, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn place_parameter_forms_share_thread_provider_constraints_and_feature_rules() {
+    use orch_api_contract::resources::{ModelParameters, ProviderKind};
+    use orch_api_contract::settings::{SettingParameterFormBody, SettingParameterFormResolve};
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let definition = |key: &str, scopes: Value, feature: Value| {
+        json!({
+            "key":key, "title":key, "description":"A declared parameter.", "group":"model",
+            "type":"boolean", "default":false, "scopes":scopes, "apply":"next_turn", "feature":feature
+        })
+    };
+    let speed = json!({
+        "key":"service_tier", "title":"Speed", "description":"An enabled speed.", "group":"model",
+        "type":"enum", "options":{"from_model":"service_tiers"},
+        "default":{"from_model":"default_service_tier"}, "scopes":["org","thread"], "apply":"next_turn"
+    });
+    let model: ModelParameters = serde_json::from_value(json!({
+        "service_tiers":[{"id":"priority","label":"Fast"},{"id":"flex","label":"Flex"}],
+        "request_options":{"native":{"type":"object","properties":{
+            "service_tier":{"oneOf":[{"const":"priority"}]}, "quiet":false
+        }}}
+    }))
+    .unwrap();
+    let forms = world
+        .app
+        .call(SettingParameterFormResolve, &[])
+        .token(&ada.token)
+        .body(&SettingParameterFormBody {
+            definitions: vec![
+                speed,
+                definition("quiet", json!(["org"]), json!("team.quiet")),
+                definition("gated", json!(["org"]), json!("team.gated")),
+                definition("thread_only", json!(["thread"]), Value::Null),
+            ],
+            model,
+            feature_defaults: std::collections::BTreeMap::from([("team.gated".to_owned(), true)]),
+            features: std::collections::BTreeMap::from([
+                ("team.quiet".to_owned(), true),
+                ("team.gated".to_owned(), false),
+            ]),
+            provider_kind: ProviderKind::Api,
+            scope: Some("org".to_owned()),
+            harness_version: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(forms.len(), 1);
+    assert_eq!(forms[0]["key"], json!("service_tier"));
+    assert_eq!(
+        forms[0]["resolved_options"],
+        json!([{"value":"priority","label":"Fast"}])
+    );
+    assert_eq!(forms[0]["allows_none"], json!(false));
+}
+
+#[tokio::test]
+async fn each_setting_carries_the_exact_inherited_value_without_its_own_contribution() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.acme),
+            "agent.model",
+            json!({"type":"offering","name":"parent-model"}),
+        )
+        .await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.web),
+            "agent.model",
+            json!({"type":"offering","name":"local-model"}),
+        )
+        .await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.acme),
+            "agent.params",
+            json!({"quiet":true}),
+        )
+        .await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.web),
+            "agent.params",
+            json!({"context":65_536}),
+        )
+        .await;
+    let rows = settings(&world, &s.boss, s.web).await;
+    for (key, expected) in [
+        (
+            "agent.model",
+            json!({"type":"offering","name":"parent-model"}),
+        ),
+        ("agent.params", json!({"quiet":true})),
+    ] {
+        let shown = serde_json::to_value(one(&rows, key)).unwrap();
+        assert_eq!(shown["inherited"]["value"], expected);
+        assert_eq!(shown["inherited"]["source"]["node"]["name"], json!("Acme"));
+        assert_eq!(shown["inherited"]["source"]["scope"], json!("org"));
+    }
 }

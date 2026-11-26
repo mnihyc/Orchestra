@@ -1,3 +1,4 @@
+import { providerTarget } from '@/lib/resourceTargets';
 // @vitest-environment node
 /** Opted-in Defaults in the browser double reuse the same per-reader native suppliers and refusals. */
 import { expect, it, vi } from 'vitest';
@@ -15,7 +16,7 @@ function reader(world: World): Person {
   return world.browserPerson(`Bearer ${answer.body.access_token}`);
 }
 function selected(world: World, person: Person) {
-  world.settings.handle(person, 'PUT', `/nodes/${id}/settings/agent.default_provider_id`, new URLSearchParams(), { value: providerId });
+  world.settings.handle(person, 'PUT', `/nodes/${id}/settings/agent.default_provider_id`, new URLSearchParams(), { value: providerTarget(providerId) });
 }
 function requireDefaults(value: NodeDefaultsOpening | null | undefined): NodeDefaultsOpening {
   if (value === null || value === undefined) throw new Error('The opted-in native Defaults projections must be present');
