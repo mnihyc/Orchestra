@@ -13,7 +13,7 @@ import { choiceOption } from '@/i18n/choices';
 
 import { agentKey, harnessKindsQuery, updateAgent } from '@/api/resources';
 import { resourceImpactQuery } from '@/api/resource-impact';
-import { ImpactCounts } from '@/features/storage/Impact';
+import { StopTip } from '@/features/storage/Impact';
 import { versionPin } from '@/features/resources/agents/descriptor';
 import { ChangedOn, EditDialog, Fixed } from '@/features/resources/EditDialog';
 import { useHarnessTitle } from '@/features/resources/harnesses';
@@ -24,8 +24,6 @@ import { ChoiceLocator } from '@/ui/ChoiceLocator';
 import { Switch } from '@/ui/Switch';
 import { Checkbox } from '@/ui/Checkbox';
 import { toast } from '@/ui/Toast';
-import { ErrorState } from '@/ui/ErrorState';
-import { SkeletonRows } from '@/ui/Skeleton';
 
 /** The sentinel of the version menu for "the default build": a menu cannot hold an empty value. */
 export const DEFAULT_BUILD = '\u0000default';
@@ -56,7 +54,8 @@ export function EditAgent({ agent, only, onProfile, onClose }: EditAgentProps) {
   const nameChanged = name.trim() !== agent.name;
   const pinChanged = only === undefined && pin !== pinned;
   const onChanged = only === undefined && on !== !agent.disabled;
-  const impact=useQuery({...resourceImpactQuery({object:{kind:'agent',id:agent.id},model_id:null}),enabled:onChanged});
+  // Switching off reads only what it stops; the read never holds Save up.
+  const impact=useQuery({...resourceImpactQuery({object:{kind:'agent',id:agent.id},model_id:null}),enabled:onChanged&&!on});
   const save = useMutation({
     mutationFn: () => {
       const patch={
@@ -81,7 +80,7 @@ export function EditAgent({ agent, only, onProfile, onClose }: EditAgentProps) {
       admin={adminSpec(agent, 'agent.manage')}
       title={only === 'name' ? t('resources.edit.renameTitle', { name: agent.name }) : t('resources.edit.title', { name: agent.name })}
       changed={nameChanged || pinChanged || onChanged}
-      valid={name.trim() !== ''&&(!onChanged||impact.isSuccess&&!impact.data.stopping)}
+      valid={name.trim() !== ''}
       pending={save.isPending}
       error={save.error}
       onSave={() => save.mutate()}
@@ -117,9 +116,9 @@ export function EditAgent({ agent, only, onProfile, onClose }: EditAgentProps) {
               ...(pin !== DEFAULT_BUILD && !builds.some((build) => build.version === pin) ? [{ value: pin, ...choiceOption(t, 'dynamic.value', { name: pin, context: t('agents.profile.pin') }) }] : []),
             ]}
           />
-          <Switch label={t('agents.edit.on')} hint={t('agents.edit.onHint')} checked={on} disabled={save.isPending} onCheckedChange={setOn} />
+          <Switch label={t('agents.edit.on')} checked={on} disabled={save.isPending} onCheckedChange={setOn} />
           {onChanged && <div className="flex flex-col gap-2">
-            {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind={on?'enable':'disable'} />}
+            {!on&&<StopTip read={impact} kind="disable" />}
             {!on&&<Input optional label={t('resourceImpact.note')} value={note} onChange={(event)=>setNote(event.target.value)} disabled={save.isPending} />}
             {on&&<Checkbox label={t('resourceImpact.runWaiting')} checked={runWaiting} onCheckedChange={setRunWaiting} disabled={save.isPending} />}
           </div>}

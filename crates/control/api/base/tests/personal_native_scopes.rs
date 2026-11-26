@@ -22,7 +22,7 @@ use orch_api_contract::personal::{
     MeChatStateList, MeFavoriteList, MeFavoriteSet, MeFavoriteSetBody, MeReadStateList,
     MeReadStateListQuery, MeSubscriptionList, MeSubscriptionListQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{hierarchy, identity, jobs};
 use orch_types::{Id, Json, new_id};
@@ -38,11 +38,12 @@ fn rule(operation: &str, kind: &str, id: Id, resource: &str) -> Json {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Personal native scope fixture",
             token_hash: &token_hash(&secret),
@@ -502,7 +503,8 @@ async fn document_notice_jobs_bind_the_stored_document_and_native_creator_filter
             .app
             .call(DocumentNoticeJobList, &[&document])
             .token(&reader)
-            .query(&PageQuery {
+            .query(&orch_api_contract::common::CollectionQuery {
+                q: None,
                 limit: Some(1),
                 cursor: None,
             })
@@ -620,8 +622,8 @@ async fn favorites_keep_native_order_with_own_operation_protected_path_names() {
         StatusCode::OK,
     );
     assert_eq!(response.as_array().unwrap().len(), 1);
-    assert_eq!(response[0]["node"]["id"], json!(s.second));
-    assert_eq!(response[0]["node"]["name"], "Unselected project");
+    assert_eq!(response[0]["target"]["id"], json!(s.second));
+    assert_eq!(response[0]["item"]["name"], "Unselected project");
     assert!(
         !response.to_string().contains("Personal root"),
         "another read operation cannot lend a protected ancestor name"
@@ -965,4 +967,31 @@ async fn notification_context_resource_kinds_come_from_the_native_stored_subject
             .await,
         StatusCode::FORBIDDEN,
     );
+}
+
+#[tokio::test]
+async fn active_notice_search_selects_the_older_matching_state_with_the_same_native_creator_gate() {
+    let s = Scene::new().await;
+    let document = s.document("Notice search").await;
+    let wanted = s.notice_job(document, s.owner.id(), false).await;
+    sqlx::query("UPDATE jobs SET state='running' WHERE id=$1")
+        .bind(wanted)
+        .execute(&s.world.db.pool)
+        .await
+        .unwrap();
+    for _ in 0..13 {
+        s.notice_job(document, s.owner.id(), false).await;
+    }
+    let response = checked(
+        s.world
+            .app
+            .call(DocumentNoticeJobList, &[&document])
+            .token(&s.owner.token)
+            .raw_query("q=running&limit=1")
+            .send_bytes()
+            .await,
+        StatusCode::OK,
+    );
+    assert_eq!(response["items"].as_array().unwrap().len(), 1);
+    assert_eq!(response["items"][0]["id"], json!(wanted));
 }

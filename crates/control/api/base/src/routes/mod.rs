@@ -77,6 +77,9 @@ pub fn mount(registry: &mut Registry) {
     port_entry::mount(registry);
     port_requests::mount(registry);
     trust::mount(registry);
+    landing::mount(registry);
+    // Last, so that a page's first reads can be any browser read bound above.
+    page_opening::mount(registry);
 }
 
 #[path = "access.rs"]
@@ -225,3 +228,7 @@ pub mod users;
 
 #[path = "workspace.rs"]
 pub mod workspace;
+
+mod landing;
+
+mod page_opening;

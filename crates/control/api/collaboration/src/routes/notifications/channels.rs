@@ -66,6 +66,8 @@ use orch_api_contract::notifications::NotificationChannelCreateBody;
 
 use orch_api_contract::notifications::NotificationChannelListQuery;
 
+use orch_api_contract::notifications::NotificationChannelOwner;
+
 use orch_api_contract::notifications::NotificationChannelTestBody;
 
 use orch_api_contract::notifications::NotificationChannelUpdateBody;
@@ -119,6 +121,8 @@ use orch_notifier_contract::descriptor::NotifierDescriptor;
 use orch_notifier_contract::descriptor::Owner;
 
 use orch_notifier_contract::descriptor::Target;
+
+use orch_notifier_contract::outbound;
 
 use orch_notifier_contract::templates::Form;
 
@@ -226,12 +230,26 @@ pub(super) fn save_fault(descriptor: Option<&NotifierDescriptor>, fault: SaveFau
     }
 }
 
-/// The refusal of a save that the far side refused for good.
-pub(super) fn refused(error: &DeliverError) -> ApiError {
-    ApiError::invalid(
-        "config",
-        &format!("the far side refuses it: {}", error.message),
-    )
+/// The refusal of a save that was refused for good, at the declared field the notifier says it is about. An
+/// address that may not be reached is refused here, before the far side is asked, and says so in plain words:
+/// its reason names a setting, which a public problem withholds.
+pub(super) fn refused(descriptor: &NotifierDescriptor, error: &DeliverError) -> ApiError {
+    let field = error
+        .field
+        .as_deref()
+        .and_then(|name| descriptor.fields.iter().find(|field| field.name == name));
+    let path = match field {
+        Some(field) if field.kind.is_secret() => format!("secrets.{}", field.name),
+        Some(field) => format!("config.{}", field.name),
+        None => "config".to_owned(),
+    };
+    let message = if error.code == outbound::NOT_ALLOWED {
+        "is a private address, which only the system's own channels reach unless a system administrator allows it"
+            .to_owned()
+    } else {
+        format!("the far side refuses it: {}", error.message)
+    };
+    ApiError::invalid(&path, &message)
 }
 
 /// A name of a channel or a destination, as it is kept: one to the most
@@ -411,6 +429,7 @@ pub(super) struct PreparedChannel {
     route: Option<route_rows::RouteRow>,
     needs: Option<orch_notifier_contract::descriptor::Needs>,
     waiting_count: i64,
+    pending_delivery: Option<orch_api_contract::notifications::PendingDelivery>,
     link: Option<orch_api_contract::notifications::NotificationRouteLink>,
 }
 
@@ -430,14 +449,18 @@ impl PreparedViews {
                     can_edit: ready.can_edit,
                     secrets_set: ready.secrets_set.clone(),
                     enabled_route_count: ready.enabled_route_count,
-                    route: views::route_view(views::RouteFacts {
-                        channel_id: Some(ready.row.id),
-                        channel: Some(ready.route_channel.clone()),
-                        route: ready.route.as_ref(),
-                        needs: ready.needs,
-                        waiting_count: ready.waiting_count,
-                        link: ready.link.clone(),
-                    }),
+                    route: {
+                        let mut shown = views::route_view(views::RouteFacts {
+                            channel_id: Some(ready.row.id),
+                            channel: Some(ready.route_channel.clone()),
+                            route: ready.route.as_ref(),
+                            needs: ready.needs,
+                            waiting_count: ready.waiting_count,
+                            link: ready.link.clone(),
+                        });
+                        shown.pending_delivery = ready.pending_delivery.clone();
+                        shown
+                    },
                 })
             })
             .collect()
@@ -572,6 +595,19 @@ pub(super) async fn prepare_views(
             Some(route) => own_link(conn, route, ctx_now(principal)).await?,
             None => None,
         };
+        let pending_delivery = match &route {
+            Some(route) => {
+                super::views::pending_delivery(
+                    conn,
+                    principal.user(),
+                    route.id,
+                    ctx_now(principal),
+                    !route.enabled || !row.enabled || needs.is_some(),
+                )
+                .await?
+            }
+            None => None,
+        };
         shown.push(PreparedChannel {
             owner: views::owner_view(row, &orgs),
             can_edit,
@@ -582,12 +618,59 @@ pub(super) async fn prepare_views(
             route,
             needs,
             waiting_count,
+            pending_delivery,
             link,
         });
     }
     Ok(PreparedViews {
         rows: shown,
         private_routes,
+    })
+}
+
+/// Native owner and field projection runs before a channel search or page is selected.
+pub async fn list(
+    ctx: Ctx,
+    query: NotificationChannelListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::notifications::NotificationChannelPage> {
+    let source = format!(
+        "channels:{}:{:?}:{}",
+        ctx.user()?.id(),
+        query.org_id,
+        query.system.unwrap_or(false)
+    );
+    let page = query.collection();
+    let rows =
+        crate::key_operations::native::selected_read::<list_read::Channels>(ctx, query, ()).await?;
+    let kinds = rows
+        .iter()
+        .map(|(_, row)| row.kind.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let page = orch_api_base::collection::snapshot(
+        &page,
+        &source,
+        rows,
+        |(created_at, row)| {
+            (
+                match &row.owner {
+                    NotificationChannelOwner::System => 0,
+                    NotificationChannelOwner::Org(_) => 1,
+                    NotificationChannelOwner::Me => 2,
+                },
+                *created_at,
+                row.id,
+            )
+        },
+        |(_, row)| format!("{} {}", row.name, row.kind),
+        false,
+    )?;
+    Ok(orch_api_contract::notifications::NotificationChannelPage {
+        items: page.items.into_iter().map(|(_, row)| row).collect(),
+        next_cursor: page.next_cursor,
+        kinds,
     })
 }
 
@@ -732,7 +815,7 @@ async fn make(
     .await
     .map_err(|fault| save_fault(Some(&descriptor), fault))?;
     let last_error = match &checked.saved {
-        Saved::Refused(error) => return Err(refused(error)),
+        Saved::Refused(error) => return Err(refused(&descriptor, error)),
         Saved::KeptWithError(error) => Some(error.message.clone()),
         Saved::Kept(_) => None,
     };
@@ -1099,7 +1182,7 @@ pub(super) async fn recheck(again: Recheck<'_>) -> ApiResult<Rechecked> {
     .await
     .map_err(|fault| save_fault(Some(&descriptor), fault))?;
     let unreached = match &checked.saved {
-        Saved::Refused(error) => return Err(refused(error)),
+        Saved::Refused(error) => return Err(refused(&descriptor, error)),
         Saved::KeptWithError(error) => Some(error.message.clone()),
         Saved::Kept(_) => None,
     };

@@ -1,6 +1,8 @@
-/** Selected rows are reviewed together but keep separate fences, progress, refusals, observed lost answers and Undo. */
+/** Selected rows act at once and keep separate fences, refusals, lost answers and Undo; a selected deletion keeps its own review. */
 import { expect, test, type Page } from '@playwright/test';
 import { ACME, scenario, signIn } from './support.ts';
+
+const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 
 test.beforeEach(async () => { await scenario(); });
 
@@ -9,7 +11,7 @@ async function select(page: Page, names: readonly string[]) {
   for (const name of names) await page.getByRole('checkbox', { name: `Select ${name}`, exact: true }).check();
 }
 
-test('a phone review names the archive work, reports a partial refusal and lost answer, and undoes the confirmed row alone', async ({ page }) => {
+test('a phone selection that stops running work says so in one line first, names a refusal and a lost answer by their rows, and Undo brings back the confirmed row alone', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
   await select(page, ['Fix login', 'Upgrade deps', 'Migrate CI']);
@@ -25,42 +27,46 @@ test('a phone review names the archive work, reports a partial refusal and lost 
     else await route.continue();
   });
   await page.route('**/api/v1/nodes/*/unarchive', async (route) => { undone.push(route.request().url().split('/').at(-2) ?? ''); await route.continue(); });
+  // The fake API counts only the turns and approvals it holds itself: Fix login's running Main thread and the approval its
+  // Repro waits for are given to Fix login's plan here.
+  await page.route('**/api/v1/nodes/*/archive/preview', async (route) => {
+    const reply = await route.fetch();
+    const plan = await reply.json() as { node: { id: string }; work: { thread: { name: string | null }; turns: number | null; approvals: number | null }[] };
+    if (plan.node.id === ACME.fixLogin) plan.work = plan.work.map((item) => item.thread.name === 'Main thread' ? { ...item, turns: 1 } : item.thread.name === 'Repro' ? { ...item, approvals: 1 } : item);
+    await route.fulfill({ response: reply, json: plan });
+  });
   await page.getByRole('region', { name: 'Selected topics' }).getByRole('button', { name: 'Archive', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Review selected places', exact: true });
-  await expect(dialog.getByRole('button', { name: 'Apply to 3 ready places' })).toBeEnabled();
-  await expect(dialog.getByRole('list', { name: 'Covered subtree' })).toHaveCount(3);
-  await expect(dialog.getByRole('list', { name: 'Work that stops' })).toHaveCount(3);
+  // Fix login has a running turn and an approval waiting: that is the one thing said before the archive is made.
+  const stops = page.getByRole('alertdialog', { name: 'Archive 3 topics?', exact: true });
+  await expect(stops.getByText(/^Work running in \d+ threads? stops$/)).toBeVisible();
+  await expect(stops.getByRole('list', { name: 'Covered subtree' })).toHaveCount(0);
   expect(applied).toEqual([]);
-  await dialog.getByRole('button', { name: 'Apply to 3 ready places' }).click();
-  const result = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
-  await expect(result.getByText('Answer lost; outcome unknown', { exact: true })).toBeVisible();
-  await expect(result.getByText('Some rows did not succeed. Each result below stands on its own.', { exact: true })).toBeVisible();
-  const lost = result.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Migrate CI', exact: true }) });
-  await lost.getByRole('button', { name: 'Read current state', exact: true }).click();
-  await expect(lost).toContainText('Read only afterwards');
-  await result.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
-  await expect(result.getByRole('heading', { name: 'Undo results' })).toBeVisible();
+  await stops.getByRole('button', { name: 'Archive 3 topics', exact: true }).click();
+  // The results name only the rows that did not succeed.
+  const result = page.getByRole('dialog', { name: 'Results for 3 topics', exact: true });
+  await expect(result.getByText('Upgrade deps', { exact: true })).toBeVisible();
+  await expect(result.getByText('Migrate CI', { exact: true })).toBeVisible();
+  await expect(result.getByText('This change was not confirmed, so Undo leaves it out. Check its current state before choosing again.', { exact: true })).toHaveCount(1);
+  await expect(result.getByText('Fix login', { exact: true })).toHaveCount(0);
   expect(applied).toHaveLength(3);
-  expect(undone).toEqual([ACME.fixLogin]);
+  await result.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();
+  await notices(page).getByRole('listitem').filter({ hasText: '1 topic archived' }).getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect.poll(() => undone).toEqual([ACME.fixLogin]);
 });
 
-test('a changed subtree is refused and only a new displayed review can be accepted', async ({ page }) => {
+test('a changed subtree refuses its row alone, and Archive again reads a new plan', async ({ page }) => {
   await signIn(page);
   await select(page, ['Upgrade deps']);
-  await page.getByRole('region', { name: 'Selected topics' }).getByRole('button', { name: 'Archive', exact: true }).click();
-  const review = page.getByRole('dialog', { name: 'Review selected places', exact: true });
-  await expect(review.getByRole('button', { name: 'Apply to 1 ready place' })).toBeEnabled();
-  // The browser reports the server's changed-subtree refusal and waits for a fresh review.
   await page.route(`**/api/v1/nodes/${ACME.upgradeDeps}/archive`, async (route) => {
     await route.fulfill({ status: 409, json: { type: 'orch:error:conflict.stale_revision', code: 'conflict.stale_revision', status: 409, title: 'Review changed', detail: 'A newer child changed this archive review.', request_id: 'stale-subtree', current: { revision: 2 } } });
   }, { times: 1 });
-  await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
-  const results = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
-  await expect(results.getByText('Refused', { exact: true })).toBeVisible();
-  await results.getByRole('button', { name: 'Review again', exact: true }).click();
-  await expect(review.getByRole('button', { name: 'Apply to 1 ready place' })).toBeEnabled();
-  await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
-  await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
+  const bar = page.getByRole('region', { name: 'Selected topics' });
+  await bar.getByRole('button', { name: 'Archive', exact: true }).click();
+  const results = page.getByRole('dialog', { name: 'Results for 1 topic', exact: true });
+  await expect(results.getByText('Upgrade deps', { exact: true })).toBeVisible();
+  await results.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();
+  await bar.getByRole('button', { name: 'Archive', exact: true }).click();
+  await expect(notices(page).getByText('1 topic archived', { exact: true })).toBeVisible();
 });
 
 test('a selected deletion keeps its own recovery group and the aggregate Undo restores only that group', async ({ page }) => {
@@ -73,32 +79,31 @@ test('a selected deletion keeps its own recovery group and the aggregate Undo re
   await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
   const results = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
   await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
-  await results.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+  await results.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
   await expect(results.getByRole('heading', { name: 'Undo results', exact: true })).toBeVisible();
   await expect(results.getByText('Succeeded', { exact: true })).toHaveCount(2);
   await results.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByRole('checkbox', { name: 'Select Upgrade deps', exact: true })).toBeVisible();
 });
 
-test('a selected move shows its destination and consequences and Undo returns the confirmed revision to its former project', async ({ page }) => {
+test('a selected move goes at once to the chosen project and Undo returns it to its former project', async ({ page }) => {
   await signIn(page);
   await select(page, ['Upgrade deps']);
   await page.getByRole('region', { name: 'Selected topics' }).getByRole('button', { name: 'Move', exact: true }).click();
-  const review = page.getByRole('dialog', { name: 'Review selected places', exact: true });
-  await review.getByRole('combobox', { name: 'Move to', exact: true }).fill('Evals');
-  await page.getByRole('option', { name: /Evals/ }).click();
-  await expect(review.getByRole('button', { name: 'Apply to 1 ready place' })).toBeEnabled();
-  await expect(review).toContainText('From');
-  await expect(review.getByRole('link', { name: 'Evals', exact: true })).toBeVisible();
+  const dialog = page.getByRole('dialog', { name: 'Move 1 topic', exact: true });
+  await dialog.getByRole('combobox', { name: 'Move to', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Evals');
+  await page.getByRole('treeitem', { name: /Evals$/ }).click();
   const confirmations: unknown[] = [];
   await page.route(`**/api/v1/topics/${ACME.upgradeDeps}/move`, async (route) => { confirmations.push(route.request().postDataJSON() as unknown); await route.continue(); });
-  await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
-  const result = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
-  await expect(result.getByText('Succeeded', { exact: true })).toBeVisible();
-  await result.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
-  await expect(result.getByText('Undone', { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Move', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const moved = notices(page).getByRole('listitem').filter({ hasText: /^1 topic moved to / });
+  await expect(moved).toBeVisible();
+  await moved.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(notices(page).getByText('1 topic moved back', { exact: true })).toBeVisible();
   expect(confirmations).toEqual([
-    { parent_id: ACME.evals, expected_revision: expect.any(Number), preflight_id: expect.any(String) },
-    { parent_id: ACME.web, expected_revision: expect.any(Number), preflight_id: expect.any(String) },
+    { parent_id: ACME.evals, expected_revision: expect.any(Number) },
+    { parent_id: ACME.web, expected_revision: expect.any(Number) },
   ]);
 });
