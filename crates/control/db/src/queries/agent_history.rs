@@ -18,6 +18,7 @@ pub struct History {
     /// The immutable machine that owns the segment's stream.
     pub machine_id: Option<Id>,
     /// The adapter's native identity.
+    #[sqlx(try_from = "crate::storage::Text")]
     pub native_session_ref: String,
     /// Last recorded physical size, or unknown.
     pub bytes: Option<i64>,
@@ -188,7 +189,7 @@ pub async fn has_dependents(conn: &mut Conn, history: &History) -> Result<bool, 
             AND s.native_session_ref=requested.native_session_ref
             AND (EXISTS(SELECT 1 FROM jobs job WHERE job.id=cut.job_id AND job.state IN ('queued','running'))
                 OR cut.owner_thread_id IS NOT NULL AND cut.owner_thread_id<>cut.thread_id AND NOT (cut.artifacts ? 'side_native_result')))")
-        .bind(&history.native_session_ref).bind(history.id)
+        .bind(orch_types::storable::encode_key(&history.native_session_ref)).bind(history.id)
         .fetch_one(conn).await?)
 }
 
@@ -278,7 +279,7 @@ pub async fn claim(
     Ok(sqlx::query("UPDATE segments SET agent_history_claim=$2,agent_history_claimed_at=$3,
         agent_history_removed_by=$4,agent_history_error=NULL WHERE id=$1 AND agent_history_claim IS NULL
         AND agent_history_removed_at IS NULL AND native_session_ref=$5")
-        .bind(current.id).bind(command).bind(at).bind(by).bind(&current.native_session_ref)
+        .bind(current.id).bind(command).bind(at).bind(by).bind(orch_types::storable::encode_key(&current.native_session_ref))
         .execute(conn).await?.rows_affected()==1)
 }
 
@@ -304,7 +305,31 @@ pub async fn measured(
         agent_history_removed_at=CASE WHEN $4 AND $5::text IS NULL THEN COALESCE(s.agent_history_removed_at,$6) ELSE s.agent_history_removed_at END,
         agent_history_error=$5 FROM segments requested WHERE requested.id=$1 AND requested.native_session_ref=$2
         AND s.machine_id IS NOT DISTINCT FROM requested.machine_id AND s.provider_id=requested.provider_id AND s.agent_id=requested.agent_id AND s.native_session_ref=requested.native_session_ref")
-        .bind(segment).bind(native).bind(bytes).bind(removed).bind(error).bind(at).execute(conn).await?;
+        .bind(segment).bind(orch_types::storable::encode_key(native)).bind(bytes).bind(removed).bind(error).bind(at).execute(conn).await?;
+    Ok(())
+}
+
+/// Records a changed native retention decision; an unchanged assessment retains its original receipt.
+pub async fn record_policy(
+    conn: &mut Conn,
+    segment: Id,
+    native: &str,
+    policy: &Json,
+) -> Result<(), DbError> {
+    let thread: Option<Id> = sqlx::query_scalar("UPDATE segments SET agent_history_policy=$3 WHERE id=$1 AND native_session_ref=$2
+        AND (agent_history_policy-'observed_at') IS DISTINCT FROM ($3::jsonb-'observed_at') RETURNING thread_id")
+        .bind(segment).bind(native).bind(policy).fetch_optional(&mut *conn).await?;
+    if let Some(thread) = thread
+        && let Some(seq) = crate::sequences::next(conn, thread).await?
+    {
+        sqlx::query("UPDATE segments SET seq_updated=$2 WHERE id=$1")
+            .bind(segment)
+            .bind(seq)
+            .execute(&mut *conn)
+            .await?;
+        crate::queries::threads::set_seq_state(conn, thread, seq).await?;
+        crate::sequences::notify(conn, thread, seq).await?;
+    }
     Ok(())
 }
 
@@ -334,7 +359,38 @@ pub async fn measured_batch(
     if observations.is_empty() {
         return Ok(());
     }
-    sqlx::query("WITH observations AS (
+    let mut values = serde_json::to_value(observations)
+        .map_err(|error| DbError::Other(sqlx::Error::Protocol(error.to_string())))?;
+    if let Some(rows) = values.as_array_mut() {
+        for row in rows {
+            if let Some(native) = row.get("native").and_then(Json::as_str) {
+                row["native"] = Json::String(orch_types::storable::encode_key(native));
+            }
+            if let Some(Json::String(error)) = row.get_mut("error") {
+                orch_types::storable::normalize_text(error);
+            }
+        }
+    }
+    // Capture physical aliases before locking threads; later associations do not borrow this observation.
+    let aliases: Vec<(Id,Id)> = sqlx::query_as("WITH o AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(segment uuid,native text))
+        SELECT DISTINCT s.id,s.thread_id FROM o JOIN segments requested ON requested.id=o.segment AND requested.native_session_ref=o.native
+        JOIN segments s ON s.provider_id=requested.provider_id AND s.agent_id=requested.agent_id AND s.native_session_ref=requested.native_session_ref
+            AND s.machine_id IS NOT DISTINCT FROM requested.machine_id ORDER BY s.thread_id,s.id")
+        .bind(&values).fetch_all(&mut *conn).await?;
+    let ids: Vec<Id> = aliases.iter().map(|(id, _)| *id).collect();
+    let threads: Vec<Id> = aliases
+        .iter()
+        .map(|(_, thread)| *thread)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let _: Vec<Id> = sqlx::query_scalar(
+        "SELECT node_id FROM threads WHERE node_id=ANY($1::uuid[]) ORDER BY node_id FOR UPDATE",
+    )
+    .bind(&threads)
+    .fetch_all(&mut *conn)
+    .await?;
+    let changed: Vec<(Id,Id)> = sqlx::query_as("WITH observations AS (
         SELECT requested.machine_id,requested.provider_id,requested.agent_id,o.*
         FROM jsonb_to_recordset($1::jsonb) AS o(segment uuid,native text,bytes bigint,removed boolean,error text,revision bigint)
         JOIN segments requested ON requested.id=o.segment AND requested.native_session_ref=o.native)
@@ -345,8 +401,35 @@ pub async fn measured_batch(
         agent_history_measured_revision=GREATEST(s.agent_history_measured_revision,COALESCE(o.revision,s.agent_history_measured_revision)),
         agent_history_error=o.error FROM observations o
         WHERE s.provider_id=o.provider_id AND s.agent_id=o.agent_id AND s.native_session_ref=o.native
-          AND s.machine_id IS NOT DISTINCT FROM o.machine_id")
-        .bind(sqlx::types::Json(observations)).bind(at).execute(conn).await?;
+          AND s.machine_id IS NOT DISTINCT FROM o.machine_id AND s.id=ANY($3::uuid[])
+          AND ROW(s.agent_history_bytes,s.agent_history_measured_at,s.agent_history_owned,
+              s.agent_history_removed_at,s.agent_history_measured_revision,s.agent_history_error)
+              IS DISTINCT FROM ROW(
+                  CASE WHEN o.error IS NULL THEN o.bytes ELSE s.agent_history_bytes END,
+                  CASE WHEN o.error IS NULL THEN $2 ELSE s.agent_history_measured_at END,
+                  s.agent_history_owned OR o.error IS NULL,
+                  CASE WHEN o.removed AND o.error IS NULL THEN COALESCE(s.agent_history_removed_at,$2) ELSE s.agent_history_removed_at END,
+                  GREATEST(s.agent_history_measured_revision,COALESCE(o.revision,s.agent_history_measured_revision)),o.error)
+          RETURNING s.id,s.thread_id")
+        .bind(&values).bind(at).bind(&ids).fetch_all(&mut *conn).await?;
+    for thread in threads {
+        let ids = changed
+            .iter()
+            .filter_map(|(id, owner)| (*owner == thread).then_some(*id))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            continue;
+        }
+        if let Some(seq) = crate::sequences::next(conn, thread).await? {
+            sqlx::query("UPDATE segments SET seq_updated=$2 WHERE id=ANY($1::uuid[])")
+                .bind(&ids)
+                .bind(seq)
+                .execute(&mut *conn)
+                .await?;
+            crate::queries::threads::set_seq_state(conn, thread, seq).await?;
+            crate::sequences::notify(conn, thread, seq).await?;
+        }
+    }
     Ok(())
 }
 
@@ -425,6 +508,120 @@ mod tests {
             .await
             .unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn repeated_native_history_refusals_keep_the_sequence_while_a_new_measurement_reports_zero()
+     {
+        let db = fixture().await;
+        let mut conn = db.pool.acquire().await.unwrap();
+        let segment = Id::from_u128(1);
+        let at = chrono::Utc::now();
+        let refusal = Observation {
+            segment,
+            native: "history-1".into(),
+            bytes: None,
+            removed: false,
+            error: Some("unsupported".into()),
+            revision: Some(1),
+        };
+        measured_batch(&mut conn, &[refusal], at).await.unwrap();
+        let before: Json = sqlx::query_scalar(
+            "SELECT jsonb_build_object('seq',t.next_seq,'segment_seq',s.seq_updated,
+             'bytes',s.agent_history_bytes,'measured_at',s.agent_history_measured_at,'error',s.agent_history_error)
+             FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        let later = at + chrono::Duration::seconds(2);
+        measured_batch(
+            &mut conn,
+            &[Observation {
+                segment,
+                native: "history-1".into(),
+                bytes: None,
+                removed: false,
+                error: Some("unsupported".into()),
+                revision: Some(1),
+            }],
+            later,
+        )
+        .await
+        .unwrap();
+        let repeated: Json = sqlx::query_scalar(
+            "SELECT jsonb_build_object('seq',t.next_seq,'segment_seq',s.seq_updated,
+             'bytes',s.agent_history_bytes,'measured_at',s.agent_history_measured_at,'error',s.agent_history_error)
+             FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(
+            repeated, before,
+            "the same refusal is no new public observation"
+        );
+        measured_batch(
+            &mut conn,
+            &[Observation {
+                segment,
+                native: "history-1".into(),
+                bytes: Some(0),
+                removed: false,
+                error: None,
+                revision: Some(1),
+            }],
+            later,
+        )
+        .await
+        .unwrap();
+        let observed: (i64, Option<i64>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+            "SELECT t.next_seq,s.agent_history_bytes,s.agent_history_measured_at,s.agent_history_error
+             FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(Some(observed.0), before["seq"].as_i64().map(|seq| seq + 1));
+        assert_eq!(observed.1, Some(0));
+        assert_eq!(
+            observed.2.map(|time| time.timestamp_micros()),
+            Some(later.timestamp_micros())
+        );
+        assert!(observed.3.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_retention_assessment_keeps_its_original_receipt_and_thread_sequence() {
+        let db = fixture().await;
+        let mut conn = db.pool.acquire().await.unwrap();
+        let segment = Id::from_u128(1);
+        let first = serde_json::json!({"days":7,"source":"default",
+            "eligible_at":{"state":"at","at":"2026-11-15T00:00:00Z"},
+            "observed_at":"2026-11-14T00:00:00Z"});
+        record_policy(&mut conn, segment, "history-1", &first)
+            .await
+            .unwrap();
+        let before: (i64, i64, Json) = sqlx::query_as(
+            "SELECT t.next_seq,s.seq_updated,s.agent_history_policy FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        let mut repeated = first.clone();
+        repeated["observed_at"] = serde_json::json!("2026-11-15T00:00:00Z");
+        record_policy(&mut conn, segment, "history-1", &repeated)
+            .await
+            .unwrap();
+        let unchanged: (i64, i64, Json) = sqlx::query_as(
+            "SELECT t.next_seq,s.seq_updated,s.agent_history_policy FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(
+            unchanged, before,
+            "the clock alone is no new retention decision"
+        );
+        repeated["days"] = serde_json::json!(0);
+        repeated["eligible_at"] = serde_json::json!({"state":"not_applicable"});
+        record_policy(&mut conn, segment, "history-1", &repeated)
+            .await
+            .unwrap();
+        let changed: (i64, i64, Json) = sqlx::query_as(
+            "SELECT t.next_seq,s.seq_updated,s.agent_history_policy FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(changed.0, before.0 + 1);
+        assert_eq!(
+            changed.2, repeated,
+            "a changed policy keeps its actual assessment time"
+        );
+        assert!(changed.1 > before.1);
     }
 
     #[tokio::test]
