@@ -19,8 +19,8 @@ import tomllib
 
 # Splitting the largest packages keeps the linked programs below the disk available
 # on a hosted runner; the remaining packages are balanced by test-target count.
-# Eight API shards: with six, every API shard ended its run with 1-4 GB of its runner's 145 GB disk left
-# (B23, B24), and the 100,000-thread scale case ran PostgreSQL out of space.
+# Eight API shards: with six, every API shard ended its run with 1-4 GB of its runner's 145 GB disk left,
+# and the 100,000-thread scale case ran PostgreSQL out of space.
 PARTS = {"api": ("orch-api-core", 8), "engine": ("orch-engine", 3)}
 OTHER_SHARDS = 4
 # Completed scale binaries take up to 30 minutes on hosted runners. Leave 50%

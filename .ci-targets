@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/component/picker-conventions.test.tsx tests/component/start-flow.test.tsx tests/component/start-environment-options.test.tsx tests/component/combobox-room.test.tsx tests/unit/layer-room.test.ts tests/component/thread-change-chosen.test.tsx tests/component/make-environment.test.tsx tests/component/move-machine-choice.test.tsx
+web-e2e tests/e2e/resource-picker-access.spec.ts tests/e2e/combobox-room.spec.ts --project=chromium
