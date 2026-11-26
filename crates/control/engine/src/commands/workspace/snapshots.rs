@@ -146,18 +146,20 @@ impl SnapshotRequest {
 async fn structural(
     conn: &mut Conn,
     job: &jobs::JobRow,
-) -> Result<(SnapshotRequest, storage::SnapshotRow), EngineError> {
+) -> Result<Option<(SnapshotRequest, storage::SnapshotRow)>, EngineError> {
     let request: SnapshotRequest =
         serde_json::from_value(job.plan.get(ORIGIN).cloned().unwrap_or(Json::Null))?;
-    let snapshot = job
+    let Some(snapshot) = job
         .plan
         .get("snapshot_id")
         .and_then(Json::as_str)
         .and_then(|id| id.parse::<Id>().ok())
-        .ok_or_else(|| EngineError::unreadable("the original snapshot identity is missing"))?;
-    let row = storage::snapshot(conn, snapshot)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("the original snapshot is missing"))?;
+    else {
+        return Ok(None);
+    };
+    let Some(row) = storage::snapshot(conn, snapshot).await? else {
+        return Ok(None);
+    };
     let operation = if request.thread.is_some() {
         "ThreadSnapshotCreate"
     } else {
@@ -181,11 +183,9 @@ async fn structural(
         || job.plan["selection"] != serde_json::to_value(&request.selection)?
         || row.selection != serde_json::to_value(&request.selection)?
     {
-        return Err(EngineError::unreadable(
-            "the native snapshot no longer matches its original recipe",
-        ));
+        return Ok(None);
     }
-    Ok((request, row))
+    Ok(Some((request, row)))
 }
 
 /// Only genuine pre-provenance jobs retain their existing ordinary native path.
@@ -213,7 +213,9 @@ impl SnapshotCommand {
         expected: &SnapshotRequest,
         command: &crate::commands::Outgoing,
     ) -> Result<Self, EngineError> {
-        let (request, _) = structural(conn, row).await?;
+        let (request, _) = structural(conn, row)
+            .await?
+            .ok_or_else(|| EngineError::BeforeEffect(Box::new(Error::Refused)))?;
         let body: FsSnapshot = serde_json::from_value(command.body.clone())?;
         if request != *expected
             || command.kind.as_str() != "fs.snapshot"
@@ -296,7 +298,9 @@ impl SnapshotCommand {
         };
         let caller = match checked {
             Ok(caller) => caller,
-            Err(Error::Refused) => return Ok(None),
+            Err(Error::Refused | Error::Binding(crate::operation_scope::BindingError::Refused)) => {
+                return Ok(None);
+            }
             Err(error) => return Err(EngineError::unreadable(error)),
         };
         if (self.request.session.is_some() && caller.grant().is_some())
@@ -317,6 +321,8 @@ impl SnapshotCommand {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -362,7 +368,7 @@ impl<M: SnapshotMode> Source for JobSource<M> {
     ) -> BoxFuture<'a, Result<(JobValue, Vec<Facts<Role>>), Error>> {
         Box::pin(async move {
             let row = jobs::job(conn, input.job).await?.ok_or(Error::Refused)?;
-            let (request, snapshot) = structural(conn, &row).await?;
+            let (request, snapshot) = structural(conn, &row).await?.ok_or(Error::Refused)?;
             if request != input.request
                 || !row.is_open()
                 || row.cancel_requested()
@@ -452,7 +458,7 @@ impl<M: SnapshotMode> Source for JobSource<M> {
                 .execute(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.machine)
                 .execute(conn)
                 .await

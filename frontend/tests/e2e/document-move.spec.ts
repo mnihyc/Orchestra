@@ -11,7 +11,7 @@ import { screenReady } from '../../e2e/layout-rules-helpers';
 import { id, me, org, userRef } from '../doubles/fixtures';
 import { treeNode } from '../doubles/tree-node';
 import { documentTreeFixture, TREE } from './document-tree-support';
-import { scenario } from './support';
+import { readsOneByOne, scenario } from './support';
 const DESTINATION = id(92, 1), NEW_ROOT = id(92, 2), CHILD = id(92, 3);
 for (const mode of SCREEN_PRESENTATIONS) test(`document folder native Move out (${mode.locale}/${mode.theme}/${mode.width})`, async ({ page }, info) => {
   // EN: Folder > menu > Move > other org > complete native deletion plan > cancel > reopen > one Move-out act
@@ -19,6 +19,7 @@ for (const mode of SCREEN_PRESENTATIONS) test(`document folder native Move out (
   const words = (key: string, values: Record<string, string> = {}) => caption(`@${key}`, mode.locale).replace(/\{\{(\w+)\}\}/gu, (whole: string, name: string) => values[name] ?? whole);
   await scenario(); const fixture = await documentTreeFixture(page); for (const row of fixture.rows.values()) row.standing.manage = true;
   const other = org(DESTINATION, 'other', 'Other org', userRef(me(1, 'ada', 'Ada')));
+  await readsOneByOne(page);
   await page.route(/\/api\/v1\/me\/bootstrap$/u, async (route) => {
     const response = await route.fetch();
     const data = await response.json() as MeBootstrapReply;

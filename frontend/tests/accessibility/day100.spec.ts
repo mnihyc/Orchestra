@@ -23,7 +23,7 @@ for (const language of ['en', 'zh-CN'] as const) {
     await expect(row.getByRole('textbox')).toHaveValue(proposed);
 
     await page.goto(`/project/${ACME.web}?view=list`);
-    await page.getByRole('checkbox', { name: language === 'en' ? 'Select Fix login' : '选择Fix login', exact: true }).check();
+    await page.getByRole('checkbox', { name: language === 'en' ? 'Select Fix login' : '选择“Fix login”', exact: true }).check();
     await page.getByLabel(language === 'en' ? 'Selected topics' : '已选话题').getByRole('button', { name: language === 'en' ? 'Mark done' : '标记为已完成', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expectAccessibleSettled(page, '[role="dialog"]');

@@ -15,7 +15,7 @@ vi.mock('@/api/imports', async (original) => ({ ...await original<object>(), pla
 vi.mock('@/features/people/importJobs', async (original) => ({ ...await original<object>(), watchImport: calls.watch }));
 vi.mock('@/features/people/ImportProgress', () => ({ ImportProgress: ({ id, onReport }: { id: string; onReport: (id: string) => void }) => <div>Running {id}<button onClick={() => onReport('report-1')}>Finish job</button></div> }));
 vi.mock('@/features/people/ImportReport', () => ({ ImportReport: ({ id }: { id: string }) => <div>Report {id}</div> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/people/importUploads', () => ({ ImportUploads: class {
   constructor(readonly source: { files: { file: File; path: string }[]; bytes: number }) {}
   run(_signal: AbortSignal, progress: (value: { received: number; bytes: number; completed: number; files: number }) => void) {
