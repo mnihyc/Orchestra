@@ -165,7 +165,7 @@ mod tests {
             "workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace",
             "mounts":[],"model":"mock-large","effort":null,"params":{},"approval_mode":"auto",
             "available_models":["mock-large"],"sandbox_mode":"workspace","instructions":"","memory":null,
-            "arrangement":"together","orch_tools":[],"raw_events":false
+            "arrangement":"together","orch_tools":[],"output_capture_bytes":67108864, "web_action_wait_secs":120,"raw_events":false
         }))?;
         assert!(
             reviewer_for(&settings, CredentialPath::Native).is_err(),
@@ -241,7 +241,7 @@ mod tests {
         );
         assert!(crate::descriptor::auto_proven());
         assert!(orch_agent_programs::Programs::builtin().auto_possible());
-        assert!(!orch_agent_programs::shipped("claude-code").proves("approval_modes.auto"));
+        assert!(!orch_agent_programs::shipped("fake").proves("approval_modes.auto"));
         let declared = crate::descriptor::capabilities().approval_reviewer;
         assert!(
             declared

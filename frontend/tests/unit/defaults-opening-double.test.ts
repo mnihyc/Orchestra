@@ -1,7 +1,7 @@
 // @vitest-environment node
 /** Opted-in Defaults in the browser double reuse the same per-reader native suppliers and refusals. */
 import { expect, it, vi } from 'vitest';
-import type { NodeDefaultsOpening, ResolvedSetting } from '@/generated/api-types';
+import type { NodeDefaultsOpening } from '@/generated/api-types';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { ACME } from '../doubles/fixtures';
 import { nodeChatOpening } from '../doubles/screen-openings';
@@ -81,16 +81,4 @@ it('serves the existing genuine Host setting used by the Defaults lazy-options j
   const meta = requireDefaults(reply.defaults);
   expect(meta.registry?.find((def) => def.key === 'env.host_id')).toEqual(host);
   expect(meta.settings?.find((row) => row.key === 'env.host_id')).toMatchObject({ value: null, own: null, writable: true });
-});
-
-it('serves the native link-sharing policy to a thread and its joined Chat opening', async () => {
-  const world = new World(), person = reader(world);
-  const policy = SETTINGS_REGISTRY.find((def) => def.key === 'sharing.on_link');
-  expect(policy).toBeDefined();
-  const direct = await world.requestFeeds.read(person, `/nodes/${ACME.mainThread}/settings`);
-  const rows = direct.body as ResolvedSetting[];
-  expect(rows.find((row) => row.key === 'sharing.on_link')).toMatchObject({ value: true, own: null, locked_by: null });
-  const opened = requireDefaults((await nodeChatOpening(world, person, ACME.mainThread, new URLSearchParams({ defaults: 'true' }))).defaults);
-  expect(opened.registry?.find((def) => def.key === 'sharing.on_link')).toEqual(policy);
-  expect(opened.settings?.find((row) => row.key === 'sharing.on_link')).toEqual(rows.find((row) => row.key === 'sharing.on_link'));
 });

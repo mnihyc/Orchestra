@@ -511,32 +511,12 @@ pub(crate) struct CopyAudience {
     pub people: u64,
 }
 
-/// Count the same native eligible readers/receivers, bounded in memory by the explicit-notice batch limit.
-pub(crate) async fn copy_audience(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    principal: &Principal,
-    chat: Id,
-) -> ApiResult<CopyAudience> {
-    audience(ctx, conn, principal, chat, false).await
-}
-
 /// A native group ending tells current eligible members, including people who never authored.
 pub(crate) async fn move_audience(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     chat: Id,
-) -> ApiResult<CopyAudience> {
-    audience(ctx, conn, principal, chat, true).await
-}
-
-async fn audience(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    principal: &Principal,
-    chat: Id,
-    members: bool,
 ) -> ApiResult<CopyAudience> {
     let target = target(conn, "chats", chat).await?;
     if !reads(conn, principal, &target).await? {
@@ -546,12 +526,8 @@ async fn audience(
     let mut users = Vec::new();
     let mut people = 0_u64;
     loop {
-        let page: Vec<Id> = if members {
-            sqlx::query_scalar("SELECT m.user_id FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=$1 AND m.left_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>$5) AND u.kind='human' AND u.status='active' AND m.user_id<>$2 AND ($3::uuid IS NULL OR m.user_id>$3) ORDER BY m.user_id LIMIT $4")
-                .bind(chat).bind(principal.user()).bind(cursor).bind(i64::try_from(PERSON_NOTIFY_MAX_PEOPLE).map_err(ApiError::internal)?).bind(ctx.app.clock.now()).fetch_all(&mut *conn).await.map_err(DbError::from)?
-        } else {
-            sqlx::query_scalar("SELECT DISTINCT m.author_id FROM chat_messages m JOIN users u ON u.id=m.author_id WHERE m.chat_id=$1 AND m.kind='message' AND m.deleted_at IS NULL AND u.kind='human' AND u.status='active' AND m.author_id<>$2 AND ($3::uuid IS NULL OR m.author_id>$3) ORDER BY m.author_id LIMIT $4").bind(chat).bind(principal.user()).bind(cursor).bind(i64::try_from(PERSON_NOTIFY_MAX_PEOPLE).map_err(ApiError::internal)?).fetch_all(&mut *conn).await.map_err(DbError::from)?
-        };
+        let page: Vec<Id> = sqlx::query_scalar("SELECT m.user_id FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=$1 AND m.left_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>$5) AND u.kind='human' AND u.status='active' AND m.user_id<>$2 AND ($3::uuid IS NULL OR m.user_id>$3) ORDER BY m.user_id LIMIT $4")
+                .bind(chat).bind(principal.user()).bind(cursor).bind(i64::try_from(PERSON_NOTIFY_MAX_PEOPLE).map_err(ApiError::internal)?).bind(ctx.app.clock.now()).fetch_all(&mut *conn).await.map_err(DbError::from)?;
 
         let Some(last) = page.last() else {
             break;
@@ -573,33 +549,6 @@ async fn audience(
         }
     }
     Ok(CopyAudience { users, people })
-}
-
-/// The copy's real source and original HTTP identity remain on the same native explicit notice.
-pub(crate) async fn tell_chat_copy(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    principal: &Principal,
-    source: Id,
-    created: Id,
-    people: &[Id],
-) -> ApiResult<()> {
-    tell_native(
-        ctx,
-        conn,
-        principal,
-        "chats",
-        source,
-        people,
-        None,
-        None,
-        || Ok(()),
-        Some(CopySource {
-            created,
-            ending: None,
-        }),
-    )
-    .await
 }
 
 /// The accepted destination receipt is captured on the same transaction before the
