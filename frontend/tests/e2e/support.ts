@@ -266,6 +266,19 @@ export function screenAddress(path: string | RegExp, own: Record<string, string>
   return new RegExp(`${where}\\/?${params.length === 0 ? '' : `[?]${params.join('&')}`}(?:${joint}list=[^&]*&_list=true|${joint}_list=true)?$`);
 }
 
+/**
+ * A page's document asks for its session and its first reads in one request (POST /auth/session/open). A case that holds
+ * or changes one of those reads on its way asks for the session alone, so that the page asks each read by itself where the
+ * case's own route sees it.
+ */
+export async function readsOneByOne(page: Page): Promise<void> {
+  await page.route((url) => url.pathname === '/api/v1/auth/session/open', async (route) => {
+    const url = new URL(route.request().url());
+    url.search = '';
+    await route.continue({ url: url.href });
+  });
+}
+
 /** Signs in with a name and a password, and waits for the workbench. */
 export async function signIn(page: Page, person: { login: string; password: string } = PEOPLE.ada): Promise<void> {
   await page.goto('/login');

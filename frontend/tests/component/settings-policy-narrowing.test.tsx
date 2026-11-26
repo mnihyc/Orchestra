@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as Client from '@/api/client';
+import { ApiError } from '@/api/client';
 import { clearSetting, putSetting, registryQuery } from '@/api/settings';
 import type { ResolvedSetting, SettingDef } from '@/generated/api-types';
 import { SettingRow } from '@/features/settings/SettingRow';
@@ -23,8 +24,8 @@ vi.mock('@/api/client', async (load) => {
   } } };
 });
 vi.mock('@/api/settings', async (load) => ({ ...await load<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const HERE = id(121, 1), target = { kind: 'node' as const, id: HERE };
 const local = { scope: 'org' as const, node: { id: HERE, kind: 'org' as const, name: 'Department', redacted: false } };
@@ -52,39 +53,90 @@ const appearance = useAppearance.getState();
 afterEach(async () => { cleanup(); vi.resetAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
-  it(`saves a looser choice, keeps the parent's answer, undoes its exact revision and follows a later relaxation ${locale}/${theme}`, async () => {
+  it(`names the inherited ceiling even when this place has already set less ${locale}/${theme}`, async () => {
+    await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+    const key = 'broadcast.thread_messages_per_hour';
+    definition(key, 'min', { type: 'integer', minimum: 0 });
+    const row = setting(key, 5, 5);
+    row.source = local;
+    row.inherited = { value: 10, source: upper };
+    show(<NativeRow value={row} />);
+    const ceiling = await screen.findByText(locale === 'en' ? 'Maximum: 10' : '上限：10');
+    expect(ceiling.parentElement).toHaveTextContent(i18n.t('settings.editor.from.system'));
+  });
+
+  it(`keeps a draft the server finds wider after refusal and saves the corrected limit at the same revision ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     const key = 'thread.side_max', title = definition(key, 'min', { type: 'integer', minimum: 1 });
-    const original = setting(key, 4, 8), accepted = setting(key, 4, 12, 8), undone = setting(key, 4, 8, 9);
-    vi.mocked(putSetting).mockResolvedValueOnce(accepted).mockResolvedValueOnce(undone);
-    const view = show(<NativeRow value={original} />), user = userEvent.setup();
+    const original = setting(key, 4, 8);
+    original.inherited = { value: 4, source: upper };
+    const accepted = { ...setting(key, 3, 3, 8), source: local, inherited: original.inherited };
+    vi.mocked(putSetting).mockRejectedValueOnce(new ApiError({
+      type: 'orch:error:request.invalid', code: 'request.invalid', status: 400, title: 'Invalid request',
+      detail: 'Something in this request is not valid. Check what you entered and try again.', request_id: 'test-limit',
+      ceiling: { value: 3, source: { scope: 'org', node: { ...local.node, name: 'Research.Team' } } },
+      errors: [{ path: 'value', message: 'exceeds the inherited maximum' }],
+    }, null)).mockResolvedValueOnce(accepted);
+    show(<NativeRow value={original} />);
+    const user = userEvent.setup();
     await screen.findByText(i18n.t('settings.compact.aboveStricter'));
     const edit = () => screen.getByRole('button', { name: i18n.t('settings.compact.editValue', { name: title }) });
-    expect(edit()).toHaveAccessibleDescription('4'); expect(putSetting).not.toHaveBeenCalled();
+    expect(edit()).toHaveAccessibleDescription('4');
     await user.click(edit());
     const input = screen.getByLabelText(title); expect(input).toHaveDisplayValue('8');
-    await user.clear(input); await user.type(input, '12');
+    // Within the maximum the page knows, so it is sent; the place above has lowered it since.
+    await user.clear(input); await user.type(input, '4');
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter', isComposing: true }); await Promise.resolve(); });
     expect(putSetting).not.toHaveBeenCalled();
-    await act(async () => { fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 }); await Promise.resolve(); });
-    expect(putSetting).not.toHaveBeenCalled();
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, key, { value: 12, expectedRevision: 7 }));
-    await screen.findByText(i18n.t('settings.compact.saved'), { exact: true });
-    await waitFor(() => expect(edit()).toHaveAccessibleDescription('4'));
-    expect(screen.getByText(i18n.t('settings.compact.aboveStricter'))).toBeVisible();
+    await screen.findByText(locale === 'en' ? 'Enter 3 or less (Research.Team).'
+      : '请输入 3 或更小的值（Research.Team）。');
+    expect(putSetting).toHaveBeenNthCalledWith(1, target, key, { value: 4, expectedRevision: 7 });
+    expect(input).toHaveDisplayValue('4');
+    expect(screen.queryByText(i18n.t('settings.compact.saved'))).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: i18n.t('settings.compact.undoNamed', { name: title }) }));
-    await waitFor(() => expect(putSetting).toHaveBeenNthCalledWith(2, target, key, { value: 8, locked: false, expectedRevision: 8 }));
-    await screen.findByText(i18n.t('settings.compact.undone'), { exact: true });
-    const relaxed = { ...undone, value: 8, source: local, parts: [
-      { source: upper, value: 20, locked: true, ignored: false },
-      { source: local, value: 8, locked: false, ignored: false },
-    ] };
-    view.rerender(<NativeRow value={relaxed} />);
-    await waitFor(() => expect(screen.queryByText(i18n.t('settings.compact.aboveStricter'))).not.toBeInTheDocument());
-    expect(edit()).toHaveAccessibleDescription('8'); expect(putSetting).toHaveBeenCalledTimes(2);
-    expect(calls.read).toHaveBeenCalledExactlyOnceWith('/settings/registry');
+    expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
+    await user.clear(input); await user.type(input, '3'); await user.keyboard('{Enter}');
+    await waitFor(() => expect(putSetting).toHaveBeenNthCalledWith(2, target, key, { value: 3, expectedRevision: 7 }));
+    await screen.findByText(i18n.t('settings.compact.saved'), { exact: true });
+    expect(edit()).toHaveAccessibleDescription('3');
+  });
+
+  it(`says a limit above the known maximum once, before sending, with nothing to retry ${locale}/${theme}`, async () => {
+    await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+    const key = 'broadcast.thread_messages_per_hour', title = definition(key, 'min', { type: 'integer', minimum: 0 });
+    const row = setting(key, 10, null);
+    row.own = null; row.parts = [{ source: upper, value: 10, locked: false, ignored: false }];
+    row.inherited = { value: 10, source: upper };
+    show(<NativeRow value={row} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('radio', { name: i18n.t('settings.compact.here') }));
+    const input = await screen.findByLabelText(title);
+    await user.clear(input); await user.type(input, '30'); await user.keyboard('{Enter}');
+    const refusal = locale === 'en' ? 'Enter 10 or less (System).' : `请输入 10 或更小的值（${i18n.t('settings.editor.from.system')}）。`;
+    expect(await screen.findAllByText(refusal)).toHaveLength(1);
+    expect(putSetting).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
+    expect(input).toHaveDisplayValue('30');
+  });
+
+  it(`offers no On where a place above switched a permission off ${locale}/${theme}`, async () => {
+    await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+    const key = 'orch_tools.owner_reads';
+    definition(key, 'all', { type: 'boolean' });
+    const project = { scope: 'project' as const, node: { id: id(121, 2), kind: 'project' as const, name: 'Web', redacted: false } };
+    const row: ResolvedSetting = { key, value: false, own: null, source: project, locked_by: null, writable: true,
+      parts: [{ source: project, value: false, locked: false, ignored: false }], inherited: { value: false, source: project } };
+    show(<NativeRow value={row} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('combobox'));
+    const on = await screen.findByRole('option', { name: new RegExp(`^${i18n.t('settings.editor.words.on')}`) });
+    expect(on).toHaveAttribute('aria-disabled', 'true');
+    expect(on).toHaveTextContent(i18n.t('settings.compact.heldAbove', { value: i18n.t('settings.editor.words.off'), place: 'Web' }));
+    await user.click(on);
+    expect(putSetting).not.toHaveBeenCalled();
+    expect(screen.getByRole('option', { name: new RegExp(`^${i18n.t('settings.editor.words.off')}`) })).not.toHaveAttribute('aria-disabled', 'true');
   });
 
   for (const [key, merge, schema, effective, own] of [

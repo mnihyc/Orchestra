@@ -579,6 +579,8 @@ async fn a_person_finds_a_removed_environment_inspects_its_frozen_day_and_restor
         .query(&EnvironmentDeleteQuery {
             confirm: "Trace HTTP kept files".to_owned(),
             at: None,
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await

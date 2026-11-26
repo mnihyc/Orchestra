@@ -1,5 +1,5 @@
 //! Immutable administrator messages and their accepted audience, using the ordinary Inbox.
-use crate::common::{Page, PageQuery, ReceiptProjection};
+use crate::common::{CollectionQuery, Page, ReceiptProjection};
 use crate::nodes::NodeRef;
 use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
 use crate::routes::Access::{Permission, Rule};
@@ -117,9 +117,9 @@ crate::endpoints! {
     MessageGet: GET "/messages/{id}", Rule("message recipient or sender at its scope"), none, none, json AdminMessage, 200,
         operation Op::single(Read, &[KeyTargetKind::Object(ObjectKind::Org), KeyTargetKind::Identity(KeyIdentityKind::System)], Target::Resolved("message_scope"));
     /// Lists messages sent at this organization, newest first, for whoever may send there.
-    OrgMessageList: GET "/orgs/{id}/messages", Permission("members.manage"), query PageQuery, none, json AdminMessageListResponse, 200,
+    OrgMessageList: GET "/orgs/{id}/messages", Permission("members.manage"), query CollectionQuery, none, json AdminMessageListResponse, 200,
         operation Op::single(Read, &[KeyTargetKind::Object(ObjectKind::Org)], Target::Path("id"));
     /// Lists installation messages, newest first, for a current system administrator.
-    AdminMessageList: GET "/admin/messages", Rule("system_admin"), query PageQuery, none, json AdminMessageListResponse, 200,
+    AdminMessageList: GET "/admin/messages", Rule("system_admin"), query CollectionQuery, none, json AdminMessageListResponse, 200,
         operation Op::single(Read, &[KeyTargetKind::Identity(KeyIdentityKind::System)], Target::System);
 }

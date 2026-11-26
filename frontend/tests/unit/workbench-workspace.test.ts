@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { activate, allTabs, applyGrid, findTab, findView, makeContainer, makeGroup, makeTab, move, spatialMainGroups } from '@/features/workbench/layout';
 import { moveScoped } from '@/features/workbench/panelScope';
-import { loadWorkspace, saveKept } from '@/features/workbench/persistence';
+import { loadWorkspace } from '@/features/workbench/persistence';
 import { keepPresentation, readPresentation } from '@/features/workbench/presentation';
 import { useWorkbench } from '@/features/workbench/store';
 import { viewKey } from '@/features/workbench/viewIdentity';
@@ -107,7 +107,7 @@ it('reset consolidates all ordinary main tabs, retains dirty state and persists 
   expect(groups[0]!.tabs.map((tab) => tab.id)).toEqual(expect.arrayContaining([a, b]));
   expect(state().unsaved.has(a)).toBe(true);
   expect(state().focusMode).toBe(false);
-  expect(loadWorkspace('workspace-reader', 'page').kept?.layout).toEqual(state().layout);
+  expect(loadWorkspace('workspace-reader').kept?.layout).toEqual(state().layout);
 });
 
 it('focus mode persists separately from bar sizes and visibility', () => {
@@ -121,18 +121,27 @@ it('focus mode persists separately from bar sizes and visibility', () => {
   expect({ left: state().layout.left, right: state().layout.right, bottom: state().layout.bottom }).toEqual(bars);
 });
 
-it('migrates valid targets from legacy arrangements once, and isolates signed-in people', () => {
+it('starts a fresh workspace instead of importing obsolete per-kind layouts from an earlier release', () => {
   state().leave(); localStorage.clear();
   const frame = state().layout;
   const a = makeTab('file', { thread: 'a', path: 'report.txt' }), b = makeTab('page', { href: '/doc/b' });
-  saveKept('legacy', 'thread', { arrangement: 'conversation', layout: { ...frame, main: makeGroup([a]) } });
-  saveKept('legacy', 'document', { arrangement: 'default', layout: { ...frame, main: makeGroup([b]) } });
+  localStorage.setItem('orch.legacy.workbench.thread', JSON.stringify({ arrangement: 'conversation', layout: JSON.stringify({ ...frame, main: makeGroup([a]) }) }));
+  localStorage.setItem('orch.legacy.workbench.document', JSON.stringify({ arrangement: 'default', layout: JSON.stringify({ ...frame, main: makeGroup([b]) }) }));
   state().enter('legacy', 'thread');
-  expect(allTabs(state().layout).map((tab) => tab.id)).toEqual([a.id, b.id]);
+  expect(allTabs(state().layout).some((tab) => tab.id === a.id || tab.id === b.id)).toBe(false);
   state().leave(); state().enter('legacy', 'document');
-  expect(allTabs(state().layout).map((tab) => tab.id)).toEqual([a.id, b.id]);
+  expect(allTabs(state().layout).some((tab) => tab.id === a.id || tab.id === b.id)).toBe(false);
   state().enter('another-person', 'thread');
   expect(allTabs(state().layout).some((tab) => tab.id === a.id || tab.id === b.id)).toBe(false);
+});
+
+it('retains a pinned targeted view when its registration is unavailable during workspace restore', () => {
+  const tab = { ...makeTab('unavailable-extension', { document: 'chosen-document' }), pinned: true };
+  state().change((layout) => ({ ...layout, main: makeGroup([tab], tab.id) }));
+  state().flush();
+  state().leave(); state().enter('workspace-reader', 'page');
+  expect(findTab(state().layout, tab.id)?.tab).toEqual(tab);
+  expect(findTab(state().layout, tab.id)?.group.active).toBe(tab.id);
 });
 
 it('retains the main insertion origin after bottom-inspector focus, including an empty grid cell', () => {

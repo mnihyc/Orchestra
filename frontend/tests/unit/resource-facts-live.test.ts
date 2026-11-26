@@ -1,9 +1,50 @@
 /** Embedded provider facts follow their existing feed without HTTP reads and withdraw with their own access. */
-import { QueryClient, QueryObserver } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
+import { render, renderHook, waitFor } from '@testing-library/react';
+import { createElement, type ReactNode } from 'react';
 import { expect, it, vi } from 'vitest';
 import { applyRow } from '@/api/cache';
 import { wantedResourceFeeds } from '@/realtime/resourceWants';
 import { planProvider } from './provider-plan-fixtures';
+import { socket } from '@/realtime/live';
+import { useResourceSample } from '@/features/resource-facts/live';
+import { KeptQueryScope } from '@/features/workbench/KeptQueries';
+import type { ThreadProvider } from '@/generated/api-types';
+
+it('shares one current resource subscription across retained views of the same cache', () => {
+  const root = new QueryClient(), scoped = new QueryClient({ queryCache: root.getQueryCache() }), stopped = vi.fn();
+  const original = socket.subscribe.bind(socket);
+  const subscribe = vi.spyOn(socket, 'subscribe').mockImplementation((...args) => {
+    const native = original(...args);
+    return { ...native, unsubscribe: () => { stopped(); native.unsubscribe(); } };
+  });
+  const wrapper = (cache: QueryClient) => ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: cache, children });
+  const one = renderHook(() => useResourceSample('shared-sample'), { wrapper: wrapper(root) });
+  const two = renderHook(() => useResourceSample('shared-sample'), { wrapper: wrapper(scoped) });
+  try {
+    expect(subscribe).toHaveBeenCalledOnce();
+    one.unmount(); expect(stopped).not.toHaveBeenCalled();
+    two.unmount(); expect(stopped).toHaveBeenCalledOnce();
+  } finally { one.unmount(); two.unmount(); root.clear(); subscribe.mockRestore(); }
+});
+
+it('stops current resource subscriptions while a retained local act keeps hidden effects mounted', async () => {
+  const root = new QueryClient(), stopped = vi.fn(), original = socket.subscribe.bind(socket);
+  const subscribe = vi.spyOn(socket, 'subscribe').mockImplementation((...args) => {
+    const native = original(...args);
+    return { ...native, unsubscribe: () => { stopped(); native.unsubscribe(); } };
+  });
+  function Sample() { useResourceSample('held-sample'); return null; }
+  const tree = (shown: boolean) => createElement(QueryClientProvider, { client: root,
+    children: createElement(KeptQueryScope, { shown, children: createElement(Sample) }) });
+  const view = render(tree(true));
+  try {
+    expect(subscribe).toHaveBeenCalledOnce();
+    view.rerender(tree(false)); expect(stopped).toHaveBeenCalledOnce();
+    view.rerender(tree(true)); expect(subscribe).toHaveBeenCalledOnce();
+    await waitFor(() => expect(subscribe).toHaveBeenCalledTimes(2));
+  } finally { view.unmount(); root.clear(); subscribe.mockRestore(); }
+});
 
 it('follows one provider for multiple shown thread parameter projections and applies live values', () => {
   const cache = new QueryClient();
@@ -13,7 +54,7 @@ it('follows one provider for multiple shown thread parameter projections and app
     queryKey: ['thread-parameters', id], initialData: { provider }, staleTime: 30_000,
     queryFn: () => { read(); return Promise.resolve({ provider }); },
   }).subscribe(() => undefined));
-  expect(wantedResourceFeeds(cache)).toEqual(new Set([`provider:${provider.id}`]));
+  expect(wantedResourceFeeds(cache)).toEqual(new Set([`provider-row:${provider.id}`]));
   const updated = structuredClone(provider);
   updated.facts.windows[1]!.used_percent = 87;
   applyRow(cache, { kind: 'provider', id: provider.id, value: { ...updated } });
@@ -26,10 +67,80 @@ it('follows one provider for multiple shown thread parameter projections and app
   cache.clear();
 });
 
+it('owns only the compact provider stream for first-paint thread facts and never widens them to a page', () => {
+  const cache = new QueryClient(), full = planProvider();
+  const provider: ThreadProvider = { id: full.id, name: full.name, address: full.address, kind: full.kind, status: full.status,
+    harness_kind: full.harness_kind, harness: full.harness, placement: full.placement,
+    facts: { ...full.facts, spend: [], available_resets: null, extra_usage: null }, facts_state: full.facts_state,
+    models_count: full.models_count, running_threads: full.running_threads, access: full.access, choice_usage: full.choice_usage };
+  const stop = new QueryObserver(cache, { queryKey: ['thread-parameters', 'compact-owner'], initialData: { provider },
+    staleTime: Infinity, queryFn: () => Promise.resolve({ provider }) }).subscribe(() => undefined);
+  try {
+    expect(wantedResourceFeeds(cache)).toEqual(new Set([`provider-row:${provider.id}`]));
+    applyRow(cache, { kind: 'provider', id: provider.id, value: { ...full, name: 'Updated provider' } });
+    const held = cache.getQueryData<{ provider: ThreadProvider }>(['thread-parameters', 'compact-owner'])?.provider;
+    expect(held?.name).toBe('Updated provider');
+    expect(held).not.toHaveProperty('models');
+    expect(held).not.toHaveProperty('config');
+    expect(held).not.toHaveProperty('upstreams');
+    expect(held?.facts.spend).toEqual([]);
+    cache.setQueryData(['provider', provider.id], full);
+    applyRow(cache, { kind: 'provider', id: provider.id, partial: true,
+      value: { ...provider, name: 'Compact live name' } });
+    const page = cache.getQueryData<typeof full>(['provider', provider.id]);
+    expect(page?.name).toBe('Compact live name');
+    expect(page?.facts.available_resets).toEqual(full.facts.available_resets);
+    expect(page?.models).toEqual(full.models);
+  } finally { stop(); cache.clear(); }
+});
+
 it('never follows provider facts from an administrative-only or absent projection', () => {
   const cache = new QueryClient();
   const provider = planProvider(); provider.access.permissions = [];
   const stop = new QueryObserver(cache, { queryKey: ['thread-parameters', 'reader'], initialData: { provider }, staleTime: 30_000, queryFn: () => Promise.resolve({ provider }) }).subscribe(() => undefined);
   expect(wantedResourceFeeds(cache)).toEqual(new Set());
   stop(); cache.clear();
+});
+
+it('refreshes a shown place only when the capacity of a machine it may read changes', async () => {
+  const cache = new QueryClient();
+  const key = ['start-options', 'topic', ''];
+  const capacity = { cpus: 4, memory_bytes: 4000, data_volume_bytes: 8000, capacity_refresh_secs: 600 };
+  const restricted = { machine: { id: 'quiet' } };
+  const choices = (memory_bytes: number) => ({
+    environments: [{ machine: { id: 'visible' }, capacity: { ...capacity, memory_bytes } }, restricted],
+  });
+  const read = vi.fn(() => Promise.resolve(choices(3600)));
+  const stop = new QueryObserver(cache, { queryKey: key, initialData: choices(4000), staleTime: Infinity, queryFn: read }).subscribe(() => undefined);
+  try {
+    expect(wantedResourceFeeds(cache)).toEqual(new Set(['machine:visible']));
+    for (const id of ['visible', 'quiet']) applyRow(cache, { kind: 'machine', id, value: { id, facts: { ...capacity, rates: { up_bps: 10 } } } });
+    expect(read).not.toHaveBeenCalled();
+    applyRow(cache, { kind: 'machine', id: 'visible', value: { id: 'visible', facts: { ...capacity, memory_bytes: 3600 } } });
+    await vi.waitFor(() => expect(cache.getQueryData(key)).toEqual(choices(3600)));
+    expect(read).toHaveBeenCalledOnce();
+  } finally {
+    stop();
+    cache.clear();
+  }
+});
+
+it('updates an open native system review when the connector reports a new executable', async () => {
+  const cache = new QueryClient();
+  const key = ['machine-policy', 'laboratory'];
+  const build = (executable: string) => ({ os: 'windows', arch: 'x86_64', executable });
+  const before = build('a'.repeat(64)), after = build('b'.repeat(64));
+  const first = { platform_review: { build: before, approved: true, approval: null } };
+  const next = { platform_review: { build: after, approved: false, approval: null } };
+  const read = vi.fn(() => Promise.resolve(next));
+  const stop = new QueryObserver(cache, { queryKey: key, initialData: first, staleTime: Infinity, queryFn: read }).subscribe(() => undefined);
+  try {
+    expect(wantedResourceFeeds(cache)).toContain('machine:laboratory');
+    const report = (running: typeof before) => ({ id: 'laboratory', facts: { runtime_platform: running, policy: { 'exec.platform': { state: 'approved', build: before } } } });
+    applyRow(cache, { kind: 'machine', id: 'laboratory', value: report(before) });
+    expect(read).not.toHaveBeenCalled();
+    applyRow(cache, { kind: 'machine', id: 'laboratory', value: report(after) });
+    await vi.waitFor(() => expect(cache.getQueryData(key)).toEqual(next));
+    expect(read).toHaveBeenCalledOnce();
+  } finally { stop(); cache.clear(); }
 });
