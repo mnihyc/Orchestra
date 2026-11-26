@@ -1,20 +1,7 @@
-/** Loaded-row range selection and revision-captured status batches with explicit refusal and uncertainty. */
+/** Revision-captured status batches with explicit refusal and uncertainty. */
 import { ApiError } from '@/api/client';
 import type { Topic, TopicStatus } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
-
-/** Shift selects the loaded range only, preserving selections outside that range. */
-export function selectRange(selected: ReadonlySet<string>, loaded: readonly string[], anchor: string | null, id: string, on: boolean, shift: boolean): Set<string> {
-  const next = new Set(selected);
-  const first = anchor === null ? -1 : loaded.indexOf(anchor);
-  const last = loaded.indexOf(id);
-  const ids = shift && first >= 0 && last >= 0 ? loaded.slice(Math.min(first, last), Math.max(first, last) + 1) : [id];
-  for (const one of ids) {
-    if (on) next.add(one);
-    else next.delete(one);
-  }
-  return next;
-}
 
 /** Every refusal names the affected row; a parent's role or permission never enables a topic. */
 export function statusBlockers(topics: readonly Topic[], status: TopicStatus): { topic: Topic; reason: 'permission' | 'archived' | 'already' }[] {

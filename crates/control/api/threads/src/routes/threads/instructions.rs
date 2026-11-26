@@ -73,6 +73,8 @@ struct Kept {
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
+    path_redacted: bool,
+    #[serde(default)]
     home: bool,
     evidence: InstructionEvidence,
     #[serde(default)]
@@ -230,6 +232,7 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadInstructions> {
                 None
             };
             InstructionSource {
+                path_redacted: source.path_redacted,
                 order: u32::try_from(order).unwrap_or(u32::MAX),
                 kind: source.kind,
                 label: source.label,

@@ -5,16 +5,14 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { api, ok } from '@/api/client';
-import type { DocumentLinks, LinkDirection, LinkGraph, LinksTab, RelatedItems } from '@/generated/api-types';
+import { api, client, ok } from '@/api/client';
+import { NetworkError } from '@/lib/requests';
+import type { DocumentLinks, LinkDirection, LinkGraph, LinkedThing, LinksTab, RelatedItems } from '@/generated/api-types';
 
 export type { DocumentLinks, LinkGraph, LinkedThing, LinkOccurrence, LinksTab } from '@/generated/api-types';
 
 /** The tabs in the order the section shows them. */
 export const LINKS_TABS: readonly LinksTab[] = ['referenced_by', 'references', 'related', 'graph'];
-
-/** How fresh a list of Links is taken to be without asking again: other documents change it, and no feed says so. */
-const LINKS_STALE_MS = 30_000;
 
 export const linksKey = (document: string) => ['document-links', document] as const;
 
@@ -23,7 +21,6 @@ export const documentLinksQuery = (document: string) =>
   queryOptions({
     queryKey: [...linksKey(document), 'tabs'] as const,
     queryFn: ({ signal }): Promise<DocumentLinks> => ok(api.GET('/documents/{id}/links', { params: { path: { id: document } }, signal })),
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
   });
 
@@ -32,32 +29,37 @@ export const setDocumentLinks = (document: string, shown: LinksTab[] | null): Pr
   ok(api.PUT('/documents/{id}/links', { params: { path: { id: document } }, body: { shown } }));
 
 /** What refers to a document, or what it refers to: sources or targets, page by page. */
-export const referencesQuery = (document: string, direction: LinkDirection) =>
+export const referencesQuery = (document: string, direction: LinkDirection, q = '') =>
   infiniteQueryOptions({
-    queryKey: [...linksKey(document), 'references', direction] as const,
+    queryKey: [...linksKey(document), 'references', direction, q, client.session.getState().userId, client.session.getState().readerVersion] as const,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
       ok(api.GET('/documents/{id}/references', {
-        params: { path: { id: document }, query: { direction, ...(pageParam === null ? {} : { cursor: pageParam }) } },
+        params: { path: { id: document }, query: { direction, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } },
         signal,
       })),
     getNextPageParam: (page) => page.next_cursor,
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
     retry: false,
   });
 
 /** The mentions of one source that follow those a row already shows, from the cursor the row carries. */
-export const mentionsQuery = (document: string, of: string, first: string) =>
+export const mentionsQuery = (document: string, of: string, first: string, q = '') =>
   infiniteQueryOptions({
-    queryKey: [...linksKey(document), 'mentions', of] as const,
-    initialPageParam: first,
-    queryFn: ({ pageParam, signal }) =>
-      ok(api.GET('/documents/{id}/references', { params: { path: { id: document }, query: { direction: 'in', of, cursor: pageParam } }, signal })),
-    getNextPageParam: (page) => page.next_cursor,
-    staleTime: LINKS_STALE_MS,
-    refetchOnWindowFocus: false,
-    retry: false,
+    queryKey: [...linksKey(document), 'mentions', of, q, client.session.getState().userId, client.session.getState().readerVersion] as const,
+    initialPageParam: q === '' ? first : null as string | null,
+    queryFn: async ({ pageParam, signal }): Promise<{ items: LinkedThing[]; next_cursor: string | null }> => {
+      let cursor = pageParam; const seen = new Set<string>();
+      for (;;) {
+        signal.throwIfAborted();
+        if (cursor !== null) { if (seen.has(cursor)) throw new NetworkError('malformed'); seen.add(cursor); }
+        const page = await ok(api.GET('/documents/{id}/references', { params: { path: { id: document }, query: { direction: 'in', of,
+          ...(q === '' ? {} : { q }), ...(cursor === null ? {} : { cursor }) } }, signal }));
+        if (q === '' || page.items.some((row) => row.occurrences.length > 0) || page.next_cursor === null) return page;
+        cursor = page.next_cursor;
+      }
+    },
+    getNextPageParam: (page) => page.next_cursor, refetchOnWindowFocus: false, retry: false,
   });
 
 /** What a graph is asked for. */
@@ -82,19 +84,18 @@ export const graphQuery = (document: string, options: GraphOptions) =>
         } },
         signal,
       })),
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
     retry: false,
   });
 
 /** The related items of a document, a page at a time; a revision of the document reuses its answer until it changes. */
-export const relatedPagesQuery = (document: string, seq: number) =>
+export const relatedPagesQuery = (document: string, seq: number, q = '') =>
   infiniteQueryOptions({
-    queryKey: ['document-related', document, seq, 'pages'] as const,
+    queryKey: ['document-related', document, seq, 'pages', q, client.session.getState().userId, client.session.getState().readerVersion] as const,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }): Promise<RelatedItems> =>
       ok(api.GET('/documents/{id}/related', {
-        params: { path: { id: document }, query: pageParam === null ? {} : { cursor: pageParam } },
+        params: { path: { id: document }, query: { ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } },
         signal,
       })),
     getNextPageParam: (page) => page.next_cursor ?? null,
