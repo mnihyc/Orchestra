@@ -3,15 +3,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { clearSetting, putSetting, type SettingsTarget } from '@/api/settings';
+import { clearSetting, putSetting, targetSettingsKey, type SettingsTarget } from '@/api/settings';
 import { SettingRow } from '@/features/settings/SettingRow';
 import { ValueControl } from '@/features/settings/ValueControl';
-import type { KeyDef } from '@/features/settings/settingsModel';
+import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
+import { withGroup, type KeyDef } from '@/features/settings/settingsModel';
 import type { ResolvedSetting, SettingPart } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: (id: string) => ({
   queryKey: ['setting-source-node', id], queryFn: () => Promise.resolve({ kind: 'org', id, address: id, name: id }),
@@ -37,14 +38,18 @@ function inherited(def: KeyDef, above: unknown, own?: unknown): ResolvedSetting 
     locked_by: null, writable: true,
     parts: [part(null, def.default, 'default'), part(acme, above, 'org'), ...(own === undefined ? [] : [part(web, own, 'project')])] };
 }
-function draw(def: KeyDef, setting: ResolvedSetting) {
+function withInheritance(def: KeyDef, above: unknown, own?: unknown): ResolvedSetting {
+  return Object.assign(inherited(def, above, own), { inherited: { value: above, source: { scope: 'org', node: acme } } });
+}
+function draw(def: KeyDef, setting: ResolvedSetting, settings?: ResolvedSetting[]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   // The ordinary page already has its org's served metadata; the compact rows do not fetch it again.
   client.setQueryData(['setting-source-node', 'acme'], { kind: 'org', id: 'acme', address: 'acme', name: 'Acme' });
+  if (settings) client.setQueryData(targetSettingsKey(target), settings);
   const view = show(<QueryClientProvider client={client}><ul><SettingRow def={def} setting={setting} target={target} place={place} /></ul></QueryClientProvider>);
   const element = view.container.querySelector<HTMLElement>('[data-setting]');
   if (element === null) throw new Error('The setting row was not drawn');
-  return { ...view, row: within(element), element };
+  return { ...view, row: within(element), element, client };
 }
 beforeEach(async () => {
   await setLocale('en');
@@ -53,6 +58,158 @@ beforeEach(async () => {
   vi.stubGlobal('ResizeObserver', Observer);
 });
 afterEach(async () => { vi.unstubAllGlobals(); await setLocale('en'); });
+
+it.each(['en','zh-CN'] as const)('names the effective value and its source in the existing stricter reason in %s',async(locale)=>{
+  await setLocale(locale);
+  const def=key('test.limit',{type:'integer',minimum:1},8,{merge:'min'});
+  const value=withInheritance(def,4,12);value.value=4;value.source={scope:'org',node:acme};
+  const {row}=draw(def,value);
+  const reason=row.getByRole('status');
+  expect(reason).toHaveTextContent('4');
+  expect(within(reason).getByRole('link',{name:i18n.t('settings.compact.inheritedFrom',{place:'Acme'})})).toBeVisible();
+  expect(putSetting).not.toHaveBeenCalled();
+});
+
+it.each(['en','zh-CN'] as const)('explains a known unsupported scope in its existing source line in %s',async(locale)=>{
+  await setLocale(locale);
+  const def=key('test.scope',{type:'integer'},12,{scopes:['system']});
+  const value=withInheritance(def,12);value.writable=false;value.source={scope:'system',node:null};
+  const {row}=draw(def,value);
+  expect(row.getByText(locale==='en'?'Only inherited here':'此处仅继承')).toBeVisible();
+  expect(row.queryByRole('spinbutton')).not.toBeInTheDocument();
+  expect(putSetting).not.toHaveBeenCalled();
+});
+
+it('starts a choice with its named inheritance and clears a later own choice through its revision', async () => {
+  const def = key('test.mode', { type: 'string', enum: ['quiet', 'full'] }, 'quiet');
+  vi.mocked(putSetting).mockResolvedValue(withInheritance(def, 'quiet', 'full'));
+  vi.mocked(clearSetting).mockResolvedValue(withInheritance(def, 'quiet'));
+  const user = userEvent.setup();
+  const { row } = draw(def, withInheritance(def, 'quiet'));
+  const picker = row.getByRole('combobox', { name: def.title });
+  expect(picker).toHaveValue('As Acme decides');
+  await user.click(picker);
+  const first = screen.getAllByRole('option')[0];
+  expect(first).toHaveTextContent('As Acme decides');
+  expect(first).toHaveTextContent('quiet');
+  expect(first).toHaveAccessibleName('As Acme decides quiet');
+  expect(first).toHaveAttribute('aria-selected', 'true');
+  const full = i18n.t('settings.editor.words.full');
+  await user.click(screen.getByRole('option', { name: full }));
+  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: 'full', expectedRevision: null }));
+  await waitFor(() => expect(row.getByRole('combobox', { name: def.title })).toHaveValue(full));
+  await user.click(row.getByRole('combobox', { name: def.title }));
+  await user.click(screen.getByRole('option', { name: /As Acme decides/u }));
+  await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, 2));
+  expect(putSetting).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(row.getByRole('combobox', { name: def.title })).toHaveValue('As Acme decides'));
+  expect(row.getByRole('combobox', { name: def.title })).toHaveFocus();
+});
+
+it('shows a free inherited value read-only and starts the local draft from it', async () => {
+  const def = key('test.number', { type: 'integer', minimum: 0 }, 60);
+  vi.mocked(putSetting).mockResolvedValue(withInheritance(def, 720, 90));
+  const user = userEvent.setup();
+  const { row } = draw(def, withInheritance(def, 720));
+  expect(row.getByRole('radio', { name: 'As Acme decides' })).toBeChecked();
+  expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720);
+  expect(row.getByRole('spinbutton', { name: def.title })).toHaveAttribute('readonly');
+  await user.click(row.getByRole('radio', { name: 'Here' }));
+  const field = row.getByRole('spinbutton', { name: def.title });
+  expect(field).not.toHaveAttribute('readonly');
+  expect(field).toHaveValue(720);
+  expect(putSetting).not.toHaveBeenCalled();
+  fireEvent.change(field, { target: { value: '90' } });
+  fireEvent.blur(field);
+  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: 90, expectedRevision: null }));
+});
+
+it('does not invent a numeric limit when Here starts from an unset inherited limit', async () => {
+  const def = key('test.optional_limit', { type: 'integer', minimum: 1 }, null);
+  const user = userEvent.setup();
+  const { row } = draw(def, withInheritance(def, null));
+  await user.click(row.getByRole('radio', { name: 'Here' }));
+  const field = row.getByRole('spinbutton', { name: def.title });
+  expect(field).toHaveValue(null);
+  fireEvent.blur(field);
+  expect(putSetting).not.toHaveBeenCalled();
+});
+
+it('uses the same first state for a structured draft and retains its inherited fields until Save', async () => {
+  const def = key('test.options', { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }, { count: 2 });
+  vi.mocked(putSetting).mockResolvedValue(withInheritance(def, { count: 12 }, { count: 18 }));
+  const user = userEvent.setup();
+  const { row } = draw(def, withInheritance(def, { count: 12 }));
+  expect(row.getByRole('radio', { name: 'As Acme decides' })).toBeChecked();
+  await user.click(row.getByRole('button', { name: `Edit ${def.title}` }));
+  expect(row.getByRole('spinbutton')).toHaveValue(12);
+  expect(row.getByRole('spinbutton')).toBeDisabled();
+  await user.click(row.getByRole('radio', { name: 'Here' }));
+  expect(row.getByRole('spinbutton')).toHaveValue(12);
+  fireEvent.change(row.getByRole('spinbutton'), { target: { value: '18' } });
+  expect(putSetting).not.toHaveBeenCalled();
+  await user.click(row.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: { count: 18 }, expectedRevision: null }));
+  expect(clearSetting).not.toHaveBeenCalled();
+});
+
+it('names the lock instead of offering a local inheritance choice beneath it', async () => {
+  const def = key('test.locked', { type: 'integer' }, 0);
+  const setting = { ...withInheritance(def, 12), writable: false, locked_by: { scope: 'org' as const, node: acme } };
+  const { row } = draw(def, setting);
+  expect(await row.findByRole('link', { name: 'Locked at Acme' })).toBeVisible();
+  expect(row.queryByRole('radio')).not.toBeInTheDocument();
+  expect(row.queryByRole('spinbutton')).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('puts the system choice before the explicit booleans in %s', async (locale) => {
+  await setLocale(locale);
+  const def = key('test.permission', { type: 'boolean' }, true, { merge: 'all' });
+  const setting = withInheritance(def, true);
+  setting.inherited = { value: true, source: { scope: 'system', node: null } };
+  const user = userEvent.setup();
+  const { row } = draw(def, setting);
+  await user.click(row.getByRole('combobox', { name: def.title }));
+  const first = screen.getAllByRole('option')[0];
+  expect(first).toHaveTextContent(i18n.t('settings.compact.asSystem'));
+  expect(first).toHaveAttribute('data-state', 'checked');
+  expect(screen.getAllByRole('option')).toHaveLength(3);
+  expect(putSetting).not.toHaveBeenCalled();
+  vi.mocked(putSetting).mockResolvedValue({ ...setting, value: false, own: { value: false, revision: 2, locked: false } });
+  vi.mocked(clearSetting).mockResolvedValue(setting);
+  await user.click(screen.getAllByRole('option').at(-1)!);
+  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: false, expectedRevision: null }));
+  await user.click(row.getByRole('combobox', { name: def.title }));
+  await user.click(screen.getAllByRole('option')[0]!);
+  await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, 2));
+  expect(row.getByRole('combobox', { name: def.title })).toHaveFocus();
+});
+
+it('starts a local map draft with the inherited entries still in its editor', async () => {
+  const def = key('test.variables', { type: 'object', additionalProperties: { type: 'string' } }, {}, { merge: 'map' });
+  const user = userEvent.setup();
+  const { row } = draw(def, withInheritance(def, { LANGUAGE: 'English' }));
+  await user.click(row.getByRole('radio', { name: 'Here' }));
+  expect(row.getByRole('textbox', { name: /LANGUAGE/u })).toHaveValue('English');
+  expect(row.getByRole('textbox', { name: /LANGUAGE/u })).toBeEnabled();
+  expect(putSetting).not.toHaveBeenCalled();
+  await user.click(row.getByRole('button', { name: 'Discard' }));
+  expect(row.getByRole('radio', { name: 'As Acme decides' })).toBeChecked();
+});
+
+it('keeps inherited appended text visible and writes only the new local text', async () => {
+  const def = key('test.instructions', { type: 'string' }, '', { merge: 'append' });
+  vi.mocked(putSetting).mockResolvedValue(withInheritance(def, 'Use the shared format.', 'Add local examples.'));
+  const user = userEvent.setup();
+  const { row } = draw(def, withInheritance(def, 'Use the shared format.'));
+  await user.click(row.getByRole('radio', { name: 'Here' }));
+  expect(row.getByRole('textbox', { name: 'As Acme decides' })).toHaveValue('Use the shared format.');
+  expect(row.getByRole('textbox', { name: 'As Acme decides' })).toHaveAttribute('readonly');
+  const field = row.getByRole('textbox', { name: def.title });
+  fireEvent.change(field, { target: { value: 'Add local examples.' } });
+  fireEvent.blur(field);
+  await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: 'Add local examples.', expectedRevision: null }));
+});
 
 it.each(['en', 'zh-CN'] as const)('edits an inherited boolean directly with one value switch in %s', async (locale) => {
   await setLocale(locale);
@@ -68,7 +225,7 @@ it.each(['en', 'zh-CN'] as const)('edits an inherited boolean directly with one 
   expect(row.getAllByText(def.description)).toHaveLength(1);
   await user.click(value);
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: false, expectedRevision: null }));
-  expect(row.getByRole('switch', { name: def.title })).not.toBeChecked();
+  await waitFor(() => expect(row.getByRole('switch', { name: def.title })).not.toBeChecked());
 });
 
 it('edits a number in place and automatically commits its guarded value on blur', async () => {
@@ -82,9 +239,9 @@ it('edits a number in place and automatically commits its guarded value on blur'
   expect(putSetting).not.toHaveBeenCalled();
   fireEvent.blur(field);
   await waitFor(() => expect(putSetting).toHaveBeenCalledWith(target, def.key, { value: 90, expectedRevision: null }));
+  expect(await row.findByText('Saved')).toBeVisible();
   expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(90);
   expect(row.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
-  expect(row.getByText('Saved')).toBeVisible();
 });
 
 it.each(['en', 'zh-CN'] as const)('shows a disabled numeric behavior as Off and edits its actual zero in %s', async (locale) => {
@@ -167,7 +324,7 @@ it('Cancel restores the current value without writing, and Reset removes only th
   await user.click(row.getByRole('button', { name: 'More about test.number' }));
   await user.click(screen.getByRole('menuitem', { name: 'Reset to inherited' }));
   await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, 2));
-  expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720);
+  await waitFor(() => expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720));
 });
 
 it('shows its description once, keeps only supplementary constraints in the question, and links to the actual source', async () => {
@@ -276,7 +433,7 @@ it.each(['en', 'zh-CN'] as const)('shows a real default beside its control and a
   expect(putSetting).not.toHaveBeenCalled();
 });
 
-it('commits a completed complex draft when it closes and keeps its value in words', async () => {
+it('keeps a completed complex draft when it closes, writes it only by Save and keeps its value in words', async () => {
   const def = key('test.properties', { type: 'object', additionalProperties: true }, {});
   const user = userEvent.setup();
   vi.mocked(putSetting).mockResolvedValue(inherited(def, {}, { safe: true }));
@@ -288,13 +445,21 @@ it('commits a completed complex draft when it closes and keeps its value in word
   await user.click(row.getByRole('button', { name: 'Edit test.properties' }));
   const field = screen.getByRole('textbox', { name: def.title });
   expect(field).toHaveFocus();
+  expect(row.getByRole('button', { name: 'Save' })).toBeDisabled();
   fireEvent.change(field, { target: { value: '{"safe":true}' } });
+  expect(row.getByRole('button', { name: 'Save' })).toBeEnabled();
   field.focus();
   await user.keyboard('{Escape}');
+  // Closing it, or leaving it, writes nothing: the draft stays until it is saved or discarded.
+  expect(putSetting).not.toHaveBeenCalled();
+  expect(row.getByText(i18n.t('settings.compact.draft'))).toBeVisible();
+  await user.click(row.getByRole('button', { name: 'Edit test.properties' }));
+  expect(screen.getByRole('textbox', { name: def.title })).toHaveValue('{"safe":true}');
+  await user.click(row.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: { safe: true }, expectedRevision: null }));
+  expect(await row.findByText('Saved')).toBeVisible();
   expect(row.getByRole('button', { name: 'Edit test.properties' })).toHaveFocus();
   expect(row.queryByRole('textbox')).not.toBeInTheDocument();
-  expect(row.getByText('Saved')).toBeVisible();
   await user.click(row.getByRole('button', { name: 'Edit test.properties' }));
   expect(screen.getByRole('textbox', { name: def.title })).toHaveValue('{\n  "safe": true\n}');
   expect(screen.getByRole('textbox', { name: def.title })).toHaveFocus();
@@ -313,6 +478,9 @@ it('retains incomplete JSON on close and refuses to save it until it can be read
   field.focus();
   await user.keyboard('{Escape}');
   expect(row.getByText(i18n.t('settings.compact.invalidValue'))).toBeVisible();
+  // The draft left behind keeps its Save (off, for the reason beside it) and its Discard.
+  expect(row.getByRole('button', { name: 'Save' })).toBeDisabled();
+  expect(row.getByRole('button', { name: i18n.t('settingsEditors.draft.discard') })).toBeEnabled();
   await user.click(row.getByRole('button', { name: 'Edit test.json' }));
   expect(row.getByRole('textbox', { name: def.title })).toHaveValue('{"unfinished":');
   expect(row.getByRole('textbox', { name: def.title })).toBeInvalid();
@@ -320,7 +488,7 @@ it('retains incomplete JSON on close and refuses to save it until it can be read
   if (form === null) throw new Error('The setting has no committing form');
   fireEvent.submit(form);
   expect(putSetting).not.toHaveBeenCalled();
-  await user.click(row.getByRole('button', { name: 'Cancel' }));
+  await user.click(row.getByRole('button', { name: i18n.t('settingsEditors.draft.discard') }));
   await user.click(row.getByRole('button', { name: 'Edit test.json' }));
   expect(row.getByRole('textbox', { name: def.title })).toHaveValue('{}');
   expect(row.getByRole('textbox', { name: def.title })).toBeValid();
@@ -338,8 +506,8 @@ it('undoes a newly stored value by removing only the returned revision', async (
   const undo = await row.findByRole('button', { name: 'Undo the change to test.number' });
   await user.click(undo);
   await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, 2));
+  expect(await row.findByText('Undone')).toBeVisible();
   expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720);
-  expect(row.getByText('Undone')).toBeVisible();
 });
 
 it('undoes a replacement with its original own value and lock, under the saved answer’s fence', async () => {
@@ -353,6 +521,52 @@ it('undoes a replacement with its original own value and lock, under the saved a
   fireEvent.blur(row.getByRole('spinbutton', { name: def.title }));
   await user.click(await row.findByRole('button', { name: 'Undo the change to test.number' }));
   await waitFor(() => expect(putSetting).toHaveBeenLastCalledWith(target, def.key, { value: 90, locked: false, expectedRevision: 3 }));
+  expect(await row.findByText('Undone')).toBeVisible();
   expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(90);
-  expect(row.getByText('Undone')).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('shows inherited summary values, events and their sources before any local choice (%s)', async (locale) => {
+  await setLocale(locale);
+  const def = withGroup(SETTINGS_REGISTRY.find((entry) => entry.key === 'summary.targets')!);
+  const above = { thread: { automatic: false, min_interval_secs: 0, on: [] }, topic: { automatic: true } };
+  const setting = withInheritance(def, above);
+  const shared = { ...setting, key: 'auto.triggers', value: { min_interval_secs: 75, on: ['milestone'] },
+    source: { scope: 'system' as const, node: null } };
+  const producer = { ...setting, key: 'auto.summarizer', value: { kind: 'model', context_tokens: 43210 } };
+  const { row, client } = draw(def, setting, [setting, shared, producer]);
+  const fetches: unknown[] = [];
+  const unsubscribe = client.getQueryCache().subscribe((event) => {
+    if (event.type === 'updated' && event.action.type === 'fetch') fetches.push(event.query.queryKey);
+  });
+  await userEvent.click(row.getByRole('button', { name: i18n.t('settings.compact.editValue', { name: def.title }) }));
+  const values = (target: string) => within(document.querySelector<HTMLElement>(`[data-summary-target="${target}"]`)!);
+  const fact = (target: string, member: string) => values(target).getByText(i18n.t(`settingsEditors.targets.${member}`)).parentElement;
+  expect(values('thread').getByText('0')).toBeVisible();
+  expect(fact('thread', 'min_interval_secs')).toHaveTextContent('Acme');
+  expect(fact('thread', 'when')).toHaveTextContent(i18n.t('settings.compact.none'));
+  expect(fact('thread', 'context_tokens')).toHaveTextContent('43,210');
+  expect(fact('thread', 'context_tokens')).toHaveTextContent(i18n.t('settingRegistry.auto.summarizer.title'));
+  expect(fact('thread', 'output_chars')).toHaveTextContent('600');
+  expect(fact('thread', 'output_chars')).toHaveTextContent(i18n.t('settings.editor.from.default'));
+  expect(fact('topic', 'min_interval_secs')).toHaveTextContent('75');
+  expect(fact('topic', 'min_interval_secs')).toHaveTextContent(i18n.t('settings.editor.from.system'));
+  expect(fact('topic', 'when')).toHaveTextContent(i18n.t('choiceCatalog.automationTrigger.child_changed.name'));
+  expect(values('topic').queryByRole('spinbutton')).not.toBeInTheDocument();
+  unsubscribe();
+  expect(fetches).toEqual([]);
+  expect(putSetting).not.toHaveBeenCalled();
+  expect(clearSetting).not.toHaveBeenCalled();
+});
+
+it('lets a project reader inspect the shipped numbers and source on an inherited summary target', async () => {
+  const def = withGroup(SETTINGS_REGISTRY.find((entry) => entry.key === 'summary.targets')!);
+  const shipped = part(null, def.default, 'default');
+  const setting = { ...inherited(def, def.default), writable: false, source: shipped.source, parts: [shipped] };
+  const { row } = draw(def, setting, [setting]);
+  await userEvent.click(row.getByRole('button', { name: i18n.t('settings.editor.detailsOf', { name: def.title }) }));
+  const thread = within(document.querySelector<HTMLElement>('[data-summary-target="thread"]')!);
+  for (const value of ['120', '32,000', '600']) expect(thread.getByText(value)).toBeVisible();
+  expect(thread.getByText(i18n.t('settingsEditors.targets.output_chars')).parentElement).toHaveTextContent(i18n.t('settings.editor.from.default'));
+  expect(thread.queryByRole('spinbutton')).not.toBeInTheDocument();
+  expect(putSetting).not.toHaveBeenCalled();
 });

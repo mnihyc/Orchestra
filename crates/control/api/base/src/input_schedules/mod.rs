@@ -32,8 +32,6 @@ use orch_api_contract::input_schedules::*;
 
 use orch_api_contract::threads::ContentPart;
 
-use orch_api_contract::threads::Delivery;
-
 use orch_api_contract::users::UserRef;
 
 use orch_authz::Act;
@@ -165,19 +163,12 @@ async fn stamp(conn: &mut Conn, topic: Id) -> ApiResult<Seq> {
 }
 
 /// Authorship survives a lost page grant, while token scopes/subtrees and suspensions still narrow it.
-async fn author_reaches(
+async fn author_reaches_destination(
     conn: &mut Conn,
     principal: &Principal,
-    row: &rows::ScheduleRow,
+    destination: Id,
     permission: Permission,
 ) -> ApiResult<bool> {
-    if principal.user() != row.author_id {
-        return Ok(false);
-    }
-    let destination = match target(row)? {
-        InputScheduleTarget::Thread { thread_id } => thread_id,
-        InputScheduleTarget::NewThread { .. } => row.topic_id,
-    };
     let path: Option<Vec<Id>> = sqlx::query_scalar("SELECT path FROM nodes WHERE id=$1")
         .bind(destination)
         .fetch_optional(&mut *conn)
@@ -219,7 +210,18 @@ async fn readable(
         InputScheduleTarget::Thread { thread_id } => (thread_id, Permission::ThreadView),
         InputScheduleTarget::NewThread { .. } => (row.topic_id, Permission::TopicView),
     };
-    Ok(author_reaches(conn, principal, row, permission).await?
+    destination_permitted(conn, principal, row.author_id, destination, permission).await
+}
+
+async fn destination_permitted(
+    conn: &mut Conn,
+    principal: &Principal,
+    author: Id,
+    destination: Id,
+    permission: Permission,
+) -> ApiResult<bool> {
+    Ok((author == principal.user()
+        && author_reaches_destination(conn, principal, destination, permission).await?)
         || allowed(conn, principal, destination, permission).await?)
 }
 
@@ -232,9 +234,7 @@ async fn controller(
         InputScheduleTarget::Thread { thread_id } => (thread_id, Permission::ThreadInteract),
         InputScheduleTarget::NewThread { .. } => (row.topic_id, Permission::TopicManage),
     };
-    if author_reaches(conn, principal, row, permission).await?
-        || allowed(conn, principal, destination, permission).await?
-    {
+    if destination_permitted(conn, principal, row.author_id, destination, permission).await? {
         Ok(())
     } else {
         Err(ApiError::new(
@@ -281,6 +281,16 @@ async fn run_view(
             reason = input.state_detail;
         }
     }
+    let outcome = row
+        .outcome
+        .map(decode::<InputScheduleOccurrenceOutcome>)
+        .transpose()?
+        .map(|mut outcome| {
+            if thread.is_none() {
+                outcome.accepted_input_ref = None;
+            }
+            outcome
+        });
     Ok(InputScheduleRun {
         id: row.id,
         occurrence: row.occurrence,
@@ -290,6 +300,7 @@ async fn run_view(
         input_id: row.input_id,
         turn_id,
         reason,
+        outcome,
         created_at: Time::new(row.created_at),
         started_at: started_at.map(Time::new),
     })
@@ -338,7 +349,12 @@ async fn present_bounded(
         None => None,
     };
     Ok(InputSchedule {
+        timing_policy: Some(InputTimingPolicy::of(&decode::<InputTiming>(
+            row.timing.clone(),
+        )?)),
         id: row.id,
+        plan: row.plan,
+        delivery: decode(json!(&row.delivery))?,
         kind: agent::metadata(&row)?.map(|_| InputScheduleKind::Agent),
         agent: agent::metadata(&row)?,
         topic: refs
@@ -427,38 +443,96 @@ pub async fn prepare_thread_pending(
             "the schedule topic is not readable",
         ));
     }
-    let seq: Seq = sqlx::query_scalar("SELECT topic_seq FROM topics WHERE node_id=$1")
-        .bind(topic)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(DbError::from)?
-        .ok_or_else(ApiError::not_found)?;
-    let mut sources = vec![targets::node(conn, topic).await?];
+    if let Some(seq) =
+        orch_db::queries::thread_continuations::empty_schedule_seq(conn, topic, thread)
+    {
+        return Ok(PreparedThreadPending {
+            value: ThreadPendingAgentSchedules {
+                seq,
+                items: Vec::new(),
+            },
+            sources: vec![targets::node(conn, topic).await?],
+            witness: Vec::new(),
+        });
+    }
+    #[derive(serde::Deserialize)]
+    struct PendingLine {
+        id: Id,
+        author_id: Id,
+        name: String,
+        revision: i64,
+        next_run_at: chrono::DateTime<chrono::Utc>,
+        target: Json,
+        definition_authority: Json,
+        has_native_action: bool,
+    }
+    let lines: Vec<(Seq, Option<sqlx::types::Json<PendingLine>>)> = sqlx::query_as(
+        "SELECT t.topic_seq, CASE WHEN pending.id IS NOT NULL THEN to_jsonb(pending) END
+         FROM topics t LEFT JOIN LATERAL (
+            SELECT s.id,s.author_id,s.name,s.revision,s.next_run_at,s.target,
+                   s.definition_authority,(s.native_action IS NOT NULL) AS has_native_action
+              FROM input_schedules s
+             WHERE s.topic_id=t.node_id AND s.target->>'kind'='thread' AND s.target->>'thread_id'=$2
+               AND s.state='active' AND s.deleted_at IS NULL AND s.next_run_at IS NOT NULL
+               AND s.definition_authority IS NOT NULL AND jsonb_typeof(s.definition_authority)<>'array'
+         ) pending ON true WHERE t.node_id=$1 ORDER BY pending.next_run_at,pending.id",
+    )
+    .bind(topic)
+    .bind(thread.to_string())
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    let seq = lines.first().ok_or_else(ApiError::not_found)?.0;
+    let topic_target = targets::node(conn, topic).await?;
+    let mut sources = vec![topic_target.clone()];
     let mut items = Vec::new();
     let mut witness = Vec::new();
-    for row in rows::topic(conn, topic, None).await? {
-        if row.deleted_at.is_some() || row.state != "active" {
-            continue;
-        }
-        let Some(at) = row.next_run_at else {
-            continue;
-        };
-        if target(&row)? != (InputScheduleTarget::Thread { thread_id: thread }) {
-            continue;
-        }
-        let Some(origin) = agent::metadata(&row)? else {
+    let mut author_visibility = None;
+    let mut viewer_visibility = None;
+    for (_, row) in lines {
+        let Some(sqlx::types::Json(row)) = row else {
             continue;
         };
-        if origin.thread_id != thread || !readable(conn, principal, &row).await? {
+        let origin = agent::pending_metadata(
+            &row.definition_authority,
+            row.author_id,
+            row.has_native_action,
+            &row.target,
+        )?;
+        if origin.thread_id != thread {
             continue;
         }
-        sources.push(operation::subject(conn, &row).await?);
+        // Each line has the same destination. Only authorship changes its read permission.
+        let visibility = if row.author_id == principal.user() {
+            &mut author_visibility
+        } else {
+            &mut viewer_visibility
+        };
+        let visible = match *visibility {
+            Some(value) => value,
+            None => {
+                let value = destination_permitted(
+                    conn,
+                    principal,
+                    row.author_id,
+                    thread,
+                    Permission::ThreadView,
+                )
+                .await?;
+                *visibility = Some(value);
+                value
+            }
+        };
+        if !visible {
+            continue;
+        }
+        sources.push(operation::subject_in_topic(topic_target.clone(), row.id)?);
         witness.push((row.id, row.revision));
         items.push(ThreadPendingAgentSchedule {
             id: row.id,
             name: row.name,
             state: InputScheduleState::Active,
-            next_run_at: Time::new(at),
+            next_run_at: Time::new(row.next_run_at),
         });
     }
     witness.sort_unstable();
@@ -482,7 +556,39 @@ async fn list(ctx: Ctx, query: InputScheduleListQuery, (): ()) -> ApiResult<Page
         }
         items.push(present_bounded(&mut tx, &principal, row.clone(), Some(&data.names)).await?);
     }
-    page(items, &query.page, |row| row.id)
+    items.retain(|row| {
+        query.thread_id.is_none_or(|thread| {
+            !row.destination.new_thread
+                && row
+                    .destination
+                    .thread
+                    .as_ref()
+                    .is_some_and(|target| target.id == thread)
+                && (row.kind != Some(InputScheduleKind::Agent)
+                    || row
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| agent.thread_id == thread))
+        })
+    });
+    crate::collection::snapshot(
+        &orch_api_contract::common::CollectionQuery {
+            q: query.q,
+            limit: query.page.limit,
+            cursor: query.page.cursor,
+        },
+        &format!(
+            "topic-schedules:{}:{}:{:?}:{:?}",
+            ctx.user()?.id(),
+            ctx.id("id")?,
+            query.state,
+            query.thread_id
+        ),
+        items,
+        |row| row.id,
+        |row| row.name.clone(),
+        false,
+    )
 }
 
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<InputSchedule> {
@@ -579,6 +685,8 @@ async fn create(
         name: name(body.name.as_deref().unwrap_or("Scheduled input"))?,
         target: encode(&body.target)?,
         content: encode(&body.content)?,
+        plan: body.plan,
+        delivery: orch_engine::inputs::delivery_word(body.delivery).into(),
         native_action: body.native_action.as_ref().map(encode).transpose()?,
         definition_authority: None,
         timing: encode(&body.timing)?,

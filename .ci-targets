@@ -1,0 +1,2 @@
+web lint
+web-e2e --grep 'a phone selection that stops running work|a selected move goes at once|a member is moved to another domain|a changed subtree refuses its row alone|a selected deletion keeps its own recovery group'

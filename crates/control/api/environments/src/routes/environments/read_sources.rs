@@ -56,6 +56,16 @@ const NAMES: NameRoles = NameRoles {
 
 pub(super) struct EnvironmentRead;
 
+pub(super) struct SelectedEnvironment {
+    reading: Prepared,
+    query: api::EnvironmentGetQuery,
+}
+fn inspection(query: &api::EnvironmentGetQuery) -> DeletedInspectionQuery {
+    DeletedInspectionQuery {
+        inspect_deleted: query.inspect_deleted,
+    }
+}
+
 fn declaration(query: &DeletedInspectionQuery) -> &'static Declaration<Source> {
     if query.inspect_deleted == Some(true) {
         &sources::GET_INSPECT
@@ -195,25 +205,42 @@ orch_api_base::__api_bind_07c8ba3b15!();
 
 impl native::Selected for EnvironmentRead {
     type Source = Source;
-    type Query = DeletedInspectionQuery;
-    type Value = Prepared;
+    type Query = api::EnvironmentGetQuery;
+    type Value = SelectedEnvironment;
     type Reply = Environment;
     const DECLARATION: &'static Declaration<Source> = &sources::GET_READ;
 
     fn declaration(
-        query: &DeletedInspectionQuery,
-        _value: &Prepared,
+        query: &api::EnvironmentGetQuery,
+        _value: &SelectedEnvironment,
     ) -> &'static Declaration<Source> {
-        declaration(query)
+        declaration(&inspection(query))
     }
 
     fn select<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a AuthCaller,
-        query: &'a DeletedInspectionQuery,
-    ) -> BoxFuture<'a, ApiResult<(Prepared, Vec<native::Facts<Source>>)>> {
-        Box::pin(prepare(ctx, conn, caller, query, declaration(query)))
+        query: &'a api::EnvironmentGetQuery,
+    ) -> BoxFuture<'a, ApiResult<(SelectedEnvironment, Vec<native::Facts<Source>>)>> {
+        Box::pin(async move {
+            let query_inspection = inspection(query);
+            let (reading, facts) = prepare(
+                ctx,
+                conn,
+                caller,
+                &query_inspection,
+                declaration(&query_inspection),
+            )
+            .await?;
+            Ok((
+                SelectedEnvironment {
+                    reading,
+                    query: query.clone(),
+                },
+                facts,
+            ))
+        })
     }
 
     fn require<'a>(
@@ -235,19 +262,59 @@ impl native::Selected for EnvironmentRead {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         principal: &'a Principal,
-        value: &'a Prepared,
+        value: &'a SelectedEnvironment,
     ) -> BoxFuture<'a, ApiResult<Environment>> {
-        Box::pin(value.render(ctx, conn, principal))
+        Box::pin(async move {
+            let mut shown = value.reading.render(ctx, conn, principal).await?;
+            let query = &value.query;
+            if query.threads_q.is_some()
+                || query.threads_limit.is_some()
+                || query.threads_cursor.is_some()
+            {
+                let collection = orch_api_contract::common::CollectionQuery {
+                    q: query.threads_q.clone(),
+                    limit: query.threads_limit,
+                    cursor: query.threads_cursor.clone(),
+                };
+                let page = crate::collection::snapshot(
+                    &collection,
+                    &format!(
+                        "environment-threads:{}:{}:{}",
+                        principal.user(),
+                        ctx.id("id")?,
+                        query.inspect_deleted.unwrap_or(false)
+                    ),
+                    shown.threads,
+                    |row| row.thread.id,
+                    |row| {
+                        let names = [&row.thread, &row.topic]
+                            .into_iter()
+                            .filter(|node| !node.redacted)
+                            .filter_map(|node| node.name.as_deref())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        format!(
+                            "{names} {} {} {}",
+                            row.owner.display_name, row.owner.username, row.directory
+                        )
+                    },
+                    false,
+                )?;
+                shown.threads = page.items;
+                shown.threads_next_cursor = page.next_cursor;
+            }
+            Ok(shown)
+        })
     }
 
     fn after_read<'a>(
         ctx: &'a Ctx,
         _accepted: &'a AuthCaller,
-        _query: &'a DeletedInspectionQuery,
-        value: &'a Prepared,
+        _query: &'a api::EnvironmentGetQuery,
+        value: &'a SelectedEnvironment,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
-            if let Shape::Retained(row) = &value.shape {
+            if let Shape::Retained(row) = &value.reading.shape {
                 retained::record_inspected(ctx, row.id).await?;
             }
             Ok(())
@@ -258,10 +325,12 @@ impl native::Selected for EnvironmentRead {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a DeletedInspectionQuery,
-        opened: &'a Prepared,
-        fresh: &'a Prepared,
+        _query: &'a api::EnvironmentGetQuery,
+        opened: &'a SelectedEnvironment,
+        fresh: &'a SelectedEnvironment,
     ) -> BoxFuture<'a, ApiResult<bool>> {
-        Box::pin(async move { Ok(opened.preserves(fresh)) })
+        Box::pin(async move {
+            Ok(opened.query == fresh.query && opened.reading.preserves(&fresh.reading))
+        })
     }
 }

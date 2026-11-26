@@ -16,7 +16,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`retains pickup before movemen
   const rect = { left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 };
   const active: Active = { id: tab.id, data: { current: { title } }, rect: { current: { initial: rect, translated: rect } } };
   const over: Over = { id: 'navigation-home', rect, disabled: false, data: { current: { label: title, target: { to: 'container', bar: 'left', container: 'navigation' } } } };
-  const announcements = viewDragAnnouncements(layout, i18n.t);
+  const announcements = viewDragAnnouncements(() => layout, i18n.t);
   expect(announcements.onDragStart({ active })).toBe(i18n.t('workbench.drag.pickedUp', { title }));
   expect(announcements.onDragOver({ active, over })).toBeUndefined();
   active.rect.current.translated = { ...rect, left: 32, right: 232 };
