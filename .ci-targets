@@ -1,0 +1,1 @@
+test -p orch-adapter-claude-code --test interface

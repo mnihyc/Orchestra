@@ -18,7 +18,6 @@ export const storageQuery = (query: StorageQuery) => queryOptions({
   ...(query.scope === 'system' ? ADMIN_QUERY : {}),
   queryKey: [...storageKeys.all, query] as const,
   queryFn: ({ signal }): Promise<StorageReport> => ok(api.GET('/storage', { params: { query }, signal })),
-  staleTime: 60_000,
 });
 
 export const storagePagesQuery = (query: StorageQuery) => infiniteQueryOptions({
@@ -27,5 +26,4 @@ export const storagePagesQuery = (query: StorageQuery) => infiniteQueryOptions({
   initialPageParam: query.cursor ?? null as string | null,
   queryFn: ({ pageParam, signal }): Promise<StorageReport> => ok(api.GET('/storage', {params:{query:{...query,cursor:pageParam ?? undefined}},signal})),
   getNextPageParam: (page) => page.next_cursor,
-  staleTime: 60_000,
 });

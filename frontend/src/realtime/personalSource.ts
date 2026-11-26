@@ -1,6 +1,7 @@
-/** Personal events have no replay. Join first; only then take the HTTP baseline. */
-import type { DurableFeed, FeedFollower } from '@/realtime/sync';
-import type { RealtimeSocket } from '@/realtime/socket';
+/** Personal events have no replay. The initial HTTP baseline and feed admission share native change order. */
+import { isCancellation, type DurableFeed, type FeedFollower } from '@/realtime/sync';
+import type { FeedFrame, RealtimeSocket } from '@/realtime/socket';
+import { retryPause } from '@/lib/requests';
 
 let baseline: (() => Promise<void>) | undefined;
 export function personalBaselineReader(read: () => Promise<void>): void { baseline = read; }
@@ -48,6 +49,10 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
   let generation = 0;
   let abort = new AbortController();
   let subscription: ReturnType<RealtimeSocket['subscribe']> | null = null;
+  // The subscription a rejoin replaces, held until the new one is in place (see `join`), and which join is the current one.
+  let leaving: ReturnType<RealtimeSocket['subscribe']> | null = null;
+  let current: object | null = null;
+  const release = () => { leaving?.unsubscribe(); leaving = null; };
   let completed = false;
   let accept!: () => void;
   let refuse!: (error: unknown) => void;
@@ -62,8 +67,10 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
   };
   waiting();
   let repairing: { generation: number; promise: Promise<void> } | undefined;
+  let cancelled = 0, retry: ReturnType<typeof setTimeout> | undefined;
   function repair(rejoin = false): Promise<void> {
     if (repairing?.generation === generation) return repairing.promise;
+    clearTimeout(retry); retry = undefined;
     const version = generation;
     const promise = (async () => {
       try {
@@ -71,26 +78,46 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
         let loaded = await feed.load(seq, abort.signal);
         if (!loaded.complete) { whole = true; loaded = await feed.load(null, abort.signal); }
         if (closed || generation !== version) return;
+        cancelled = 0;
         if (whole) feed.reset(loaded.data, loaded.seq); else feed.apply(loaded.data, loaded.seq);
         seq = loaded.seq;
         if (rejoin) join();
-      } catch (error) { if (!closed && generation === version) { refuse(error); feed.failed?.(error); } }
+      } catch (error) {
+        if (closed || generation !== version) return;
+        if (isCancellation(error)) {
+          const pause = retryPause(cancelled++);
+          retry = setTimeout(() => { if (!closed && generation === version) void repair(rejoin); }, pause);
+        } else { refuse(error); feed.failed?.(error); }
+      }
     })();
     const flight = { generation: version, promise }; repairing = flight;
     void promise.finally(() => { if (repairing === flight) repairing = undefined; });
     return promise;
   }
+  // News is never replayed, and the server tells it on the subscriptions it holds when it happens. A rejoin (after every
+  // reset of the feed, which a machine's enrollment causes just before its notice that the machine is online) keeps the
+  // subscription it replaces until the new one is in place, and hears what the server sent on it until the server ends
+  // it: let go at once, the page would drop what was sent before the server heard of the release, and the server tells
+  // nobody what happens between that release and the new one's start. Meanwhile the former one is heard for its news
+  // alone; its cursor, repairs and end are no longer the source's.
   function join() {
-    subscription?.unsubscribe();
+    release();
+    leaving = subscription;
+    const own = {};
+    current = own;
     subscription = socket.subscribe(feed.feed, {
       since: () => seq,
       onSubscribe: () => {
+        if (current !== own) return;
+        clearTimeout(retry); retry = undefined;
         generation += 1; abort.abort(); abort = new AbortController();
         if (completed) waiting();
         changed();
       },
       onFrame: (frame) => {
         if (closed) return;
+        if (current !== own) { news(frame); return; }
+        if (frame.op === 'subscribed' || frame.op === 'closed' || frame.op === 'error') release();
         if (frame.op === 'subscribed') {
           if (frame.mode === 'reload') { seq = null; void repair(true); return; }
           seq = frame.seq ?? seq;
@@ -109,7 +136,11 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
           else feed.failed?.(error);
         } else feed.other?.(frame);
       },
+      afterRelease: news,
     });
+  }
+  function news(frame: FeedFrame) {
+    if (!closed && frame.op === 'event') feed.other?.(frame);
   }
   join();
   return {
@@ -117,6 +148,6 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
     lastSeq: () => seq,
     refresh: () => { void repair(); },
     reload: () => { seq = null; void repair(true); },
-    stop: () => { closed = true; generation += 1; abort.abort(); subscription?.unsubscribe(); refuse(new Error('The personal live source was replaced')); },
+    stop: () => { closed = true; generation += 1; clearTimeout(retry); abort.abort(); release(); subscription?.unsubscribe(); refuse(new Error('The personal live source was replaced')); },
   };
 }
