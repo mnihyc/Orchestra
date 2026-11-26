@@ -1,0 +1,4 @@
+# n41-defaults: a thread's new environment placed in the creating request's administrator mode; a move out of an
+# environment that was never made carries no files
+test -p orch-engine --test environments
+test -p orch-engine --lib -- jobs::provision::tests jobs::fork::tests

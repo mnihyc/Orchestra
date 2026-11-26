@@ -10,7 +10,7 @@ use orch_link::spool::SpoolOptions;
 use orch_link_contract::commands::CommandKind;
 use orch_link_contract::events::{Event, ItemCompleted, ItemDelta, RawFrame, SessionTitle};
 use orch_link_contract::session::Role;
-use orch_link_contract::streams::{ResetReason, Stream};
+use orch_link_contract::streams::Stream;
 use orch_link_contract::version::Limits;
 use orch_testkit::doubles::controller::{CommitMode, ScriptedController};
 use orch_testkit::doubles::link::{Direction, Hub, TestPki};
@@ -26,6 +26,148 @@ struct Rig {
     stream: Stream,
     thread_id: Id,
     name: String,
+}
+
+#[tokio::test]
+async fn a_refused_provider_report_leaves_the_machine_ready_to_deliver_session_output() {
+    let rig = rig(
+        MachineSpec {
+            roles: vec![Role::Agent],
+            ..MachineSpec::default()
+        },
+        true,
+    );
+    rig.machine.link.connected().await;
+    let report = Event::ProviderLogin(orch_link_contract::foreign::LoginState::idle());
+    let provider = Stream::Provider {
+        provider_id: new_id(),
+    };
+    let outcome = rig.machine.link.publish(&provider, &report).await;
+    assert!(matches!(
+        outcome,
+        Err(orch_link::streams::PublishError::RoleMissing(
+            Role::Provider,
+            _
+        ))
+    ));
+    rig.machine.publish(&rig.stream, &title(0)).await;
+    assert!(
+        rig.controller
+            .wait_until(Duration::from_secs(20), |c| c.applied(&rig.name).len() == 1)
+            .await
+    );
+    assert_eq!(rig.machine.link.spool_status().borrow().problem, None);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_failed_authoritative_append_holds_its_publisher_reports_backpressure_and_retries_once_after_space_recovers()
+ {
+    const CHILD: &str = "ORCH_PUBLICATION_SHORT_WRITE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let result = std::process::Command::new("bash").args(["-c","trap '' XFSZ; exec \"$@\"","publication-fault"])
+            .arg(std::env::current_exe().unwrap()).args(["--exact","a_failed_authoritative_append_holds_its_publisher_reports_backpressure_and_retries_once_after_space_recovers","--test-threads=1"])
+            .env(CHILD,"1").status().unwrap();
+        assert!(result.success());
+        return;
+    }
+    let rig = rig(MachineSpec::default(), true);
+    rig.machine.link.connected().await;
+    rig.machine.publish(&rig.stream, &title(0)).await;
+    assert!(
+        rig.controller
+            .wait_until(Duration::from_secs(20), |controller| controller
+                .applied(&rig.name)
+                .len()
+                == 1)
+            .await
+    );
+    assert!(
+        std::process::Command::new("prlimit")
+            .args([
+                "--pid",
+                &std::process::id().to_string(),
+                "--fsize=262144:unlimited"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let large = Event::SessionTitle(SessionTitle {
+        title: "kept native output ".repeat(32768),
+    });
+    let publishing = rig.machine.link.publish(&rig.stream, &large);
+    tokio::pin!(publishing);
+    let failed = rig
+        .controller
+        .wait_until(Duration::from_secs(20), |controller| {
+            controller
+                .report_bodies("spool.status")
+                .iter()
+                .any(|body| body.get("problem").is_some_and(|value| !value.is_null()))
+        });
+    tokio::pin!(failed);
+    tokio::select! {biased; result=&mut publishing=>panic!("a failed append must hold its original event, not answer {result:?}"), seen=&mut failed=>assert!(seen,"storage backpressure was not reported beside the durable spool")}
+    // Commands use their independent small journal and remain responsive while native output waits.
+    let command = rig.controller.issue(
+        &orch_link_contract::commands::SerialKey::Thread(rig.thread_id),
+        orch_types::Time::new(clock().now() + chrono::Duration::minutes(5)),
+        &orch_link_contract::commands::TurnInterrupt {
+            thread_id: rig.thread_id,
+            turn_id: new_id(),
+        },
+    );
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            rig.controller.wait_command(command)
+        )
+        .await
+        .unwrap(),
+        orch_link::commands::Progress::Succeeded(_)
+    ));
+    assert!(
+        std::process::Command::new("prlimit")
+            .args([
+                "--pid",
+                &std::process::id().to_string(),
+                "--fsize=unlimited:unlimited"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(20), &mut publishing)
+        .await
+        .unwrap()
+        .unwrap();
+    rig.machine.publish(&rig.stream, &title(1)).await;
+    assert!(
+        rig.controller
+            .wait_until(Duration::from_secs(20), |controller| controller
+                .applied(&rig.name)
+                .len()
+                == 3)
+            .await
+    );
+    let applied = rig.controller.applied(&rig.name);
+    assert_eq!(
+        applied.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(applied[1].body, large.body().unwrap());
+    assert!(rig.controller.violations().is_empty());
+    let before = rig.hub.session_of(rig.machine.machine_id);
+    let mut status = rig.machine.link.status();
+    rig.hub.disconnect(rig.machine.machine_id);
+    tokio::time::timeout(Duration::from_secs(20),async {
+        loop {
+            if matches!(&*status.borrow(),orch_link::machine::LinkStatus::Connected {session_id,..} if Some(*session_id)!=before) {break;}
+            status.changed().await.unwrap();
+        }
+    }).await.unwrap();
+    assert_eq!(rig.controller.applied(&rig.name), applied);
+    rig.machine.link.shutdown().await;
 }
 
 fn clock() -> Arc<dyn Clock> {
@@ -120,6 +262,63 @@ async fn events_whose_frames_are_dropped_repeated_and_swapped_are_each_applied_o
         "the faults did fire: {}",
         faults.fired()
     );
+}
+
+#[tokio::test]
+async fn an_oversized_diagnostic_gives_way_to_authoritative_output_and_keeps_its_capture_gap() {
+    let rig = rig(MachineSpec::default(), true);
+    rig.machine.link.connected().await;
+    rig.machine.publish(&rig.stream, &title(0)).await;
+    let large = Event::RawFrame(RawFrame {
+        n: 0,
+        direction: "in".into(),
+        text: Vec::new(),
+        text_complete: true,
+        payload: serde_json::json!({"text":"x".repeat(Limits::default().message_bytes()+1)}),
+    });
+    assert!(
+        rig.machine.link.publish(&rig.stream, &large).await.is_ok(),
+        "lossy diagnostics cannot hold an authoritative batch forever"
+    );
+    rig.machine.publish(&rig.stream, &title(1)).await;
+    rig.machine
+        .publish(
+            &rig.stream,
+            &Event::RawFrame(RawFrame {
+                n: 0,
+                direction: "in".into(),
+                text: Vec::new(),
+                text_complete: true,
+                payload: serde_json::json!({"safe":true}),
+            }),
+        )
+        .await;
+    assert!(
+        rig.controller
+            .wait_until(Duration::from_secs(20), |controller| controller
+                .applied(&rig.name)
+                .len()
+                == 3)
+            .await
+    );
+    let applied = rig.controller.applied(&rig.name);
+    let captured = applied
+        .iter()
+        .find(|event| event.kind == "raw.frame")
+        .unwrap();
+    assert_eq!(
+        captured.body["n"], 2,
+        "the discarded diagnostic still consumed its durable capture number"
+    );
+    assert_eq!(
+        applied
+            .iter()
+            .filter(|event| event.kind == "session.title")
+            .map(|event| event.body["title"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["title 0000", "title 0001"]
+    );
+    rig.machine.link.shutdown().await;
 }
 
 #[tokio::test]
@@ -230,6 +429,8 @@ fn small_spool(max_bytes: u64) -> MachineSpec {
 
 fn raw(n: usize) -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 0,
         direction: "in".to_owned(),
         payload: serde_json::json!({ "n": n, "text": "x".repeat(150) }),
@@ -259,8 +460,7 @@ fn completed(item: &str) -> Event {
 }
 
 #[tokio::test]
-async fn a_full_spool_gives_up_diagnostics_and_then_the_text_a_completed_item_repeats_and_nothing_else()
- {
+async fn a_full_diagnostic_allowance_preserves_all_authoritative_progress() {
     let rig = rig(small_spool(7_000), false);
     // Offline: everything is spooled and nothing is sent.
     for n in 0..30 {
@@ -293,8 +493,8 @@ async fn a_full_spool_gives_up_diagnostics_and_then_the_text_a_completed_item_re
     );
     let deltas = applied.iter().filter(|e| e.kind == "item.delta").count();
     assert!(
-        deltas < 40,
-        "deltas of a completed item were left out: {deltas} of 40 arrived"
+        deltas == 40,
+        "all authoritative progress survived: {deltas} of 40 arrived"
     );
     assert!(
         rig.controller.resets().is_empty(),
@@ -305,8 +505,7 @@ async fn a_full_spool_gives_up_diagnostics_and_then_the_text_a_completed_item_re
 }
 
 #[tokio::test]
-async fn a_spool_that_must_give_up_its_oldest_events_says_so_with_a_reset_and_the_system_asks_for_the_session_again()
- {
+async fn a_spool_over_its_diagnostic_allowance_delivers_all_history_without_a_reset() {
     let rig = rig(small_spool(6_000), false);
     for n in 0..20 {
         rig.machine.publish(&rig.stream, &raw(n)).await;
@@ -329,21 +528,14 @@ async fn a_spool_that_must_give_up_its_oldest_events_says_so_with_a_reset_and_th
         rig.controller.resets(),
         rig.controller.violations()
     );
-    let resets = rig.controller.resets();
-    assert_eq!(resets.len(), 1, "{resets:?}");
-    assert_eq!(resets[0].reason, ResetReason::SpoolOverflow);
-    assert!(
-        resets[0].resync_requested,
-        "a session stream is repaired by asking for the session again"
-    );
+    assert!(rig.controller.resets().is_empty());
     let applied = rig.controller.applied(&rig.name);
-    assert!(
-        applied.iter().all(|e| e.kind == "session.title"),
-        "diagnostics went first"
-    );
-    assert!(applied.len() < 300, "the oldest went");
-    // The numbers continue from where the reset says the stream goes on.
-    assert_eq!(applied[0].seq, resets[0].from);
+    let applied: Vec<_> = applied
+        .iter()
+        .filter(|event| event.kind == "session.title")
+        .collect();
+    assert_eq!(applied.len(), 300, "no authoritative event was given up");
+    assert_eq!(applied[0].seq, 1);
     for pair in applied.windows(2) {
         assert_eq!(pair[1].seq, pair[0].seq + 1);
     }
@@ -352,29 +544,14 @@ async fn a_spool_that_must_give_up_its_oldest_events_says_so_with_a_reset_and_th
         "{:?}",
         rig.controller.violations()
     );
-    // The machine was asked, once, for the session again.
-    let asked = async {
-        while !rig
-            .machine
+    assert!(
+        rig.machine
             .handler
             .executions()
             .iter()
-            .any(|run| run.kind == CommandKind::SessionResync)
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(10), asked)
-        .await
-        .expect("the machine was never asked for the session");
-    let resyncs = rig
-        .machine
-        .handler
-        .executions()
-        .iter()
-        .filter(|run| run.kind == CommandKind::SessionResync)
-        .count();
-    assert_eq!(resyncs, 1);
+            .all(|run| run.kind != CommandKind::SessionResync),
+        "retained history needs no repair read"
+    );
     let _ = rig.thread_id;
 }
 

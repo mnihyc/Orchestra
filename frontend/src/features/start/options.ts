@@ -14,15 +14,18 @@ import { startOptionsQuery } from '@/api/start';
 import type { Node } from '@/generated/api-types';
 
 import { canUseEnvironment, CHOOSE_EXISTING_ENVIRONMENT, type Mode, NEW_ENVIRONMENT, NO_PICKS, type Picks, resolve, type Resolved } from './choices';
-import { useLastSetup } from './lastSetup';
+import { useLastSetupObservation, type LastSetupObservation } from './lastSetup';
 import type { CreationAccessContext, StartOptions } from '@/api/start';
 
 export interface Started {
+  setupObservation?: LastSetupObservation;
   /** Native loading/retry state for callers using the shared read skeleton. */
   read: UseQueryResult<StartOptions>;
   /** The answer, or `null` before the first one. */
   options: StartOptions | null;
   resolved: Resolved | null;
+  /** Retained choices for display after a refusal; never evidence that submission is ready. */
+  preview: Resolved | null;
   loading: boolean;
   failed: unknown;
   /** The answer shown is the one for another environment, and the one for this is on its way. */
@@ -37,9 +40,10 @@ interface BindingState {
 }
 
 /** What a thread made in a topic, or in a topic made in a project, could be bound to, and what the person's picks make of it. */
-export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enabled = true, context?: CreationAccessContext, knownEnvironment?: string | null): Started {
+/** `beside`: the starter stands beside the page's own content (a place's quick start), which is shown without waiting for it. */
+export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enabled = true, context?: CreationAccessContext, knownEnvironment?: string | null, beside = false): Started {
   const reader = useStore(client.session, (state) => `${state.userId}:${state.readerVersion}:${state.status}`);
-  const last = useLastSetup();
+  const [last, setupObservation] = useLastSetupObservation();
   const previous = last === null ? NO_PICKS : { ...last.picks, environment: last.place === nodeId ? last.picks.environment : null };
   // Metadata is owned by the addressed page. Observe its flight without issuing a
   // competing plain-node request before that page can use its native opening.
@@ -66,7 +70,8 @@ export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enable
   const waitingForNode = picks.environment === null && knownEnvironment === undefined && node === undefined && nodeRead.isFetching;
   const settling = picks.environment === null && knownEnvironment === undefined && node === undefined && committed !== scope;
   const paused = waitingForNode || settling;
-  const query = useQuery({ ...startOptionsQuery(nodeId, environment, context), enabled: enabled && !paused });
+  const query = useQuery({ ...startOptionsQuery(nodeId, environment, context, picks.newEnvironment), enabled: enabled && !paused,
+    ...(beside ? { meta: { afterContent: true } } : {}) });
   // Preserve the loaded form while its newly chosen environment is being checked.
   // A different place, audience or reader never inherits that display snapshot.
   const options = query.data ?? (held?.scope === scope ? held.options : null);
@@ -101,9 +106,11 @@ export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enable
   if (next !== binding) setBinding(next);
   const failed = paused && query.data === undefined ? null : query.isError ? query.error : rejectedChoice;
   return {
+    setupObservation,
     read: query,
     options,
     resolved: failed === null ? judged : null,
+    preview: judged,
     loading: (paused || query.isPending) && options === null,
     failed,
     refreshing: waitingForNode || (settling && options === null) || fallback || redirect || (query.isPending && options !== null),
