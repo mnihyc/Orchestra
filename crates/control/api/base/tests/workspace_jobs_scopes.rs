@@ -103,6 +103,97 @@ async fn add_permission(site: &Site, object: &str, id: Id, permission: &str, act
 }
 
 #[tokio::test]
+async fn a_completed_handoff_keeps_its_captured_input_under_the_actual_job_reader() {
+    let site = site().await;
+    let captured = json!({
+        "input_coverage": {
+            "read_turn_bytes":4096,
+            "included_turn_ranges":[{"first":3,"through":6},{"first":8,"through":9}],
+            "oversized_turn_ranges":[{"first":1,"through":2},{"first":7,"through":7}],
+            "omitted_prefix":true,
+            "captured_at":orch_types::Time::new(site.world.now())
+        },
+        "result_facts":null
+    });
+    let id = seed(
+        &site,
+        "thread_fork",
+        Some(site.thread),
+        Some(site.environment),
+        None,
+        json!({"handoff_result":&captured}),
+    )
+    .await;
+    let key = keys::scoped(
+        &site,
+        site.ada.id(),
+        vec![
+            read_job(id),
+            subject("JobGet.ordinary", "thread", site.thread, "read"),
+        ],
+    )
+    .await;
+    assert!(get(&site, id, &key.secret, StatusCode::OK).await["handoff_result"].is_null());
+    sqlx::query("UPDATE jobs SET state='succeeded',finished_at=$2 WHERE id=$1")
+        .bind(id)
+        .bind(site.world.now())
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        get(&site, id, &key.secret, StatusCode::OK).await["handoff_result"],
+        captured
+    );
+    sqlx::query("UPDATE jobs SET progress=jsonb_set(progress,'{message}',$2),plan=jsonb_set(plan,'{read_turn_bytes}',$3) WHERE id=$1")
+        .bind(id)
+        .bind(json!("A newer reading allowance applies"))
+        .bind(json!(32768))
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        get(&site, id, &key.secret, StatusCode::OK).await["handoff_result"],
+        captured,
+        "current workflow metadata never rewrites the retained producer receipt"
+    );
+    let elsewhere = keys::scoped(
+        &site,
+        site.ada.id(),
+        vec![
+            read_job(new_id()),
+            subject("JobGet.ordinary", "thread", site.thread, "read"),
+        ],
+    )
+    .await;
+    let refused = get(&site, id, &elsewhere.secret, StatusCode::FORBIDDEN).await;
+    assert!(!refused.to_string().contains("included_turn_ranges"));
+    let unrelated = seed(
+        &site,
+        jobs::kind::ENVIRONMENT_RESTART,
+        Some(site.thread),
+        Some(site.environment),
+        None,
+        json!({"handoff_result":&captured}),
+    )
+    .await;
+    sqlx::query("UPDATE jobs SET state='succeeded',finished_at=$2 WHERE id=$1")
+        .bind(unrelated)
+        .bind(site.world.now())
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        get(&site, unrelated, &site.ada.token, StatusCode::OK).await["handoff_result"].is_null()
+    );
+    sqlx::query("UPDATE jobs SET plan=plan-'handoff_result' WHERE id=$1")
+        .bind(id)
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    assert!(get(&site, id, &key.secret, StatusCode::OK).await["handoff_result"].is_null());
+}
+
+#[tokio::test]
 async fn ordinary_jobs_use_one_real_native_alternative_without_requiring_every_nonnull_link() {
     let site = site().await;
     for kind in [jobs::kind::ENVIRONMENT_RESTART, jobs::kind::SNAPSHOT] {
@@ -320,6 +411,79 @@ async fn creator_job_read_keeps_its_real_place_ceiling_without_inventing_parent_
             assert_eq!(body, native);
         }
     }
+}
+
+#[tokio::test]
+async fn a_thread_move_creator_can_read_its_job_after_the_source_ends_with_the_same_place_ceiling()
+{
+    let site = site().await;
+    let id = seed(
+        &site,
+        "thread_fork",
+        Some(site.thread),
+        Some(site.environment),
+        None,
+        json!({"confirmed_history_source":{"operation":{"origin":{"operation":"ThreadMoveOut"}}}}),
+    )
+    .await;
+    let ordinary = seed(
+        &site,
+        "thread_fork",
+        Some(site.thread),
+        Some(site.environment),
+        None,
+        json!({}),
+    )
+    .await;
+    sqlx::query("UPDATE jobs SET state='succeeded',finished_at=$2 WHERE id=ANY($1)")
+        .bind(vec![id, ordinary])
+        .bind(site.world.now())
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(site.thread)
+        .bind(site.world.now())
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    for (place, allowed) in [(site.org, true), (site.ada.person.personal_org, false)] {
+        let key = keys::scoped(&site, site.ada.id(), vec![read_job(id)]).await;
+        let restriction = vec![vec![keys::rule(
+            "JobGet.ordinary",
+            "org",
+            place,
+            "subtree",
+            &["read"],
+        )]];
+        sqlx::query("UPDATE api_tokens SET operation_scope=jsonb_set(operation_scope,'{constraints}',$2) WHERE id=$1")
+            .bind(key.id).bind(json!(restriction)).execute(&site.world.db.pool).await.unwrap();
+        let body = get(
+            &site,
+            id,
+            &key.secret,
+            if allowed {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            },
+        )
+        .await;
+        if allowed {
+            assert_eq!(body["result"]["native_result"], "Earlier native Job result");
+        }
+    }
+    let other = keys::scoped(&site, site.dev.id(), vec![read_job(id)]).await;
+    let reply = site
+        .app()
+        .call(JobGet, &[&id])
+        .token(&other.secret)
+        .send_bytes()
+        .await;
+    assert!(!reply.status.is_success());
+    assert!(!String::from_utf8_lossy(&reply.raw).contains("Earlier native Job result"));
+    let key = keys::scoped(&site, site.ada.id(), vec![read_job(ordinary)]).await;
+    get(&site, ordinary, &key.secret, StatusCode::FORBIDDEN).await;
 }
 
 #[tokio::test]

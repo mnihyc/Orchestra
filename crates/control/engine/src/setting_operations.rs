@@ -723,6 +723,9 @@ impl crate::Engine {
                     .await?;
                 }
             }
+            key if crate::environments::is_workspace_setting(key) => {
+                self.workspace_scope_changed(change.node).await?;
+            }
             keys::AUTH_SECOND_STEP => {
                 let mut conn = self.db().acquire().await?;
                 let held = orch_db::queries::threads::threads_held_for_second_step(&mut conn, None)
