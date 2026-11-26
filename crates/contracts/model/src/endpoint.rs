@@ -373,6 +373,7 @@ pub fn authorize_joined(
     let bad = |name: &str| AuthorizeError::BadHeader(name.to_owned());
     for name in ["authorization", "x-api-key", "cookie"]
         .into_iter()
+        .chain(crate::protocol::credential_headers())
         .chain(HOP_BY_HOP)
     {
         headers.remove(name);
@@ -445,7 +446,7 @@ pub fn authorize_joined(
         .collect())
 }
 
-/// The options both built-in protocols declare, in the one shape in which a person is asked for a value.
+/// The common endpoint options, in the shape in which a person is asked for a value.
 #[must_use]
 pub fn standard_options() -> Vec<Field> {
     let mut auth = Field::new("auth", "How the key is presented", FieldType::Choice);
@@ -454,6 +455,7 @@ pub fn standard_options() -> Vec<Field> {
         [
             ("bearer", "Authorization: Bearer <key>"),
             ("x-api-key", "x-api-key: <key>"),
+            ("x-goog-api-key", "x-goog-api-key: <key>"),
             ("header", "A header of your choice"),
             ("none", "No key"),
         ]
@@ -792,7 +794,16 @@ mod tests {
                 .iter()
                 .all(|field| !field.required && field.help.is_some())
         );
-        assert_eq!(fields[0].choices.as_ref().unwrap().len(), 4);
+        assert_eq!(
+            fields[0]
+                .choices
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["bearer", "x-api-key", "x-goog-api-key", "header", "none"]
+        );
         // What a form can give is accepted by the options.
         assert_eq!(
             orch_types::fields::validate(
