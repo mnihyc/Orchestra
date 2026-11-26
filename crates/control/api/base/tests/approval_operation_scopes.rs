@@ -23,7 +23,7 @@ use orch_api_contract::approvals::{
     ApprovalCancel, ApprovalDecide, ApprovalDecision, ApprovalGet, ApprovalList, ApprovalListQuery,
 };
 use orch_api_contract::threads::Delivery;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::{Act, Caller, Policy, Principal};
 use orch_db::queries::identity;
@@ -70,7 +70,7 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> Key {
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
@@ -91,7 +91,7 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> Key {
 }
 async fn legacy(s: &Scene, actor: Id) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
@@ -389,25 +389,63 @@ async fn scoped_harness_manage_keeps_one_native_decision_and_exact_delivery() {
         decide(&s, &old.secret, ids[1], &allow).await,
         StatusCode::OK,
     );
-    let key = key(
+    let decision_key = key(
         &s,
         s.ada.id(),
         decide_rules(&s, thread, HARNESS, "manage", true),
     )
     .await;
     let shown = checked(
-        decide(&s, &key.secret, ids[2], &allow).await,
+        decide(&s, &decision_key.secret, ids[2], &allow).await,
         StatusCode::OK,
     );
     assert_eq!(shown["state"], "approved");
-    assert_eq!(shown["decision"], allow);
-    assert_eq!(shown["decided_by"]["id"], json!(s.ada.id()));
+    // The committed action can return a receipt when its optional card read was unavailable.
+    let response: orch_api_contract::approvals::ApprovalWriteResponse =
+        serde_json::from_value(shown).unwrap();
+    match response {
+        orch_api_contract::approvals::ApprovalWriteResponse::Full(reply) => {
+            assert_eq!(reply.approval.id, ids[2]);
+            assert_eq!(reply.approval.decision, Some(allow.clone()));
+            assert_eq!(
+                reply.approval.decided_by.as_ref().map(|person| person.id),
+                Some(s.ada.id())
+            );
+        }
+        orch_api_contract::approvals::ApprovalWriteResponse::Receipt(receipt) => {
+            assert_eq!(receipt.approval_id, ids[2]);
+            assert_eq!(receipt.decided_by, Some(s.ada.id()));
+        }
+    }
     rig::eventually("all three exact native decisions are delivered", || async {
         s.rig.seen.of_kind(CommandKind::ApprovalResolve).len() == 3
     })
     .await;
+    let delivered = s.rig.seen.of_kind(CommandKind::ApprovalResolve);
+    let references = delivered
+        .iter()
+        .map(|command| {
+            let body = command.body().unwrap();
+            assert_eq!(body["thread_id"], json!(thread));
+            assert_eq!(body["decision"], allow);
+            body["request_ref"].as_str().unwrap().to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        references,
+        ["browser", "legacy", "key"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    // A full card is read only through its own explicitly authorized operation.
+    let read_key = key(&s, s.ada.id(), read_rules(&s, thread, GET)).await;
+    let stored = checked(get(&s, &read_key.secret, ids[2]).await, StatusCode::OK);
+    assert_eq!(stored["state"], "approved");
+    assert_eq!(stored["decision"], allow);
+    assert_eq!(stored["decided_by"]["id"], json!(s.ada.id()));
     let again = checked(
-        decide(&s, &key.secret, ids[2], &allow).await,
+        decide(&s, &decision_key.secret, ids[2], &allow).await,
         StatusCode::CONFLICT,
     );
     assert_eq!(again["code"], "approval.already_decided");

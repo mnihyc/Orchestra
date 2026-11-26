@@ -20,6 +20,13 @@ const metadata = {
 beforeEach(() => { queryClient.setQueryData(['meta'], metadata); });
 afterEach(() => { queryClient.removeQueries({ queryKey: ['meta'], exact: true }); });
 
+it('resolves a local tab address without reading the installation addresses', () => {
+  const addresses = { get public_url(): string { throw new Error('Unexpected installation lookup'); } };
+  for (const href of [`/doc/${ID}`, `${location.origin}/doc/${ID}`]) {
+    expect(readOrchLink(href, { addresses })?.href).toBe(`${location.origin}/doc/${ID}`);
+  }
+});
+
 it.each([location.origin, metadata.public_url, ...metadata.alternate_urls, 'https://edge.orch.test'])('recognizes exactly the declared address %s across resource consumers', (origin) => {
   const href = `${origin}/doc/${ID}?block=${BLOCK}#section`;
   expect(readOrchLink(href)?.href).toBe(`${location.origin}/doc/${ID}?block=${BLOCK}#section`);

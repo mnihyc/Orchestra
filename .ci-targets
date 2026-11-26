@@ -1,0 +1,10 @@
+# Claude Code's sandbox where it runs and its approval choices: the adapter's whole suite, the engine programs that
+# share its recorded conversations, the lint of every target, and the web checks of the composer line and the card
+test -p orch-adapter-claude-code
+test -p orch-engine --test background_wake_native
+test -p orch-engine --test d417_feedback -- an_unsupported_sandbox_blocks_the_turn_with_the_actionable_setting_names
+clippy
+contracts
+web typecheck
+web lint
+web test -- tests/component/composer-sandbox-shortfall.test.tsx tests/component/approval-options-note.test.tsx tests/component/composer-approval-mode.test.tsx tests/component/machine-program-version-blocked.test.tsx tests/component/approval-rules-state.test.tsx tests/component/thread-approval-keyboard.test.tsx tests/component/sandbox-readiness.test.tsx tests/component/composer-controls.test.tsx tests/component/viewer-composer.test.tsx

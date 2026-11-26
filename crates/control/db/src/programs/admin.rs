@@ -140,6 +140,8 @@ impl BuildRow {
 
 /// Selection applied in SQL before a bounded build page is returned.
 pub struct BuildSelection<'a> {
+    /// Literal visible build words, already escaped for ILIKE.
+    pub patterns: &'a [String],
     /// Program.
     pub kind: &'a str,
     /// Release's fixed build array.
@@ -169,7 +171,7 @@ pub async fn builds(
     limit: i64,
 ) -> Result<Vec<BuildRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT version,os,arch,version_sort,payload FROM orch_program_build_page($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        "SELECT version,os,arch,version_sort,payload FROM orch_program_build_page($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ORDER BY version_sort COLLATE \"C\" DESC,version DESC,os,arch LIMIT $13",
     )
     .bind(selection.kind)
@@ -185,6 +187,7 @@ pub async fn builds(
     .bind(after.map(|p| p.os.as_str()))
     .bind(after.map(|p| p.arch.as_str()))
     .bind(limit)
+    .bind(selection.patterns)
     .fetch_all(conn)
     .await?)
 }
@@ -379,6 +382,7 @@ mod tests {
             .execute(&mut *conn).await.unwrap();
         let shipped = json!([{"kind":"third","version":"1.0.2","os":"linux","arch":"x86_64","source":"release","status":"checked","is_default":true}]);
         let selection = BuildSelection {
+            patterns: &[],
             kind: "third",
             shipped: &shipped,
             trust_mirror: false,

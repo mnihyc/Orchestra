@@ -68,13 +68,16 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # What the agent works with. ripgrep and git are what harnesses search and
 # change files with; build-essential and python3 are what most repositories
-# build and test with; the rest is what a person at a shell would be
-# surprised to find missing.
+# build and test with; bubblewrap and socat are what Claude Code's shell
+# sandbox runs commands in on Linux (where the environment's runtime lets
+# bubblewrap make its namespaces); the rest is what a person at a shell would
+# be surprised to find missing.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        bash build-essential ca-certificates curl git jq less \
-        openssh-client procps python3 python3-pip python3-venv ripgrep unzip xz-utils zip \
- && rm -rf /var/lib/apt/lists/*
+        bash bubblewrap build-essential ca-certificates curl git jq less \
+        openssh-client procps python3 python3-pip python3-venv ripgrep socat unzip xz-utils zip \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v bwrap socat > /dev/null
 
 # The account the agent runs as, and the two places an environment keeps its
 # volumes (the template's workspace_mount and home_mount). The ids are the
