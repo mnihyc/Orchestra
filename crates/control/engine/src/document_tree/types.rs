@@ -70,7 +70,8 @@ pub enum Actor<'a> {
     },
 }
 
-/// Organization operations. Delete and MoveOut consume a complete native deletion plan.
+/// Organization operations. MoveOut consumes a complete native deletion plan; Delete moves its
+/// trees to the trash at once and checks a plan only when one is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
@@ -91,6 +92,23 @@ pub enum Command {
     /// Restore one earlier text-document version.
     RestoreVersion,
 }
+
+impl Command {
+    /// Whether a request of this command may carry (`given`) a deletion plan: Move to another org
+    /// always carries its complete plan, a deletion may carry one, and nothing else carries one.
+    #[must_use]
+    pub const fn fits_deletion_plan(self, given: bool) -> bool {
+        match self {
+            Self::MoveOut => given,
+            Self::Delete => true,
+            _ => !given,
+        }
+    }
+}
+
+/// The refusal of a deletion plan that does not fit its command.
+pub const DELETION_PLAN_MISFIT: &str =
+    "Move to another org requires its complete native deletion plan, and only it and deletion take one";
 
 /// Canonical arguments, independent of the caller's display paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

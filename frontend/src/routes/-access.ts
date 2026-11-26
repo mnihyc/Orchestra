@@ -8,11 +8,12 @@
 import { redirect } from '@tanstack/react-router';
 import { QueryObserver } from '@tanstack/react-query';
 
-import { signOut } from '@/api/auth';
+import { metaKey, signOut } from '@/api/auth';
 import { admissionMetaQuery } from '@/shell/admission';
 import { client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { setSystemName } from '@/lib/title';
+import type { Meta } from '@/generated/api-types';
 
 /** Whom a route is for. */
 export type RouteNeeds =
@@ -84,13 +85,38 @@ interface Visit {
   onward: unknown;
 }
 
-async function admissionFacts() {
+/**
+ * What admission needs to know: whether this browser holds a session and, for a visitor with none, what the system says of
+ * itself. Somebody signed in is let in at the session's answer: a system that has a person in it has a user, and the shell's
+ * first read (started at that same answer, see `shell/startup.ts`) lands in its cache by itself, so nothing here waits for it.
+ */
+async function admissionFacts(): Promise<{ meta: Meta | null; signedIn: boolean }> {
   // Admission still owns Meta when restoration unmounts the last AuthFrame observer.
   // Disabled retains without fetching; Infinity does not block a caller-specific refetch.
   const reader = new QueryObserver(queryClient, { ...admissionMetaQuery, enabled: false, staleTime: Infinity });
-  const release = reader.subscribe(() => undefined);
+  const unsubscribe = reader.subscribe(() => undefined);
+  let released = false;
+  const release = () => { if (!released) { released = true; unsubscribe(); } };
+  // This observer already owns the route's cancellable lifetime. An additional imperative lease
+  // would outlive a failed restoration and retain a read that no remaining frame needs.
+  const query = reader.getCurrentQuery();
+  const meta = query.state.data === undefined ? query.fetch() : Promise.resolve(query.state.data);
+  const read = { settled: false };
+  void meta.then(() => { read.settled = true; }, () => { read.settled = true; });
+  let signedIn: boolean;
   try {
-    return await Promise.all([queryClient.query({ ...admissionMetaQuery, staleTime: 'static' }), client.restore()]);
+    signedIn = await client.restore();
+  } catch (error) {
+    release();
+    throw error;
+  }
+  if (signedIn) {
+    // Admission goes on without Meta, but keeps its lease until the read that is under way has settled.
+    if (read.settled) release(); else void meta.then(release, release);
+    return { meta: null, signedIn };
+  }
+  try {
+    return { meta: await meta, signedIn };
   } finally { release(); }
 }
 
@@ -99,11 +125,14 @@ async function admissionFacts() {
  * enter. A failure to ask is thrown as it is, and the root route shows it with a way to try again.
  */
 export async function admit(visit: Visit): Promise<void> {
-  const [meta, signedIn] = await admissionFacts();
-  setSystemName(meta.name);
+  // A public form can be used with its actual policy while the private cookie is being checked.
+  const delivered = visit.needs === 'signed_out' && /^\/login\/?$/.test(visit.pathname) && client.session.getState().status === 'unknown'
+    ? queryClient.getQueryData<Meta>(metaKey) : undefined;
+  const { meta, signedIn } = delivered?.may_create_org === false ? { meta: delivered, signedIn: false } : await admissionFacts();
+  if (meta !== null) setSystemName(meta.name);
 
   // A system with no user has one screen, and everything leads to it.
-  if (meta.needs_setup) {
+  if (meta?.needs_setup === true) {
     if (visit.needs === 'setup') return;
     throw redirect({ to: '/setup', replace: true });
   }

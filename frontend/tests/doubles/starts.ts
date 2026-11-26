@@ -39,10 +39,10 @@ export class Starts implements Part {
       const value = settings.valueAt(nodeId, key).value;
       return isText(value) ? value : null;
     };
-    const locked = ['agent.default_provider_id', 'agent.default_agent_id', 'agent.model'].some((key) => settings.valueAt(nodeId, key).lockedBy !== null);
+    const locked = (key: string) => settings.valueAt(nodeId, key).lockedBy !== null;
     return {
       node: { id: nodeId, kind },
-      defaults: { provider: text('agent.default_provider_id'), agent: text('agent.default_agent_id'), model: text('agent.model'), effort: text('agent.effort'), locked },
+      defaults: { provider: text('agent.default_provider_id'), agent: text('agent.default_agent_id'), model: text('agent.model'), effort: text('agent.effort'), locks: { provider: locked('agent.default_provider_id'), agent: locked('agent.default_agent_id'), model: locked('agent.model'), effort: locked('agent.effort') } },
       prefer: asTypes(settings.valueAt(nodeId, 'binding.prefer').value) ?? [],
       allowed: asTypes(settings.valueAt(nodeId, 'binding.allowed').value),
       environmentDefault: settings.valueAt(nodeId, 'env.thread_default').value === 'fresh' ? 'fresh' : 'shared',

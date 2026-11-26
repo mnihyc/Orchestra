@@ -5,12 +5,17 @@
  * download of its certificate. Under it, the certificates of the system's own services and how many
  * machines hold one that ends within thirty days, with the first fifty named and linked.
  */
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Download, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { pkiQuery } from '@/api/admin';
+import { useState } from 'react';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Button } from '@/ui/Button';
+import { EmptyState } from '@/ui/EmptyState';
+import { pkiPageQuery } from '@/api/admin';
 import { BASE_PATH } from '@/api/client';
 import { daysLeft, groupFingerprint } from '@/features/admin/pki';
 import { useAppearance } from '@/lib/appearance';
@@ -30,11 +35,18 @@ import { type Column, Table } from '@/ui/Table';
 const SOON_DAYS = 30;
 
 export function Pki() {
+  const search=useCollectionSearch('pki');
+  return <PkiForReader key={search.scope} search={search}/>;
+}
+function PkiForReader({search}:{search:ReturnType<typeof useCollectionSearch>}) {
   const { t, i18n } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
-  const pki = useQuery(pkiQuery);
+  const [path,setPath]=useState<{q:string;cursors:(string|undefined)[]}>({q:search.q,cursors:[undefined]});
+  if(path.q!==search.q)setPath({q:search.q,cursors:[undefined]});
+  const cursors=path.q===search.q?path.cursors:[undefined];
+  const pki = useQuery({...pkiPageQuery(search.q,cursors.at(-1)),placeholderData:keepPreviousData});
 
   if (pki.isPending) return <SkeletonRows read={pki} rows={5} />;
   if (pki.isError) return <ErrorState error={pki.error} retrying={pki.isRefetching} onRetry={() => void pki.refetch()} />;
@@ -108,16 +120,18 @@ export function Pki() {
       </Section>
 
       <Section id="admin-machines" title={t('admin.pki.machinesTitle')}>
+        <CollectionSearch name={t('admin.pki.expiringMachines')} {...search}/>
         {expiring > 0 ? (
           <>
             <InlineAlert tone="warning" title={t('admin.pki.expiring', { count: expiring, number: expiring })}>
               {t('admin.pki.expiringHint')}
             </InlineAlert>
             <p className="text-base text-text-muted">{t('admin.pki.machinesLead')}</p>
-            <Table label={t('admin.pki.expiringMachines')} columns={machineColumns} rows={machines} rowKey={({ machine }) => machine.id} />
-            {expiring > machines.length && (
-              <p className="text-sm text-text-muted">{t('admin.pki.moreExpiring', { shown: machines.length, total: expiring })}</p>
-            )}
+            {machines.length===0?<EmptyState compact title={t('ui.collection.none')}/>:<Table label={t('admin.pki.expiringMachines')} columns={machineColumns} rows={machines} rowKey={({ machine }) => machine.id}/>}
+            {(cursors.length>1 || pki.data.machines_next_cursor!==undefined && pki.data.machines_next_cursor!==null) && <div className="flex justify-end gap-2">
+              <Button size="sm" disabled={cursors.length===1 || pki.isFetching || search.text.trim()!==search.q} onClick={()=>setPath({q:search.q,cursors:cursors.slice(0,-1)})}>{t('resourceDetails.layout.previous')}</Button>
+              <Button size="sm" disabled={pki.data.machines_next_cursor===undefined || pki.data.machines_next_cursor===null || pki.isFetching || search.text.trim()!==search.q} onClick={()=>{const next=pki.data.machines_next_cursor;if(next!==undefined && next!==null)setPath({q:search.q,cursors:[...cursors,next]});}}>{t('ui.pagination.more')}</Button>
+            </div>}
           </>
         ) : (
           <p className="flex items-center gap-2 text-base text-text">

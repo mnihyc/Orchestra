@@ -1055,14 +1055,12 @@ async fn an_api_token_kept_to_a_subtree_sees_nothing_outside_it() {
     let acme = make_org(&world, &boss, "Acme", "acme").await;
     let web = make_project(&world, &boss, acme.base.id, "Web").await;
     let docs = make_project(&world, &boss, acme.base.id, "Docs").await;
-    let token = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let token = orch_api_core::middleware::authentication::new_api_token(orch_types::new_id());
     sqlx::query(
         "INSERT INTO api_tokens (id, user_id, name, token_hash, scopes, node_id)
          VALUES ($1, $2, 'kept', $3, ARRAY['*'], $4)",
     )
-    .bind(orch_types::new_id())
+    .bind(orch_api_contract::api_keys::key_id(&token).unwrap())
     .bind(boss.id())
     .bind(orch_api_core::middleware::authentication::token_hash(
         &token,
