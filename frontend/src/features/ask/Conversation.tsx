@@ -1,4 +1,5 @@
 /** Ask answers use the ordinary Markdown, reference chips, attachments and hover actions. */
+import { PathLink } from '@/shell/TrailLink';
 import { Copy, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { AttachmentChips } from '@/features/composer/Attachments';
@@ -33,7 +34,12 @@ export function AskCitationChip({ citation }: { citation: AskCitation }) {
     if (object.kind === 'mcp_server') return <ResourceChip subject={{ kind: 'mcp_server', server: named }} hint={false} />;
     if (object.kind === 'skill') return <ResourceChip subject={{ kind: 'skill', skill: named }} hint={false} />;
   }
-  return <a className={REFERENCE_CHIP_CLASS} href={`${url.pathname}${url.search}${url.hash}`}>{name}</a>;
+  return <PathLink className={REFERENCE_CHIP_CLASS} href={`${url.pathname}${url.search}${url.hash}`}>{name}</PathLink>;
+}
+
+/** Whether an Ask message is a step that wrote nothing: it only read sources on the way to an answer. */
+export function readOnlyStep(message: AskMessage): boolean {
+  return message.role === 'assistant' && message.content.every((part) => part.type === 'text' && part.text.trim() === '');
 }
 
 export function AskMessageRow({ message, threadId, owner, canRetry, onRetry }: { message: AskMessage; threadId: string; owner?: UserChipProps['user']; canRetry: boolean; onRetry: () => void }) {
@@ -43,7 +49,8 @@ export function AskMessageRow({ message, threadId, owner, canRetry, onRetry }: {
   const copied = text + (message.citations.length === 0 ? '' : `\n\n${message.citations.filter((one) => one.title !== null).map((one) => markdownReference(one.title ?? '', one.url)).join('\n')}`);
   return <li className="group/ask-message flex min-w-0 flex-col gap-2 py-3" data-ask-message={message.id} data-role={message.role}>
     <div className="flex min-w-0 items-center gap-2 text-xs text-text-muted">{message.role === 'user' && owner !== undefined ? <UserChip user={owner} /> : <span>{t(message.role === 'user' ? 'ask.question' : 'ask.title')}</span>}<RelativeTime at={message.created_at} /></div>
-    <AgentReferences threadId={threadId}><Markdown text={text} streaming={message.role === 'assistant' && !message.complete} breaks compact /></AgentReferences>
+    {message.complete && readOnlyStep(message) ? <span className="text-sm text-text-muted">{t('ask.noAnswer')}</span>
+      : <AgentReferences threadId={threadId}><Markdown text={text} streaming={message.role === 'assistant' && !message.complete} breaks compact /></AgentReferences>}
     {attachments.length > 0 && <AttachmentChips parts={attachments} />}
     {message.citations.length > 0 && <ul className="flex min-w-0 flex-wrap items-center gap-2 text-sm" aria-label={t('ask.sources')}>
       {message.citations.map((citation) => <li className="min-w-0 max-w-full" key={citation.reference}><AskCitationChip citation={citation} /></li>)}

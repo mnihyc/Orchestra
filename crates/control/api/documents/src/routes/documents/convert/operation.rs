@@ -103,7 +103,7 @@ pub(super) struct Fetched {
     document: Option<Id>,
     text_bytes: i64,
     reply: DocumentConvertReply,
-    held: Vec<HeldFile>,
+    held: HeldFiles,
     original_names: HashMap<Id, String>,
     witness: Witness,
 }
@@ -112,7 +112,7 @@ pub(super) struct Proposal {
     fetched: Arc<Fetched>,
     document: Option<Id>,
     settings: Option<DocSettings>,
-    held: Vec<HeldFile>,
+    held: HeldFiles,
     refused: Option<super::refusal::Failure>,
 }
 
@@ -407,7 +407,7 @@ impl effects::Initial for Conversions {
                         orch_documents::warnings::Warning::new("reader.pictures_left_out", &[]),
                     );
                 }
-                Vec::new()
+                HeldFiles::default()
             };
             let reply = DocumentConvertReply {
                 blocks: read.blocks,
