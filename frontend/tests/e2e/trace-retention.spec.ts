@@ -7,7 +7,7 @@ import type { CleanupPlan, DeletedEnvironmentPage } from '../../src/generated/ap
 
 async function retention(body: Record<string, unknown>) { const response = await fetch(`${DOUBLE}/__double/trace/retention`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); expect(response.ok).toBe(true); }
 async function state() { return (await fetch(`${DOUBLE}/__double/trace/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json() as Promise<{ requests: { method: string; path: string; query: Record<string, string>; body: Record<string, unknown> }[] }>; }
-async function deleted(page: Page) { await page.goto(`/project/${ACME.web}`); await page.getByRole('button', { name: /^Actions for Web(?: · .+)?$/, exact: true }).first().click(); await page.getByRole('menuitem', { name: 'Recently deleted…', exact: true }).click(); await expect(page.getByRole('dialog', { name: /^Recently deleted in the project Web, in / })).toBeVisible(); }
+async function deleted(page: Page) { await page.goto(`/project/${ACME.web}`); await page.getByRole('button', { name: /^Actions for Web(?: · .+)?$/, exact: true }).first().click(); await page.getByRole('menuitem', { name: 'Trash…', exact: true }).click(); await expect(page.getByRole('dialog', { name: /^Trash in the project Web, in / })).toBeVisible(); }
 const envRow = (page: Page, id: string = TRACE.environment) => page.locator(`[data-kept-environment="${id}"]`);
 const stopped = (scope: Page | Locator) => scope.getByRole('status').filter({ hasText: 'Restoration returns Stopped.' });
 const deadline = (page: Page) => envRow(page).getByText(/^Kept until /);
@@ -35,7 +35,7 @@ async function hostKept(page: Page) {
 }
 test.beforeEach(async () => { await scenario(); });
 
-test('Recently deleted includes guarded nodes, documents, measured and unknown environment size, host, storage and phase', async ({ page }) => {
+test('the Trash includes guarded nodes, documents, measured and unknown environment size, host, storage and phase', async ({ page }) => {
   await signIn(page); await deleted(page); await expect(page.getByText('Archived experiment', { exact: true })).toBeVisible(); await expect(page.locator(`[data-kept-document="${TRACE.document}"]`)).toBeVisible(); await expect(envRow(page)).toContainText('2 GiB'); await expect(envRow(page)).toContainText('host-1'); await expect(envRow(page)).toContainText('Kept');
   const unmeasuredSize = envRow(page, TRACE.unknownEnvironment).getByText('Size', { exact: true }).locator('xpath=following-sibling::dd[1]');
   await expect(unmeasuredSize).toHaveText('Not recorded');
@@ -161,7 +161,7 @@ test('QS-013 the host detail uses its served kept_data and makes no speculative 
 test('Remove describes a positive window, zero-day deletion and a connected registration truthfully', async ({ page }) => {
   await signIn(page); await page.goto(`/resources/environments/${RUNS_ON.sandbox}`); await page.getByRole('button', { name: 'Actions for Sandbox', exact: true }).click(); await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click(); await expect(page.getByText(/Its files are kept until/)).toBeVisible(); await expect(page.getByText('Workspace, home, state and private views are included. Mounts are kept separately.')).toBeVisible(); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await retention({ keep_days: 0 }); await page.reload(); await page.getByRole('button', { name: 'Actions for Sandbox', exact: true }).click(); await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click();
-  await expect(page.getByText('Deletes the unit and its owned volumes without a recovery window.')).toBeVisible();
+  await expect(page.getByText('Deletes the container and its owned volumes without a recovery window.')).toBeVisible();
   await expect(page.getByText(/Its files are kept until/)).toHaveCount(0);
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.goto(`/resources/environments/${RUNS_ON.workspace}`); await page.getByRole('button', { name: 'Actions for Workspace', exact: true }).click(); await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click(); await expect(page.getByText('Only its registration is removed; its files stay on this machine.')).toBeVisible();

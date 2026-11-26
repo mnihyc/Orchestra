@@ -68,7 +68,11 @@ impl Engine {
                     .await?
                     .is_some_and(|row| row.plan.get("kept_image_pins").is_none())
                 {
-                    if orch_db::queries::storage::pin_blobs(&mut tx, &[archive.hash]).await? != 1 {
+                    if orch_db::queries::storage::pin_transfer_blobs(&mut tx, &[archive.hash])
+                        .await?
+                        .len()
+                        != 1
+                    {
                         return Err(Stop::Failed(Failure::new(
                             "blob_missing",
                             "the kept-image archive was not stored",
@@ -175,7 +179,7 @@ impl Engine {
         let plan = job.plan().await?;
         if let Some(image) = runtime.kept_image.as_ref() {
             let recorded:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE kind='environment_remove' AND environment_id=$1 AND plan->'removal_revision'=$2 AND plan->'kept_image'=$3)")
-                .bind(runtime.environment_id).bind(plan.get("removal_revision").cloned().unwrap_or(Json::Null)).bind(image).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+                .bind(runtime.environment_id).bind(plan.get("removal_revision").cloned().unwrap_or(Json::Null)).bind(orch_types::storable::encode_exact(image)).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
             if recorded {
                 drop(conn);
                 job.remember(&json!({"kept_image":image})).await?;
@@ -193,7 +197,7 @@ impl Engine {
             &json!({"keep_intent":{"environment":environment,"generation":runtime.generation}}),
         )
         .await?;
-        let value = job
+        let kept = job
             .command(
                 Outgoing::new(
                     ids::derived("kept.image.archive", &[job.id().as_bytes()]),
@@ -208,7 +212,17 @@ impl Engine {
                 )
                 .map_err(EngineError::from)?,
             )
-            .await?;
+            .await;
+        let value = match kept {
+            Ok(value) => value,
+            // The host no longer has the unit (removed by hand, or gone with its disk): there are no installed
+            // files left to keep, and nothing was captured. The removal goes on; the volumes are kept as before.
+            Err(Stop::Failed(failure)) if failure.code == "not_found" => {
+                tracing::info!(environment = %environment, runtime = %runtime.id, "the unit is gone from its host; there are no installed files to keep");
+                return Ok(());
+            }
+            Err(other) => return Err(other),
+        };
         let image: KeptImage = serde_json::from_value(value).map_err(EngineError::from)?;
         let mut tx = self.db().begin().await.map_err(EngineError::from)?;
         sqlx::query("UPDATE runtimes SET kept_image=$2 WHERE id=$1")
@@ -454,6 +468,7 @@ impl Engine {
         let plans:Vec<(Id,Json)>=sqlx::query_as("SELECT j.id,j.plan FROM jobs j WHERE j.environment_id IS NOT NULL AND j.state IN ('queued','running') AND (j.plan->>'host'=$1::text OR EXISTS(SELECT 1 FROM runtimes r WHERE r.id::text=j.plan->>'old' AND r.host_id=$1) OR EXISTS(SELECT 1 FROM runtimes r WHERE r.environment_id=j.environment_id AND r.host_id=$1 AND r.state NOT IN ('removed','retired')))")
             .bind(host).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         for (job, plan) in plans {
+            let plan = orch_types::storable::decode_exact(plan).map_err(orch_db::DbError::from)?;
             if let Some(image) = plan
                 .get("kept_image")
                 .cloned()
