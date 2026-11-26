@@ -106,12 +106,7 @@ impl Engine {
         thread: Id,
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Submitted, InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "an agent schedule uses the ordinary queue",
-            ));
-        }
+    ) -> Result<Taken, InputError> {
         let authority = saved_authority(Some(raw))?.ok_or(InputError::Invalid(
             "the starter's accepted authority is unavailable",
         ))?;
@@ -150,6 +145,6 @@ impl Engine {
                 .copied()
                 .unwrap_or(taken.submitted.seq);
         }
-        Ok(taken.submitted)
+        Ok(taken)
     }
 }

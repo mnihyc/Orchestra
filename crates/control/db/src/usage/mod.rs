@@ -4,6 +4,7 @@
 //! counted in.
 
 pub mod caps;
+mod health_window;
 pub mod ledger;
 pub mod micros;
 pub mod performance;

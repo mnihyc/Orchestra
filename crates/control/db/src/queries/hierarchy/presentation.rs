@@ -82,3 +82,32 @@ pub async fn children_of_kind(
     .fetch_all(conn)
     .await?)
 }
+
+/// Native direct children selected by literal visible-name terms before the page and projection.
+pub async fn children_matching(
+    conn: &mut Conn,
+    parent: Id,
+    kind: Option<&str>,
+    after: Option<Id>,
+    limit: i64,
+    query: &crate::queries::search::Query,
+) -> Result<Vec<NodeRow>, DbError> {
+    let matching = crate::queries::search::matching_sql("n.name", "$5");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.owner_id, n.archived_at,
+                n.deleted_at, n.revision, e.placement, t.environment_id
+           FROM nodes n LEFT JOIN threads t ON t.node_id=n.id
+           LEFT JOIN environments e ON e.id=t.environment_id
+          WHERE n.parent_id=$1 AND n.deleted_at IS NULL
+            AND (($2::text IS NULL AND NOT n.unlisted) OR n.kind=$2)
+            AND ($3::uuid IS NULL OR n.id>$3) AND {matching}
+          ORDER BY n.id LIMIT $4"
+    )))
+    .bind(parent)
+    .bind(kind)
+    .bind(after)
+    .bind(limit)
+    .bind(query.like_patterns())
+    .fetch_all(conn)
+    .await?)
+}

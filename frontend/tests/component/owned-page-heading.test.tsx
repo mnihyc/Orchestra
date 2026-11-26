@@ -1,4 +1,5 @@
 /** An owned caption removes only redundant chrome; opening checks, metadata and acts remain. */
+import userEvent from '@testing-library/user-event';
 import { screen } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { PageHeader, PageSectionContext, Section } from '@/shell/Page';
@@ -35,4 +36,22 @@ it('uses the real owning heading and retains a reused body’s lead exactly once
   expect(screen.getByRole('region', { name: 'Current section' })).toHaveAttribute('aria-labelledby', 'owner-heading');
   expect(screen.getByRole('button', { name: 'Change current value' })).toBeVisible();
   expect(screen.getByText('All current values remain visible')).toBeVisible();
+});
+
+it('opens resource details with the name, current state and primary action still in view', async () => {
+  const user = userEvent.setup();
+  show(<PageHeader title="Long workspace name" compactResource ownership={{ owner: null }} lead="Workspace description"
+    facts={['Running', 'Container runtime']} actions={<button>Start a thread</button>} />);
+  expect(screen.getByRole('heading', { name: 'Long workspace name' })).toBeVisible();
+  expect(screen.getByText('Running')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Start a thread' })).toBeVisible();
+  const toggle = screen.getByRole('button', { name: 'Details' });
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByText('Container runtime')).toBeNull();
+  await user.click(toggle);
+  expect(screen.getByText('Container runtime')).toBeVisible();
+  expect(screen.getByText('Workspace description')).toBeVisible();
+  await user.click(toggle);
+  expect(toggle).toHaveFocus();
+  expect(screen.queryByText('Workspace description')).toBeNull();
 });
