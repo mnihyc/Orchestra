@@ -1,3 +1,4 @@
+import { CompleteCollection } from '@/ui/CompleteCollection';
 /** Requests sent together can be reviewed together; every decision keeps its own confirmed outcome. */
 import { useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -137,7 +138,7 @@ function AccessBatchDialog({ items, reviewed, live, onSettled, summary, onClose 
       <Button variant="danger-ghost" pending={busy === 'deny'} disabled={reason !== undefined} reason={reason} onClick={() => void send(false)}>{t('approvals.batch.deny')}</Button>
       <Button variant="primary" pending={busy === 'approve'} disabled={reason !== undefined} reason={reason} onClick={() => void send(true)}>{t('approvals.batch.approve')}</Button>
     </>}>
-    <Table label={t('approvals.batch.title')} columns={columns} rows={reviewed} rowKey={(item) => item.id} boundedIdentity />
+    <CompleteCollection label={t('approvals.batch.title')} items={reviewed} textOf={(item)=>current(item)?.title??t('approvals.batch.unavailable')}>{(rows)=><Table label={t('approvals.batch.title')} columns={columns} rows={rows} rowKey={(item)=>item.id} boundedIdentity/>}</CompleteCollection>
     <Textarea label={t('approvals.note')} rows={2} value={note} disabled={busy !== null} onChange={(event) => setNote(event.target.value)} />
   </Dialog>;
 }

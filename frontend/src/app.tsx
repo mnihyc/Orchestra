@@ -6,12 +6,14 @@
  * shows as "me", their preferences are how it looks, and when they sign out or another person signs in,
  * nothing of theirs stays in the page's query cache.
  */
+import { clearSignInLanding, visitLanding } from '@/api/landingOpening';
 import { QueryClientProvider } from '@tanstack/react-query';
-import { createRouter, RouterProvider } from '@tanstack/react-router';
+import { createRouter, RouterContextProvider, RouterProvider } from '@tanstack/react-router';
 import { LucideProvider } from 'lucide-react';
 
 import { meKey, metaKey } from '@/api/auth';
 import { client } from '@/api/client';
+import { pageHtmlReads } from '@/api/htmlReads';
 import { queryClient } from '@/api/query';
 import { installReaderCacheBoundary } from '@/api/readerCache';
 import type { Meta } from '@/generated/api-types';
@@ -55,12 +57,18 @@ declare module '@tanstack/react-router' {
   }
 }
 
-router.subscribe('onBeforeNavigate', () => { cancelOwnerReadConfirmations(); beginOpening(); });
+router.subscribe('onBeforeNavigate', ({ toLocation }) => {
+  visitLanding(toLocation.pathname);
+  pageHtmlReads()?.visit(toLocation.pathname);
+  cancelOwnerReadConfirmations();
+  beginOpening();
+});
 
 installReaderCacheBoundary(client, queryClient);
 client.onSession((event) => {
   cancelOwnerReadConfirmations();
   if (event.type === 'signed_out') {
+    clearSignInLanding();
     // Every route is asked again whether it is for somebody who is not signed in.
     void router.invalidate();
     return;
@@ -80,10 +88,12 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <LucideProvider size={ICON_SIZE} strokeWidth={ICON_STROKE}>
         <TooltipProvider>
-          <Toaster>
-            <RouterProvider router={router} />
-            <OwnerReadConfirmation />
-          </Toaster>
+          <RouterContextProvider router={router}>
+            <Toaster>
+              <RouterProvider router={router} />
+              <OwnerReadConfirmation />
+            </Toaster>
+          </RouterContextProvider>
         </TooltipProvider>
       </LucideProvider>
     </QueryClientProvider>

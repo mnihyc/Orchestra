@@ -74,14 +74,13 @@ it('does not rebase another pane when an HTTP fresh observation changes source o
   await left.release(); await right.release();
 });
 
-it.each(['revision', 'source', 'as_of', 'observed_from', 'path'] as const)('rejects a continuation with the wrong %s without merging it', async (field) => {
+it.each(['revision', 'source', 'observed_from', 'path'] as const)('rejects a continuation with the wrong %s without merging it', async (field) => {
   const r = rig(), view = r.open();
   r.fetch.mockResolvedValueOnce(page(['head'], { next_cursor: 'next', truncated: true })); await view.first();
   const wrong: DirListing = page(['wrong']);
   switch (field) {
     case 'revision': wrong.revision = 'other'; break;
     case 'source': wrong.source = 'cached'; break;
-    case 'as_of': wrong.as_of = '2026-01-01T00:00:01Z'; break;
     case 'observed_from': wrong.observed_from = '2025-12-31T23:59:00Z'; break;
     case 'path': wrong.path = 'different'; break;
   }
@@ -182,7 +181,7 @@ it('applies complete live deltas directly in canonical order without mutating an
   expect(r.fetch).not.toHaveBeenCalled(); await view.release();
 });
 
-it.each(['reset', 'invalidated', 'busy', 'refused'] as const)('fences a held later page on %s with no automatic HTTP walk', async (change) => {
+it.each(['reset', 'busy', 'refused'] as const)('fences a held later page on %s with no automatic HTTP walk', async (change) => {
   const r = rig(), view = r.open();
   r.event({ reset: true, changed: [entry('head')], revision: 'revision', next_cursor: 'two', truncated: true,
     as_of: STAMP, observed_from: STAMP });
@@ -190,7 +189,6 @@ it.each(['reset', 'invalidated', 'busy', 'refused'] as const)('fences a held lat
   const gate = pending<DirListing>(); r.fetch.mockReturnValueOnce(gate.promise); const reading = view.next();
   switch (change) {
     case 'reset': r.event({ reset: true, changed: [entry('new-head')], revision: 'new' }); break;
-    case 'invalidated': r.event({ invalidated: true }); break;
     case 'busy': r.event({ error: { code: 'environment.unavailable', detail: 'Busy', reason: 'busy', retryable: true } }); break;
     case 'refused': r.event({ error: { code: 'authz.denied', detail: '', reason: null, retryable: false } }); break;
   }
@@ -259,4 +257,53 @@ it('authority reload clears a failed sealed watch without reporting a permission
   r.event({ reset: true, changed: [entry('current')], revision: 'current' }, 1);
   expect(view.read().entries.map((row) => row.name)).toEqual(['current']);
   expect(view.read().watch).toBe('live'); await view.release();
+});
+
+it('keeps a wide folder visible and continuable while native membership changes', async () => {
+  const r = rig(), view = r.open();
+  const first = pending<DirListing>(); r.fetch.mockReturnValueOnce(first.promise);
+  const opening = view.first();
+  r.event({ invalidated: true });
+  first.resolve(page(['known-head'], { revision: 'observed', next_cursor: 'next', truncated: true }));
+  expect(await opening).toBe('done');
+  const before = view.read().entries;
+  const next = pending<DirListing>(); r.fetch.mockReturnValueOnce(next.promise);
+  const continuing = view.next();
+  r.event({ invalidated: true });
+  expect(view.read().entries).toBe(before);
+  expect(view.read().canNext).toBe(true);
+  next.resolve(page(['remaining-child'], { revision: 'observed', as_of: '2026-01-01T00:00:01.000Z' }));
+  expect(await continuing).toBe('done');
+  expect(view.read().entries[0]?.name).toBe('remaining-child');
+  expect(await view.previous()).toBe('done');
+  expect(view.read().entries).toBe(before);
+  await view.release();
+});
+
+it('rejects a live continuation whose observation time moves backwards', async () => {
+  const r = rig(), view = r.open();
+  r.fetch.mockResolvedValueOnce(page(['head'], { next_cursor: 'next', truncated: true })); await view.first();
+  r.fetch.mockResolvedValueOnce(page(['wrong'], { as_of: '2025-12-31T23:59:59.000Z' }));
+  expect(await view.next()).toBe('restart');
+  expect(view.read().entries[0]?.name).toBe('head');
+  await view.release();
+});
+
+it.each(['/tmp/native', 'C:/native', '//server/share/native'])('absolute folder %s pages without adding a realtime feed or disturbing the workspace feed', async (path) => {
+  const r = rig(), root = r.open('');
+  r.event({ reset: true, changed: [entry('kept')], revision: 'workspace' });
+  r.fetch.mockResolvedValueOnce(page(['a'], { path, next_cursor: 'native-next', truncated: true, revision: 'native' }));
+  const native = r.open(path, 'native');
+  expect(await native.first()).toBe('done');
+  expect(r.subscriptions).toHaveLength(1);
+  expect(native.read().watch).not.toBe('live');
+  expect(native.read().entries[0]?.path).toBe(path + '/a');
+  r.fetch.mockResolvedValueOnce(page(['b'], { path, revision: 'native' }));
+  expect(await native.next()).toBe('done');
+  expect(r.fetch).toHaveBeenLastCalledWith(door, path, expect.objectContaining({ cursor: 'native-next' }));
+  r.event({ reset: true, changed: [entry('still live')], revision: 'workspace-new' });
+  expect(root.read().entries[0]?.name).toBe('still live');
+  await native.release();
+  expect(r.subscriptions[0]?.unsubscribe).not.toHaveBeenCalled();
+  await root.release();
 });

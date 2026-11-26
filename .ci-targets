@@ -1,0 +1,4 @@
+# the repository lint and every project's types on the head that types the archived thread of the gone-line test, and that test
+web typecheck
+web lint
+web test tests/component/gone-references.test.tsx

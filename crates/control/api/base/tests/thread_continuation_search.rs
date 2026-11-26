@@ -9,7 +9,7 @@ use continuation_read_support::{Proof, Retained, retained, select};
 use orch_api_contract::{
     common::ErrorCode,
     search::{SearchFound, SearchList, SearchListQuery},
-    threads::ItemPayload,
+    threads::{ItemPayload, OutlineKind, ThreadOutlineGet, ThreadOutlineGetQuery},
 };
 use orch_types::{Id, Time};
 
@@ -54,6 +54,44 @@ async fn scene() -> Proof<(rig::Scene, Id, Retained)> {
     )
     .await?;
     Ok((scene, thread, view))
+}
+
+#[tokio::test]
+async fn an_older_outline_keeps_its_captured_final_mark_after_the_live_item_is_reclassified()
+-> Proof {
+    let (scene, thread, view) = scene().await?;
+    let mut conn = scene.rig.world.app.app.db.acquire().await?;
+    let seq = orch_db::sequences::next(&mut conn, thread)
+        .await?
+        .ok_or("thread absent")?;
+    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{phase}','\"commentary\"'::jsonb),seq_updated=$2 WHERE id=$1")
+        .bind(view.prefix_item).bind(seq).execute(&mut *conn).await?;
+    drop(conn);
+    let outline = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadOutlineGetQuery {
+            continuation_id: Some(view.child),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let point = outline
+        .entries
+        .iter()
+        .find(|entry| entry.item_id == view.prefix_item && entry.kind == OutlineKind::AgentMessage)
+        .ok_or("captured answer absent")?;
+    let facts = point
+        .message
+        .as_ref()
+        .ok_or("captured message facts absent")?;
+    assert_eq!(facts.phase.as_deref(), Some("final"));
+    assert_eq!(facts.last_final_seq, Some(point.seq));
+    Ok(())
 }
 
 fn query(thread: Id, view: Option<Id>, text: &str) -> SearchListQuery {

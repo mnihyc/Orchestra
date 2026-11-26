@@ -16,8 +16,31 @@ pub(super) fn needs_journal(command: &Outgoing) -> bool {
         || creation(command)
 }
 
+/// The commands whose private authority holds a digest of their body.
+fn identifies_its_body(kind: CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ProviderComplete
+            | CommandKind::SessionPrefixInspect
+            | CommandKind::SessionPrefixOpen
+            | CommandKind::SessionContinuationResume
+            | CommandKind::SessionContinuationClose
+    )
+}
+
 fn failed(error: impl std::fmt::Display) -> CommandsError {
     CommandsError::Other(error.to_string())
+}
+
+fn same_origin(saved: Option<&Json>, command: &Outgoing) -> bool {
+    match (saved, command.authority.as_ref()) {
+        (None, None) => true,
+        (Some(saved), Some(authority)) => {
+            serde_json::from_value::<orch_engine::commands::CommandAuthority>(saved.clone())
+                .is_ok_and(|saved| saved.same_origin(authority))
+        }
+        _ => false,
+    }
 }
 
 pub(super) async fn journal(
@@ -56,6 +79,8 @@ pub(super) async fn journal(
             )
         });
     let proposed = link_queries::NewCommand {
+        content_transit: false,
+        native_target: command.native_target.as_ref(),
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),
@@ -71,7 +96,7 @@ pub(super) async fn journal(
             || row.body != command.body
             || row.serial_key() != key.as_deref()
             || row.deadline_at != deadline.get()
-            || existing.authority.as_ref() != private.as_ref()
+            || !same_origin(existing.authority.as_ref(), command)
         {
             return Err(CommandsError::AuthorityMismatch);
         }
@@ -109,6 +134,30 @@ pub(super) async fn journal(
         )
         .await
         .map_err(failed)?;
+        // The writer asks its authority again about the stored row once it has inserted it, and the
+        // wire admission asks it before the command goes out. Both read the row back, so what is
+        // asked about is the body as the database keeps it (its object members in the database's
+        // own order), never the body as the engine built it. The commands whose authority
+        // identifies their body are checked the same way here: an authority that knows its body
+        // only in the order it was built refuses them.
+        if identifies_its_body(command.kind)
+            && let Some(authority) = &command.authority
+        {
+            let stored = link_queries::command(&mut tx, command.id)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| failed("the command that was just stored cannot be read back"))?;
+            Box::pin(authority.current_callers_after_issue(
+                &mut tx,
+                &stored,
+                &admitted,
+                commands.clock.as_ref(),
+                commands.access.as_ref(),
+            ))
+            .await
+            .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?
+            .ok_or(CommandsError::AuthorityMismatch)?;
+        }
         if admitted.iter().any(|(caller, until)| {
             caller
                 .as_ref()
@@ -122,6 +171,14 @@ pub(super) async fn journal(
     orch_api_core::testing::observe_native_creation(&mut tx, command.id)
         .await
         .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?;
+    if command.kind == CommandKind::ProviderComplete
+        && let Some(authority) = &command.authority
+    {
+        authority
+            .mark_model_admitted(&mut tx, commands.clock.time())
+            .await
+            .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?;
+    }
     tx.commit().await.map_err(failed)?;
     if current.as_ref().is_some_and(|current| {
         commands.clock.time() >= deadline
