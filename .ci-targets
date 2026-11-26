@@ -1,0 +1,12 @@
+test -p orch-engine --test turns
+test -p orch-engine --test source
+test -p orch-engine --test source_uniform
+test -p orch-engine --test recording_cleanup
+test -p orch-engine --test restart
+test -p orch-engine --test preflight
+test -p orch-engine --test lifecycle
+test -p orch-engine --test model_inputs
+test -p orch-engine --test ingest
+test -p orch-engine --test failures -- --skip unavailable_restart_recovery_preserves_the_admitted_turn_without_retrying_its_input
+test -p orch-engine --test connected
+test -p orch-engine --test agent_history

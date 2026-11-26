@@ -272,3 +272,29 @@ async fn import_history_publication_preserves_old_rows_after_native_window_chang
         }
     }
 }
+
+#[tokio::test]
+async fn import_history_search_finds_older_source_files_before_a_small_page() {
+    let o = Office::new().await;
+    let wanted = make(&o, "older-search-source").await;
+    make(&o, "newer-unrelated-source").await;
+    let reply =
+        o.s.rig
+            .world
+            .app
+            .call(MeImportList, &[])
+            .token(&o.s.ada.token)
+            .query(&json!({"q":"older-search-source","limit":1}))
+            .send_bytes()
+            .await;
+    assert_eq!(
+        reply.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    let page: Page<ImportLine> = serde_json::from_slice(&reply.raw).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, wanted.id);
+    assert!(page.next_cursor.is_none());
+}

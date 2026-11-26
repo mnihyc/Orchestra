@@ -7,7 +7,7 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 const help = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => help }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => help }));
 // The provider card owns its own current read. This suite keeps the ordinary chip as supplied text.
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject }: { subject: { provider: { name: string } } }) => <span>{subject.provider.name}</span> }));
 
@@ -20,7 +20,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     show(<CapabilityRoutes value={[
       { ...row, capability: 'generation', program_default: true, route_view: { kind: 'native-program' } },
       { ...row, capability: 'web_search', route_view: { kind: 'service' }, provider: { id: 'fixture-account', title: 'Team search' }, prices: { search: { amount: '0.00075', currency: 'USD', unit: 'search' } }, route: { backend: { config: { secret: 'private-backend' } } } },
-      { ...row, capability: 'page_fetch', route_view: null, reason: 'disabled', fallbacks:[{rule_id:'pages',scope:'org',when:'unavailable',provider:null,offering:null}] },
+      { ...row, capability: 'page_fetch', route_view: null, reason: 'disabled', fallbacks:[{rule_id:'pages',scope:'org',when:'unavailable',pool_kind:null,provider:null,offering:null}] },
       { ...row, capability: 'image_generation', route_view: null, reason: 'current_authority_refused' },
       { ...row, capability: 'future_capability', title: 'Future capability', route_view: { kind: 'future-route' } },
       { ...row, capability: 'embeddings', route_view: { kind: 'native-model' }, provider: { id: 'fixture-router', title: 'Router account' } },
@@ -52,4 +52,25 @@ it('omits an absent older-server projection and ignores malformed rows', () => {
   expect(screen.queryByTestId('capability-routes')).not.toBeInTheDocument();
   rerender(<CapabilityRoutes value={[null, { capability: 'incomplete' }]} />);
   expect(screen.queryByTestId('capability-routes')).not.toBeInTheDocument();
+});
+
+it.each(['en','zh-CN'] as const)('shows a captured generation conversion with its declared limits in %s', async (language) => {
+  await setLocale(language);
+  const t = i18n.getFixedT(language);
+  const translation = {from:'openai-responses',to:'anthropic-messages',title:'Responses / Messages',losses:{
+    preserved:['Text, image inputs, tool identifiers and upstream token usage.'],
+    approximated:['Custom tool grammars become a single string argument; the upstream does not enforce the grammar.'],
+    dropped:['Vendor server tools are not translated; use Orch’s capability routes.'],
+  }};
+  const row = {capability:'generation',title:'Generation',reason:null,program_default:false,provider:null,prices:{},route_view:{kind:'native-model'}};
+  const shown = show(<CapabilityRoutes value={[{...row,translation}]} />);
+  const route = screen.getByRole('button',{name:t('modelTranslation.route',{from:t('modelTranslation.names.responses'),to:t('modelTranslation.names.messages')})});
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  await userEvent.click(route);
+  expect(screen.getByRole('dialog')).toHaveTextContent(t('modelTranslation.custom'));
+  expect(screen.getByRole('dialog')).not.toHaveTextContent('private-backend');
+  await userEvent.keyboard('{Escape}');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  shown.rerender(<CapabilityRoutes value={[row]} />);
+  expect(screen.queryByRole('button',{name:t('modelTranslation.route',{from:t('modelTranslation.names.responses'),to:t('modelTranslation.names.messages')})})).not.toBeInTheDocument();
 });

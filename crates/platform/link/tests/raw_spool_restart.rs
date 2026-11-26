@@ -15,6 +15,7 @@ fn a_server_cursor_after_spool_loss_resumes_delivery_without_changing_capture_nu
     use orch_link_contract::frames::Frame;
     use orch_link_contract::session::Role;
     use orch_link_contract::streams::{Ack, Stream};
+    use orch_link_contract::version::Limits;
     use std::collections::BTreeMap;
 
     fn events(frames: Vec<Frame>) -> Vec<(String, i64, Time, serde_json::Value)> {
@@ -69,7 +70,11 @@ fn a_server_cursor_after_spool_loss_resumes_delivery_without_changing_capture_nu
         )
         .unwrap();
     let mut cursors = BTreeMap::from([(name.clone(), 100), ("machine".to_owned(), 50)]);
-    let resets = sender.on_ready(&cursors, 64 * 1024, now).unwrap();
+    let limits = Limits {
+        max_frame_bytes: 64 * 1024,
+        ..Limits::default()
+    };
+    let resets = sender.on_ready(&cursors, limits, now).unwrap();
     assert!(resets.iter().any(
         |frame| matches!(frame, Frame::Reset(reset) if reset.stream == name && reset.from == 101)
     ));
@@ -108,12 +113,7 @@ fn a_server_cursor_after_spool_loss_resumes_delivery_without_changing_capture_nu
         StreamSender::open_for_machine(directory.path(), options, vec![Role::Agent], now)
             .unwrap()
             .0;
-    assert!(
-        sender
-            .on_ready(&cursors, 64 * 1024, now)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(sender.on_ready(&cursors, limits, now).unwrap().is_empty());
     sender
         .publish(
             &stream,
@@ -151,6 +151,7 @@ fn promoted_diagnostics_are_not_queued_again_and_a_partial_queue_resumes_in_orde
                     .append(
                         stream,
                         &SpoolEvent {
+                            native_opening_id: None,
                             at,
                             kind: "raw.frame".to_owned(),
                             body: json!({ "direction": "in", "payload": { "ordinal": ordinal } }),
@@ -204,6 +205,7 @@ fn promoted_diagnostics_are_not_queued_again_and_a_partial_queue_resumes_in_orde
             .append(
                 stream,
                 &SpoolEvent {
+                    native_opening_id: None,
                     at,
                     kind: "raw.frame".to_owned(),
                     body: json!({ "direction": "in", "payload": "next" }),
@@ -232,6 +234,7 @@ fn ordinary_delivery_numbers_do_not_advance_the_first_capture_number_after_a_res
             .append(
                 stream,
                 &SpoolEvent {
+                    native_opening_id: None,
                     at,
                     kind: "session.title".to_owned(),
                     body: json!({"title": "ordinary"}),
@@ -248,6 +251,7 @@ fn ordinary_delivery_numbers_do_not_advance_the_first_capture_number_after_a_res
         .append(
             stream,
             &SpoolEvent {
+                native_opening_id: None,
                 at,
                 kind: "raw.frame".to_owned(),
                 body: json!({"direction": "in", "payload": "first capture"}),
@@ -271,6 +275,7 @@ fn capture_numbers_precede_delivery_numbers_and_a_server_floor_never_renumbers_q
         "session:0199c1a0-0000-7000-8000-00000000000a:0199c1a0-0000-7000-8000-00000000000b";
     let at: Time = "2026-10-13T08:00:00.000Z".parse().unwrap();
     let raw = SpoolEvent {
+        native_opening_id: None,
         at,
         kind: "raw.frame".to_owned(),
         body: json!({"direction": "in", "payload": "same"}),
@@ -280,6 +285,7 @@ fn capture_numbers_precede_delivery_numbers_and_a_server_floor_never_renumbers_q
         .append(
             stream,
             &SpoolEvent {
+                native_opening_id: None,
                 at,
                 kind: "session.title".to_owned(),
                 body: json!({"title": "Hello"}),
@@ -350,6 +356,7 @@ fn dropping_all_diagnostic_segment_files_does_not_reuse_a_capture_number() {
         "session:0199c1a0-0000-7000-8000-00000000000a:0199c1a0-0000-7000-8000-00000000000b";
     let at: Time = "2026-10-13T08:00:00.000Z".parse().unwrap();
     let raw = SpoolEvent {
+        native_opening_id: None,
         at,
         kind: "raw.frame".to_owned(),
         body: json!({"direction": "in", "payload": "x".repeat(400)}),
@@ -369,6 +376,7 @@ fn dropping_all_diagnostic_segment_files_does_not_reuse_a_capture_number() {
         .append(
             stream,
             &SpoolEvent {
+                native_opening_id: None,
                 at,
                 kind: "raw.frame".to_owned(),
                 body: json!({"direction": "in", "payload": "new"}),

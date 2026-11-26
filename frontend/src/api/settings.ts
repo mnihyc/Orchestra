@@ -6,6 +6,9 @@
  * written. A screen that reads the few settings it explains itself by (the rules an org gives its
  * invitations) uses the same list as the editor, under the same key.
  */
+import { poolQuery, updatePool } from '@/api/pools';
+import { collectionQuery, readAllPages } from '@/api/collection';
+import { RELEASE_READ } from '@/api/freshness';
 import { joinedDefaultsRegistry } from '@/api/defaultsOpening';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { queryOptions } from '@tanstack/react-query';
@@ -15,7 +18,7 @@ import { environmentQuery } from '@/api/environments';
 import { queryClient } from '@/api/query';
 import { hostKey, providerQuery } from '@/api/resources';
 import { sameValue } from '@/features/settings/settingsModel';
-import type { Destination, NotificationChannel, NotificationTestReply, Notifier, ResolvedSetting, SecretInfo, SettingDef } from '@/generated/api-types';
+import type { Destination, NotificationChannel, NotificationTestReply, Notifier, ResolvedSetting, SecretInfo, SettingDef, SettingParameterFormBody } from '@/generated/api-types';
 
 /** Where settings are read and written: a node (an org, a project, a topic), an environment, a managed provider's runtime, or the system. */
 export type SettingsTarget =
@@ -23,6 +26,7 @@ export type SettingsTarget =
   | { kind: 'environment'; id: string }
   | { kind: 'provider'; id: string }
   | { kind: 'host'; id: string }
+  | { kind: 'pool'; id: string }
   | { kind: 'system' };
 
 /** The key a node's settings are kept under: what other screens that read a few of them use. */
@@ -51,7 +55,6 @@ export const settingsQuery = (nodeId: string) =>
     queryKey: settingsKey(nodeId),
     queryFn: (): Promise<ResolvedSetting[]> =>
       ok(api.GET('/nodes/{id}/settings', { params: { path: { id: nodeId } } })),
-    staleTime: Infinity,
   });
 
 /** Every key there is, with its words, the schema of its value, its class, where it can be set and how scopes combine. It changes with a release. */
@@ -59,7 +62,14 @@ export const registryQuery = queryOptions({
   queryKey: ['settings-registry'] as const,
   queryFn: async ({ signal, client: cache }): Promise<SettingDef[]> =>
     await joinedDefaultsRegistry(cache, ['settings-registry'], signal) ?? ok(api.GET('/settings/registry', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
+});
+
+/** Resolve public native declarations with the same projection the thread controls use. */
+export const parameterFormQuery = (body: SettingParameterFormBody) => queryOptions({
+  queryKey: ['settings-parameter-form', body] as const,
+  queryFn: ({ signal }): Promise<unknown[]> => ok(api.POST('/settings/parameters/form', { body, signal })),
+  staleTime: Infinity,
 });
 
 /** The settings in effect at any target. */
@@ -75,6 +85,8 @@ export const targetSettingsQuery = (target: SettingsTarget) =>
           return ok(api.GET('/environments/{id}/settings', { params: { path: { id: target.id } } }));
         case 'provider':
           return ok(api.GET('/providers/{id}/settings', { params: { path: { id: target.id } } }));
+        case 'pool':
+          return queryClient.query({ ...poolQuery(target.id), staleTime: Infinity }).then((pool) => pool.settings);
         case 'host':
           return ok(api.GET('/hosts/{id}/settings', { params: { path: { id: target.id } } }));
         case 'system':
@@ -91,8 +103,22 @@ export interface SettingWrite {
 }
 
 /** Changes only one own key, preserving the other confirmed config members under the resource's revision guard. */
-async function changeResourceSetting(target: Extract<SettingsTarget, { kind: 'environment' | 'provider' }>, key: string, value: unknown, remove: boolean, expectedRevision?: number | null): Promise<ResolvedSetting> {
+async function changeResourceSetting(target: Extract<SettingsTarget, { kind: 'environment' | 'provider' | 'pool' }>, key: string, value: unknown, remove: boolean, expectedRevision?: number | null): Promise<ResolvedSetting> {
   const stale = () => new ApiError({ type: 'orch:error:conflict.stale_revision', code: 'conflict.stale_revision', title: 'The setting changed', detail: 'Read the current own value before saving again.', status: 409, request_id: '' }, null);
+  if (target.kind === 'pool') {
+    const current = await queryClient.query({ ...poolQuery(target.id), staleTime: Infinity });
+    const own = current.settings.find((row) => row.key === key)?.own ?? null;
+    if (expectedRevision !== undefined && (own?.revision ?? null) !== expectedRevision) throw stale();
+    const config = Object.fromEntries(current.settings.flatMap((row) => row.own === null ? [] : [[row.key, row.own.value]]));
+    const next = remove ? Object.fromEntries(Object.entries(config).filter(([name]) => name !== key)) : { ...config, [key]: value };
+    await updatePool(target.id, { expected_revision: current.revision, name: current.name, description: current.description, enabled: current.enabled, policy: current.policy, lend_members: current.lend_members, config: next });
+    await queryClient.invalidateQueries({ queryKey: ['pool', target.id] });
+    const fresh = await queryClient.query(poolQuery(target.id));
+    queryClient.setQueryData(targetSettingsKey(target), fresh.settings);
+    const changed = fresh.settings.find((row) => row.key === key);
+    if (changed === undefined) throw new Error('the changed pool setting was not returned');
+    return changed;
+  }
   if (target.kind === 'environment') {
     const [current, rows] = await Promise.all([
       queryClient.query({ ...environmentQuery(target.id), staleTime: Infinity }),
@@ -210,20 +236,22 @@ export const notifiersKey = ['notifiers'] as const;
 export const notifiersQuery = queryOptions({
   queryKey: notifiersKey,
   queryFn: ({ signal }): Promise<Notifier[]> => ok(api.GET('/notifiers', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 export const channelsKey = (orgId: string) => ['channels', orgId] as const;
 
 /** The ways out of Orch that a root org gives its members, to look after: for whoever makes the rules there. */
-export const channelsQuery = (orgId: string) =>
-  queryOptions({
-    queryKey: channelsKey(orgId),
-    queryFn: async ({ signal }): Promise<NotificationChannel[]> => {
-      const channels = await ok(api.GET('/notification-channels', { params: { query: orgId === 'system' ? {} : { org_id: orgId } }, signal }));
-      return orgId === 'system' ? channels.filter((channel) => channel.owner === 'system') : channels;
-    },
-  });
+export const channelsQuery = (orgId: string) => queryOptions({
+  queryKey: channelsKey(orgId),
+  queryFn: ({ signal }): Promise<NotificationChannel[]> => readAllPages((cursor) => ok(api.GET('/notification-channels', { params: { query: {
+    ...(orgId === 'system' ? { system: true } : { org_id: orgId }), ...(cursor === null ? {} : { cursor }),
+  } }, signal })), signal),
+});
+export const channelsPageQuery = (orgId: string, q: string) => collectionQuery(channelsKey(orgId), q, (query, signal) => ok(api.GET('/notification-channels', { params: { query: {
+  ...query, ...(orgId === 'system' ? { system: true } : { org_id: orgId }),
+} }, signal })));
+
 
 /** What a channel or a destination is made or changed with: its name, the values of its fields, the secrets that were typed, and its texts. */
 export interface NotifierWrite {
@@ -270,7 +298,7 @@ export const destinationsKey = (nodeId: string) => ['destinations', nodeId] as c
 export const destinationsQuery = (nodeId: string) =>
   queryOptions({
     queryKey: destinationsKey(nodeId),
-    queryFn: ({ signal }): Promise<Destination[]> => ok(api.GET('/nodes/{id}/destinations', { params: { path: { id: nodeId } }, signal })),
+    queryFn: ({ signal }): Promise<Destination[]> => readAllPages((cursor) => ok(api.GET('/nodes/{id}/destinations', { params: { path: { id: nodeId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /** What a destination is made with, beside what a channel is. */
@@ -301,3 +329,5 @@ export function deleteDestination(id: string): Promise<void> {
 export function testDestination(id: string): Promise<NotificationTestReply> {
   return ok(api.POST('/destinations/{id}/test', { params: { path: { id } } }));
 }
+
+export const destinationsPageQuery = (nodeId: string, q: string) => collectionQuery(destinationsKey(nodeId), q, (query, signal) => ok(api.GET('/nodes/{id}/destinations', { params: { path: { id: nodeId }, query }, signal })));
