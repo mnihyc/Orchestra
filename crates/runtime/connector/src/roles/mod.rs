@@ -162,6 +162,8 @@ pub struct Services {
     pub keys: Arc<Keys>,
     /// The configuration as the connector started with it.
     pub config: ConnectorConfig,
+    /// The physical composition's verified build cache, when it can fetch named programs.
+    pub build_cache: Option<Arc<dyn crate::builds::BuildCache>>,
     /// The read-only directory of tools a managed runtime is given, if it was.
     pub tools_dir: Option<PathBuf>,
     /// The harnesses that directory held when the connector started: the builds the system put in this
@@ -195,6 +197,7 @@ impl Services {
                 kind: found.kind.clone(),
                 path: found.program.display().to_string(),
                 version: found.version.clone(),
+                sha256: None,
                 daemon: false,
             })
     }
@@ -203,6 +206,8 @@ impl Services {
 /// A command as a role is handed it.
 #[derive(Debug, Clone)]
 pub struct Call {
+    /// The actual dispatcher execution timer; absent for work without a reported job.
+    pub work_deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     /// What the link knows of it: its identifier, its key, its deadline, and the token that fires when
     /// the system asks for it not to be carried out.
     pub context: CommandContext,
@@ -213,6 +218,19 @@ pub struct Call {
 /// Something that carries out commands of one role.
 #[async_trait]
 pub trait RoleHandler: Send + Sync {
+    fn tool_session_restrict(
+        &self,
+        _update: &orch_link_contract::tool_sessions::ToolSessionUpdate,
+    ) {
+    }
+    fn tool_session_update(&self, _update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {}
+    fn tool_session_control(&self, _available: bool) {}
+    fn tool_session_refresh(&self) {
+        self.tool_session_control(false);
+    }
+    /// A role may apply a prepared local change only after the durable command answer is sent.
+    fn answered(&self, _id: Id) {}
+
     /// Reconciles external work from an interrupted journal entry before acknowledging that it stopped.
     async fn interrupted(&self, _id: Id, _command: &Command) -> Result<(), CommandError> {
         Ok(())
@@ -237,6 +255,11 @@ pub trait RoleHandler: Send + Sync {
 
     /// Carries out a command of one of those kinds. The result has to be that of the command's kind.
     async fn handle(&self, call: Call, command: Command) -> Result<CommandResult, CommandError>;
+
+    /// Apply platform review changes at the native acknowledgement boundary.
+    async fn review_system(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
 
     /// Adds to what the machine reports of itself.
     fn contribute(&self, _facts: &mut FactsDraft) {}

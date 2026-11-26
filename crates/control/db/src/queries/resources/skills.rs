@@ -320,6 +320,16 @@ pub async fn versions_by_id(conn: &mut Conn, ids: &[Id]) -> Result<Vec<VersionRo
     .await?)
 }
 
+/// Selection metadata without reading or transferring a version's potentially large file manifest.
+pub async fn version_metadata_by_id(
+    conn: &mut Conn,
+    ids: &[Id],
+) -> Result<Vec<VersionRow>, DbError> {
+    Ok(sqlx::query_as("SELECT id,skill_id,number,name,''::text AS description,archive,archive_size,
+      '[]'::jsonb AS files,size,'{}'::jsonb AS origin,created_by,created_at FROM skill_versions WHERE id=ANY($1) ORDER BY id")
+        .bind(ids).fetch_all(conn).await?)
+}
+
 /// How many versions each of the skills `skills` has.
 pub async fn version_counts(conn: &mut Conn, skills: &[Id]) -> Result<Vec<(Id, i64)>, DbError> {
     Ok(sqlx::query_as(

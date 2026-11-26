@@ -227,7 +227,7 @@ async fn an_existing_archive_is_still_private_until_the_caller_has_a_completed_u
         .app
         .app
         .blobs
-        .register(&mut conn, meta, world.now())
+        .register(&mut conn, &meta, world.now())
         .await
         .unwrap();
     orch_db::queries::uploads::remember(&mut conn, c.viewer.id(), &hash, world.now())

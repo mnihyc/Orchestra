@@ -74,6 +74,8 @@ pub enum TunnelKind {
     /// A harness's connection to its executor: whole messages, each
     /// framed inside the stream as [`ExecMessage`].
     Exec,
+    /// Trusted adapter control of one isolated native program, including its standard streams.
+    Program,
     /// One model request and its answer.
     Llm,
     /// One request to a tool server and its answer.
@@ -94,6 +96,7 @@ impl TunnelKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Exec => "exec",
+            Self::Program => "program",
             Self::Llm => "llm",
             Self::Mcp => "mcp",
             Self::Pty => "pty",
@@ -108,7 +111,7 @@ impl TunnelKind {
     pub const fn idle_secs(self) -> Option<u32> {
         match self {
             Self::Llm | Self::Mcp => Some(EXCHANGE_IDLE_SECS),
-            Self::Exec | Self::Pty | Self::Browser | Self::Rfb | Self::Port => None,
+            Self::Exec | Self::Program | Self::Pty | Self::Browser | Self::Rfb | Self::Port => None,
         }
     }
 }
@@ -130,6 +133,11 @@ pub enum Service {
     Exec {
         /// The executor kind.
         executor: String,
+    },
+    /// A trusted connector's process control channel for one actual capability work unit.
+    Program {
+        /// The admitted work, matched to its helper and source machine again by the node.
+        work_id: Id,
     },
     /// The forwarder, for the requests of one lease.
     Llm {
@@ -166,6 +174,7 @@ impl Service {
             Self::Browser { .. } => TunnelKind::Browser,
             Self::Rfb { .. } => TunnelKind::Rfb,
             Self::Exec { .. } => TunnelKind::Exec,
+            Self::Program { .. } => TunnelKind::Program,
             Self::Llm { .. } => TunnelKind::Llm,
             Self::Mcp { .. } => TunnelKind::Mcp,
             Self::Pty { .. } | Self::AgentPty { .. } => TunnelKind::Pty,
@@ -180,6 +189,7 @@ impl std::fmt::Display for Service {
             Self::Browser { browser_id } => write!(f, "browser/{browser_id}"),
             Self::Rfb { display_id } => write!(f, "rfb/{display_id}"),
             Self::Exec { executor } => write!(f, "exec/{executor}"),
+            Self::Program { work_id } => write!(f, "program/{work_id}"),
             Self::Llm { lease_id } => write!(f, "llm/{lease_id}"),
             Self::Mcp { server } => write!(f, "mcp/{server}"),
             Self::Pty { terminal_id } => write!(f, "pty/{terminal_id}"),
@@ -213,6 +223,7 @@ impl std::str::FromStr for Service {
             "exec" => Ok(Self::Exec {
                 executor: name.to_owned(),
             }),
+            "program" => Ok(Self::Program { work_id: id()? }),
             "llm" => Ok(Self::Llm { lease_id: id()? }),
             "mcp" => Ok(Self::Mcp {
                 server: name.to_owned(),
@@ -277,6 +288,40 @@ impl JsonSchema for TicketSource {
     }
 }
 
+/// The immutable physical session and member that admitted a tool transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSessionScope {
+    /// Accepted physical opening order across this thread's logical segments.
+    pub opening_epoch: i64,
+    pub thread_id: Id,
+    pub segment_id: Id,
+    pub opening_id: Id,
+    /// exec, llm or mcp:<server>, selected from the native service binding.
+    pub member: String,
+    pub nonce: Id,
+    pub revision: i64,
+}
+
+impl ToolSessionScope {
+    /// The same canonical member key on admission facts and signed claims.
+    #[must_use]
+    pub fn accepts(&self, service: &Service) -> bool {
+        match service {
+            Service::Exec { .. } => self.member == "exec",
+            Service::Llm { .. } => self.member == "llm",
+            Service::Mcp { server } if server == orch_agent_contract::loopback::EXEC_SERVER => {
+                self.member == "exec"
+            }
+            Service::Mcp { .. } => self
+                .member
+                .strip_prefix("mcp:")
+                .is_some_and(|id| id.parse::<Id>().is_ok()),
+            _ => false,
+        }
+    }
+}
+
 /// What a ticket allows: who may open a tunnel, to which machine, to
 /// which service there, and until when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -304,9 +349,12 @@ pub struct TicketClaims {
     /// The generation of that environment when the tool ticket was issued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_environment_generation: Option<i64>,
-    /// The executor build admitted to this tool channel; absent on older or other tickets.
+    /// The executor build admitted to this tool channel; absent for other services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_executor_version: Option<String>,
+    /// Required for a machine's session tool transport; API-origin operations keep their own admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_session: Option<ToolSessionScope>,
     /// Port admission facts, absent from every other tunnel kind.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     pub port: Option<crate::ports::PortTicketClaims>,
@@ -337,7 +385,30 @@ impl TicketClaims {
             (TunnelKind::Port, None) | (_, Some(_)) => false,
             (_, None) => true,
         };
-        if self.src != presenter || !names_its_kind || !port_holds {
+        let program_holds = self.kind != TunnelKind::Program
+            || (matches!(self.src, TicketSource::Machine(_))
+                && self.thread_id.is_some()
+                && self.tool_set.is_none()
+                && self.tool_environment_id.is_none()
+                && self.tool_environment_generation.is_none()
+                && self.tool_executor_version.is_none());
+        let service = self.service.parse::<Service>().ok();
+        let tool = matches!(
+            service,
+            Some(Service::Exec { .. } | Service::Llm { .. } | Service::Mcp { .. })
+        );
+        let tool_holds = match (&self.tool_session, service) {
+            (Some(scope), Some(service)) => {
+                scope.revision > 0
+                    && scope.opening_epoch > 0
+                    && self.thread_id == Some(scope.thread_id)
+                    && scope.accepts(&service)
+            }
+            (None, _) => !tool || matches!(self.src, TicketSource::Api),
+            (Some(_), None) => false,
+        };
+        if self.src != presenter || !names_its_kind || !port_holds || !program_holds || !tool_holds
+        {
             return Err(OpenErrorCode::BadTicket);
         }
         Ok(())
@@ -1114,6 +1185,15 @@ mod tests {
             tool_environment_id: None,
             tool_environment_generation: None,
             tool_executor_version: None,
+            tool_session: Some(ToolSessionScope {
+                opening_epoch: 1,
+                thread_id: id(THING),
+                segment_id: id(OTHER),
+                opening_id: id(MACHINE),
+                member: "exec".into(),
+                nonce: id(THING),
+                revision: 1,
+            }),
             port: None,
             exp: 1_791_500_000,
         }
@@ -1146,6 +1226,66 @@ mod tests {
         assert_eq!(ticket.claims(), &claims());
         assert_eq!(ticket.signed(), input.as_bytes());
         assert_eq!(ticket.signature(), b"signature");
+    }
+
+    #[test]
+    fn a_session_tool_ticket_keeps_its_physical_opening_and_cannot_name_another_thread_or_member() {
+        let mut ticket = claims();
+        ticket.tool_session = Some(ToolSessionScope {
+            opening_epoch: 1,
+            thread_id: id(THING),
+            segment_id: id(OTHER),
+            opening_id: id(MACHINE),
+            member: "exec".into(),
+            nonce: id(THING),
+            revision: 1,
+        });
+        let presenter = TicketSource::Machine(id(MACHINE));
+        assert_eq!(ticket.check(presenter, before_expiry()), Ok(()));
+        ticket.thread_id = Some(id(OTHER));
+        assert_eq!(
+            ticket.check(presenter, before_expiry()),
+            Err(OpenErrorCode::BadTicket)
+        );
+        ticket.thread_id = Some(id(THING));
+        ticket.tool_session.as_mut().unwrap().member = "llm".into();
+        assert_eq!(
+            ticket.check(presenter, before_expiry()),
+            Err(OpenErrorCode::BadTicket)
+        );
+        ticket.tool_session = None;
+        assert_eq!(
+            ticket.check(presenter, before_expiry()),
+            Err(OpenErrorCode::BadTicket)
+        );
+        ticket.thread_id = None;
+        assert_eq!(
+            ticket.check(presenter, before_expiry()),
+            Err(OpenErrorCode::BadTicket),
+            "omitting the thread cannot bypass session tool admission"
+        );
+    }
+
+    #[test]
+    fn the_builtin_executor_keeps_its_exec_membership_when_its_transport_is_mcp() {
+        let mut ticket = claims();
+        let presenter = ticket.src;
+        ticket.kind = TunnelKind::Mcp;
+        ticket.service = "mcp/exec".into();
+        assert_eq!(ticket.check(presenter, before_expiry()), Ok(()));
+        ticket.service = "mcp/files".into();
+        assert_eq!(
+            ticket.check(presenter, before_expiry()),
+            Err(OpenErrorCode::BadTicket)
+        );
+        ticket.tool_session.as_mut().unwrap().member = format!("mcp:{}", id(OTHER));
+        assert_eq!(ticket.check(presenter, before_expiry()), Ok(()));
+        ticket.service = "mcp/exec".into();
+        assert_eq!(
+            ticket.check(presenter, before_expiry()),
+            Err(OpenErrorCode::BadTicket),
+            "an external server membership cannot stand for the builtin executor"
+        );
     }
 
     #[test]
@@ -1209,6 +1349,52 @@ mod tests {
             wrong.check(machine, before_expiry()),
             Err(OpenErrorCode::BadTicket)
         );
+    }
+
+    #[test]
+    fn a_program_channel_names_its_work_and_grants_no_environment_tool_access() {
+        let work = id(OTHER);
+        let mut program = claims();
+        program.kind = TunnelKind::Program;
+        program.service = Service::Program { work_id: work }.to_string();
+        program.thread_id = Some(id(THING));
+        program.tool_set = None;
+        program.tool_environment_id = None;
+        program.tool_environment_generation = None;
+        program.tool_executor_version = None;
+        program.tool_session = None;
+        assert_eq!(
+            program.service.parse::<Service>().unwrap(),
+            Service::Program { work_id: work }
+        );
+        assert_eq!(program.check(program.src, before_expiry()), Ok(()));
+        let mut without_helper = program.clone();
+        without_helper.thread_id = None;
+        assert_eq!(
+            without_helper.check(without_helper.src, before_expiry()),
+            Err(OpenErrorCode::BadTicket)
+        );
+        let mut from_browser = program.clone();
+        from_browser.src = TicketSource::Api;
+        assert_eq!(
+            from_browser.check(TicketSource::Api, before_expiry()),
+            Err(OpenErrorCode::BadTicket)
+        );
+        for extra in ["environment", "generation", "executor", "tools", "session"] {
+            let mut mixed = program.clone();
+            match extra {
+                "environment" => mixed.tool_environment_id = Some(id(OTHER)),
+                "generation" => mixed.tool_environment_generation = Some(0),
+                "executor" => mixed.tool_executor_version = Some("1.0.0".into()),
+                "tools" => mixed.tool_set = Some("plain".into()),
+                "session" => mixed.tool_session = claims().tool_session,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                mixed.check(mixed.src, before_expiry()),
+                Err(OpenErrorCode::BadTicket)
+            );
+        }
     }
 
     #[test]
