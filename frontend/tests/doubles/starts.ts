@@ -1,3 +1,4 @@
+import { defaultProviderId, defaultModelName } from '@/features/settings/threadDefaults';
 /** What starting a thread is asked from: the defaults each place gives the threads made in it, what a thread there could be bound to before it exists, and the acts that mend a default.
  *
  * The defaults are settings written at a place (an org, a project, a topic) and read from the nearest one down the
@@ -39,10 +40,10 @@ export class Starts implements Part {
       const value = settings.valueAt(nodeId, key).value;
       return isText(value) ? value : null;
     };
-    const locked = ['agent.default_provider_id', 'agent.default_agent_id', 'agent.model'].some((key) => settings.valueAt(nodeId, key).lockedBy !== null);
+    const locked = (key: string) => settings.valueAt(nodeId, key).lockedBy !== null;
     return {
       node: { id: nodeId, kind },
-      defaults: { provider: text('agent.default_provider_id'), agent: text('agent.default_agent_id'), model: text('agent.model'), effort: text('agent.effort'), locked },
+      defaults: { provider: defaultProviderId(settings.valueAt(nodeId,'agent.default_provider_id').value), agent: text('agent.default_agent_id'), model: defaultModelName(settings.valueAt(nodeId,'agent.model').value), effort: text('agent.effort'), locks: { provider: locked('agent.default_provider_id'), agent: locked('agent.default_agent_id'), model: locked('agent.model'), effort: locked('agent.effort') } },
       prefer: asTypes(settings.valueAt(nodeId, 'binding.prefer').value) ?? [],
       allowed: asTypes(settings.valueAt(nodeId, 'binding.allowed').value),
       environmentDefault: settings.valueAt(nodeId, 'env.thread_default').value === 'fresh' ? 'fresh' : 'shared',

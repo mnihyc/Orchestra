@@ -665,6 +665,8 @@ async fn restore_uses_the_acknowledged_private_layout_after_its_command_journal_
     orch_db::queries::link::insert_command(
         &mut conn,
         &orch_db::queries::link::NewCommand {
+            content_transit: false,
+            native_target: None,
             id: command,
             machine_id: host.machine,
             kind: K::NodeMountsApply.as_str(),
@@ -1380,6 +1382,7 @@ async fn restore_and_early_purge_honor_the_tokens_current_scope_subtree_and_org_
         rows::lock_environment(&mut tx, made.id).await.unwrap();
         let token = orch_db::queries::identity::testing::insert_api_token(
             &mut tx,
+            orch_types::new_id(),
             world.ada,
             &[u8::try_from(number).unwrap() + 40; 32],
         )

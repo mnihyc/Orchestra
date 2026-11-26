@@ -431,7 +431,7 @@ async fn an_imported_thread_opens_and_syncs_without_an_agent_then_gets_its_first
             .call(ThreadEnvironmentSet, &[&thread])
             .token(&ada.token)
             .body(&ThreadEnvironmentSetBody {
-                choice: EnvironmentChoice::Use(o.s.on.environment),
+                choice: EnvironmentChoice::existing(o.s.on.environment),
                 directory: None,
             })
             .send()

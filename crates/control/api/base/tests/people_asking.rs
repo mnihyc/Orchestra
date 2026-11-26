@@ -210,7 +210,7 @@ async fn the_preview_is_real_but_publishes_nothing_and_send_keeps_authors_sender
         .set_at(
             orch_settings::Target::Node(one.base.id),
             "agent.model",
-            serde_json::json!("changed-after-acceptance"),
+            serde_json::json!({"type":"offering","name":"changed-after-acceptance"}),
         )
         .await;
     let repeated = send(&s, &s.ada, chat, &body).await;

@@ -7,7 +7,7 @@ import type { AskComposerProps } from '@/features/composer/AskComposer';
 import { ProgramComposer } from '@/features/composer/ProgramComposer';
 import type { Thread } from '@/generated/api-types';
 import { setLocale } from '@/i18n';
-import { askModels } from '../unit/ask-fixtures';
+import { apiAskModel, askModels } from '../unit/ask-fixtures';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 import { show } from './support';
@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({ send: vi.fn<typeof AskApi.sendAsk>(), sync: vi
 vi.mock('@/api/ask', async (load) => ({ ...await load<typeof AskApi>(), sendAsk: calls.send }));
 vi.mock('@/api/threads', async (load) => ({ ...await load<object>(), fetchThreadSync: calls.sync, interruptTurn: calls.stop }));
 vi.mock('@/api/threadRead', async (load) => ({ ...await load<object>(), captureThreadExecution: vi.fn(), threadAct: (_ref: unknown, execute: () => Promise<unknown>) => execute() }));
-vi.mock('@/realtime/threadReadContext', () => ({ useThreadReadRef: (id: string) => id }));
+vi.mock('@/realtime/threadReadContext', async (loadOriginal) => ({ ...await loadOriginal<object>(), useThreadReadRef: (id: string) => id }));
 vi.mock('@/realtime/stores/thread', async (load) => ({ ...await load<object>(), useThreadPart: () => null }));
 vi.mock('@/features/composer/AskComposer', () => ({ AskComposer: (props: AskComposerProps) => { calls.props = props; return <div data-question-thread={props.conversationId} />; } }));
 
@@ -41,7 +41,9 @@ for (const locale of ['en', 'zh-CN'] as const) it(`uses the saved choice, then a
   expect(question()).toMatchObject({ root: ACME.org, conversationId: thread.id, draftKey: thread.id, model: thread.program_model });
   await act(() => question().send([{ type: 'text', text: 'Keep the saved choice' }], 'saved'));
   expect(calls.send.mock.calls[0]).toEqual([thread.id, { client_id: 'saved', content: [{ type: 'text', text: 'Keep the saved choice' }], context: null, model: thread.program_model }, true]);
-  const selected = { provider_id: thread.program_model?.provider_id ?? '', model: 'other-api-model' };
+  const saved = thread.program_model;
+  if (!saved || !('backend' in saved) || !saved.backend.offering) throw new Error('Expected a saved API model');
+  const selected = apiAskModel(saved.backend.offering.provider, 'other-api-model');
   act(() => question().onModel(selected));
   await act(() => question().send([{ type: 'text', text: 'Use this choice' }], 'explicit'));
   expect(calls.send.mock.calls[1]?.[1].model).toEqual(selected);

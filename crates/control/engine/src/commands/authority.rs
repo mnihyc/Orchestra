@@ -58,6 +58,8 @@ pub enum CommandAuthority {
     ForkPreparation(Box<crate::fork_plan::command::Authority>),
     /// The actual first-Make owner and exact native sign-in keeper startup.
     ProviderCreator(Box<crate::jobs::provider_provision::CreatorCommand>),
+    /// The exact provider placement, conjunctive with its existing native command source.
+    ProviderPlacement(Box<crate::jobs::provider_provision::PlacementCommand>),
     /// The same native measurement job/phase and its retained domain source.
     Measurement(Box<crate::jobs::measurement::preparation::CommandEvidence>),
     /// The actual raw HTTP identity, conjunctive with its native command/source evidence.
@@ -102,6 +104,8 @@ pub enum CommandAuthority {
     MachinePrograms(Box<super::MachineProgramsAuthority>),
     /// Original delegated role selection.
     MachineRoles(Box<super::MachineRolesAuthority>),
+    /// Original primary gateway selection.
+    MachineGateway(Box<super::MachineGatewayAuthority>),
     /// Original key-by-key policy choice.
     MachinePolicy(Box<super::MachinePolicyAuthority>),
     /// Actual Host operation retained on its native policy synchronization.
@@ -216,6 +220,13 @@ impl Serialize for CommandAuthority {
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
+            Self::ProviderPlacement(authority) => {
+                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
+                value.serialize_field("version", &1_u8)?;
+                value.serialize_field("kind", "provider_placement")?;
+                value.serialize_field("authority", authority)?;
+                value.end()
+            }
             Self::Http(authority) => {
                 let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
                 value.serialize_field("version", &1_u8)?;
@@ -311,6 +322,13 @@ impl Serialize for CommandAuthority {
                 let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
                 value.serialize_field("version", &1_u8)?;
                 value.serialize_field("kind", "machine_roles")?;
+                value.serialize_field("authority", authority)?;
+                value.end()
+            }
+            Self::MachineGateway(authority) => {
+                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
+                value.serialize_field("version", &1_u8)?;
+                value.serialize_field("kind", "machine_gateway")?;
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
@@ -530,6 +548,9 @@ impl<'de> Deserialize<'de> for CommandAuthority {
                 "provider_creator" => serde_json::from_value(value.authority)
                     .map(|authority| Self::ProviderCreator(Box::new(authority)))
                     .map_err(D::Error::custom),
+                "provider_placement" => serde_json::from_value(value.authority)
+                    .map(|authority| Self::ProviderPlacement(Box::new(authority)))
+                    .map_err(D::Error::custom),
                 "continuation" => serde_json::from_value(value.authority)
                     .map(|authority| Self::Continuation(Box::new(authority)))
                     .map_err(D::Error::custom),
@@ -565,6 +586,9 @@ impl<'de> Deserialize<'de> for CommandAuthority {
                     .map_err(D::Error::custom),
                 "machine_roles" => serde_json::from_value(value.authority)
                     .map(|value| Self::MachineRoles(Box::new(value)))
+                    .map_err(D::Error::custom),
+                "machine_gateway" => serde_json::from_value(value.authority)
+                    .map(|value| Self::MachineGateway(Box::new(value)))
                     .map_err(D::Error::custom),
                 "machine_policy" => serde_json::from_value(value.authority)
                     .map(|value| Self::MachinePolicy(Box::new(value)))
@@ -649,6 +673,11 @@ impl CommandAuthority {
     /// Take the native owner's factual row fence before its canonical command row.
     /// This grants nothing; the live verifier still restores and checks the original source.
     pub async fn lock_native_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
+        if self.reads_before_fence() {
+            // Its verifier reads the words first, then takes this same native footprint and
+            // proves their versions unchanged. An outer lock would make that read hold the rows.
+            return Ok(());
+        }
         match self {
             Self::ResourceSummary(authority) => authority.lock_source(conn).await,
             Self::SideHistory(authority) => authority.lock_source(conn).await,
@@ -656,6 +685,7 @@ impl CommandAuthority {
             Self::RebindPreparation(authority) => authority.lock_source(conn).await,
             Self::ForkPreparation(authority) => authority.lock_source(conn).await,
             Self::ProviderCreator(authority) => authority.lock_source(conn).await,
+            Self::ProviderPlacement(authority) => Box::pin(authority.lock_source(conn)).await,
             Self::Measurement(authority) => Box::pin(authority.lock_source(conn)).await,
             Self::Http(authority) => Box::pin(authority.lock_source(conn)).await,
             Self::HostPortsProbe(authority) => authority.lock_source(conn).await,
@@ -670,6 +700,7 @@ impl CommandAuthority {
             Self::MachineProbe(authority) => authority.lock_source(conn).await,
             Self::MachinePrograms(authority) => authority.lock_source(conn).await,
             Self::MachineRoles(authority) => authority.lock_source(conn).await,
+            Self::MachineGateway(authority) => authority.lock_source(conn).await,
             Self::MachinePolicy(authority) => authority.lock_source(conn).await,
             Self::HostPolicy(authority) => authority.lock_source(conn).await,
             Self::CapabilityRecreation(authority) => authority.lock_source(conn).await,
@@ -682,6 +713,84 @@ impl CommandAuthority {
             Self::ImageInput(authority) => authority.lock_source(conn).await,
             Self::CapabilitySession(authority) => authority.lock_source(conn).await,
             _ => Ok(()),
+        }
+    }
+
+    /// Whether the native verifier takes its source fence after reading the words, so the
+    /// caller must run it before taking the canonical command row as well.
+    #[must_use]
+    pub fn reads_before_fence(&self) -> bool {
+        match self {
+            Self::ResourceSummary(authority) => authority.reads_before_fence(),
+            Self::Http(authority) => authority.reads_before_fence(),
+            Self::CapabilityService(authority) => {
+                authority.native().is_some_and(Self::reads_before_fence)
+            }
+            _ => false,
+        }
+    }
+    /// Record that model IO may follow this already-validated wire cut, on the same source-
+    /// fenced transaction. A later disconnect or lost acknowledgement never clears it.
+    pub async fn mark_model_admitted(&self, conn: &mut Conn, at: Time) -> Result<(), EngineError> {
+        match self.summary_source() {
+            Some(source) => source.mark_model_admitted(conn, at).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the rows around this stored command already refuse it, decided before the native
+    /// source's rows are taken, so that a command refused for that reason never holds a person's
+    /// thread for the time its refusal takes. `false` leaves the decision to the check under the
+    /// source's fence, as for every authority that has no such part.
+    pub async fn refused_without_fence(
+        &self,
+        conn: &mut Conn,
+        command: &CommandRow,
+    ) -> Result<bool, EngineError> {
+        match self {
+            Self::ResourceSummary(authority) => {
+                authority.refused_without_fence(conn, command).await
+            }
+            Self::Http(authority) => Box::pin(authority.refused_without_fence(conn, command)).await,
+            Self::CapabilityService(authority) => match authority.native() {
+                Some(source) => Box::pin(source.refused_without_fence(conn, command)).await,
+                None => Ok(false),
+            },
+            _ => Ok(false),
+        }
+    }
+
+    pub(crate) fn summary_source(&self) -> Option<&crate::summaries::resource::command::Authority> {
+        match self {
+            Self::ResourceSummary(source) => Some(source),
+            Self::Http(source) => source.summary_source(),
+            Self::CapabilityService(source) => source.native().and_then(Self::summary_source),
+            _ => None,
+        }
+    }
+
+    /// Recheck a just-inserted row on the same transaction that obtained `issued`. A summary's
+    /// native source remains fenced, so only its source proof is reused; HTTP/paid envelopes
+    /// still validate the stored row and save every narrower restriction they observed.
+    pub async fn current_callers_after_issue(
+        &self,
+        conn: &mut Conn,
+        command: &CommandRow,
+        issued: &[(Option<Caller>, Option<Time>)],
+        clock: &dyn Clock,
+        access: &dyn crate::access::ResourceAccess,
+    ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+        match self.summary_source() {
+            Some(source) => {
+                let check = crate::summaries::resource::command::issued::Check::capture(
+                    conn, source, command.id, issued,
+                )
+                .await?;
+                check
+                    .scope(self.current_callers(conn, command, clock, access))
+                    .await
+            }
+            None => self.current_callers(conn, command, clock, access).await,
         }
     }
 
@@ -698,6 +807,7 @@ impl CommandAuthority {
                 | Self::ForkNative(_)
                 | Self::RebindPreparation(_)
                 | Self::ProviderCreator(_)
+                | Self::ProviderPlacement(_)
                 | Self::ForkPreparation(_)
                 | Self::Measurement(_)
                 | Self::Http(_)
@@ -707,6 +817,7 @@ impl CommandAuthority {
                 | Self::MachineProbe(_)
                 | Self::MachinePrograms(_)
                 | Self::MachineRoles(_)
+                | Self::MachineGateway(_)
                 | Self::MachinePolicy(_)
                 | Self::HostPolicy(_)
                 | Self::ComponentUpdate(_)
@@ -803,6 +914,9 @@ impl CommandAuthority {
             Self::ProviderCreator(authority) => {
                 Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
             }
+            Self::ProviderPlacement(authority) => {
+                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
+            }
             Self::Http(authority) => {
                 Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
             }
@@ -824,6 +938,9 @@ impl CommandAuthority {
                 authority.current_issue_callers(conn, command, clock).await
             }
             Self::MachineRoles(authority) => {
+                authority.current_issue_callers(conn, command, clock).await
+            }
+            Self::MachineGateway(authority) => {
                 authority.current_issue_callers(conn, command, clock).await
             }
             Self::MachinePolicy(authority) => {
@@ -975,6 +1092,9 @@ impl CommandAuthority {
         if let Self::ProviderCreator(authority) = self {
             return Box::pin(authority.current_callers(conn, command, clock, access)).await;
         }
+        if let Self::ProviderPlacement(authority) = self {
+            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
+        }
         if let Self::Continuation(authority) = self {
             return authority
                 .current_callers(conn, command, clock, access)
@@ -1021,6 +1141,9 @@ impl CommandAuthority {
             return value.current_callers(conn, command, clock).await;
         }
         if let Self::MachineRoles(value) = self {
+            return value.current_callers(conn, command, clock).await;
+        }
+        if let Self::MachineGateway(value) = self {
             return value.current_callers(conn, command, clock).await;
         }
         if let Self::MachinePolicy(value) = self {
@@ -1074,6 +1197,7 @@ impl CommandAuthority {
             | Self::ForkNative(_)
             | Self::RebindPreparation(_)
             | Self::ProviderCreator(_)
+            | Self::ProviderPlacement(_)
             | Self::ForkPreparation(_)
             | Self::Measurement(_)
             | Self::Http(_)
@@ -1097,6 +1221,7 @@ impl CommandAuthority {
             | Self::MachineProbe(_)
             | Self::MachinePrograms(_)
             | Self::MachineRoles(_)
+            | Self::MachineGateway(_)
             | Self::MachinePolicy(_)
             | Self::HostPolicy(_)
             | Self::ComponentUpdate(_)
@@ -1192,6 +1317,10 @@ impl CommandAuthority {
     /// Retain the exact delegated role request.
     pub fn machine_roles(value: super::MachineRolesAuthority) -> Self {
         Self::MachineRoles(Box::new(value))
+    }
+    /// Retain the exact primary gateway request.
+    pub fn machine_gateway(value: super::MachineGatewayAuthority) -> Self {
+        Self::MachineGateway(Box::new(value))
     }
     /// Retain the exact key-by-key Machine request.
     pub fn machine_policy(value: super::MachinePolicyAuthority) -> Self {
@@ -1357,6 +1486,8 @@ impl CommandAuthority {
                 // only reapplies retained restrictions to its fresh, fully resolved native proof.
                 let serial = command.key.wire();
                 let proposed = orch_db::queries::link::NewCommand {
+                    content_transit: command.content_transit,
+                    native_target: None,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),
@@ -1412,6 +1543,7 @@ impl CommandAuthority {
             Self::RebindPreparation(authority) => authority.command_kind(),
             Self::ForkPreparation(authority) => authority.command_kind(),
             Self::ProviderCreator(authority) => authority.command_kind(),
+            Self::ProviderPlacement(authority) => authority.command_kind(),
             Self::Measurement(authority) => authority.command_kind(),
             Self::Http(authority) => authority.command_kind(),
             Self::SideHistory(authority) => authority.command_kind(),
@@ -1428,6 +1560,7 @@ impl CommandAuthority {
             Self::MachineProbe(_) => "machine.probe",
             Self::MachinePrograms(_) => "machine.programs",
             Self::MachineRoles(_) => "machine.roles.set",
+            Self::MachineGateway(_) => "machine.gateway.set",
             Self::MachinePolicy(_) | Self::HostPolicy(_) => "machine.policy.set",
             Self::ComponentUpdate(_) => "machine.update.now",
             Self::TemplateImport(_) => "node.template.import",
@@ -1486,6 +1619,7 @@ impl CommandAuthority {
             | Self::ForkNative(_)
             | Self::RebindPreparation(_)
             | Self::ProviderCreator(_)
+            | Self::ProviderPlacement(_)
             | Self::ForkPreparation(_)
             | Self::Measurement(_)
             | Self::Http(_)
@@ -1509,6 +1643,7 @@ impl CommandAuthority {
             | Self::MachineProbe(_)
             | Self::MachinePrograms(_)
             | Self::MachineRoles(_)
+            | Self::MachineGateway(_)
             | Self::MachinePolicy(_)
             | Self::HostPolicy(_)
             | Self::ComponentUpdate(_)

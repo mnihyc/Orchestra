@@ -302,12 +302,19 @@ impl Harness {
             }
         }
     }
-    async fn open(&mut self, thread: Id, segment: Id, wake: bool) -> SessionOpenResult {
+    async fn open(
+        &mut self,
+        opening_id: Id,
+        thread: Id,
+        segment: Id,
+        wake: bool,
+    ) -> SessionOpenResult {
         let opened = match self {
             Self::Claude(rig) => {
                 rig.thread = thread;
                 rig.segment = segment;
                 let mut spec = rig.spec(SessionMode::New, None);
+                spec.opening_id = opening_id;
                 spec.settings.model = MODEL.into();
                 spec.settings.available_models = vec![MODEL.into()];
                 spec.settings.background_wake = wake;
@@ -318,6 +325,7 @@ impl Harness {
             }
             Self::Codex(rig) => {
                 let mut spec = rig.spec(thread, SessionMode::New, None);
+                spec.opening_id = opening_id;
                 spec.settings.segment_id = segment;
                 spec.settings.model = MODEL.into();
                 spec.settings.available_models = vec![MODEL.into()];
@@ -354,6 +362,7 @@ pub struct State {
 }
 
 pub struct Bridge {
+    opening: Id,
     pub world: common::World,
     pub native: Harness,
     pub thread: Id,
@@ -402,6 +411,7 @@ impl NativeControl {
 }
 
 struct Observation<'a> {
+    opening: Id,
     world: &'a common::World,
     state: &'a mut State,
     published: &'a mut i64,
@@ -452,7 +462,13 @@ impl Bridge {
             ON CONFLICT(provider_id,model_name) DO NOTHING")
             .bind(world.provider).bind(MODEL).bind(common::MODEL).bind(orch_types::new_id()).execute(world.pool.pool()).await.unwrap();
         assert_eq!(model.rows_affected(), 1);
-        world.set(world.topic, "agent.model", json!(MODEL)).await;
+        world
+            .set(
+                world.topic,
+                "agent.model",
+                json!({"type":"offering","name":MODEL}),
+            )
+            .await;
         // This bridge attaches the owned native workspace as a directory. It has no
         // isolation declaration: use On request and the operator's explicit Open ceiling.
         world
@@ -556,7 +572,13 @@ impl Bridge {
                 "the actual native input author must hold Interact before the first turn"
             );
         }
-        world.set(thread, "agent.model", json!(MODEL)).await;
+        world
+            .set(
+                thread,
+                "agent.model",
+                json!({"type":"offering","name":MODEL}),
+            )
+            .await;
         {
             let mut conn = world.pool.acquire().await.unwrap();
             let row = orch_db::queries::threads::thread(&mut conn, thread)
@@ -604,30 +626,14 @@ impl Bridge {
         }
         let segment = world.segment_of(thread).await;
         phase("native-session-open");
-        let opened = native.open(thread, segment, wake).await;
+        let native_owner = &mut native;
+        let (opening, opened) = world
+            .open_session_with_native(thread, segment, move |opening_id| async move {
+                native_owner.open(opening_id, thread, segment, wake).await
+            })
+            .await;
         phase("native-session-opened");
         let reference = opened.native_session_ref.clone();
-        for kind in [CommandKind::SessionOpen, CommandKind::SessionOpenFenced] {
-            let receipt = opened.clone();
-            world
-                .machine
-                .handler
-                .on(kind, move |command| match command {
-                    Command::SessionOpen(open)
-                        if open.thread_id == thread && open.segment_id == segment =>
-                    {
-                        Ok(CommandResult::SessionOpen(receipt.clone()))
-                    }
-                    Command::SessionOpenFenced(open)
-                        if open.session.thread_id == thread
-                            && open.session.segment_id == segment =>
-                    {
-                        Ok(CommandResult::SessionOpenFenced(receipt.clone()))
-                    }
-                    _ => panic!("this fixture owns only its exact source session"),
-                });
-        }
-        world.open_session_for_reports(thread, segment).await;
         let stored: String = world
             .scalar(
                 "SELECT native_session_ref FROM segments WHERE id=$1",
@@ -717,6 +723,7 @@ impl Bridge {
         let origin = first.turn_id;
         let turn: TurnStart = serde_json::from_value(serde_json::to_value(first).unwrap()).unwrap();
         let mut result = Self {
+            opening,
             world,
             native,
             thread,
@@ -809,6 +816,7 @@ impl Bridge {
 
     fn observation(&mut self) -> Observation<'_> {
         Observation {
+            opening: self.opening,
             world: &self.world,
             state: &mut self.state,
             published: &mut self.published,
@@ -834,6 +842,7 @@ impl Bridge {
             _ => None,
         };
         let mut observation = Observation {
+            opening: self.opening,
             world: &self.world,
             state: &mut self.state,
             published: &mut self.published,
@@ -1293,11 +1302,13 @@ impl Bridge {
 
 impl Observation<'_> {
     async fn accept(&mut self, event: AdapterEvent) {
+        let native_opening_id = event.native_opening_id();
         let linked = match event {
             AdapterEvent::Session {
                 thread_id,
                 segment_id,
                 event,
+                ..
             } => {
                 assert_eq!((thread_id, segment_id), (self.thread, self.segment));
                 match &event {
@@ -1374,13 +1385,18 @@ impl Observation<'_> {
             }
             _ => return,
         };
-        self.publish(linked).await;
+        self.publish_from(native_opening_id, linked).await;
     }
 
     async fn publish(&mut self, event: Event) {
+        self.publish_from(Some(self.opening), event).await;
+    }
+
+    async fn publish_from(&mut self, native_opening_id: Option<Id>, event: Event) {
         bounded(
             "publishing an actual native event to the Engine",
-            self.world.machine.publish(
+            self.world.machine.publish_from(
+                native_opening_id,
                 &Stream::Session {
                     thread_id: self.thread,
                     segment_id: self.segment,

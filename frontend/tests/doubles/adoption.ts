@@ -95,8 +95,8 @@ export class AdoptionWorld implements Part {
     if (plan.environment === null) throw new Refusal(400, 'environment.none_usable', `none of your environments on that machine holds ${plan.register_first ?? 'its folder'}; register the directory first`);
     const made = this.world.threads.handle(person, 'POST', `/topics/${topicId}/threads`, new URLSearchParams(), {
       name: plan.name,
-      binding: { provider_id: body.provider_id, agent_id: body.agent_id },
-      environment: { use: plan.environment.id },
+      binding: { target: { type: 'single', resource: { kind: 'provider', id: body.provider_id } }, agent_id: body.agent_id },
+      environment: { use: { type: 'single', resource: { kind: 'environment', id: plan.environment.id } } },
       directory: plan.directory ?? '',
       model: plan.model ?? this.world.resources.modelsOf(String(body.provider_id)).find((model) => model.enabled)?.model_name,
     });

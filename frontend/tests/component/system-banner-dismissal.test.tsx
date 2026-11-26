@@ -66,3 +66,15 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(screen.getByText(first.text)).toBeVisible();
   });
 }
+
+it.each(['en', 'zh-CN'] as const)('shows a changed public address as one line without a reload or dialog in %s', async (locale) => {
+  await setLocale(locale);
+  cache.setQueryData(metaQuery.queryKey, meta({ public_url: 'https://before.example.test', public_address_revision: 1 }));
+  draw();
+  act(() => { cache.setQueryData(metaQuery.queryKey, meta({ public_url: 'https://changed.example.test', public_address_revision: 2 })); });
+  expect(await screen.findByText(i18n.t('publicAddress.changed'))).toBeVisible();
+  const open = screen.getByRole('link', { name: i18n.t('common.open') });
+  expect(open).toHaveAttribute('href', 'https://changed.example.test');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: i18n.t('shell.banner.reload') })).not.toBeInTheDocument();
+});

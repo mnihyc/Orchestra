@@ -6,7 +6,7 @@ import { askReader, sendAsk } from '@/api/ask';
 import { client } from '@/api/client';
 import { captureThreadExecution, threadAct } from '@/api/threadRead';
 import { fetchThreadSync, interruptTurn } from '@/api/threads';
-import type { AskModel, Thread } from '@/generated/api-types';
+import type { AskPreference, Thread } from '@/generated/api-types';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { currentTurnOver, runningTurn, useThreadPart } from '@/realtime/stores/thread';
 import { holds } from '@/lib/permissions';
@@ -23,7 +23,7 @@ export function ProgramComposer({ thread, onSent }: { thread: Thread; onSent?: (
 function Question({ thread, root, onSent }: { thread: Thread; root: string; onSent?: () => void }) {
   const read = useThreadReadRef(thread.id);
   const turn = useThreadPart(thread.id, runningTurn);
-  const [choice, setChoice] = useState<AskModel | null | undefined>(undefined);
+  const [choice, setChoice] = useState<AskPreference | null | undefined>(undefined);
   const model = choice === undefined ? thread.program_model ?? null : choice;
   const over = useThreadPart(thread.id, currentTurnOver);
   const active = turn !== null || !over && (thread.state === 'running' || thread.state === 'waiting_approval');

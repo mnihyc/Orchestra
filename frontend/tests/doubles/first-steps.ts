@@ -1,3 +1,4 @@
+import { defaultProviderId } from '@/features/settings/threadDefaults';
 /** First-steps facts read from the one fake world's providers, work, members and ordinary documents. */
 
 import { firstStepsChoice, landingOrg, record, savedOrg } from '../../src/features/onboarding/state.ts';
@@ -98,7 +99,7 @@ export class FirstStepsWorld implements Part {
     const ids = new Set(visible.map((node) => node.id));
     ids.add(org.id);
     const settings = this.world.settings.handle(person, 'GET', `/nodes/${org.id}/settings`, new URLSearchParams(), {})?.body as { key: string; value: unknown }[];
-    const defaultProvider = settings.find((entry) => entry.key === 'agent.default_provider_id')?.value;
+    const defaultProvider = defaultProviderId(settings.find((entry) => entry.key === 'agent.default_provider_id')?.value);
     const readableProviders: Provider[] = [];
     for (const candidate of this.world.resources.providers) {
       if (!ids.has(candidate.home) && candidate.id !== defaultProvider) continue;

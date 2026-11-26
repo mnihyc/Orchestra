@@ -26,7 +26,7 @@ use orch_api_contract::operations::TargetResolver;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Root,
-    Providers,
+    Resources,
 }
 
 const SOURCES: Declaration<Source> = Declaration {
@@ -39,8 +39,8 @@ const SOURCES: Declaration<Source> = Declaration {
             cardinality: Cardinality::One,
         },
         Binding {
-            source: Source::Providers,
-            target: TargetResolver::ResolvedCollection("ask_model_providers"),
+            source: Source::Resources,
+            target: TargetResolver::ResolvedCollection("ask_model_resources"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
         },
@@ -54,6 +54,7 @@ impl Selected for Models {
     type Query = api::AskModelsQuery;
     type Value = api::AskModelsReply;
     type Reply = api::AskModelsReply;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &SOURCES;
     const WATCH_ORDINARY: bool = true;
 
@@ -75,29 +76,44 @@ impl Selected for Models {
             let ordinary = principal.ordinary(conn).await.map_err(ApiError::internal)?;
             root_access(conn, &ordinary, query.root_org_id).await?;
             let reply = resolve(conn, &principal, query.root_org_id).await?;
-            let identities = reply
+            let provider_ids = reply
                 .models
                 .iter()
-                .filter_map(|model| model.provider.as_ref().map(|provider| provider.id))
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .map(|id| orch_access_contract::decisions::ObjectRef {
-                    kind: ObjectKind::Provider,
-                    id,
-                })
-                .collect::<Vec<_>>();
-            let providers =
-                crate::key_operations::targets::resource_objects(conn, &identities).await?;
-            let provider_groups = if providers.is_empty() {
-                vec![]
-            } else {
-                vec![(KeyTargetKind::Object(ObjectKind::Provider), providers)]
-            };
+                .filter_map(|model| model.provider.as_ref().map(|provider| provider.id));
+            let pool_ids = reply
+                .models
+                .iter()
+                .filter_map(|model| match &model.selection {
+                    api::AskTarget::Pool {
+                        target: orch_provider_contract::pools::Target::Pool { id, .. },
+                        ..
+                    } => Some(*id),
+                    _ => None,
+                });
+            let mut resource_groups = Vec::new();
+            for (kind, ids) in [
+                (
+                    ObjectKind::Provider,
+                    provider_ids.collect::<std::collections::BTreeSet<_>>(),
+                ),
+                (ObjectKind::Pool, pool_ids.collect()),
+            ] {
+                let refs = ids
+                    .into_iter()
+                    .map(|id| orch_access_contract::decisions::ObjectRef { kind, id })
+                    .collect::<Vec<_>>();
+                if !refs.is_empty() {
+                    resource_groups.push((
+                        KeyTargetKind::Object(kind),
+                        crate::key_operations::targets::resource_objects(conn, &refs).await?,
+                    ));
+                }
+            }
             Ok((
                 reply,
                 vec![
                     native::Facts::one(Source::Root, KeyTargetKind::Object(ObjectKind::Org), root),
-                    native::Facts::collection(Source::Providers, provider_groups),
+                    native::Facts::collection(Source::Resources, resource_groups),
                 ],
             ))
         })
@@ -119,7 +135,8 @@ impl Selected for Models {
         value: &'a Self::Value,
     ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
         Box::pin(async move {
-            root_access(conn, principal, value.root_org_id).await?;
+            let ordinary = principal.ordinary(conn).await.map_err(ApiError::internal)?;
+            root_access(conn, &ordinary, value.root_org_id).await?;
             Ok(value.clone())
         })
     }
@@ -132,7 +149,8 @@ impl Selected for Models {
         fresh: &'a Self::Value,
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move {
-            root_access(conn, principal, query.root_org_id).await?;
+            let ordinary = principal.ordinary(conn).await.map_err(ApiError::internal)?;
+            root_access(conn, &ordinary, query.root_org_id).await?;
             // Eligibility, schemas and edit hints must still describe the producing body.
             Ok(serde_json::to_value(opened).map_err(ApiError::internal)?
                 == serde_json::to_value(fresh).map_err(ApiError::internal)?)
@@ -177,7 +195,7 @@ pub(crate) async fn resolve(
         .ok_or_else(|| ApiError::internal("ask.models is absent from the setting registry"))?;
     let configured = view
         .value()
-        .map(|value| serde_json::from_value::<Vec<api::AskModelIdentity>>(value.clone()))
+        .map(|value| serde_json::from_value::<Vec<api::AskTarget>>(value.clone()))
         .transpose()
         .map_err(ApiError::internal)?;
     let writable = view.into_setting(permitted).writable;
@@ -189,7 +207,7 @@ pub(crate) async fn resolve(
         .map(|model| model.selection.clone());
     let blocked_reason = if configured.is_none() {
         Some(Blocked::NotConfigured)
-    } else if configured.as_ref().is_some_and(Vec::is_empty) {
+    } else if configured.as_ref().is_some_and(Vec::is_empty) && models.is_empty() {
         Some(Blocked::Empty)
     } else if default_model.is_some() {
         None
@@ -237,7 +255,7 @@ pub(crate) async fn check_preference(
     conn: &mut Conn,
     principal: &Principal,
     root: Id,
-    model: Option<&api::AskModel>,
+    model: Option<&api::AskPreference>,
 ) -> ApiResult<()> {
     let Some(model) = model else {
         return Ok(());
@@ -246,14 +264,14 @@ pub(crate) async fn check_preference(
     if let Some(reason) = choices.blocked_reason {
         return Err(blocked(reason));
     }
-    if !choices.models.iter().any(|choice| {
-        choice.allowed
-            && choice.selection.provider_id == model.provider_id
-            && choice.selection.model == model.model
-    }) {
+    if !choices
+        .models
+        .iter()
+        .any(|choice| choice.allowed && choice.selection.matches(model))
+    {
         return Err(ApiError::invalid(
             "model",
-            "Choose a usable entry from this root organization's ask.models list",
+            "This model cannot be used from this organization's Ask list. Choose another model.",
         ));
     }
     Ok(())

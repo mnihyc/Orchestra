@@ -28,7 +28,7 @@ use orch_access_contract::permissions::Permission;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::notification_sources as sources;
 
@@ -55,6 +55,15 @@ use orch_db::queries::jobs::JobRow;
 use orch_types::Id;
 
 use std::collections::HashMap;
+#[derive(serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Position {
+    document: Id,
+    user: Id,
+    words: orch_types::Hash,
+    after: Id,
+}
+
 pub(super) struct NoticeJobs;
 
 pub(super) struct Selected {
@@ -65,7 +74,7 @@ pub(super) struct Selected {
 
 impl native::Selected for NoticeJobs {
     type Source = Source;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = Selected;
     type Reply = Page<Job>;
     const DECLARATION: &'static Declaration<Source> = &sources::DOCUMENT_JOBS;
@@ -74,7 +83,7 @@ impl native::Selected for NoticeJobs {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(Selected, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let document = ctx.id("id")?;
@@ -102,26 +111,54 @@ impl native::Selected for NoticeJobs {
                 Policy::default(),
             )
             .await?;
+            let words = orch_types::Hash::of(query.q.as_deref().unwrap_or("").trim().as_bytes());
             let after = query
                 .cursor
                 .as_deref()
-                .map(str::parse::<Id>)
-                .transpose()
-                .map_err(|_| ApiError::invalid("cursor", "is not a notification job cursor"))?;
-            let limit = usize::try_from(query.limit()).map_err(ApiError::internal)?;
-            let mut rows = rows::document_notices_page(
+                .map(|text| {
+                    let position: Position = serde_json::from_str(text).map_err(|_| {
+                        ApiError::invalid("cursor", "is not a notification job cursor")
+                    })?;
+                    if position.document != document
+                        || position.user != caller.user()
+                        || position.words != words
+                    {
+                        return Err(ApiError::invalid(
+                            "cursor",
+                            "belongs to another notification job search",
+                        ));
+                    }
+                    Ok(position.after)
+                })
+                .transpose()?;
+            let limit = super::inbox::list_limit(query.limit)?;
+            let mut rows = rows::document_notices_search(
                 conn,
                 caller.user(),
                 document,
                 after,
                 i64::try_from(limit + 1).map_err(ApiError::internal)?,
+                &orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""))
+                    .like_patterns(),
             )
             .await?;
             let more = rows.len() > limit;
             rows.truncate(limit);
-            let next_cursor = more
-                .then(|| rows.last().map(|row| row.id.to_string()))
-                .flatten();
+            let next_cursor = if more {
+                rows.last()
+                    .map(|row| {
+                        serde_json::to_string(&Position {
+                            document,
+                            user: caller.user(),
+                            words,
+                            after: row.id,
+                        })
+                        .map_err(ApiError::internal)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             let mut names = projection::machine_name_sources(conn, &rows).await?;
             let ids = names.keys().copied().collect::<Vec<_>>();
             let mut found = targets::machine_subjects(conn, &ids).await?;
