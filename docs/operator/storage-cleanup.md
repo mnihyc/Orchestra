@@ -1,124 +1,94 @@
-# Storage cleanup
+# Clean up storage and uninstall
 
-## Unused node caches
+Free the disk that Orch keeps on its hosts and on the server, and remove an instance or the whole stack. At the end you know what is removed automatically, what you remove by hand, and what stays.
 
-`cleanup.unused_keep_days` starts at 7. Set it in system settings, or on one
-host's Settings page. A system lock prevents host overrides. Zero disables
-automatic cleanup of unused images and tool versions.
+People manage kept data from the screens: see [Storage cleanup](../user/storage-cleanup.md). This page covers the settings and the commands you run on the machines.
 
-The server chooses what may go. The node inventories its managed objects and
-rechecks each exact object before removing it. Running work, stopped units and
-retained environments' restore references keep their dependencies in use.
-Incomplete inventory or unknown restore references keep caches; an absent
-machine is not successful cleanup.
+## Before you start
 
-The first complete observation starts the age of a cache with no use history.
-Tool downloads and checks record use. A use after selection invalidates that
-selection. Cancellation stops between irreversible items after the current
-item is confirmed. The job retains each completed or failed result.
+- Run the `update.sh` commands on the server, in `deploy/`. The API process has no write access to the release and dump directories, so the **Storage** screen in **Management** shows you the exact command to copy instead of running it.
+- Back up first if you are unsure ([Back up and restore](backup-and-restore.md)).
+- Cleanup previews its plan before it removes anything. Read it.
 
-A dependency keeps its cache occupied until it stops or is removed. Its confirmed
-end starts the unused interval. These exact node stamps guard cleanup. The library
-uses reported operations for its Used figures.
+## Clean up unused caches on nodes
 
-Owned data follows its existing retention dates. Cache cleanup does not purge
-volumes, retained installed files or a person's existing directories. The node
-does not run a whole-host prune. Registry images without installation ownership
-evidence stay outside destructive inventory.
+Orch removes unused images and tool versions on a host after `cleanup.unused_keep_days` (7 by default). Set it in the system settings, or on one host's **Settings** page; a lock at the system prevents a host's override. Zero turns automatic cleanup of unused images and tool versions off.
 
-## Unused releases and dumps
+1. Open **Management → Storage** (or the host's page) and read what is unused and for how long.
+2. To change the period, edit `cleanup.unused_keep_days`.
+3. To clean up now, choose the cleanup action and review the plan. The same plan and the same job are behind every cleanup menu in **Storage** and **Resources**.
 
-`cleanup.release_keep_count` starts at 3. Each payload retains that many unused
-complete releases, in addition to `current` and `previous`. Zero keeps all.
-The updater applies the policy after a successful update or rollback. A policy
-read failure keeps everything.
+**How it decides.**
+- The server chooses what may go. The node lists the objects it manages and checks each exact object again before it removes it.
+- Running work, stopped containers and the restore references of retained environments keep their dependencies in use. A dependency keeps its cache occupied until it stops or is removed, and its confirmed end starts the unused interval.
+- The first complete observation starts the age of a cache that has no use history. Tool downloads and checks record use, and a use after the plan was chosen cancels that selection.
+- An incomplete inventory or an unknown restore reference keeps the caches. A machine that is absent is not a successful cleanup.
+- A job reloads the original sign-in or token and its recorded administration mode before each item. A changed occupancy fence, an unknown dependency, a current lifecycle owner or a recovery promise blocks removal. Cancelling finishes the operation in progress and then stops; each result stays in the job.
 
-Database dumps are not removed automatically. Keep each dump, its manifest and
-its paired blob copy together. See [Backup and restore](backup-and-restore.md)
-and [Upgrades and recovery](upgrades.md#keeping-unused-releases).
+**What it never does.** Cache cleanup does not purge volumes, installed files that are kept, or a person's existing directories. The node does not run a whole-host prune. Registry images without evidence that Orch installed them stay out of the inventory that can be removed. Data that Orch owns follows its own retention dates.
 
-Run `./update.sh prune` on the server to preview unused releases and their sizes.
-Add `--yes` to apply. It keeps the current and previous releases and follows the
-same setting as automatic update cleanup.
+## Clean up unused releases and dumps
 
-Run `./update.sh dumps remove <name>` for one recorded local dump pair. It lists
-the dump, manifest and paired copy, then asks for the dump name. `--yes` confirms
-an already reviewed plan. An unfinished update, a changed copy or missing pairing
-evidence blocks removal. Deleting a rollback pair also ends that recovery point.
-The live content store stays in place.
+`cleanup.release_keep_count` (3 by default) is how many unused complete releases each payload keeps, besides `current` and `previous`. Zero keeps all. The updater applies it after a successful update or rollback. If it cannot read the setting, it keeps everything.
 
-System Storage reads the updater's protected metadata. Its cleanup rows offer
-these exact commands to copy. Run them where the files live. The API process has
-no write access to release or dump directories.
+1. Preview the unused releases and their sizes:
 
-## Uninstalling an instance
+   ```sh
+   ./update.sh prune
+   ```
 
-Run `orch-node uninstall [--purge]` or `orch-connector uninstall [--purge]` with
-the instance's existing `--data-dir` and, for the node, `--config`. Read the
-fates, sizes and blockers first. `--plan` leaves the installation in place.
-Type the enrolled name once, or use `--yes` for an already reviewed plan.
+2. Apply it with `./update.sh prune --yes`. It keeps the current and previous releases and follows the same setting as the automatic cleanup after an update.
+3. Database dumps are never removed automatically. To remove one recorded local dump pair:
 
-The installer records the exact program, configuration and service instance.
-Only the last active connector instance removes a shared program. An unknown
-or damaged ownership record blocks removal. Run an older installation's
-installer once to record its ownership. Other active or retained instances
-inside a data directory block its purge.
+   ```sh
+   ./update.sh dumps remove <name>
+   ```
 
-Uninstall stops the recorded service and requires exclusive access to that
-instance before purging. A foreground process must be stopped first. Stable
-lock files contain no identity or credentials and remain to prevent a new run
-from entering during directory removal. Windows reports final program deletion
-as scheduled until this command exits.
+   It lists the dump, its manifest and the paired blob copy, then asks you to type the dump name. `--yes` confirms a plan you have already reviewed.
 
-Node purge removes only the selected system-owned runtime inventory, in
-dependency order. A failed or unreadable item keeps the node's files for a new
-plan. A driver without read-only inventory appears as a blocker before a service
-is stopped. Connector purge rechecks each recorded directory's identity. It never
-adopts an existing folder or purges an allowed storage root.
+Keep each dump, its manifest and its paired blob copy together. An unfinished update, a changed copy or missing pairing evidence blocks removal. Deleting a rollback pair also ends that recovery point. The live content store stays where it is. [Update and roll back](upgrades.md#keep-unused-releases) describes the rollback side.
 
-## Uninstalling the stack
+## Uninstall a connector or a node
 
-From `deploy/`, run `./update.sh uninstall [--purge]`. Read the stack and node
-inventory, then type the system name. `--plan` previews; `--yes` confirms.
-Without purge, the runtime and secrets remain for `docker compose up -d`.
-With purge, node cleanup must finish before the stack, `runtime/` and
-`config/secrets/` are removed. Configuration and `.env` remain.
+1. Read the plan first. It shows the fates, the sizes and anything that blocks the removal, and leaves the installation in place:
 
-The default final save is a new protected directory in `backups/`, outside the
-purged runtime. It contains the database dump and manifest, the subsequent blob
-copy, configuration, original keys and node identity. Applications are stopped
-for this save. Execution volumes are excluded; preserve their separate copies
-before confirming. `--no-backup` explicitly skips the final save. Protect and
-encrypt the saved set before transferring it off this host.
+   ```sh
+   orch-node uninstall --plan
+   orch-connector uninstall --plan
+   ```
 
-## Reviewed switch batches
+   Use the instance's existing `--data-dir` and, for the node, `--config`.
+2. Run `orch-node uninstall [--purge]` or `orch-connector uninstall [--purge]` with the same options. Type the enrolled name once, or pass `--yes` for a plan you have reviewed.
 
-`switch.batch_threads` starts at 200 and bounds one reviewed batch. Raise the system setting for a larger selection. `switch.batch_parallel` independently bounds concurrent jobs. A provider-wide selection uses current Binding facts and ordinary Thread Manage authority; unrelated and inaccessible threads are never granted to the requester.
+**What it does.**
+- The installer records the exact program, configuration and service instance. Only the last active connector instance removes the shared program. An unknown or damaged ownership record blocks removal; run an older installation's installer once to record it.
+- It stops the recorded service and needs exclusive access to the instance before it purges. Stop a foreground process first. Small lock files hold no identity or credentials and stay, so that a new run cannot enter while the directory is removed. On Windows the final deletion of the program is reported as scheduled until the command exits.
+- A node purge removes only the system-owned runtime inventory you selected, in dependency order. A failed or unreadable item keeps the node's files for a new plan. A driver that cannot list its objects without changing them shows up as a blocker before any service is stopped.
+- A connector purge checks each recorded directory's identity again. It never adopts an existing folder and never purges an allowed storage root. Other active or retained instances inside a data directory block its purge.
 
-## Reviewed cleanup
+## Uninstall the stack
 
-Storage and resource menus use the same expiring cleanup plan and durable job. The job reloads the original sign-in or token and its recorded administration mode before each item. A changed occupancy fence, unknown dependency, current lifecycle owner or recovery promise blocks removal. Cancellation finishes the admitted native operation before stopping; each actual outcome remains in the job.
+1. From `deploy/`, preview: `./update.sh uninstall --plan`.
+2. Read the stack and node inventory, then run `./update.sh uninstall [--purge]` and type the system name (`--yes` confirms a plan you reviewed).
 
-A mount keeps the completed cleanup result open until Close, even after its last kept-data row disappears. A kept-environment row retains its accepted job when the dialog is hidden. Confirmed terminal outcomes refresh the retained-data views; a failed or unconfirmed purge never becomes a restored environment locally.
+Without `--purge` the runtime and the secrets stay, and `docker compose up -d` brings the stack back. With `--purge`, node cleanup must finish first. Then the stack, `runtime/` and `config/secrets/` are removed; the configuration and `.env` remain.
 
-## Immediate pauses
+**The final save.** By default the command first makes a new protected directory in `backups/`, outside the purged runtime. It holds the database dump and manifest, the blob copy made after it, the configuration, the original keys and the node identity. The applications are stopped for this save. Execution volumes are not included, so keep their separate copies before you confirm. `--no-backup` skips the final save on purpose. Protect and encrypt the saved set before you move it off this host.
 
-Disabling a provider, model, profile or environment interrupts its active turns without holding the queued inputs. Separate summary and embedding requests are cancelled and refused at admission after the resource is off. A durable noncancellable stop then settles the native units while keeping volumes. Deletion admits the same stop and retires the provider runtime after its turns stop. Native source and queue authority are checked again when work resumes.
+## Remove a host
 
-An accepted summary keeps its paying provider/model and source profile/environment. Its stop stays attached to that request even if the resource is enabled before dispatch. Completed reported usage still follows the ordinary accounting and recovery path. A deliberate pause is shown as a skip, rather than a producer failure.
+**Delete** on a host, with its choices for environments, mount data and what Orch keeps there, is described for the people who do it in [Recover work after a machine is lost](../user/recover-lost-work.md#remove-a-host). Two facts matter to an operator. A host that was declared lost is removed from Orch alone; run `orch-node uninstall --purge` on the original machine, when it can be reached, to review the objects it still owns. And the inventory read that erases what Orch keeps is an ordinary watched job that needs **Host Manage**; an incomplete read blocks erasure, and a failed removal keeps the host registered.
 
-Enable leaves Run the waiting messages unchecked. Those messages are then held for their authors to Resume or switch. Selecting it wakes eligible messages only after the resource is available. Existing personal Stop holds remain held, and each author passes the normal model-use checks again. Selecting it also continues each latest resource-stopped turn through the shared visible Continue as its original author, preserving all original authority. A revoked author leaves a safe stopped-task result; no failed-call rule or guard attempt is created. The count opens the visible thread list and names when waiting began.
+## Settings that belong to these reviews
 
-## Operation notice defaults
+| Setting | Default | What it does |
+|---|---|---|
+| `cleanup.unused_keep_days` | 7 | Days before unused images and tool versions are removed; 0 turns it off |
+| `cleanup.release_keep_count` | 3 | Unused complete releases kept besides `current` and `previous`; 0 keeps all |
+| `switch.batch_threads` | 200 | The largest reviewed batch of threads that one switch can take; raise it at the system for a larger selection |
+| `switch.batch_parallel` | 4 | How many jobs of a batch run at once |
+| `notify.operations` | `when_blocking` | The first state of **Notify** for reviewed moves, recovery, **Declare lost** and **Delete host**: `always` and `never` change the checkbox, and the person still decides |
 
-Reviewed moves, recovery, Declare lost and Delete host resolve `notify.operations` through the normal settings and locks. Its shipped value is `when_blocking`; `always` and `never` change the initial checkbox. The person still decides for the operation. A single environment or provider uses its own resolved setting. A host uses its home. A machine without a home, or recovery across several homes, uses the system setting. Move batches opened in a place use that place. Personal notification-kind choices still filter the recipient count and delivery.
+A provider-wide selection for a switch uses the current bindings and the person's own authority to manage each thread; unrelated threads, and threads the person cannot reach, are never added. A single environment or provider uses its own `notify.operations`. A host uses its home. A machine without a home, or a recovery across several homes, uses the system's. A move batch opened in a place uses that place's.
 
-## Removing a host
-
-Delete host pauses scheduling and admits only the caller's authorized cascades. Other managers' environments wait for their managers; they do not block acceptance. The progress names remaining operations, those environments, or the original retained-file date. Cancel while waiting restores the earlier scheduling choice and leaves accepted child operations under their own controls.
-
-Mount data defaults to Leave on the machine. Move uses the existing Copy transfer into a new destination location. Delete requires the mount's name. Existing borrowed directories are never erased. Retained environments default to their frozen recovery deadline. Early Purge now needs administration of their current home and the environment name. Unattributed owned volumes and layers default to Leave and need their own typed Delete consent.
-
-Erase what Orch keeps there defaults on for reachable hosts. Its inventory read is an ordinary watched background job requiring Host Manage. An incomplete read blocks erasure. After the cascades, fresh exact node inventory and removal repeat ownership and dependency checks; general erasure excludes data rows set to Leave or Wait. A failed removal keeps the host registered. The result lists remaining objects with measured sizes or an unknown figure.
-
-A declared-lost host is removed from Orch alone. Run `orch-node uninstall --purge` on the original machine when reachable to review the remaining owned objects. It uses the same inventory; it never prunes another system's objects.
+Pausing a provider, model, agent profile or environment is a person's act and is explained in [Pause, switch and remove](../user/pause-and-switch.md).

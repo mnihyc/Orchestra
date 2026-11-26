@@ -223,11 +223,13 @@ async fn forward(
     segment: Id,
     event: &AdapterEvent,
 ) -> Result<(), String> {
+    let native_opening_id = event.native_opening_id();
     let linked = match event {
         AdapterEvent::Session {
             thread_id,
             segment_id,
             event,
+            ..
         } => {
             if *thread_id != thread || *segment_id != segment {
                 return Err("the real native event has a different thread/segment".into());
@@ -251,7 +253,8 @@ async fn forward(
     };
     world
         .machine
-        .publish(
+        .publish_from(
+            native_opening_id,
             &Stream::Session {
                 thread_id: thread,
                 segment_id: segment,
@@ -288,37 +291,15 @@ async fn prove(
     spec.settings.sandbox_mode = SandboxMode::Open;
     spec.exec.executor = Some("codex-exec-server".into());
     spec.exec.generation = context.generation;
-    let opened = native
-        .adapter
-        .open_session(spec)
-        .await
-        .map_err(|error| error.to_string())?;
-    let actual: SessionOpenResult = serde_json::from_value(serde_json::to_value(&opened).unwrap())
-        .map_err(|error| error.to_string())?;
-    // Scripted admission returns the real native session's receipt, not a fabricated native id.
-    for kind in [CommandKind::SessionOpen, CommandKind::SessionOpenFenced] {
-        let actual = actual.clone();
-        world
-            .machine
-            .handler
-            .on(kind, move |command| match command {
-                Command::SessionOpen(open)
-                    if open.thread_id == thread && open.segment_id == segment =>
-                {
-                    Ok(CommandResult::SessionOpen(actual.clone()))
-                }
-                Command::SessionOpenFenced(open)
-                    if open.session.thread_id == thread && open.session.segment_id == segment =>
-                {
-                    Ok(CommandResult::SessionOpenFenced(actual.clone()))
-                }
-                _ => Err(CommandError::new(
-                    ErrorCode::Internal,
-                    "unexpected native proof session",
-                )),
-            });
-    }
-    world.open_session_for_reports(thread, segment).await;
+    let adapter = &mut native.adapter;
+    let (_, opened) = world
+        .open_session_with_native(thread, segment, move |opening_id| async move {
+            spec.opening_id = opening_id;
+            let opened = adapter.open_session(spec).await.unwrap();
+            serde_json::from_value::<SessionOpenResult>(serde_json::to_value(opened).unwrap())
+                .unwrap()
+        })
+        .await;
     let stored: String = world
         .scalar(
             "SELECT native_session_ref FROM segments WHERE id=$1",

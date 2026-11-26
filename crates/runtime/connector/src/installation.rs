@@ -53,6 +53,34 @@ pub fn node(data: &DataDir, config_file: &Path) -> MachineInstallation {
     )
 }
 
+/// Read the identity of this connector once; changing an installation requires reviewing its new build.
+pub(crate) fn reviewable_platform()
+-> Option<&'static orch_agent_programs::confirmation::PlatformBuild> {
+    use orch_agent_programs::confirmation::PlatformBuild;
+    static BUILD: OnceLock<Option<PlatformBuild>> = OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            if orch_envhost::RUNTIME_VERIFIED {
+                return None;
+            }
+            let mut binary = std::fs::File::open(program_path()?).ok()?;
+            let mut hash = orch_types::Hash::hasher();
+            std::io::copy(&mut binary, &mut hash).ok()?;
+            Some(PlatformBuild {
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                executable: orch_types::Hash::finish(&hash),
+            })
+        })
+        .as_ref()
+}
+
+/// A local review names one executable; it does not add support for an unavailable primitive.
+pub(crate) fn runtime_reviewed(policy: &orch_link_contract::policy::LocalPolicy) -> bool {
+    orch_envhost::RUNTIME_VERIFIED
+        || reviewable_platform().is_some_and(|build| policy.exec_platform.accepts(build))
+}
+
 /// Uses the same observed command formatter for a known installed connector executable.
 #[must_use]
 pub fn connector_with_program(data: &DataDir, program: &Path) -> MachineInstallation {

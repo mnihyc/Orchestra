@@ -71,6 +71,35 @@ async fn projections(world: &World, who: &Who, id: Id, label: &str, address: &st
         reference["address"], address,
         "thread/binding references agree with the page and list"
     );
+    let admitted = std::collections::BTreeSet::from([row.home_node_id]);
+    let expected =
+        orch_authz::resources::addresses_with_name_sources(&mut conn, &[id], Some(&admitted))
+            .await
+            .unwrap();
+    let (restricted, reads) =
+        support::Statements::queries(orch_engine::views::environment_ref_json_with_names(
+            &mut conn,
+            &row,
+            Time::new(world.now()),
+            Some(&admitted),
+        ))
+        .await;
+    assert_eq!(restricted.unwrap()["address"], expected[0].1);
+    let address_reads: usize = reads
+        .statements
+        .iter()
+        .filter(|(sql, _)| {
+            sql.contains("FROM orgs")
+                || sql.contains("JOIN orgs")
+                || sql.contains("SELECT id, username FROM users")
+                || sql.contains(orch_db::queries::addresses::ENVIRONMENT_SEGMENT_SQL)
+        })
+        .map(|(_, count)| count.statements)
+        .sum();
+    assert_eq!(
+        address_reads, 1,
+        "one lookup renders the admitted address of the selected environment"
+    );
     drop(conn);
     let found = world
         .app
