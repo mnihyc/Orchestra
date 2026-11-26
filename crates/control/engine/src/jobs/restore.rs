@@ -425,9 +425,11 @@ impl Restoring {
                 job,
                 "restore.undo.metadata",
                 &FsRecord {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: self.plan.environment,
                     snapshot_id: body.undo_snapshot_id,
                     directory: directory.clone(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Restore,
                     record_days: *record_days,
                     max_bytes: *max_bytes,

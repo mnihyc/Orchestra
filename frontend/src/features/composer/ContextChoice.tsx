@@ -8,7 +8,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { appliesWords, ChoiceHead, LockedLine, SECTION } from '@/features/composer/SpeedAndAccess';
+import { ChoiceHead, LockedLine, SECTION } from '@/features/composer/SpeedAndAccess';
 import type { Chooser, ContextState } from '@/features/composer/modelState';
 import { contextChoices, firstStep, formatContext, readTokens, stepBelow } from '@/features/models/context';
 import { useAppearance } from '@/lib/appearance';
@@ -91,7 +91,6 @@ export function ContextChoice({ state, writable, chooser, onChoose }: { state: C
       )}
       {state.description !== '' && <p className="text-xs text-text-muted">{state.description}</p>}
       <LockedLine state={state} />
-      <p className="text-xs text-text-subtle">{appliesWords(state, t)}</p>
     </section>
   );
 }

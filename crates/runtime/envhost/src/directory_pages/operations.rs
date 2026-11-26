@@ -1,11 +1,12 @@
 //! Attachment-scoped admission and joined blocking directory reads.
 
+use super::allowance::{Allowance, Held};
 use super::{Coverage, DirectoryPages, check, lock};
 use crate::error::{HostError, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -18,16 +19,30 @@ struct WorkSet {
 /// Completed records keep their allowance until actual-use reaping joins/releases them; another
 /// attachment can reap them too. There are never 256 retained worker sets per watch/environment.
 pub(super) struct Owners {
-    slots: Arc<Semaphore>,
+    slots: Arc<Allowance>,
     attachments: Mutex<Vec<Weak<Attachment>>>,
 }
 
 impl Owners {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
-            slots: Arc::new(Semaphore::new(super::SLOTS)),
+            slots: Allowance::new(
+                orch_link_contract::commands::WorkspaceLimits::default().directory_slots,
+            ),
             attachments: Mutex::new(Vec::new()),
         })
+    }
+
+    pub(super) fn configure(&self, maximum: u64) {
+        self.slots.configure(maximum);
+    }
+
+    pub(super) fn maximum(&self) -> usize {
+        self.slots.maximum()
+    }
+
+    pub(super) fn acquire(&self) -> Result<Held> {
+        Arc::clone(&self.slots).try_acquire_owned()
     }
 
     async fn reap(&self) -> Result<()> {
@@ -64,7 +79,7 @@ struct Worker {
     driver: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
     // Keep only the host allowance after exit, not the request's Environment owner: retaining
     // that owner here would make an attachment -> worker -> attachment cycle when a host drops.
-    _permit: Arc<OwnedSemaphorePermit>,
+    _permit: Arc<Held>,
 }
 
 struct Request {
@@ -72,7 +87,7 @@ struct Request {
     deadline: Instant,
     busy: AtomicBool,
     // One of the host's existing directory-owner allowance, retained until actual blocking exit.
-    permit: Arc<OwnedSemaphorePermit>,
+    permit: Arc<Held>,
     // An old plain/no-store attachment must not drop its native owners while work is still in it.
     _owner: Option<Coverage>,
 }
@@ -238,7 +253,7 @@ impl Operation {
             check(&self.request.cancel, self.request.deadline)?;
             // At most one blocking phase per live request, with the same host-wide256 owners.
             // Finished drivers are reaped on actual use; no upkeep timer or per-watch allocation.
-            if work.workers.len() >= super::SLOTS {
+            if work.workers.len() >= self.owners.maximum() {
                 return Err(HostError::Busy(
                     "the attachment has no unused directory worker owner".to_owned(),
                 ));
@@ -247,7 +262,7 @@ impl Operation {
                 .iter()
                 .any(|attachment| attachment.ptr_eq(&Arc::downgrade(&self.attachment)))
             {
-                if owners.len() >= super::SLOTS {
+                if owners.len() >= self.owners.maximum() {
                     return Err(HostError::Busy(
                         "the host has no unused directory worker registry slot".to_owned(),
                     ));
