@@ -134,6 +134,11 @@ pub struct Implementation {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentCapabilities {
+    /// Optional vendor metadata and ACP account actions reported during negotiation.
+    #[serde(rename = "_meta")]
+    pub meta: Option<Json>,
+    /// Supported account actions (for example logout).
+    pub auth: Option<Json>,
     /// It loads a session and replays its history.
     pub load_session: bool,
     /// What a prompt may hold.

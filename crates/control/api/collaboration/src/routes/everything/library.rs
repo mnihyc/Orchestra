@@ -223,6 +223,9 @@ pub(crate) fn select_relations(raw: &mut [resource_facts::RawFacts]) {
                 | orch_access_contract::permissions::ObjectKind::Environment => {
                     edge.relation == DependentRelation::Binding
                 }
+                orch_access_contract::permissions::ObjectKind::Pool => {
+                    edge.relation == DependentRelation::ExplicitGiving
+                }
                 orch_access_contract::permissions::ObjectKind::Skill => {
                     edge.relation == DependentRelation::ExplicitGiving
                         || edge.relation == DependentRelation::Attachment

@@ -154,7 +154,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const beforeHelp = reads.requests.length;
       await row.locator('[data-help-article="settings-and-usage"][data-help-heading="agent-history"]').click();
       await page.getByRole('button', { name: words.helpRelease.openEntry, exact: true }).click();
-      await expect(page.getByRole('heading', { name: locale === 'en' ? 'Agent history' : '代理历史', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: locale === 'en' ? 'Agent history' : '智能体历史', exact: true })).toBeVisible();
       await capture(page, info, `setting-help-${suffix}`);
       expect(reads.requests.slice(beforeHelp), 'The guide is shipped with the application').toEqual([]);
       await info.attach('requests', { body: JSON.stringify({ cold, idle: idleReads, action: reads.requests.slice(beforeAction) }, null, 2), contentType: 'application/json' });
