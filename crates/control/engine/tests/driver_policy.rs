@@ -136,7 +136,7 @@ async fn a_prospective_unit_uses_its_target_driver_without_borrowing_an_unselect
         "the driver is known before any physical machine is selected"
     );
     sqlx::query(
-        "UPDATE environments SET config=jsonb_build_object('env.host_id',$2::text) WHERE id=$1",
+        "UPDATE environments SET config=jsonb_build_object('env.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id=$1",
     )
     .bind(world.environment)
     .bind(host.id.to_string())
@@ -160,5 +160,66 @@ async fn a_prospective_unit_uses_its_target_driver_without_borrowing_an_unselect
     assert_eq!(
         created, selected,
         "the selected unit keeps the same facts and ceiling from planning through creation"
+    );
+}
+
+#[tokio::test]
+async fn a_host_without_the_templates_driver_is_told_as_a_missing_driver_and_not_as_a_policy_refusal()
+ {
+    let world = World::new().await;
+    let host = ScriptedHost::on(&world, "Process node", 8192).await;
+    let template = hosting::template(&world).await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    // The host reported its own driver (host processes) and its policy, but not the template's (Docker).
+    sqlx::query("UPDATE hosts SET drivers=drivers-'docker' WHERE id=$1")
+        .bind(host.id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let mut policy =
+        LocalPolicy::resolve(&["*".into()], &PolicyValues::new(), &PolicyValues::new()).unwrap();
+    policy
+        .local_values
+        .insert("drivers".into(), json!(policy.drivers));
+    sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy}',$2) WHERE id=$1")
+        .bind(host.machine)
+        .bind(json!(policy))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let template = rows::template(&mut conn, template).await.unwrap().unwrap();
+    let wanted = places::wanted(&mut conn, world.topic, template, &json!({}))
+        .await
+        .unwrap();
+    let now = world.clock.now();
+    let principal = Principal::load(&mut conn, Caller::session(world.ada), Time::new(now))
+        .await
+        .unwrap();
+    let ask = Ask {
+        home: world.topic,
+        wanted: &wanted,
+        current: None,
+        minutes_idle: 60,
+        now,
+    };
+    let places = places::host_places(&mut conn, &principal, &ask)
+        .await
+        .unwrap();
+    let place = &places
+        .iter()
+        .find(|place| place.host.id == host.id)
+        .unwrap()
+        .place;
+    assert!(!place.usable);
+    assert!(
+        place
+            .reasons
+            .contains(&orch_api_contract::environment::HostReason::Driver),
+        "{:?}",
+        place.reasons
+    );
+    assert_eq!(
+        place.policy_refusal, None,
+        "no policy refused anything: the host has no driver for this template"
     );
 }

@@ -18,7 +18,7 @@ column means the host has not reported those facts.
 Image builds, image archives, host directories, private views, suspension and
 host ports can be unavailable even when the driver can run an environment.
 Installed files and transferring installed files are separate operations.
-Tool delivery and gateway access describe what a new unit can use.
+Tool delivery and gateway access describe what a new container can use.
 
 These are the host’s reported abilities. Access permissions, machine policy and
 the chosen template still determine whether a particular request is allowed.
@@ -27,7 +27,7 @@ Reading the card starts no work and changes no settings.
 ## Read capacity and storage
 
 A host is one destination for environments and can represent a pool of several
-machines. Its driver chooses the machine for each unit. Capacity and load describe
+machines. Its driver chooses the machine for each container. Capacity and load describe
 that offered pool; they do not necessarily describe the computer running the node.
 
 On **Storage → Storages**, a name can describe a disk or a storage class. An

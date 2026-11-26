@@ -169,6 +169,7 @@ async fn prove_volume_flow(after: After) -> Proof {
                 build: old.build,
                 blobs: old.blobs.clone(),
                 cache: crate::cache::Cache::new(&old.config),
+                metrics_listener_failed: old.metrics_listener_failed.clone(),
                 host_ports: old.host_ports.clone(),
                 builtin_sources: old.builtin_sources.clone(),
             }),
@@ -231,10 +232,8 @@ async fn prove_volume_flow(after: After) -> Proof {
             json!({"rules":[{"target":{"kind":"mount","id":mount,"reach":"self"},"allow":[{"operation":"MountLocationSet","actions":["write"]}]},{"target":{"kind":"machine","id":transport.machine,"reach":"self"},"allow":[{"operation":"MountLocationSet","actions":["manage"]}]}]}),
         )?;
         assert!(policy.validate().is_empty());
-        let token = crate::middleware::authentication::new_token(
-            crate::middleware::authentication::API_TOKEN_PREFIX,
-        );
         let id = new_id();
+        let token = crate::middleware::authentication::new_api_token(id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {

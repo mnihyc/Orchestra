@@ -64,6 +64,7 @@ impl Controller {
                 thread_id,
                 segment_id,
                 event,
+                ..
             } = event
             {
                 if thread_id != thread || segment_id != segment {

@@ -11,7 +11,7 @@ meets at a limit is `../../ui/LimitPrompt.tsx`.
 - `ScopePicker.tsx`: Me, visible orgs, departments and projects in the header, reusing authorized names and one opened org's cached tree; never eager trees for every org.
 - `PerformanceView.tsx`: The Performance view's shared frame, with the same scope, span and filters as Usage.
 - `Performance.tsx`: Median figures with missing-measurement reasons, a sortable model comparison and error-code filters.
-- `PerformancePlaces.tsx`: Seven-day performance at open model choices and providers, and the degraded-only status part. The open ring or Usage panel owns provider-health loading; the status part only observes its cache.
+- `PerformancePlaces.tsx` shows seven-day performance at model choices and providers. In `ProviderHealth.tsx`, an open ring or Usage panel loads provider health. The status bar observes the cached result.
 - `performance.ts`: Shared display units, confidence floors and like-for-like performance comparisons.
 - `Requests.tsx`: A scoped live model-request log with historical cursor pages and a pause that keeps one's place.
 - `outcomes.ts`: Typed contract outcome selectors shared by addresses, controls and request filtering.
