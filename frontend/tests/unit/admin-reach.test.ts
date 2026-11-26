@@ -120,3 +120,11 @@ it.each([
     expect(unrelated).not.toHaveBeenCalled(); expect(c.getQueryData(activityKey)).toEqual(['retained history']);
   } finally { stops.forEach((stop) => stop()); }
 });
+
+it('searches administrative token and browser metadata in the native inventory', async () => {
+  const c = cache();
+  await c.infiniteQuery(adminTokensQuery(reachPerson.id, 'older key'));
+  expect(calls.get.mock.calls.at(-1)?.[1].params).toMatchObject({ path: { id: reachPerson.id }, query: { q: 'older key', limit: 50 } });
+  await c.infiniteQuery(adminSessionsQuery(reachPerson.id, 'research browser'));
+  expect(calls.get.mock.calls.at(-1)?.[1].params).toMatchObject({ path: { id: reachPerson.id }, query: { q: 'research browser', limit: 50 } });
+});

@@ -16,6 +16,7 @@ import { systemQuery } from '@/api/admin';
 import { BannerEditor } from '@/features/admin/BannerEditor';
 import { MessagesSection } from '@/features/admin-messages/Sent';
 import { OverviewCharts } from '@/features/admin/Charts';
+import { ConfigurationFacts } from '@/features/admin/ConfigurationFacts';
 import { Installation } from '@/features/admin/Installation';
 import { SPANS } from '@/features/admin/search';
 import type { SectionProps } from '@/features/admin/sections';
@@ -36,7 +37,9 @@ const PART_GRID = 'grid gap-3 @sm:grid-cols-2 @3xl:grid-cols-4';
 function PartCard({ part }: { part: SystemComponent }) {
   const { t } = useTranslation();
   const Icon = part.ok ? CircleCheck : CircleAlert;
-  const hasDetail = part.detail !== null && part.detail !== '';
+  const listenerFailed = part.issue === 'metrics_listener_unavailable';
+  const detail = [part.detail, listenerFailed ? t('admin.overview.metricsUnavailable') : null].filter((text) => text !== null && text !== '').join(' · ');
+  const hasDetail = detail !== '';
   return (
     <li className={cx(boxClasses, 'flex min-w-0 flex-col gap-1 p-3', !part.ok && 'border-danger bg-danger-subtle')} data-part={part.name} data-ok={part.ok}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -44,7 +47,7 @@ function PartCard({ part }: { part: SystemComponent }) {
         <h3 className="text-base font-medium text-text">{t(`admin.overview.parts.${part.name}`)}</h3>
         <span className="ml-auto text-sm whitespace-nowrap text-text">{part.ok ? t('admin.overview.well') : t('admin.overview.failing')}</span>
       </div>
-      {hasDetail && <p className="text-sm wrap-anywhere text-text-muted">{part.detail}</p>}
+      {hasDetail && <p className={cx('text-sm wrap-anywhere', listenerFailed ? 'text-warning-text' : 'text-text-muted')}>{detail}</p>}
       {part.seen_at !== null ? (
         <p className="text-sm text-text-muted">
           {t('admin.overview.lastHeartbeat')} <RelativeTime at={part.seen_at} />
@@ -69,6 +72,7 @@ function State({ system }: { system: SystemInfo }) {
         <span>
           {t('admin.overview.started')} <RelativeTime at={system.started_at} />
         </span>
+        <ConfigurationFacts observation={system.effective_configuration} />
       </p>
 
       <Section id="admin-parts" title={t('admin.overview.partsTitle')} lead={t('admin.overview.partsLead')}>
