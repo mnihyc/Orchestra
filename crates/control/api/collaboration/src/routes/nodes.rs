@@ -173,14 +173,14 @@ pub fn mount(registry: &mut Registry) {
     archive_plan::mount(registry);
     registry
         .on_with_operation(OrgList, org_reading::list, org_list)
-        .on_with_operation(OrgBySlugGet, org_reading::address, org_by_slug)
+        .on_snapshot_read_with_operation(OrgBySlugGet, org_reading::address, org_by_slug)
         .on_with_operation(NodeGet, node_get_operation, node_get)
-        .on_with_operation(
+        .on_snapshot_read_with_operation(
             orch_api_contract::nodes::OrgOverviewGet,
             overview::prepare,
             overview::get,
         )
-        .on_with_operation(
+        .on_snapshot_read_with_operation(
             orch_api_contract::nodes::NodeOverviewGet,
             overview::node_prepare,
             overview::node_get,
@@ -421,7 +421,21 @@ pub(super) async fn child_list_in(
     };
     let limit = usize::try_from(page.limit()).unwrap_or(usize::MAX);
     let filter = query.archived.unwrap_or_default();
-    let mut after = cursor_of("cursor", query.cursor.as_deref())?;
+    let private = query
+        .cursor
+        .as_deref()
+        .and_then(|cursor| cursor.strip_prefix("private:"));
+    if private.is_some() && query.participating.unwrap_or(false) {
+        return Err(invalid(
+            "cursor",
+            "is not a cursor of the participation list",
+        ));
+    }
+    let mut after = if private.is_some() {
+        None
+    } else {
+        cursor_of("cursor", query.cursor.as_deref())?
+    };
     let child_kind = if let Some(kind) = query.kind {
         let (_, parent_kind) = placed(conn, parent).await?;
         let allowed = match parent_kind {
@@ -441,15 +455,14 @@ pub(super) async fn child_list_in(
     } else {
         None
     };
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
     let batch = i64::try_from(limit + READ_AHEAD).unwrap_or(i64::MAX);
     let mut items: Vec<Node> = Vec::new();
-    loop {
-        let rows = match child_kind {
-            Some(kind) => {
-                hierarchy::presentation::children_of_kind(conn, parent, kind, after, batch).await?
-            }
-            None => hierarchy::children_after(conn, parent, after, batch).await?,
-        };
+    while private.is_none() {
+        let rows = hierarchy::presentation::children_matching(
+            conn, parent, child_kind, after, batch, &words,
+        )
+        .await?;
         let exhausted = i64::try_from(rows.len()).is_ok_and(|count| count < batch);
         let Some(last) = rows.last().map(|row| row.id) else {
             break;
@@ -470,40 +483,57 @@ pub(super) async fn child_list_in(
             break;
         }
     }
-    let more = items.len() > limit;
-    let witness = items.get(limit).map(node_id);
+    let visible_more = items.len() > limit;
+    let mut witness = items.get(limit).map(node_id);
     items.truncate(limit);
-    // The private children the caller administers stand once, on the first page, after what they may
-    // read, sorted by name: an existence list that counts nothing and tells no work.
-    let hidden = if query.cursor.is_none() && !query.participating.unwrap_or(false) {
-        let candidates = match child_kind {
-            Some(kind) => {
-                hierarchy::presentation::children_of_kind(
-                    conn,
-                    parent,
-                    kind,
-                    None,
-                    PRIVATE_CHILDREN_MOST,
-                )
-                .await?
-            }
-            None => hierarchy::children_after(conn, parent, None, PRIVATE_CHILDREN_MOST).await?,
+    let mut hidden = Vec::new();
+    let room = limit - items.len();
+    if !visible_more && !query.participating.unwrap_or(false) {
+        let mut after = match private {
+            Some("start") | None => None,
+            Some(cursor) => cursor_of("cursor", Some(cursor))?,
         };
-        let ids: Vec<Id> = candidates
-            .iter()
-            .filter(|row| archived_ok(filter, row.archived_at.is_some()))
-            .map(|row| row.id)
-            .collect();
-        match scope {
-            Some(scope) => scope.private_rows(conn, &ids).await?,
-            None => tree::private_rows(conn, principal, &ids).await?,
+        loop {
+            let candidates = hierarchy::presentation::children_matching(
+                conn, parent, child_kind, after, batch, &words,
+            )
+            .await?;
+            let exhausted = i64::try_from(candidates.len()).is_ok_and(|count| count < batch);
+            let Some(last) = candidates.last().map(|row| row.id) else {
+                break;
+            };
+            after = Some(last);
+            let ids: Vec<Id> = candidates
+                .iter()
+                .filter(|row| archived_ok(filter, row.archived_at.is_some()))
+                .map(|row| row.id)
+                .collect();
+            let mut rows = match scope {
+                Some(scope) => scope.private_rows(conn, &ids).await?,
+                None => tree::private_rows(conn, principal, &ids).await?,
+            };
+            rows.sort_by_key(|row| row.id);
+            hidden.extend(rows);
+            if hidden.len() > room || exhausted {
+                break;
+            }
         }
+    }
+    let hidden_more = hidden.len() > room;
+    if hidden_more {
+        witness = hidden.get(room).map(|row| row.id);
+    }
+    hidden.truncate(room);
+    let next_cursor = if visible_more {
+        items.last().map(|node| node_id(node).to_string())
+    } else if hidden_more {
+        Some(hidden.last().map_or_else(
+            || "private:start".to_owned(),
+            |row| format!("private:{}", row.id),
+        ))
     } else {
-        Vec::new()
+        None
     };
-    let next_cursor = more
-        .then(|| items.last().map(|node| node_id(node).to_string()))
-        .flatten();
     let answer = Page {
         next_cursor,
         items: items
@@ -517,10 +547,6 @@ pub(super) async fn child_list_in(
         more: witness,
     })
 }
-
-/// The most private children a first page names for an admin: an existence list, bounded so that the
-/// first page costs what the others do.
-const PRIVATE_CHILDREN_MOST: i64 = 200;
 
 /// A node's identifier.
 #[must_use]
@@ -1080,3 +1106,9 @@ pub mod tags;
 
 #[path = "nodes/tree_docs.rs"]
 pub mod tree_docs;
+
+#[path = "nodes/tree_fold.rs"]
+pub mod tree_fold;
+
+#[path = "nodes/tree_order.rs"]
+pub mod tree_order;

@@ -47,8 +47,11 @@ impl Fixture {
             thread,
             world.environment,
             "web",
-            Some(true),
-            None,
+            CreationChoice {
+                prepare: Some(true),
+                worktree: None,
+                workspace_edits: &[],
+            },
         )
         .await?;
         unit.finish().await?;
@@ -125,6 +128,8 @@ impl Fixture {
             token: None,
             creator_origin: Some(origin),
             scheduled_input: None,
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action: Action::Prepare {
                 directory: "web".into(),
                 source: repository,
@@ -199,6 +204,57 @@ impl Fixture {
         );
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn first_activation_keeps_saved_files_pending_for_the_write_after_environment_init()
+-> TestResult {
+    let s = Fixture::new().await?;
+    let mut tx = s.world.pool.begin().await?;
+    let row = threads::thread(&mut tx, s.thread)
+        .await?
+        .ok_or("thread absent")?;
+    let mut value = row.source.ok_or("source absent")?;
+    let prepared = value["info"].clone();
+    let edit = WorkspaceFileEdit {
+        path: "AGENTS.md".into(),
+        text: "The reviewed start file\n".into(),
+        expected_hash: None,
+    };
+    let mut plan = s.plan.clone();
+    plan.workspace_edits = vec![edit.clone()];
+    value["native_plan"] = json!(plan);
+    value["workspace_edits"] = json!([edit]);
+    value["prepared_source"] = prepared;
+    value["info"]["state"] = json!("pending");
+    source::set_source(&mut tx, s.thread, &value, row.seq_state).await?;
+    s.publish(&mut tx).await?;
+    assert_eq!(
+        publish_creator_generation(
+            &mut tx,
+            &s.job,
+            s.world.environment,
+            s.runtime,
+            s.world.machine_id,
+            0
+        )
+        .await?,
+        1
+    );
+    let row = threads::thread(&mut tx, s.thread)
+        .await?
+        .ok_or("thread absent")?;
+    let value = row.source.ok_or("source absent")?;
+    assert_eq!(value["info"]["state"], "pending");
+    assert_eq!(staged_edits(&value)?[0].text, "The reviewed start file\n");
+    assert_eq!(accepted_creator_generation(&value)?, Some(1));
+    assert_eq!(
+        s.world.commands.issued_of("fs.write"),
+        0,
+        "activation does not write ahead of environment init"
+    );
+    tx.rollback().await?;
+    Ok(())
 }
 
 #[tokio::test]

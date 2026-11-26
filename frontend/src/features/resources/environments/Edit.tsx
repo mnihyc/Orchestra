@@ -21,7 +21,6 @@ import { Hint } from '@/features/help/Hint';
 import { PlacePicker, type PickedPlace } from '@/features/settings/PlacePicker';
 import type { Environment } from '@/generated/api-types';
 import { Input } from '@/ui/Input';
-import { InlineAlert } from '@/ui/InlineAlert';
 import { Switch } from '@/ui/Switch';
 import { toast } from '@/ui/Toast';
 
@@ -104,8 +103,6 @@ export function EditEnvironment({ environment, only, onTab, onClose }: EditEnvir
           <Switch label={t('environments.overview.terminal')} help={<Hint id="env-terminal" />} checked={shell} disabled={save.isPending} onCheckedChange={setShell} />
           <PlacePicker label={t('environments.overview.home')} value={home} onChange={setHome} rootOrgId={environment.org_id} disabled={save.isPending} />
           <DataSourcesEditor machine={sourceMachine} driver={environment.template?.driver} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={save.isPending} />
-          {sourcesChanged && <InlineAlert tone="warning">{t('environmentData.update')}</InlineAlert>}
-          {homeChanged && <InlineAlert tone="warning">{t('resourceDetails.environment.moveHelp', { place: home.path })}</InlineAlert>}
         </>
       )}
     </EditDialog>

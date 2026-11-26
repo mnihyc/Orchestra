@@ -72,6 +72,8 @@ use orch_types::Json;
 
 use serde_json::json;
 
+mod attempts;
+
 use std::collections::BTreeMap;
 
 pub use orch_api_base::routes::summaries::View;
@@ -213,6 +215,19 @@ fn read_facts(
     ]
 }
 
+/// A signed-in reader may see the model admitted for the summary. For a key, its
+/// consuming operation must also admit the provider source before returning either name.
+fn project_model_names(
+    principal: &Principal,
+    provider: Option<&KeyResolvedTarget>,
+    view: &mut SummaryProducerView,
+) {
+    if principal.caller().grant().is_some() && provider.is_none() {
+        view.title = "Model summarizer".into();
+        view.offering = None;
+    }
+}
+
 async fn readable_provider_fact(
     conn: &mut Conn,
     principal: &Principal,
@@ -239,26 +254,50 @@ async fn readable_provider_fact(
             std::slice::from_ref(&fact),
         )
         .map_err(source_error)?
-        || !orch_authz::resources::check(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ObjectKind::Provider,
-                id,
-            },
-            Permission::ProviderView,
-            orch_authz::Policy::default(),
-        )
-        .await
-        .map_err(source_error)?
-        .is_allowed()
     {
         return Ok(None);
     }
-    Ok(Some(fact))
+    // A read's views name the same provider for their producers and routes: its View is decided once in the read.
+    let viewable = match orch_engine::summaries::once::provider_view(principal.caller(), id) {
+        Some(viewable) => viewable,
+        None => {
+            let viewable = orch_authz::resources::check(
+                conn,
+                principal,
+                ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id,
+                },
+                Permission::ProviderView,
+                orch_authz::Policy::default(),
+            )
+            .await
+            .map_err(source_error)?
+            .is_allowed();
+            orch_engine::summaries::once::keep_provider_view(principal.caller(), id, viewable);
+            viewable
+        }
+    };
+    Ok(viewable.then_some(fact))
 }
 
+/// A view asks of its place's model for its producer, its route and its proposal: one read judges each choice once.
 async fn read_view(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    target: SummaryTarget,
+    wanted: Option<SummaryChatRange>,
+    plan: &Prepared,
+    slots: [usize; 3],
+) -> ApiResult<View> {
+    orch_engine::summaries::once::deciding(read_view_judged(
+        ctx, conn, caller, target, wanted, plan, slots,
+    ))
+    .await
+}
+
+async fn read_view_judged(
     ctx: &Ctx,
     conn: &mut Conn,
     caller: &Caller,
@@ -295,7 +334,9 @@ async fn read_view(
     let checked =
         cache_read::guard(conn, &principal, target, plan, wanted, cache, slots[1]).await?;
     let cache = checked.cache;
-    let inputs = checked.inputs;
+    let paragraph_inputs = checked.inputs.clone();
+    let mut inputs = checked.inputs;
+    let mut proposal_inputs = Vec::new();
     let inspecting = checked.inspecting;
     let fresh = if let Some(cache) = &cache {
         let cursor = if matches!(target, SummaryTarget::ChatTitle { .. }) {
@@ -341,11 +382,43 @@ async fn read_view(
     };
     let (producer, mut providers) =
         cache_read::producer(conn, &principal, plan, cache.as_ref(), slots[2]).await?;
+    let attempt = attempts::read(
+        conn,
+        &principal,
+        target,
+        plan,
+        wanted,
+        latest.as_ref(),
+        &slots,
+    )
+    .await?;
+    inputs.extend(attempt.inputs);
+    if let Some(fact) = attempt.provider
+        && !providers.contains(&fact)
+    {
+        providers.push(fact);
+    }
+    let program = cache_read::program(
+        conn,
+        &principal,
+        plan,
+        latest.as_ref(),
+        slots,
+        &mut inputs,
+        &mut providers,
+    )
+    .await?;
     let manual = if policy.producer.is_none() {
         Some(
-            resource::manual_default(conn, &principal, identity.place(), ctx.app.clock.time())
-                .await
-                .map_err(ApiError::engine)?,
+            resource::manual_default(
+                conn,
+                &principal,
+                identity.place(),
+                resource::field_for(target),
+                ctx.app.clock.time(),
+            )
+            .await
+            .map_err(ApiError::engine)?,
         )
     } else {
         None
@@ -364,7 +437,7 @@ async fn read_view(
     let preview_producer = policy.producer.as_ref().or(manual_producer.as_ref());
     let default_provider = preview_producer
         .filter(|producer| producer.kind == "model")
-        .and_then(|producer| producer.config.get("provider_id"))
+        .and_then(|producer| producer.config.pointer("/backend/offering/provider"))
         .and_then(Json::as_str)
         .and_then(|id| id.parse::<Id>().ok());
     let default_fact = match default_provider {
@@ -381,16 +454,88 @@ async fn read_view(
     .await
     .ok()
     .flatten();
-    if route.as_ref().is_some_and(|route| {
-        route.provider.is_some() || route.offering.is_some() || !route.prices.is_empty()
-    }) && let Some(fact) = default_fact
-        && !providers.iter().any(|old| old.object == fact.object)
-    {
-        providers.push(fact);
-    }
     let unavailable = route
         .as_ref()
         .is_none_or(|resolution| resolution.route.is_none());
+    let refresh_proposal = if !inspecting && !unavailable {
+        if let Some(producer) = preview_producer.filter(|producer| producer.kind == "model") {
+            let scope = sources::ReadScope::new(plan, slots[0], slots[1]).map_err(source_error)?;
+            match resource::preview_selection(
+                conn,
+                &principal,
+                target,
+                wanted,
+                &scope,
+                policy.clone(),
+                producer,
+            )
+            .await
+            {
+                Ok(selected) => {
+                    let (estimated_input, output) = resource::proposal_budget(conn, &selected)
+                        .await
+                        .map_err(ApiError::engine)?;
+                    let owner = principal.caller().user();
+                    let mut people =
+                        crate::middleware::authorization::refusals::user_refs(conn, &[owner])
+                            .await?;
+                    let offering = selected.config.offering().map_err(ApiError::internal)?;
+                    let model = orch_db::queries::resources::thread_engine::model(
+                        conn,
+                        offering.provider,
+                        &offering.offering,
+                    )
+                    .await?;
+                    let display = model
+                        .map(|model| model.display_name)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| offering.offering.clone());
+                    let revision = orch_types::Hash::of(&serde_json::to_vec(&json!({"source":selected.material.snapshot,"policy":selected.policy.fingerprint,"config":selected.config,"owner":owner})).map_err(ApiError::internal)?);
+                    for fact in &selected.material.inputs {
+                        if !inputs.iter().any(|old| old.object == fact.object) {
+                            inputs.push(fact.clone());
+                        }
+                    }
+                    proposal_inputs.clone_from(&selected.material.inputs);
+                    let mut model = SummaryProducerView {
+                        kind: "model".into(),
+                        title: display,
+                        provider: route.as_ref().and_then(|route| route.provider.clone()),
+                        offering: Some(offering.offering.clone()),
+                    };
+                    project_model_names(&principal, default_fact.as_ref(), &mut model);
+                    Some(orch_api_contract::summary_facts::SummaryRefreshProposal {
+                        revision,
+                        producer: model,
+                        usage_owner: people.remove(&owner),
+                        input_estimate_tokens: Some(estimated_input),
+                        output_allowance_tokens: Some(output),
+                        estimate_basis: orch_api_contract::forks::EstimateBasis::Assumed,
+                        problem: None,
+                    })
+                }
+                Err(orch_engine::EngineError::BeforeEffect(_)) => None,
+                Err(error) => return Err(ApiError::engine(error)),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let route_names_provider = route.as_ref().is_some_and(|route| {
+        route.provider.is_some() || route.offering.is_some() || !route.prices.is_empty()
+    });
+    let key_names_model = principal.caller().grant().is_some()
+        && refresh_proposal
+            .as_ref()
+            .is_some_and(|proposal| proposal.producer.offering.is_some());
+    if (route_names_provider || key_names_model)
+        && let Some(fact) = default_fact
+        && !providers.contains(&fact)
+    {
+        providers.push(fact);
+    }
     let follow = follow::load(
         conn,
         identity.place(),
@@ -400,10 +545,25 @@ async fn read_view(
     )
     .await?;
     let failed = latest.as_ref().is_some_and(|row| row.state == "failed");
+    let changed = latest.as_ref().is_some_and(|row| {
+        matches!(
+            row.problem
+                .as_ref()
+                .and_then(|problem| problem.get("reason"))
+                .and_then(Json::as_str),
+            Some("source_changed" | "content_changing" | "settings_changed")
+        )
+    });
     let state = if follow.scheduled {
         SummaryState::Scheduled
     } else if follow.updating {
         SummaryState::Updating
+    } else if changed {
+        if cache.as_ref().and_then(|row| row.text.as_ref()).is_some() {
+            SummaryState::Stale
+        } else {
+            SummaryState::Empty
+        }
     } else if failed {
         SummaryState::Failed
     } else if policy.producer.is_none() && manual_producer.is_none() {
@@ -434,6 +594,15 @@ async fn read_view(
         state,
         text: cache.as_ref().and_then(|row| row.text.clone()),
         producer,
+        program,
+        refresh_proposal,
+        last_attempt: attempt.attempt,
+        result_facts: cache
+            .as_ref()
+            .and_then(|row| row.result_facts.clone())
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(ApiError::internal)?,
         manual_problem: manual.and_then(|manual| manual.problem),
         wait: follow.wait,
         poll_after_ms: follow.poll_after_ms,
@@ -451,28 +620,287 @@ async fn read_view(
             .and_then(|row| row.completed_at)
             .map(Into::into),
         route,
-        problem: (failed && !follow.updating).then(|| {
-            Problem::new(
-                ErrorCode::ProviderUnavailable,
-                "The summary could not be refreshed. The previous paragraph is kept.",
-            )
+        problem: ((failed || changed) && !follow.updating).then(|| {
+            // What the failed request stored: the thing that stopped it, by a stable word the page
+            // keys its sentence by, and that sentence in English for readers that know no word.
+            let stored = latest.as_ref().and_then(|row| row.problem.as_ref());
+            let reason = stored
+                .and_then(|problem| problem.get("reason"))
+                .and_then(Json::as_str);
+            let message = stored
+                .and_then(|problem| problem.get("message"))
+                .and_then(Json::as_str)
+                .unwrap_or("The summary could not be refreshed.");
+            let detail = if cache.as_ref().is_some_and(|row| row.text.is_some()) {
+                format!("{message} The previous paragraph is kept.")
+            } else {
+                message.to_owned()
+            };
+            let problem = Problem::new(
+                if changed {
+                    ErrorCode::ConflictStaleRevision
+                } else {
+                    ErrorCode::ProviderUnavailable
+                },
+                detail,
+            );
+            match reason {
+                Some(reason) => problem.with("reason", reason),
+                None => problem,
+            }
         }),
     };
     Ok(View {
         identity,
         inputs,
+        paragraph_inputs,
+        proposal_inputs,
         providers,
         snapshot,
         policy: policy.fingerprint,
     })
 }
 
+/// What of two views of one summary differs, by the name of the member. The wait for a request that is due
+/// at a time counts down with the clock: it moves with the time of the read, not with the summary, and is
+/// the same wait while the time it ends at is the same.
+fn moved(old: &View, fresh: &View) -> Vec<&'static str> {
+    let (old_snapshot, fresh_snapshot) = (&old.snapshot, &fresh.snapshot);
+    let counting_down = old_snapshot
+        .wait
+        .as_ref()
+        .zip(fresh_snapshot.wait.as_ref())
+        .is_some_and(|(old, fresh)| old.until.is_some() && old.until == fresh.until);
+    [
+        ("identity", old.identity.fact() != fresh.identity.fact()),
+        ("target", old_snapshot.target != fresh_snapshot.target),
+        ("inputs", old.inputs != fresh.inputs),
+        ("providers", old.providers != fresh.providers),
+        ("policy", old.policy != fresh.policy),
+        ("state", old_snapshot.state != fresh_snapshot.state),
+        ("revision", old_snapshot.revision != fresh_snapshot.revision),
+        ("text", old_snapshot.text != fresh_snapshot.text),
+        ("wait", old_snapshot.wait != fresh_snapshot.wait),
+        (
+            "poll_after_ms",
+            !counting_down && old_snapshot.poll_after_ms != fresh_snapshot.poll_after_ms,
+        ),
+        (
+            "updated_at",
+            old_snapshot.updated_at != fresh_snapshot.updated_at,
+        ),
+        ("route", old_snapshot.route != fresh_snapshot.route),
+        ("producer", old_snapshot.producer != fresh_snapshot.producer),
+        ("problem", old_snapshot.problem != fresh_snapshot.problem),
+        ("input", old_snapshot.input != fresh_snapshot.input),
+        (
+            "last_attempt",
+            old_snapshot.last_attempt != fresh_snapshot.last_attempt,
+        ),
+        (
+            "refresh_proposal",
+            old_snapshot.refresh_proposal != fresh_snapshot.refresh_proposal,
+        ),
+        (
+            "result_facts",
+            old_snapshot.result_facts != fresh_snapshot.result_facts,
+        ),
+        (
+            "manual_problem",
+            old_snapshot.manual_problem != fresh_snapshot.manual_problem,
+        ),
+        (
+            "inspecting",
+            old_snapshot.inspecting != fresh_snapshot.inspecting,
+        ),
+        (
+            "root",
+            old_snapshot.root_org_id != fresh_snapshot.root_org_id,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(member, differs)| differs.then_some(member))
+    .collect()
+}
+
+/// Whether a read shows what the one before it showed. A difference is a summary that moved while it was
+/// read (a request taken up or finished, a paragraph written, a source that has grown); the read is then
+/// made again. It says nothing about who may read what: that is `same_sources`.
 fn same_view(old: &View, fresh: &View) -> bool {
-    old.identity.fact() == fresh.identity.fact()
-        && old.inputs == fresh.inputs
-        && old.providers == fresh.providers
-        && old.policy == fresh.policy
-        && old.snapshot == fresh.snapshot
+    let differing = moved(old, fresh);
+    if differing.is_empty() {
+        return true;
+    }
+    tracing::debug!(
+        target_kind = ?old.snapshot.target,
+        moved = ?differing,
+        "a summary read moved between its read and its check"
+    );
+    false
+}
+
+/// Whether everything that the earlier read was made from may still be read by the reader, whatever else
+/// about the summary has moved: the same target in the same root, read in the same way, and every source
+/// and provider that the paragraph was made from still among those the reader may read. A paragraph made
+/// from a source the reader can no longer read is never given.
+fn same_sources(old: &View, fresh: &View) -> bool {
+    let held = old.identity.fact() == fresh.identity.fact()
+        && old.snapshot.root_org_id == fresh.snapshot.root_org_id
+        && (old.snapshot.inspecting || !fresh.snapshot.inspecting)
+        && old.inputs.iter().all(|input| fresh.inputs.contains(input))
+        && old
+            .providers
+            .iter()
+            .all(|provider| fresh.providers.contains(provider));
+    if !held {
+        tracing::info!(
+            target_kind = ?old.snapshot.target,
+            "a summary read is refused: what it was made from can no longer be read by the person who asked"
+        );
+    }
+    held
+}
+
+/// The summary source an input's fact names, as the sources identify it.
+fn source_of(input: &KeyResolvedTarget) -> Option<SummaryTarget> {
+    let id = input.object.id?;
+    match input.object.kind {
+        KeyTargetKind::Object(ObjectKind::Thread) => Some(SummaryTarget::Thread { id }),
+        KeyTargetKind::Object(ObjectKind::Topic) => Some(SummaryTarget::Topic { id }),
+        KeyTargetKind::Object(ObjectKind::Document) => Some(SummaryTarget::Document { id }),
+        KeyTargetKind::Identity(KeyIdentityKind::Chat) => Some(SummaryTarget::Chat { id }),
+        _ => None,
+    }
+}
+
+/// [`same_sources`] asked of what the view names, without making the view again: its target is where it was (the
+/// same identity and root), bound by the operation and disclosed to the reader, and readable when the view was a
+/// reading; every input is where it was, bound and viewable, its stored paragraph's inputs readable when the view
+/// was a reading and its proposal's inputs readable as a model's input is; every provider it names is still one the
+/// reader may view. Its default model, route, proposal and freshness are not read again: what moved about the summary
+/// while it was read changes nothing about who may read what it was made from.
+pub(crate) async fn sources_held(
+    conn: &mut Conn,
+    caller: &Caller,
+    principal: &Principal,
+    plan: &Prepared,
+    view: &View,
+    slots: [usize; 3],
+) -> ApiResult<bool> {
+    let target = view.identity.target();
+    let Ok(identity) = sources::identify(conn, target).await else {
+        return Ok(false);
+    };
+    if identity.fact() != view.identity.fact()
+        || !plan
+            .permits_binding(
+                caller,
+                slots[0],
+                identity.fact().object.kind,
+                std::slice::from_ref(identity.fact()),
+            )
+            .map_err(source_error)?
+    {
+        return Ok(false);
+    }
+    if !sources::viewable(conn, principal, target)
+        .await
+        .map_err(source_error)?
+    {
+        return Ok(false);
+    }
+    let root = orch_db::queries::hierarchy::node(conn, identity.place())
+        .await?
+        .map(|node| node.org_id);
+    if root != Some(view.snapshot.root_org_id) {
+        return Ok(false);
+    }
+    let reading = !view.snapshot.inspecting;
+    if reading
+        && !sources::readable(conn, principal, target)
+            .await
+            .map_err(source_error)?
+    {
+        return Ok(false);
+    }
+    for input in &view.inputs {
+        let Some(source) = source_of(input) else {
+            return Ok(false);
+        };
+        let Ok(current) = sources::identify(conn, source).await else {
+            return Ok(false);
+        };
+        if current.fact() != input
+            || !plan
+                .permits_binding(
+                    principal.caller(),
+                    slots[1],
+                    input.object.kind,
+                    std::slice::from_ref(input),
+                )
+                .map_err(source_error)?
+            || !sources::viewable(conn, principal, source)
+                .await
+                .map_err(source_error)?
+        {
+            return Ok(false);
+        }
+        let read = (reading && view.paragraph_inputs.contains(input))
+            || view.proposal_inputs.contains(input);
+        if read
+            && !sources::readable(conn, principal, source)
+                .await
+                .map_err(source_error)?
+        {
+            return Ok(false);
+        }
+    }
+    for provider in &view.providers {
+        let Some(id) = provider.object.id else {
+            return Ok(false);
+        };
+        if readable_provider_fact(conn, principal, plan, id, slots[2])
+            .await?
+            .as_ref()
+            != Some(provider)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The same question answered by making the view again and asking [`same_sources`] of the two, as the openings
+/// did before they checked sources directly. The comparison case calls this beside [`sources_held`].
+pub(crate) async fn sources_held_by_rebuilding(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    plan: &Prepared,
+    view: &View,
+    wanted: Option<SummaryChatRange>,
+    slots: [usize; 3],
+) -> ApiResult<bool> {
+    let target = view.identity.target();
+    let Ok(identity) = sources::identify(conn, target).await else {
+        return Ok(false);
+    };
+    if !plan
+        .permits_binding(
+            caller,
+            slots[0],
+            identity.fact().object.kind,
+            std::slice::from_ref(identity.fact()),
+        )
+        .map_err(source_error)?
+    {
+        return Ok(false);
+    }
+    match read_view(ctx, conn, caller, target, wanted, plan, slots).await {
+        Ok(fresh) => Ok(same_sources(view, &fresh)),
+        Err(error) if matches!(error.problem.status, 403 | 404 | 410) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 struct Reader;
@@ -484,6 +912,7 @@ impl native::Selected for Reader {
     type Reply = SummarySnapshot;
     const DECLARATION: &'static Declaration<Role> = &declarations::RESOURCE_READ;
     const WATCH_ORDINARY: bool = true;
+    const MOVES: native::Moves = native::Moves::Publish;
     fn select<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
@@ -524,6 +953,16 @@ impl native::Selected for Reader {
         fresh: &'a View,
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move { Ok(same_view(old, fresh)) })
+    }
+    fn access_held<'a>(
+        _: &'a Ctx,
+        _: &'a mut Conn,
+        _: &'a Principal,
+        _: &'a SummaryReadQuery,
+        old: &'a View,
+        fresh: &'a View,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move { Ok(same_sources(old, fresh)) })
     }
     fn after_read<'a>(
         ctx: &'a Ctx,
@@ -639,9 +1078,22 @@ impl effects::Effect for Refresher {
                         "Use an ordered range inside this chat",
                     ));
                 }
+                if range.after == range.through {
+                    // Unread material is already known to be empty. It needs no model proposal,
+                    // provider permission, request row or paid completion.
+                    return Err(ApiError::new(
+                        ErrorCode::SummaryNothingNew,
+                        "There is nothing new to summarize",
+                    ));
+                }
             }
             if let Some(model) = &body.model
-                && (model.model.trim().is_empty()
+                && (model.backend.route.trim().is_empty()
+                    || model
+                        .backend
+                        .offering
+                        .as_ref()
+                        .is_none_or(|offering| offering.offering.trim().is_empty())
                     || model
                         .params
                         .as_ref()
@@ -663,14 +1115,14 @@ impl effects::Effect for Refresher {
                     conn,
                     &principal,
                     identity.place(),
+                    resource::field_for(target),
                     ctx.app.clock.time(),
                 )
                 .await
                 .map_err(ApiError::engine)?;
                 let config=picked.config.ok_or_else(||ApiError::new(ErrorCode::ProviderUnavailable,if picked.problem==Some(orch_api_contract::summaries::SummaryManualProblem::CapReached) {"A usage cap has no room for summaries"} else {"No permitted API model is available; check provider access and model allowlists"}))?;
                 Some(orch_api_contract::summaries::SummaryModelChoice {
-                    provider_id: config.provider_id,
-                    model: config.model_name,
+                    backend: config.backend,
                     params: Some(config.params),
                 })
             } else {
@@ -695,6 +1147,14 @@ impl effects::Effect for Refresher {
             )
             .await
             .map_err(ApiError::engine)?;
+            // A source with nothing in it is answered here, with its own code: no request is made, no
+            // model is asked and nothing is booked, where it would only end as a request that failed.
+            if selected.material.activity.is_empty() {
+                return Err(ApiError::new(
+                    ErrorCode::SummaryNothingNew,
+                    "There is nothing new to summarize",
+                ));
+            }
             let facts = selected.facts();
             Ok((Refresh { selected, body }, facts))
         })
@@ -715,6 +1175,11 @@ impl effects::Effect for Refresher {
             )
             .await
             .map_err(ApiError::engine)?;
+            let offering = value
+                .selected
+                .config
+                .offering()
+                .map_err(ApiError::internal)?;
             if !ctx
                 .app
                 .engine
@@ -722,8 +1187,8 @@ impl effects::Effect for Refresher {
                     conn,
                     &orch_engine::caps::OwnCapAsk {
                         place: value.selected.material.identity.place(),
-                        provider: value.selected.config.provider_id,
-                        model: &value.selected.config.model_name,
+                        provider: offering.provider,
+                        model: &offering.offering,
                         tier: None,
                         purpose: "summary",
                         person: Some(principal.caller().user()),
@@ -758,8 +1223,12 @@ impl effects::ApplyOwned for Refresher {
             let http = native::http_origin::capture_operation(ctx, &mut tx, &origin).await?;
             let accepted = serde_json::to_value(http.origin()).map_err(ApiError::internal)?;
             let arguments = serde_json::to_value(&value.body).map_err(ApiError::internal)?;
-            let source = json!({"target":target,"range":value.selected.material.range,"snapshot":value.selected.material.snapshot,"policy":value.selected.policy.fingerprint,"http":http,
-                "model":{"provider_id":value.selected.config.provider_id,"model":value.selected.config.model_name,"params":value.selected.config.params}});
+            let selection = value
+                .selected
+                .backend_selection()
+                .map_err(ApiError::engine)?;
+            let source = json!({"target":target,"range":value.selected.pinned_range(),"snapshot":value.selected.material.snapshot,"policy":value.selected.policy.fingerprint,"http":http,
+                "selection":selection});
             before.check()?;
             let cache = rows::ensure(
                 &mut tx,

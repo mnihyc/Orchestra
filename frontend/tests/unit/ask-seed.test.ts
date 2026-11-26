@@ -7,7 +7,7 @@ import { useComposerStore } from '@/features/composer/Draft';
 import { helpAskReference, helpAskText } from '@/features/help/ask';
 
 const opened = vi.hoisted(() => vi.fn());
-vi.mock('@/features/workbench/openView', () => ({ revealView: opened }));
+vi.mock('@/features/workbench/openView', async (loadOriginal) => ({ ...await loadOriginal<object>(), revealView: opened }));
 const before = client.session.getState();
 beforeEach(() => { clearAskDraftSeed(); opened.mockClear(); client.session.setState({ status: 'signed_in', userId: 'seed-reader', readerVersion: 10 }); });
 afterEach(() => { clearAskDraftSeed(); client.session.setState(before, true); });

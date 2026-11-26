@@ -322,9 +322,14 @@ export class Places {
     return username === undefined ? undefined : this.world.people.get(username);
   }
 
-  /** A frame of the live connection: none is the places' own, but one that follows the tree of an org says who reads it there. */
+  /**
+   * A frame of the live connection: none is the places' own, but one that follows a tree says who reads it there, by an
+   * org's feed or by the hierarchy feed the left bar follows its places through, so that a change is sent to its reader
+   * as they may see it.
+   */
   frame(subscriber: Subscriber, person: Person | undefined, frame: Record<string, unknown>): boolean {
-    if (frame.op === 'sub' && typeof frame.feed === 'string' && frame.feed.startsWith('org:') && person !== undefined) this.readers.set(subscriber, person.me.username);
+    const follows = typeof frame.feed === 'string' && (frame.feed.startsWith('org:') || this.world.isHierarchy(frame.feed));
+    if (frame.op === 'sub' && follows && person !== undefined) this.readers.set(subscriber, person.me.username);
     return false;
   }
 
@@ -643,7 +648,8 @@ export class Places {
    */
   private searchPeople(person: Person, query: URLSearchParams): UserRef[] {
     const q = (query.get('q') ?? '').trim().toLowerCase();
-    if (Array.from(q).length < 2) throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'q', message: 'must be at least 2 characters' }] });
+    if (query.get('picker')!=='true' && Array.from(q).length < 2) throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'q', message: 'must be at least 2 characters' }] });
+    const picked=query.get('picker')==='true'&&q===''?this.world.settings.pickerRecentsOf(person).choices.user??[]:[];
     const orgId = query.get('org_id');
     const inOrg = orgId === null ? null : new Set(this.roles.get(this.rootOf(orgId) ?? orgId)?.keys() ?? []);
     const shared = new Set<string>();
@@ -653,10 +659,14 @@ export class Places {
         if (other.suspended) return false;
         const exact = other.me.username.toLowerCase() === q || (other.me.email ?? '').toLowerCase() === q;
         const near = other.me.username.toLowerCase().startsWith(q) || other.me.display_name.toLowerCase().includes(q);
-        if (inOrg !== null) return near && inOrg.has(other.me.username);
-        return exact || (near && shared.has(other.me.username));
+        if (inOrg !== null && query.get('include_external') !== 'true') return (near || exact) && inOrg.has(other.me.username);
+        if (inOrg?.has(other.me.username) === true && (near || exact)) return true;
+        return exact || (near && shared.has(other.me.username)) || picked.includes(other.me.id);
       })
-      .slice(0, 20)
+      .sort((one,other)=>{
+        const rank=(id:string)=>{const at=picked.indexOf(id);return at<0?Infinity:at;};
+        return rank(one.me.id)-rank(other.me.id)||Number(other.me.username.toLowerCase()===q)-Number(one.me.username.toLowerCase()===q)||one.me.username.localeCompare(other.me.username)||one.me.id.localeCompare(other.me.id);
+      })
       .map((other) => userRef(other.me));
   }
 
@@ -665,7 +675,12 @@ export class Places {
     const text = (member: string): string | null => (typeof body[member] === 'string' ? body[member] : null);
     let found: RegExpExecArray | null;
 
-    if (route === 'GET /users/search') return { status: 200, body: this.searchPeople(person, query) };
+    if (route === 'GET /users/search') {
+      const rows=this.searchPeople(person,query),from=Number(query.get('cursor')??0),limit=Number(query.get('limit')??20);
+      const items=rows.slice(from,from+limit),orgId=query.get('org_id');
+      const membership=orgId===null||query.get('include_external')!=='true'?{}:{org_member_ids:items.filter((user)=>this.roles.get(this.rootOf(orgId)??orgId)?.has(user.username)===true).map((user)=>user.id)};
+      return {status:200,body:{items,next_cursor:from+limit<rows.length?String(from+limit):null,...membership}};
+    }
     // Native UserGet is an authenticated exact-ID public reference, independent of name search scope.
     if ((found = /^GET \/users\/([^/]+)$/.exec(route))) {
       const selected = [...this.world.people.values()].find((candidate) => candidate.me.id === found?.[1]);
@@ -747,7 +762,16 @@ export class Places {
     if ((found = /^GET \/nodes\/([^/]+)\/deleted$/.exec(route))) return { status: 200, body: this.deletedUnder(person, found[1] ?? '', query) };
     if ((found = /^GET \/nodes\/([^/]+)\/children$/.exec(route))) return { status: 200, body: this.childList(person, found[1] ?? '', query) };
     if ((found = /^GET \/nodes\/([^/]+)\/activity$/.exec(route))) return { status: 200, body: this.activity(person, found[1] ?? '', query) };
-    if ((found = /^GET \/nodes\/([^/]+)\/tags$/.exec(route))) return { status: 200, body: this.tagsFor(person, found[1] ?? '') };
+    if ((found = /^GET \/nodes\/([^/]+)\/tags$/.exec(route))) {
+      const id = found[1] ?? '', text = (query.get('q') ?? '').trim().toLowerCase(), words = text.split(/\s+/u).filter(Boolean);
+      const recent = query.get('picker') === 'true' && text === '' ? this.world.settings.pickerRecentsOf(person).choices.tag ?? [] : [];
+      const path = this.pathTo(id).map((row) => row.id), rank = (tag: Tag) => { const index = recent.indexOf(tag.id); return index < 0 ? Infinity : index; };
+      const rows = this.tagsFor(person, id).filter((tag) => words.every((word) => tag.name.toLowerCase().includes(word))).sort((one, other) =>
+        Number(text !== '' && one.name.toLowerCase() !== text) - Number(text !== '' && other.name.toLowerCase() !== text)
+        || rank(one) - rank(other) || path.indexOf(one.node.id) - path.indexOf(other.node.id) || one.id.localeCompare(other.id));
+      const from = Number(query.get('cursor') ?? 0), limit = Number(query.get('limit') ?? 50);
+      return { status: 200, body: { items: rows.slice(from, from + limit), next_cursor: from + limit < rows.length ? String(from + limit) : null } };
+    }
     if ((found = /^POST \/nodes\/([^/]+)\/tags$/.exec(route))) return { status: 200, body: this.makeTag(person, found[1] ?? '', body) };
     if ((found = /^PUT \/nodes\/([^/]+)\/tags$/.exec(route))) return { status: 200, body: this.setTags(person, found[1] ?? '', body) };
     if ((found = /^(PATCH|DELETE) \/tags\/([^/]+)$/.exec(route))) return this.changeTag(person, found[2] ?? '', found[1] === 'DELETE', body);
@@ -1548,8 +1572,8 @@ export class Places {
     if (this.rootIsPersonal(root)) throw new Refusal(409, 'org.closed', 'a personal org takes no members');
     const email = typeof body.email === 'string' && body.email !== '' ? body.email : null;
     if (email !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) this.invalid('email', 'is not an address');
-    const hours = typeof body.expires_in_hours === 'number' ? body.expires_in_hours : 168;
-    if (hours > 720) this.invalid('expires_in_hours', 'at most 720 hours are allowed here');
+    const minutes = typeof body.expires_in_minutes === 'number' ? body.expires_in_minutes : 10080;
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 43200) this.invalid('expires_in_minutes', 'from 1 to 43200 minutes are allowed here');
     const token = `inv_${randomUUID()}`;
     const role = (ROLES as readonly string[]).includes(String(body.role)) ? (body.role as Role) : 'viewer';
     const row = this.must(orgId);
@@ -1566,7 +1590,7 @@ export class Places {
       max_uses: email === null ? Number(body.max_uses ?? 1) : 1,
       uses: 0,
       note: typeof body.note === 'string' ? body.note : '',
-      expires_at: new Date(Date.now() + hours * 3_600_000).toISOString(),
+      expires_at: new Date(Math.floor(Date.now() / 60_000 + minutes) * 60_000).toISOString(),
       revoked: false,
       created_by: userRef(person.me),
       created_at: new Date().toISOString(),

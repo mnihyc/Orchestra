@@ -253,11 +253,16 @@ async fn check_held(
         view.source.clone_from(&source);
     }
     let answer = fetch(config).await.and_then(|(version, notes)| {
-        let offered = semver::Version::parse(&version).map_err(|_| "the offered version is invalid")?;
-        let current = semver::Version::parse(installed).map_err(|_| "the installed version is invalid")?;
-        let previous = view.offered_version.as_deref().and_then(|value| semver::Version::parse(value).ok());
+        let offered =
+            semver::Version::parse(&version).map_err(|_| "the offered version is invalid")?;
+        let current =
+            semver::Version::parse(installed).map_err(|_| "the installed version is invalid")?;
+        let previous = view
+            .offered_version
+            .as_deref()
+            .and_then(|value| semver::Version::parse(value).ok());
         if offered < current || previous.is_some_and(|previous| offered < previous) {
-            return Err("the release source names an older version; the previous successful facts are retained");
+            return Err("release.source_older");
         }
         Ok((version, offered > current, notes))
     });
