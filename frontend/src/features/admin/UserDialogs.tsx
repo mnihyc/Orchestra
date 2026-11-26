@@ -131,8 +131,8 @@ export function CreateUserDialog({ open, onClose }: { open: boolean; onClose: ()
       }
     >
       <form id="admin-create-user" className="flex flex-col gap-4 py-2" onSubmit={form.submit((values) => { if (policy.isSuccess && !create.isPending) create.mutate(values); })} noValidate>
-        <Input label={t('admin.users.create.username')} hint={t('admin.users.create.usernameHint')} autoComplete="off" autoCapitalize="none" {...form.field('username')} />
         <Input label={t('admin.users.create.name')} autoComplete="off" {...form.field('display_name')} />
+        <Input label={t('admin.users.create.username')} hint={t('admin.users.create.usernameHint')} autoComplete="off" autoCapitalize="none" {...form.field('username')} />
         <Input label={t('admin.users.create.email')} optional type="email" autoComplete="off" hint={t('admin.users.create.emailHint')} {...form.field('email')} />
         {personalEnabled && <fieldset className="flex flex-col gap-2 rounded-lg border border-border p-3">
           <legend className="px-1 text-sm font-medium text-text">{t('admin.users.create.ownOrg')}</legend>

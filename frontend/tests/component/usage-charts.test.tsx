@@ -21,7 +21,7 @@ import { show } from './support';
 
 const NOW=Date.parse('2026-10-28T12:00:00Z');
 const planRead=vi.hoisted(()=>vi.fn<()=>Promise<{items:ProviderPlanSeries[];next_cursor:string | null}>>());
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/api/planUsage',()=>({PLAN_PAGE_SIZE:20,creditUsageQuery:()=>({queryKey:['chart-credit'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})}),planUsageQuery:(id:string,from:string,to:string,bucket:string,at:string | null,cursor?:string)=>({queryKey:['chart-plan',id,from,to,bucket,at,cursor],staleTime:Infinity,queryFn:planRead})}));
 vi.mock('@tanstack/react-router',async(load)=>({...await load<typeof RouterModule>(),Link:({to,params,search,hash,children,...anchor}:AnchorHTMLAttributes<HTMLAnchorElement> & {to:string;params?:Record<string,string>;search?:Record<string,string>;hash?:string;children?:ReactNode})=><a {...anchor} href={`${to.replace(/\$(\w+)/g,(_,key:string)=>params?.[key] ?? '')}?${new URLSearchParams(search)}${hash===undefined ? '' : `#${hash}`}`}>{children}</a>}));
 beforeEach(()=>{vi.spyOn(Date,'now').mockReturnValue(NOW);planRead.mockReset();});
@@ -205,5 +205,5 @@ it('reopens an expired page with a fresh first read even before its source clock
   if(review!==null)await userEvent.click(review);
   await userEvent.click(await screen.findByRole('button',{name:'Try again'}));
   await waitFor(()=>expect(planRead).toHaveBeenCalledTimes(3));
-  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  await waitFor(()=>expect(screen.queryByRole('alert')).not.toBeInTheDocument());
 });
