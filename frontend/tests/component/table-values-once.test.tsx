@@ -1,7 +1,8 @@
 /** Table rows show display names once, keep technical identifiers in their editor and retain an existing environment scope. */
-import { cleanup, screen, within } from '@testing-library/react';
+import { act, cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
+import { QueryClient } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import type * as AdminApi from '@/api/admin';
@@ -13,9 +14,13 @@ import { i18n, setLocale } from '@/i18n';
 
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
 vi.mock('@/api/admin', async (load) => ({ ...await load<typeof AdminApi>(),
-  capabilitiesQuery: { queryKey: ['table-value-capabilities'], queryFn: (): Promise<CapabilityDef[]> => Promise.resolve([capability]) },
+  capabilitiesQuery: { queryKey: ['table-value-capabilities'], queryFn: (): Promise<CapabilityDef[]> => Promise.resolve(capabilityRows) },
+  capabilitiesPageQuery:(q:string)=>({queryKey:['table-value-capabilities','pages',q],initialPageParam:null as string|null,
+   queryFn:({pageParam}:{pageParam:string|null})=>{const matches=capabilityRows.filter((row)=>row.label.toLowerCase().includes(q.toLowerCase()));const from=Number(pageParam??0);return Promise.resolve({items:matches.slice(from,from+50),next_cursor:from+50<matches.length?String(from+50):null});},
+   getNextPageParam:(page:{next_cursor:string|null})=>page.next_cursor,
+  }),
 }));
 vi.mock('@/api/usage', async (load) => ({ ...await load<typeof UsageApi>(),
   ratesQuery: () => ({ queryKey: ['table-value-rates'], queryFn: (): Promise<RateTable> => Promise.resolve(rates) }),
@@ -25,6 +30,7 @@ vi.mock('@/api/usage', async (load) => ({ ...await load<typeof UsageApi>(),
 
 const capability: CapabilityDef = { key: 'storage_extra', label: 'Extra storage', description: 'Access the extra storage volume.',
   risk: 'medium', default_decision: 'ask', default_approver_scope: 'environment', driver_patch: {}, builtin: false, revision: 1 };
+let capabilityRows=[capability];
 const provider = { id: 'provider', name: 'Team supply', kind: 'api' as const, harness_kind: null, harness: null,
   address: 'internal.route', placement: 'managed' as const, status: 'ready' as const };
 const rates: RateTable = { catalogue: { on: false, scale: '1', as_of: '' }, models: [
@@ -35,7 +41,7 @@ const rates: RateTable = { catalogue: { on: false, scale: '1', as_of: '' }, mode
 const catalogue: RateCatalogue = { format: 1, as_of: '', unit: 'USD', origin: 'shipped', source: null,
   loaded_at: '2026-10-15T00:00:00Z', loaded_by: null, shipped_as_of: '', families: [] };
 
-afterEach(async () => { cleanup(); await setLocale('en'); });
+afterEach(async () => { cleanup();vi.restoreAllMocks();capabilityRows=[capability]; await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`keeps a capability's key out of its row, its editor usable, and help in one place (${locale}, ${theme})`, async () => {
@@ -66,3 +72,28 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     for (const name of ['vendor/internal-route', 'vendor/another-route', provider.address]) expect(within(table).queryByText(name)).not.toBeInTheDocument();
   });
 }
+
+it.each(['en', 'zh-CN'] as const)('asks for the capability name before its technical key in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  show(<Capabilities />);
+  await user.click(screen.getByRole('button', { name: i18n.t('admin.capabilities.addTitle') }));
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('admin.capabilities.addTitle') });
+  expect(within(dialog).getAllByRole('textbox')[0]).toHaveAccessibleName(i18n.t('admin.capabilities.label'));
+});
+
+
+it('finds a later capability through its own native search and keeps an open edit above changed pages',async()=>{
+ vi.spyOn(HTMLElement.prototype,'offsetHeight','get').mockImplementation(function(this:HTMLElement){return this.tagName==='TR'?72:384;});
+ vi.spyOn(HTMLElement.prototype,'offsetWidth','get').mockReturnValue(600);
+
+ capabilityRows=Array.from({length:1_001},(_,index)=>({...capability,key:`cap_${index}`,label:`Capability ${String(index).padStart(4,'0')}`}));
+ const cache=new QueryClient({defaultOptions:{queries:{retry:false}}});show(<Capabilities/>,cache);const user=userEvent.setup();
+ await screen.findByText('Capability 0000',{exact:true});expect(screen.queryByText('Capability 1000',{exact:true})).toBeNull();
+ const search=screen.getByRole('searchbox',{name:i18n.t('ui.collection.find',{name:i18n.t('admin.sections.capabilities.title')})});
+ await user.type(search,'Capability 1000');await screen.findByText('Capability 1000',{exact:true});
+ await user.click(screen.getByRole('button',{name:i18n.t('admin.capabilities.menuOf',{name:'Capability 1000'})}));await user.click(screen.getByRole('menuitem',{name:i18n.t('admin.capabilities.edit')}));
+ const dialog=screen.getByRole('dialog');const label=within(dialog).getByLabelText(i18n.t('admin.capabilities.label'));await user.clear(label);await user.type(label,'Unfinished edit');
+ act(()=>{cache.setQueryData(['table-value-capabilities','pages','Capability 1000'],{pages:[{items:[],next_cursor:null}],pageParams:[null]});});
+ expect(dialog).toBeVisible();expect(label).toHaveValue('Unfinished edit');
+});

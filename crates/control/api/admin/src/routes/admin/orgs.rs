@@ -405,6 +405,7 @@ async fn deleted_views(
                 tags: Vec::new(),
                 tags_source: field_source(detail.tags_source.as_deref().unwrap_or("auto")),
                 auto_updated_at: detail.auto_updated_at.map(Time::new),
+                automatic_fields: None,
                 page: PageState::Follows,
                 chat_id: detail.chat_id.unwrap_or_else(Id::nil),
                 archived: detail.archived_at.is_some(),

@@ -1,0 +1,1 @@
+web-e2e --grep 'a topic is moved into a folder with its plan read first|a folder is moved into another folder|an archive says what it does before it does it|a member is moved to another domain, after the dialog|a selected move shows its destination|a row has its menu by right click'
