@@ -27,6 +27,7 @@ fn bytes() -> Proof<Vec<u8>> {
 
 fn stat(path: &str, bytes: &[u8], at: Time) -> Proof<orch_api_contract::workspace::FileStat> {
     Ok(orch_api_contract::workspace::FileStat {
+        facts: None,
         entry: orch_api_contract::workspace::DirEntry {
             name: path.rsplit('/').next().ok_or("no file name")?.into(),
             path: path.into(),
@@ -56,6 +57,10 @@ async fn configured_with_input_keys(
     } else {
         Scene::new().await?
     };
+    configured_scene(shape, scene).await
+}
+
+async fn configured_scene(shape: Shape, scene: Scene) -> Proof<(Scene, Id, Arc<AtomicBool>)> {
     let provider = new_id();
     let mut sources = orch_provider_contract::builtins::BuiltinSources::default();
     let mut binding = None;
@@ -692,6 +697,7 @@ async fn keep_input_image(scene: &Scene) -> Proof {
             }
             Ok(CommandResult::FsFetch(
                 orch_link_contract::commands::FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
                     hash: blob,
                     size: actual.len() as i64,
                     mtime_ns: at.get().timestamp_nanos_opt().ok_or_else(|| {

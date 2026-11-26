@@ -90,6 +90,18 @@ it.each(['en', 'zh-CN'] as const)('keeps native failure reasons but never prints
   expect(errorText(new Error('private exception and stack'), t, { locale }).message).toBe(t('errors.page'));
 });
 
+it.each(['en', 'zh-CN'] as const)('names the live capacity cause in this view’s existing failure line (%s)', async (locale) => {
+  await setLocale(locale); useAppearance.setState({ locale });
+  const retry = vi.fn(), error = Object.assign(new Error('org:opaque-id: too_many_subscriptions: private native detail'), { code: 'too_many_subscriptions' });
+  const view = show(<ErrorState error={error} onRetry={retry} />);
+  const alert = screen.getByRole('alert');
+  expect(alert).toHaveTextContent(locale === 'en' ? 'Live update capacity reached' : '实时更新名额已满');
+  expect(alert).not.toHaveTextContent(/opaque-id|too_many_subscriptions|private native detail/);
+  expect(view.container.querySelectorAll('[data-state-line]')).toHaveLength(1);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+  expect(retry).toHaveBeenCalledOnce();
+});
+
 it.each(['en', 'zh-CN'] as const)('keeps the server field explanation available without showing its protocol path (%s)', async (locale) => {
   await setLocale(locale); const t = i18n.getFixedT(locale);
   const error = new ApiError({ type: 'orch:error:request.invalid', status: 400, code: 'request.invalid', title: 'Invalid', detail: 'Invalid request', request_id: 'private-request',

@@ -13,9 +13,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::DestinationDelete;
-use orch_api_core::middleware::authentication::{
-    ACCESS_TOKEN_PREFIX, API_TOKEN_PREFIX, new_token, token_hash,
-};
+use orch_api_core::middleware::authentication::{ACCESS_TOKEN_PREFIX, new_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::notifications::channels::{self as rows, NewDestination};
 use orch_db::queries::{access, identity};
@@ -53,11 +51,11 @@ struct Credential {
 async fn credential(world: &World, user: Id, org: Id, case: Case) -> Credential {
     let id = new_id();
     let session = matches!(case, Case::BrowserSession);
-    let secret = new_token(if session {
-        ACCESS_TOKEN_PREFIX
+    let secret = if session {
+        new_token(ACCESS_TOKEN_PREFIX)
     } else {
-        API_TOKEN_PREFIX
-    });
+        orch_api_core::middleware::authentication::new_api_token(id)
+    };
     let until = world.now()
         + if case.ordinary() {
             Duration::hours(1)
@@ -343,14 +341,14 @@ async fn run(case: Case) {
             .await
             .unwrap();
         identity_lock.rollback().await.unwrap();
-        // This native holder-frame query compares current role AND page expiry in its
-        // valid-until stamp, even when the holder identities themselves are cached.
+        // Both the first lookup and the validation of a saved snapshot must reach
+        // this backend's role or permission lock before the test advances the clock.
         let reached = blocked_frame(
             &world,
             frame_pid,
             request_backend,
             &pending,
-            "%with kept as materialized%pg_snapshot_xmin%access_changes_floor%",
+            "/* effective holder identities and their validity interval. */%",
         )
         .await;
         if !reached {

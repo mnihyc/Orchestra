@@ -148,7 +148,7 @@ async fn lock_rows(
         .collect::<Vec<_>>();
     machines.sort_unstable();
     machines.dedup();
-    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE")
         .bind(machines)
         .execute(&mut *conn)
         .await
