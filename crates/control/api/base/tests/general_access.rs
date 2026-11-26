@@ -106,13 +106,13 @@ async fn every_general_preset_at_creation_gives_a_viewer_role_member_exactly_its
             .token(&s.ada.token)
             .body(&CreateThread {
                 name: Some(format!("General {level}")),
-                binding: Some(CreateThreadBinding {
-                    agent_id: s.on.agent,
-                    provider_id: s.on.provider,
-                    arrangement: None,
-                }),
+                binding: Some(CreateThreadBinding::provider(
+                    s.on.agent,
+                    s.on.provider,
+                    None,
+                )),
                 model: Some(MODEL.into()),
-                environment: Some(EnvironmentChoice::Use(s.on.environment)),
+                environment: Some(EnvironmentChoice::existing(s.on.environment)),
                 access: Some(ThreadAccess::Change(preset(&catalogue, topic, level))),
                 ..CreateThread::default()
             })

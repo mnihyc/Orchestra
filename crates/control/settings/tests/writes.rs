@@ -31,28 +31,39 @@ async fn rows(w: &World) -> i64 {
 async fn a_value_is_written_at_a_node_and_holds_there_and_below_with_its_writer_recorded() {
     let w = World::new().await;
     let written = w
-        .set(Target::Node(w.project), keys::AGENT_MODEL, json!("model-b"))
+        .set(
+            Target::Node(w.project),
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"model-b"}),
+        )
         .await;
     assert!(written.changed);
     let own = written.view.own.clone().unwrap();
     assert_eq!(
         (own.value, own.locked, own.revision),
-        (json!("model-b"), false, 1)
+        (json!({"type":"offering","name":"model-b"}), false, 1)
     );
-    assert_eq!(written.view.value(), Some(&json!("model-b")));
+    assert_eq!(
+        written.view.value(),
+        Some(&json!({"type":"offering","name":"model-b"}))
+    );
     let again = w
-        .set(Target::Node(w.project), keys::AGENT_MODEL, json!("model-c"))
+        .set(
+            Target::Node(w.project),
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"model-c"}),
+        )
         .await;
     assert_eq!(
         again.before.value(),
-        Some(&json!("model-b")),
+        Some(&json!({"type":"offering","name":"model-b"})),
         "and says what held before it, for the marker in a thread's conversation"
     );
     assert_eq!(again.before.own.as_ref().map(|own| own.revision), Some(1));
     assert_eq!(again.view.own.unwrap().revision, 2, "each write counts one");
     assert_eq!(
         w.value(Place::Node(w.thread), keys::AGENT_MODEL).await,
-        Some(json!("model-c"))
+        Some(json!({"type":"offering","name":"model-c"}))
     );
     let by: Option<Id> = sqlx::query_scalar("SELECT updated_by FROM settings WHERE node_id = $1")
         .bind(w.project)
@@ -157,7 +168,7 @@ async fn a_key_is_refused_at_a_scope_it_does_not_take_and_an_unknown_key_is_refu
         .try_set(
             Target::System,
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             None,
             None,
             true,
@@ -312,7 +323,7 @@ async fn a_lock_changes_nothing_where_lower_scopes_can_only_narrow_or_nothing_li
         .try_set(
             Target::Node(w.thread),
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             Some(true),
             None,
             true,
@@ -346,11 +357,28 @@ async fn a_lock_changes_nothing_where_lower_scopes_can_only_narrow_or_nothing_li
 async fn a_stale_revision_is_refused_with_the_value_as_it_stands_now() {
     let w = World::new().await;
     let target = Target::Node(w.project);
-    w.set(target, keys::AGENT_MODEL, json!("a")).await;
-    w.set(target, keys::AGENT_MODEL, json!("b")).await;
+    w.set(
+        target,
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"a"}),
+    )
+    .await;
+    w.set(
+        target,
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"b"}),
+    )
+    .await;
 
     let Err(WriteError::Stale { current }) = w
-        .try_set(target, keys::AGENT_MODEL, json!("c"), None, Some(1), true)
+        .try_set(
+            target,
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"c"}),
+            None,
+            Some(1),
+            true,
+        )
         .await
     else {
         panic!("a write at an old revision was accepted");
@@ -358,10 +386,13 @@ async fn a_stale_revision_is_refused_with_the_value_as_it_stands_now() {
     let own = current.own.clone().unwrap();
     assert_eq!(
         (own.value, own.revision),
-        (json!("b"), 2),
+        (json!({"type":"offering","name":"b"}), 2),
         "the caller is shown what is there now"
     );
-    assert_eq!(current.value(), Some(&json!("b")));
+    assert_eq!(
+        current.value(),
+        Some(&json!({"type":"offering","name":"b"}))
+    );
     assert_eq!(
         w.view(Place::Node(w.project), keys::AGENT_MODEL)
             .await
@@ -372,7 +403,14 @@ async fn a_stale_revision_is_refused_with_the_value_as_it_stands_now() {
     );
 
     let ok = w
-        .try_set(target, keys::AGENT_MODEL, json!("c"), None, Some(2), true)
+        .try_set(
+            target,
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"c"}),
+            None,
+            Some(2),
+            true,
+        )
         .await
         .unwrap();
     assert_eq!(ok.view.own.unwrap().revision, 3);
@@ -381,7 +419,7 @@ async fn a_stale_revision_is_refused_with_the_value_as_it_stands_now() {
         .try_set(
             Target::Node(w.topic),
             keys::AGENT_MODEL,
-            json!("x"),
+            json!({"type":"offering","name":"x"}),
             None,
             Some(1),
             true,
@@ -411,7 +449,7 @@ async fn setting_or_lifting_a_lock_is_for_a_caller_who_showed_they_may() {
         .try_set(
             target,
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             Some(true),
             None,
             false,
@@ -431,7 +469,7 @@ async fn setting_or_lifting_a_lock_is_for_a_caller_who_showed_they_may() {
         .try_set(
             target,
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             Some(true),
             None,
             true,
@@ -440,7 +478,14 @@ async fn setting_or_lifting_a_lock_is_for_a_caller_who_showed_they_may() {
         .unwrap();
     assert!(locked.view.own.unwrap().locked);
     let kept = w
-        .try_set(target, keys::AGENT_MODEL, json!("n"), None, None, false)
+        .try_set(
+            target,
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"n"}),
+            None,
+            None,
+            false,
+        )
         .await
         .unwrap();
     assert!(
@@ -451,7 +496,7 @@ async fn setting_or_lifting_a_lock_is_for_a_caller_who_showed_they_may() {
         .try_set(
             target,
             keys::AGENT_MODEL,
-            json!("n"),
+            json!({"type":"offering","name":"n"}),
             Some(false),
             None,
             false,
@@ -478,8 +523,19 @@ async fn setting_or_lifting_a_lock_is_for_a_caller_who_showed_they_may() {
 async fn writing_a_value_as_it_stands_changes_nothing_and_leaves_no_trace() {
     let w = World::new().await;
     let target = Target::Node(w.project);
-    w.set(target, keys::AGENT_MODEL, json!("a")).await;
-    let again = w.set(target, keys::AGENT_MODEL, json!("a")).await;
+    w.set(
+        target,
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"a"}),
+    )
+    .await;
+    let again = w
+        .set(
+            target,
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"a"}),
+        )
+        .await;
     assert!(!again.changed);
     assert_eq!(
         again.view.own.unwrap().revision,
@@ -492,7 +548,14 @@ async fn writing_a_value_as_it_stands_changes_nothing_and_leaves_no_trace() {
         "and no line of history is written"
     );
     let stale = w
-        .try_set(target, keys::AGENT_MODEL, json!("a"), None, Some(5), true)
+        .try_set(
+            target,
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"a"}),
+            None,
+            Some(5),
+            true,
+        )
         .await;
     assert!(
         matches!(stale, Err(WriteError::Stale { .. })),
@@ -502,7 +565,7 @@ async fn writing_a_value_as_it_stands_changes_nothing_and_leaves_no_trace() {
         .try_set(
             target,
             keys::AGENT_MODEL,
-            json!("a"),
+            json!({"type":"offering","name":"a"}),
             Some(true),
             None,
             true,
@@ -520,7 +583,7 @@ async fn a_side_thread_takes_no_setting() {
         .try_set(
             Target::Node(side),
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             None,
             None,
             true,
@@ -545,7 +608,7 @@ async fn a_deleted_node_or_one_that_never_was_takes_no_setting_and_shows_none() 
         .try_set(
             Target::Node(w.topic),
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             None,
             None,
             true,
@@ -556,7 +619,7 @@ async fn a_deleted_node_or_one_that_never_was_takes_no_setting_and_shows_none() 
         .try_set(
             Target::Node(new_id()),
             keys::AGENT_MODEL,
-            json!("m"),
+            json!({"type":"offering","name":"m"}),
             None,
             None,
             true,
@@ -576,8 +639,18 @@ async fn a_write_leaves_a_line_of_history_that_says_what_a_parameter_became_and_
  {
     let w = World::new().await;
     let project = Target::Node(w.project);
-    w.set(project, keys::AGENT_MODEL, json!("gpt-6-sol")).await;
-    w.set(project, keys::AGENT_MODEL, json!("gpt-6-luna")).await;
+    w.set(
+        project,
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"gpt-6-sol"}),
+    )
+    .await;
+    w.set(
+        project,
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"gpt-6-luna"}),
+    )
+    .await;
     w.set(project, keys::TERMINAL_ENABLED, json!(false)).await;
     w.set(project, keys::ENV_IDLE_STOP_MINUTES, json!(30)).await;
     w.set(project, keys::AGENT_INSTRUCTIONS, json!("x".repeat(200)))
@@ -585,7 +658,7 @@ async fn a_write_leaves_a_line_of_history_that_says_what_a_parameter_became_and_
     w.try_set(
         project,
         keys::AGENT_MODEL,
-        json!("gpt-6-luna"),
+        json!({"type":"offering","name":"gpt-6-luna"}),
         Some(true),
         None,
         true,
@@ -595,7 +668,7 @@ async fn a_write_leaves_a_line_of_history_that_says_what_a_parameter_became_and_
     w.try_set(
         project,
         keys::AGENT_MODEL,
-        json!("gpt-6-luna"),
+        json!({"type":"offering","name":"gpt-6-luna"}),
         Some(false),
         None,
         true,
@@ -668,20 +741,32 @@ async fn a_write_leaves_a_line_of_history_that_says_what_a_parameter_became_and_
 #[tokio::test]
 async fn taking_a_value_back_makes_the_key_inherit_again_and_taking_back_nothing_is_no_change() {
     let w = World::new().await;
-    w.set(Target::Node(w.root), keys::AGENT_MODEL, json!("a"))
-        .await;
-    w.set(Target::Node(w.project), keys::AGENT_MODEL, json!("b"))
-        .await;
+    w.set(
+        Target::Node(w.root),
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"a"}),
+    )
+    .await;
+    w.set(
+        Target::Node(w.project),
+        keys::AGENT_MODEL,
+        json!({"type":"offering","name":"b"}),
+    )
+    .await;
     let cleared = w
         .try_clear(Target::Node(w.project), keys::AGENT_MODEL, None, true)
         .await
         .unwrap();
     assert!(cleared.changed);
     assert!(cleared.view.own.is_none());
-    assert_eq!(cleared.view.value(), Some(&json!("a")), "now inherited");
+    assert_eq!(
+        cleared.view.value(),
+        Some(&json!({"type":"offering","name":"a"})),
+        "now inherited"
+    );
     assert_eq!(
         cleared.before.value(),
-        Some(&json!("b")),
+        Some(&json!({"type":"offering","name":"b"})),
         "from what it was"
     );
     assert_eq!(cleared.view.resolved.source.node, Some(w.root));
@@ -692,7 +777,11 @@ async fn taking_a_value_back_makes_the_key_inherit_again_and_taking_back_nothing
     assert!(!nothing.changed);
     assert_eq!(w.audit().await.len(), 3, "two writes and one reset");
     let again = w
-        .set(Target::Node(w.project), keys::AGENT_MODEL, json!("c"))
+        .set(
+            Target::Node(w.project),
+            keys::AGENT_MODEL,
+            json!({"type":"offering","name":"c"}),
+        )
         .await;
     assert_eq!(
         again.view.own.unwrap().revision,
@@ -798,7 +887,7 @@ async fn a_write_in_a_transaction_that_is_dropped_leaves_neither_the_row_nor_its
         actor: Actor::User(w.ada),
         target: Target::Node(w.project),
         key: keys::AGENT_MODEL,
-        value: json!("m"),
+        value: json!({"type":"offering","name":"m"}),
         locked: None,
         expected_revision: None,
         may_lock: true,

@@ -194,10 +194,19 @@ pub(crate) async fn prepare_page(
                 id_setting(conn, id, keys::ENV_DEFAULT_ID).await?
             };
             let starting = Starting {
-                provider: id_setting(conn, id, keys::AGENT_DEFAULT_PROVIDER_ID).await?,
+                provider: orch_settings::thread_provider(conn, Place::Node(id))
+                    .await
+                    .map_err(ApiError::internal)?,
                 profile: id_setting(conn, id, keys::AGENT_DEFAULT_AGENT_ID).await?,
                 host: if environment.is_none() {
-                    id_setting(conn, id, keys::ENV_HOST_ID).await?
+                    get::<orch_provider_contract::pools::Target>(
+                        conn,
+                        Place::Node(id),
+                        keys::ENV_HOST_ID,
+                    )
+                    .await
+                    .map_err(ApiError::internal)?
+                    .and_then(|target| target.single_host())
                 } else {
                     None
                 },

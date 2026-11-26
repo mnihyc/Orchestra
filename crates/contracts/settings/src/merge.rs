@@ -16,10 +16,16 @@
 use orch_types::Json;
 
 use crate::provenance::{LockedBy, Part, Resolved, Source, SourceScope, SuppliedPart};
-use crate::registry::{Merge, Scope, SettingDef};
+use crate::registry::{Merge, Schema, Scope, SettingDef};
 
 /// What separates the texts of two scopes that are joined: one blank line.
 const BLANK_LINE: &str = "\n\n";
+
+/// The rule of rules (a map of choices that include it) that names the only members a scope allows.
+const REQUIRE: &str = "require";
+
+/// The member of rules that stands for every member a scope does not name.
+const EVERY_OTHER: &str = "*";
 
 /// One value that a key has on the way down.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +114,11 @@ impl<'a, N> Layer<'a, N> {
 /// - `all`: every setting scope must allow the permission.
 /// - `any`: any setting scope can require the protection.
 /// - `stricter`: the highest-ranked choice in the declared schema, strictest last.
+/// - `map_stricter`: the objects merged member by member, each member keeping the strictest value a layer gives
+///   it: off for a switch, the later declared choice, and field by field for an object of such fields. In rules (a
+///   map of choices that include `require`), `*` stands for every member a layer does not name, and a layer that
+///   requires members leaves out every other one, as the engine reads the rules of one place. The default's
+///   members fill in what no layer names. A lock changes nothing.
 ///
 /// Shipped defaults are fallback values, never implicit constraints. A setting's
 /// declared unbounded zero and nullable bounds resolve as unset when no finite
@@ -167,11 +178,14 @@ pub fn resolve<N: Clone>(def: &SettingDef, layers: &[Layer<'_, N>]) -> Resolved<
         Merge::All => boolean(default, counted, false),
         Merge::Any => boolean(default, counted, true),
         Merge::Stricter => stricter(def, default, counted),
+        Merge::MapStricter => map_stricter(def, default, counted),
     };
     // The default is a part of the value where the mode joins it with the rows, and where no row
     // counted; otherwise the rows replace it.
-    let joins_default =
-        matches!(def.merge, Merge::Union | Merge::Map | Merge::Append) || used.is_empty();
+    let joins_default = matches!(
+        def.merge,
+        Merge::Union | Merge::Map | Merge::MapStricter | Merge::Append
+    ) || used.is_empty();
     let supplied: Vec<SuppliedPart<N>> = given
         .filter(|value| joins_default && !value.is_null())
         .map(|value| SuppliedPart {
@@ -387,6 +401,19 @@ fn number_cmp(one: &Json, other: &Json) -> Option<std::cmp::Ordering> {
     one.as_f64()?.partial_cmp(&other.as_f64()?)
 }
 
+/// Whether a schema-valid value would loosen an explicit numeric ceiling.
+/// Use the same exact decimal ordering and unbounded spellings as resolution.
+#[must_use]
+pub fn exceeds_ceiling(def: &SettingDef, proposed: &Json, ceiling: &Json) -> bool {
+    if def.merge != Merge::Min || ceiling.is_null() || def.zero_means_no_limit() && is_zero(ceiling)
+    {
+        return false;
+    }
+    proposed.is_null()
+        || def.zero_means_no_limit() && is_zero(proposed)
+        || number_cmp(proposed, ceiling).is_some_and(|order| order.is_gt())
+}
+
 fn bound<'r, 'a, N>(
     def: &SettingDef,
     default: Option<Json>,
@@ -489,6 +516,212 @@ fn stricter<'r, 'a, N>(
     }
 }
 
+/// How strict a value of `schema` is, where that can be said: a switch that is off is stricter than one that is on,
+/// a later declared choice stricter than an earlier one.
+fn rank(schema: &Schema, value: &Json) -> Option<usize> {
+    match schema {
+        Schema::Bool => value.as_bool().map(|on| usize::from(!on)),
+        Schema::Choice { values } => value
+            .as_str()
+            .and_then(|word| values.iter().position(|choice| *choice == word)),
+        _ => None,
+    }
+}
+
+/// The stricter of a member's value held from further up and a nearer one: an object of declared fields field by
+/// field; the nearer where both are as strict, or where strictness cannot be said of the value.
+fn stricter_member(schema: &Schema, held: &Json, nearer: &Json) -> Json {
+    if let (
+        Schema::Object {
+            members,
+            open: false,
+        },
+        Some(above),
+        Some(below),
+    ) = (schema, held.as_object(), nearer.as_object())
+    {
+        let mut merged = above.clone();
+        for (name, value) in below {
+            let joined = match (
+                members.iter().find(|member| member.name == name),
+                above.get(name),
+            ) {
+                (Some(member), Some(above)) => stricter_member(&member.schema, above, value),
+                _ => value.clone(),
+            };
+            merged.insert(name.clone(), joined);
+        }
+        return Json::Object(merged);
+    }
+    match (rank(schema, held), rank(schema, nearer)) {
+        (Some(above), Some(below)) if above > below => held.clone(),
+        (Some(_), None) => held.clone(),
+        _ => nearer.clone(),
+    }
+}
+
+/// What one layer of rules decides, as the engine reads one place's rules: a layer that requires members leaves out
+/// every member it does not require, `*` included unless it requires that too; without a requirement, a `*` that
+/// says `require` requires nothing and so allows.
+fn decided_rules(
+    values: &[&str],
+    members: &serde_json::Map<String, Json>,
+) -> serde_json::Map<String, Json> {
+    let strictest = values.last().copied().unwrap_or(REQUIRE);
+    let allow = values.first().copied().unwrap_or(REQUIRE);
+    let requires = members
+        .iter()
+        .any(|(name, rule)| name != EVERY_OTHER && rule.as_str() == Some(REQUIRE));
+    let mut decided: serde_json::Map<String, Json> = members
+        .iter()
+        .map(|(name, rule)| {
+            let word = rule.as_str();
+            let kept = if requires && word != Some(REQUIRE) {
+                Json::from(strictest)
+            } else if !requires && name == EVERY_OTHER && word == Some(REQUIRE) {
+                Json::from(allow)
+            } else {
+                rule.clone()
+            };
+            (name.clone(), kept)
+        })
+        .collect();
+    if requires && !decided.contains_key(EVERY_OTHER) {
+        decided.insert(EVERY_OTHER.to_owned(), Json::from(strictest));
+    }
+    decided
+}
+
+/// Whether a schema-valid value would lower an explicit numeric floor (`max`): no floor, or a smaller one.
+fn below_floor(def: &SettingDef, proposed: &Json, floor: &Json) -> bool {
+    let unbounded = |value: &Json| value.is_null() || def.zero_means_no_limit() && is_zero(value);
+    !unbounded(floor)
+        && (unbounded(proposed) || number_cmp(proposed, floor).is_some_and(|order| order.is_lt()))
+}
+
+/// The first explicit member of a proposed policy that loosens this ancestor; the empty path stands for the whole
+/// value. Every mode in which a place below may only narrow says it, as its resolution does: a switch a place above
+/// holds off (`all`) or on (`any`), a choice ranked below the one held above (`stricter`), a smaller minimum
+/// (`max`), and member by member (`map_stricter`). A larger ceiling (`min`) is [`exceeds_ceiling`]'s; a list
+/// (`intersect`) is narrowed where it is read, as a pattern above can name what a member below spells out.
+pub fn widening_field(def: &SettingDef, proposed: &Json, ancestor: &Json) -> Option<String> {
+    let whole = |widens: bool| widens.then(String::new);
+    match def.merge {
+        Merge::All => {
+            return whole(ancestor.as_bool() == Some(false) && proposed.as_bool() == Some(true));
+        }
+        Merge::Any => {
+            return whole(ancestor.as_bool() == Some(true) && proposed.as_bool() == Some(false));
+        }
+        Merge::Stricter => {
+            return whole(
+                match (rank(&def.schema, ancestor), rank(&def.schema, proposed)) {
+                    (Some(above), Some(below)) => below < above,
+                    _ => false,
+                },
+            );
+        }
+        Merge::Max => return whole(below_floor(def, proposed, ancestor)),
+        Merge::MapStricter => {}
+        _ => return None,
+    }
+    let Schema::Map { values, .. } = def.schema else {
+        return None;
+    };
+    let above = ancestor.as_object()?;
+    let rules = match values {
+        Schema::Choice { values } if values.contains(&REQUIRE) => {
+            Some(decided_rules(values, above))
+        }
+        _ => None,
+    };
+    for (name, value) in proposed.as_object()? {
+        let held = match &rules {
+            Some(rules) => rules.get(name).or_else(|| rules.get(EVERY_OTHER)),
+            None => above.get(name),
+        };
+        if let Some(held) = held {
+            let joined = stricter_member(values, held, value);
+            if let Some(object) = value.as_object() {
+                if let Some((field, _)) = object
+                    .iter()
+                    .find(|(field, proposed)| joined.get(*field) != Some(*proposed))
+                {
+                    return Some(format!("{name}.{field}"));
+                }
+            } else if joined != *value {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn map_stricter<'r, 'a, N>(
+    def: &SettingDef,
+    default: Option<Json>,
+    rows: &[&'r Layer<'a, N>],
+) -> Merged<'r, 'a, N> {
+    let Schema::Map { values: member, .. } = def.schema else {
+        return Merged::new(default, Vec::new());
+    };
+    let objects: Vec<_> = rows
+        .iter()
+        .copied()
+        .filter(|layer| layer.value.is_object())
+        .collect();
+    if objects.is_empty() {
+        return Merged::new(default, objects);
+    }
+    let rules = match member {
+        Schema::Choice { values } if values.contains(&REQUIRE) => Some(*values),
+        _ => None,
+    };
+    let mut layers: Vec<serde_json::Map<String, Json>> = objects
+        .iter()
+        .filter_map(|layer| layer.value.as_object())
+        .map(|members| {
+            rules.map_or_else(|| members.clone(), |values| decided_rules(values, members))
+        })
+        .collect();
+    if rules.is_some() {
+        // A member one layer names follows another layer's `*` where that layer does not name it.
+        let named: Vec<String> = layers
+            .iter()
+            .flat_map(|members| members.keys())
+            .filter(|name| *name != EVERY_OTHER)
+            .cloned()
+            .collect();
+        for members in &mut layers {
+            if let Some(every) = members.get(EVERY_OTHER).cloned() {
+                for name in &named {
+                    members.entry(name.clone()).or_insert_with(|| every.clone());
+                }
+            }
+        }
+    }
+    let mut merged = serde_json::Map::new();
+    for members in &layers {
+        for (name, value) in members {
+            let joined = match merged.get(name) {
+                Some(held) => stricter_member(member, held, value),
+                None => value.clone(),
+            };
+            merged.insert(name.clone(), joined);
+        }
+    }
+    // The default fills in only what no layer names: it is a fallback, never a bound.
+    for (name, value) in default
+        .as_ref()
+        .and_then(Json::as_object)
+        .into_iter()
+        .flatten()
+    {
+        merged.entry(name.clone()).or_insert_with(|| value.clone());
+    }
+    Merged::new(Some(Json::Object(merged)), objects)
+}
+
 #[cfg(test)]
 #[path = "merge/narrowing_tests.rs"]
 mod narrowing_tests;
@@ -518,15 +751,29 @@ mod tests {
         // EN: system Ask models A/B > org tries C or reverses B/A; only parent
         // identities survive, in system order. Remove A to choose B as default.
         // 中文：系统允许 A/B > 组织尝试 C 或改为 B/A；只能保留父级允许项及顺序，移除 A 才能默认 B。
-        let first = json!({"provider_id":new_id(),"model":"first"});
-        let second = json!({"provider_id":new_id(),"model":"second"});
-        let extra = json!({"provider_id":new_id(),"model":"extra"});
+        let offering = json!({"provider":new_id(),"offering":"shared"});
+        let first =
+            json!({"backend":{"route":"provider.generate","offering":offering,"config":null}});
+        let second = json!({"backend":{"route":"ask.delegation","offering":offering,"config":{"environment_id":new_id()}}});
+        let extra = json!({"backend":{"route":"ask.delegation","offering":offering,"config":{"environment_id":new_id()}}});
         let parent = json!([first, second]);
-        let child = json!([second, first, extra]);
+        let child = crate::registry::canonical_value(
+            keys::ASK_MODELS,
+            &json!([second, {"backend":{"route":"provider.generate","offering":offering}}, extra]),
+        );
         let node = new_id();
         let definition = def(keys::ASK_MODELS);
         assert_eq!(definition.class, Class::Policy);
         assert_eq!(definition.merge, Merge::Intersect);
+        assert!(crate::registry::validate_at(keys::ASK_MODELS, Scope::System, &parent).is_ok());
+        assert!(
+            crate::registry::validate_at(
+                keys::ASK_MODELS,
+                Scope::Org,
+                &json!([{"backend":{"route":"ask.delegation"}}])
+            )
+            .is_err()
+        );
         assert_eq!(
             resolve(
                 definition,

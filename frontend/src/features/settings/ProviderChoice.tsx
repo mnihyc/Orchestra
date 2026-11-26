@@ -1,20 +1,22 @@
 import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 /** A provider default is chosen and read by its authorized name inside the existing settings row. */
 import { queryOptions, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, type ReactNode, createContext, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
 import { ApiError, api, client, ok } from '@/api/client';
+import { summaryProvidersQuery, usablePool, usableProvider } from './summaryChoices';
 import { everythingQuery } from '@/api/everything';
 import { providerQuery } from '@/api/resources';
+import { poolQuery } from '@/api/pools';
 import { defaultProviderReader, providerDefaultKey } from '@/api/defaultsOpening';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
 import { ResourceCreateButton } from '@/features/resources/ResourceCreation';
 import { ResourceHint, ResourceName, resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { providerLabels } from '@/features/resources/providers/labels';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
-import type { Provider } from '@/generated/api-types';
+import type { Provider, ProviderListRow } from '@/generated/api-types';
 import { choiceOption } from '@/i18n/choices';
 import { useDebounced } from '@/lib/debounce';
 import { holds } from '@/lib/permissions';
@@ -31,38 +33,48 @@ function currentProviderQuery(id: string, reader: string) {
 }
 
 /** Read-only references never ask a person to interpret a UUID or guess a hidden provider's name. */
-export function ProviderDefaultName({ value, children }: { value: unknown; children?: (name: string) => ReactNode }) {
+export function ProviderDefaultName({ value, children, read = false }: { value: unknown; children?: (name: string) => ReactNode; read?: boolean }) {
   const { t } = useTranslation();
-  return typeof value === 'string' && value !== '' ? <NamedProvider id={value} render={children} /> : <span className="text-text-muted">{t('settings.compact.none')}</span>;
+  return typeof value === 'string' && value !== '' ? <NamedProvider id={value} render={children} read={read} /> : <span className="text-text-muted">{t('settings.compact.none')}</span>;
 }
 
-function NamedProvider({ id, render }: { id: string; render: ((name: string) => ReactNode) | undefined }) {
+function NamedProvider({ id, render, read }: { id: string; render: ((name: string) => ReactNode) | undefined; read: boolean }) {
   const { t } = useTranslation();
   const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
   // The bounded opening publishes one of these independently authorized name slots.
-  const current = useQuery({ ...currentProviderQuery(id, reader), enabled: false });
+  const current = useQuery({ ...currentProviderQuery(id, reader), enabled: read });
   const reference = useQuery({ ...providerQuery(id), enabled: false });
-  const provider = current.isPending ? reference : current;
+  const provider = !read && current.isPending ? reference : current;
   const named = provider.data;
   if (named === null || provider.isError && provider.error instanceof ApiError && (provider.error.status === 403 || provider.error.status === 404)) {
     return <span className="text-sm text-text-muted">{t('settings.compact.managed')}</span>;
   }
-  if (provider.isError) return <ErrorState compact title={t('places.providerDefault.unavailable')} error={provider.error} retrying={provider.isRefetching} onRetry={() => void provider.refetch()} />;
+  if (provider.isError) return read && render !== undefined ? render(t('places.providerDefault.unavailable'))
+    : <ErrorState compact title={t('places.providerDefault.unavailable')} error={provider.error} retrying={provider.isRefetching} onRetry={() => void provider.refetch()} />;
   if (named !== undefined) return render === undefined ? <ResourceName subject={{ kind: 'provider', provider: named }} /> : render(named.name);
   const selected = t('places.providerDefault.selected');
   return render === undefined ? <span className="text-text-muted">{selected}</span> : render(selected);
 }
 
+export const ProviderSuggestionCompletion=createContext<((provider:Provider)=>void)|null>(null);
+
 const readerScope = defaultProviderReader;
 const refused = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
 
 /** The parent's revision/lock/autosave machinery remains the only writer of the setting. */
-export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md' }) {
+export interface ProviderPoolSelection {
+  kind?: 'model' | 'provider';
+  includeProviderPools?: boolean;
+  id: string | null;
+  name?: string;
+  onSelect: (id: string, name: string, kind?: 'model' | 'provider') => void;
+}
+export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md'; summaryWindow?: string | undefined; providerKind?: Provider['kind'];proposal?:ReactNode; pools?: ProviderPoolSelection }) {
   const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
   return <ReaderChoice key={reader} {...props} reader={reader} />;
 }
 
-function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm' }: ValueControlProps & { reader: string; size?: 'sm' | 'md' }) {
+function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm', summaryWindow, providerKind, inheritance, proposal, pools }: ValueControlProps & { reader: string; size?: 'sm' | 'md'; summaryWindow?: string | undefined; providerKind?: Provider['kind']; proposal?:ReactNode; pools?: ProviderPoolSelection }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const known = useKnownPlaces({ trees: false });
@@ -73,6 +85,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
   useEffect(() => { currentValue.current = value; }, [value]);
   const [open, setOpen] = useState(false), [visited, setVisited] = useState(false), [typed, setTyped] = useState('');
   const [listRecovery, setListRecovery] = useState<{ query: string; error: unknown; more: boolean } | null>(null);
+  const [pickedRow, setPickedRow] = useState<ProviderListRow | null>(null);
   const [currentRecovery, setCurrentRecovery] = useState<{ id: string; error: unknown } | null>(null);
   const text = typed.trim(), settled = useDebounced(text), waiting = text !== settled;
   const requested = useRef(''), visible = useRef(false), dismissed = useRef(0);
@@ -80,13 +93,14 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
   const type = (next: string) => { requested.current = next.trim(); setTyped(next); };
   // The caller's full usable reach is native: no home/member-root restriction,
   // no browser filtering of a first window, and no name-only/path-only choices.
-  const source = everythingQuery(`${reader}:${session}`, 'resources', {
-    scope: 'mine', kinds: ['provider'], q: settled, owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc',
+  const source = summaryWindow !== undefined ? summaryProvidersQuery(summaryWindow, settled) : everythingQuery(`${reader}:${session}`, 'resources', {
+    scope: 'mine', kinds: pools === undefined ? ['provider'] : ['provider', 'pool'], q: settled, owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc',
     resource: { details: true, view: 'usable' },
-  }, 'provider-default-choices');
+  }, pools === undefined ? 'provider-default-choices' : 'provider-pool-default-choices');
   const list = useInfiniteQuery({ ...source, enabled: open && !disabled && !waiting, retry: false, staleTime: Infinity,
     refetchOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false });
   const selected = typeof value === 'string' ? value : '';
+  const selectedPool = useQuery({ ...poolQuery(pools?.id ?? '',reader), enabled: visited && pools?.id !== undefined && pools.id !== null && !disabled, retry: false });
   // Keep names across the parent's acknowledged-save remount, but never across
   // readers. Do not seed this exact read from an unscoped historical cache.
   const currentKey = (id: string) => providerDefaultKey(id, reader);
@@ -99,21 +113,28 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
   const nextPageError = list.isFetchNextPageError || list.isFetching && listRecovery?.query === settled && listRecovery.more && listError !== null;
   const unverified = refused(listError) || list.isFetching && !list.isSuccess && list.errorUpdatedAt > 0;
   const rows = waiting || unverified || listError !== null && !nextPageError ? [] : [...new Map((list.data?.pages.flatMap((page) => page.items) ?? []).flatMap((item) => {
-    const provider = item.resource?.kind === 'provider' ? item.resource.value : undefined;
+    const provider = usableProvider(item);
     if (provider === undefined) return [];
-    return item.kind === 'provider' && item.my_access !== 'path_only' && item.name !== null && item.id === provider.id
-      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use')
+    return (providerKind === undefined || provider.kind === providerKind)
       && !(provider.id === selected && (currentError !== null || currentMissing)) ? [[provider.id, provider] as const] : [];
   })).values()];
   const labels = providerLabels([...new Map([...(current === undefined ? [] : [current]), ...rows].map((row) => [row.id, row])).values()], known);
+  const compactName = summaryWindow === undefined || currentError !== null ? undefined
+    : labels.get(selected) ?? (pickedRow?.id === selected ? pickedRow.name : undefined);
   const shown = selected === '' ? '' : managed ? t('settings.compact.managed') : current === undefined
-    ? t(chosen.isPending && currentError === null ? visited ? 'places.providerDefault.loading' : 'places.providerDefault.selected' : 'places.providerDefault.unavailable')
+    ? compactName ?? t(chosen.isPending && currentError === null ? visited ? 'places.providerDefault.loading' : 'places.providerDefault.selected' : 'places.providerDefault.unavailable')
     : labels.get(selected) ?? current.name;
   const busy = waiting || list.isFetching;
   const options: ComboboxOption<string>[] = [
     ...(text === '' && selected !== '' && !rows.some((row) => row.id === selected) ? [{ value: selected, label: shown, text: shown, disabled: true }] : []),
     ...rows.map((provider) => { const name = labels.get(provider.id) ?? provider.name; return { value: provider.id, ...choiceOption(t, 'dynamic.resource', { name }), ...resourceChoice({ kind: 'provider', provider }), text: name }; }),
   ];
+  const poolRows = pools === undefined || waiting || unverified || listError !== null && !nextPageError ? [] : [...new Map((list.data?.pages.flatMap((page)=>page.items) ?? []).flatMap((item)=> {
+    const pool = usablePool(item);
+    return pool && (pool.kind === (pools.kind ?? 'provider') || pools.includeProviderPools && pool.kind === 'provider') ? [[pool.id, pool] as const] : [];
+  })).values()];
+  const poolOptions: ComboboxOption<string>[] = poolRows.map((pool)=>({value:`\u0000pool:${pool.id}`,label:pool.name,text:pool.name,...resourceChoice({kind:'pool',pool}),disabled:!pool.enabled || pool.policy===null,description:!pool.enabled?t('pools.off'):pool.policy===null?t('pools.policy.choose'):undefined}));
+  const poolLabel = pools?.id === undefined || pools.id === null ? null : selectedPool.isError ? t('settings.compact.managed') : selectedPool.isSuccess ? selectedPool.data.name : pools.name ?? t(visited ? 'common.loading' : pools.kind === 'model' ? 'pools.selectedModel' : 'places.providerDefault.selected');
   const changedOpen = (next: boolean) => {
     // SettingRow restores input focus in its layout effect after save/Undo. That
     // restoration is not a new request to browse, nor is a closed-name retry.
@@ -171,19 +192,36 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
     void list.refetch({ cancelRefetch: false });
   };
   return <div ref={frame} className="flex min-w-0 flex-col gap-2" data-provider-default onKeyDownCapture={press}>
-    <ResourcePickerLookup pickerKey="provider-default" id={session} size={size} label={label} hideLabel={showLabel !== true} disabled={disabled} error={error} fieldClassName="min-w-0"
+    <ResourcePickerLookup inheritance={inheritance} pickerKey="provider-default" id={session} size={size} label={label} hideLabel={showLabel !== true} disabled={disabled} error={error} fieldClassName="min-w-0"
       hint={current === undefined ? undefined : <ResourceName subject={{ kind: 'provider', provider: current }} hint={false} wrap><ResourceHint subject={{ kind: 'provider', provider: current }} wrap /></ResourceName>}
-      query={typed} onQueryChange={type} displayValue={shown} initialActiveValue={selected} placeholder={placeholder ?? t('places.providerDefault.choose')}
+      query={typed} onQueryChange={type} displayValue={poolLabel ?? shown} initialActiveValue={pools?.id === undefined || pools.id===null ? selected : `\u0000pool:${pools.id}`} placeholder={placeholder ?? t('places.providerDefault.choose')}
       open={open} onOpenChange={changedOpen} loading={busy} empty={listError !== null ? undefined : t('ui.combobox.empty')}
-      groups={[{ id: 'providers', label: '', options }]}
-      footer={hasFooter ? <div ref={footer} className="flex min-w-0 flex-col gap-1">{currentProblem}{pages}</div> : undefined}
+      groups={[{ id: 'providers', label: '', options },...(pools===undefined?[]:[{id:'provider-pools',label:t('screens.pools.title'),options:poolOptions}])]}
+      footer={hasFooter || open && proposal!==undefined ? <div ref={footer} className="flex min-w-0 flex-col gap-1">{currentProblem}{pages}{open && <ProviderSuggestionCompletion value={(provider)=>{
+        if(readerScope()!==reader)return;
+        cache.setQueryData(currentKey(provider.id),provider);currentValue.current=provider.id;
+        show(false);type('');setVisited(false);setListRecovery(null);setCurrentRecovery(null);
+      }}>{proposal}</ProviderSuggestionCompletion>}</div> : undefined}
       onSelect={(option) => {
         if (disabled || busy) return;
+        if (pools !== undefined && option.value.startsWith('\u0000pool:')) {
+          const pool=poolRows.find((pool)=>option.value===`\u0000pool:${pool.id}`);
+          if (pool===undefined || !pool.enabled || pool.policy===null) return;
+          cache.setQueryData(poolQuery(pool.id, reader).queryKey, pool);
+          show(false);type('');setVisited(false);
+          if (inheritance?.selected === true || pool.id !== pools.id) {
+            onEdited?.();
+            if (pools.includeProviderPools && (pool.kind === 'model' || pool.kind === 'provider')) pools.onSelect(pool.id, pool.name, pool.kind);
+            else pools.onSelect(pool.id, pool.name);
+          }
+          return;
+        }
         const provider = rows.find((row) => row.id === option.value);
         if (provider === undefined) return;
-        cache.setQueryData(currentKey(provider.id), provider);
+        if ('models' in provider) cache.setQueryData(currentKey(provider.id), provider);
+        else setPickedRow(provider);
         show(false); type(''); setVisited(false); setListRecovery(null); setCurrentRecovery(null);
-        if (provider.id !== selected) { currentValue.current = provider.id; onEdited?.(); onChange(provider.id); }
+        if (inheritance?.selected === true || provider.id !== selected) { currentValue.current = provider.id; onEdited?.(); onChange(provider.id); }
       }} />
     {!open && <>{currentProblem}{pages}</>}
     {empty && <div className="flex flex-wrap items-center gap-2">

@@ -79,6 +79,7 @@ impl native::Selected for Options {
     type Query = NodeBindingOptionsGetQuery;
     type Value = Selected;
     type Reply = BindingOptions;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::OPTIONS;
     fn select<'a>(
         ctx: &'a Ctx,
@@ -114,11 +115,15 @@ impl native::Selected for Options {
             let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
             let bounds = scope::Bounds::new(ctx, caller)?;
             let bounded = modern.then_some(&bounds as &dyn choice_window::Bounds);
-            let providers = provider_candidates(conn, &principal, context.node.id, bounded).await?;
+            // The session sees its administrative inventory. The thread will work with its maker's own Use grants.
+            let work = principal.ordinary(conn).await.map_err(ApiError::internal)?;
+            let providers =
+                provider_candidates(conn, &principal, &work, context.node.id, bounded).await?;
             let inputs = provider_inputs(conn, &providers).await?;
             let environments = environment_candidates(
                 conn,
                 &principal,
+                &work,
                 context.node.id,
                 Permission::EnvironmentUse,
                 bounded,
@@ -195,7 +200,13 @@ impl native::Selected for Options {
                     let request = crate::routes::environments::places::prepare_request(
                         conn,
                         context.node.id,
-                        &orch_api_contract::environment::PlaceListQuery::default(),
+                        &orch_api_contract::environment::PlaceListQuery {
+                            template_id: context
+                                .recipe
+                                .map(|(template, _)| template)
+                                .or(query.template_id),
+                            ..Default::default()
+                        },
                     )
                     .await;
                     if let Ok(request) = request {
@@ -467,6 +478,7 @@ impl native::Selected for Options {
         Box::pin(async move {
             if !old.grouping.preserves_sources(&fresh.grouping)
                 || old.context.node.path != fresh.context.node.path
+                || old.context.recipe != fresh.context.recipe
                 || old.context.sources != fresh.context.sources
                 || !old.names.is_subset(&fresh.names)
                 || !old.visible_names.is_subset(&fresh.visible_names)

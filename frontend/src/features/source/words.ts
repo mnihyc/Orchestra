@@ -6,14 +6,48 @@
 import type { TFunction } from 'i18next';
 
 import { ApiError } from '@/api/client';
-import type { DirectoryWork, RestorePlan, ReviewComment, Snapshot, ThreadAttention, ThreadLink } from '@/generated/api-types';
+import type { DirectoryWork, RestorePlan, ReviewComment, Snapshot, SourceInfo, Thread, ThreadAttention, ThreadLink, Turn } from '@/generated/api-types';
+import { denial } from '@/lib/permissions';
 import { graphemeCount } from '@/lib/grapheme';
 import { fencedCode } from '@/lib/fencedCode';
 
-/** Source writes obey the machine's policy; protocol codes never become the explanation. */
+/** Why a source could not be prepared, in the reader's words and with the act that fits. Source writes obey the machine's
+ * policy; a protocol code never becomes the explanation: each code the preparation can fail with has its own sentence, and a
+ * code that has none gets the general one. */
 export function sourceFailure(t: TFunction, reason: string): string {
-  return reason === 'workspace.remote_write_disabled' || reason === 'policy.remote_write_disabled'
-    ? t('source.prepare.writeDisabled') : t('source.prepare.failureReason');
+  switch (reason) {
+    case 'workspace.remote_write_disabled':
+    case 'policy.remote_write_disabled':
+      return t('source.prepare.writeDisabled');
+    case 'clone_stalled': return t('source.prepare.cloneUnresponsive');
+    case 'timeout': return t('source.prepare.reasons.timeout');
+    case 'busy': return t('source.prepare.reasons.busy');
+    case 'not_found': return t('source.prepare.reasons.notFound');
+    case 'workspace.source_conflict': return t('source.prepare.reasons.conflict');
+    case 'workspace.restore_unavailable': return t('source.prepare.reasons.restoreUnavailable');
+    case 'offline_peer': return t('source.prepare.reasons.offline');
+    case 'too_large': return t('source.prepare.reasons.tooLarge');
+    case 'credential_unusable':
+    case 'login_required':
+      return t('source.prepare.reasons.credential');
+    case 'changed': return t('source.prepare.reasons.changed');
+    case 'internal': return t('source.prepare.reasons.internal');
+    case 'expired': return t('source.prepare.reasons.expired');
+    case 'unsupported': return t('source.prepare.reasons.unsupported');
+    default: return t('source.prepare.failureReason');
+  }
+}
+
+/** The address is already restricted to the thread's visible source. Show only its host on failure. */
+export function preparationFailure(t: TFunction, source: SourceInfo): string {
+  const idle = source.job?.clone?.idle_seconds;
+  if (source.reason === 'clone_stalled' && idle !== undefined && source.repository_url !== null) {
+    let remote: string;
+    try { remote = new URL(source.repository_url).host; }
+    catch { remote = source.repository_url.split(':')[0]?.split('@').at(-1) ?? ''; }
+    return t('source.prepare.cloneStalled', { remote: remote || t('source.prepare.unknownRepository'), seconds: idle });
+  }
+  return sourceFailure(t, source.reason ?? 'workspace.source_failed');
 }
 
 /** Whether a recorded state is one a whole directory can be put back to: complete, nothing missing. */
@@ -48,10 +82,20 @@ export function wholeUnavailableReason(t: TFunction, reason: string): string {
       return t('source.restore.why.liveTree');
     case 'not_ready':
       return t('source.restore.why.notReady');
+    case 'indexing':
+      return t('source.restore.why.indexing');
+    case 'timeout':
+      return t('source.restore.why.timeout');
+    case 'cancelled':
+      return t('source.restore.why.cancelled');
     case 'store_unavailable':
       return t('source.restore.why.storeUnavailable');
     case 'too_large':
       return t('source.restore.why.tooLarge');
+    case 'changed_during_recording':
+      return t('source.restore.why.changedDuring');
+    case 'unreadable':
+      return t('source.restore.why.unreadable');
     case 'off':
       return t('source.restore.why.recordingOff');
     case 'offline':
@@ -212,4 +256,14 @@ export function reviewMessage(t: TFunction, comments: readonly ReviewComment[]):
 export function hunkChanged(comment: ReviewComment, liveDiff: string | null): boolean {
   if (liveDiff === null) return true;
   return !hunksOf(liveDiff).some((hunk) => hunk.text === comment.hunk);
+}
+
+/** The icon and named menu use the same current permission, checkpoint and file-change decision. */
+export function restoreTurnActionState(thread: Thread | null, turn: Turn, hasChanges: boolean, readOnly: boolean, t: TFunction): { review: boolean; blocked: boolean; reason: string | null } {
+  const reads = thread?.environment_permissions.includes('files.view') === true;
+  const writes = thread?.environment_permissions.includes('files.manage') === true;
+  const reason = readOnly ? t('messageVersions.activeActions') : !thread?.environment ? t('source.restore.noEnvironment')
+    : !reads ? denial(t, 'files.view', thread.environment.name, thread.environment.owner) : !writes ? denial(t, 'files.manage', thread.environment.name, thread.environment.owner)
+    : turn.completed_at === null ? t('thread.turnActions.turnRunning') : turn.before_snapshot_id === null && !hasChanges ? t('thread.turnActions.noCheckpoint') : null;
+  return { review: reason !== null || thread === null, blocked: !reads || readOnly, reason };
 }

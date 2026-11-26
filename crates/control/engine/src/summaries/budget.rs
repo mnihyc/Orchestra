@@ -9,34 +9,67 @@ use orch_settings::Place;
 use orch_settings_contract::registry::keys;
 use orch_types::Id;
 
+/// One activity window serves every requested automatic field, including larger chosen title budgets.
+pub(super) fn activity_field(
+    config: &orch_summarizer_model::descriptor::Config,
+    fields: &[orch_summarizer_contract::descriptor::SummaryField],
+) -> orch_summarizer_contract::descriptor::SummaryField {
+    use orch_summarizer_contract::descriptor::SummaryField;
+    fields
+        .iter()
+        .copied()
+        .max_by_key(|field| config.answer_tokens(*field))
+        .unwrap_or(SummaryField::Title)
+}
+
 /// Current declared model context for ordinary summary activity, retaining its configured output.
 pub(super) async fn context_tokens(
     conn: &mut orch_db::Conn,
     config: &orch_summarizer_model::descriptor::Config,
+    field: orch_summarizer_contract::descriptor::SummaryField,
 ) -> Result<u32, EngineError> {
+    member_context(conn, config, Some(field)).await
+}
+
+/// A goal verdict reserves its own answer length independently of automatic summary fields.
+pub(super) async fn member_context(
+    conn: &mut orch_db::Conn,
+    config: &orch_summarizer_model::descriptor::Config,
+    field: Option<orch_summarizer_contract::descriptor::SummaryField>,
+) -> Result<u32, EngineError> {
+    let offering = config.offering().map_err(EngineError::unreadable)?;
     let model = orch_db::queries::resources::thread_engine::model(
         conn,
-        config.provider_id,
-        &config.model_name,
+        offering.provider,
+        &offering.offering,
     )
     .await?
     .ok_or_else(|| EngineError::unreadable("the summary model is unavailable"))?;
-    let provider = orch_db::queries::resources::thread_engine::provider(conn, config.provider_id)
+    let provider = orch_db::queries::resources::thread_engine::provider(conn, offering.provider)
         .await?
         .ok_or_else(|| EngineError::unreadable("the summary provider is unavailable"))?;
-    let protocol = super::resource::completion_protocol(&provider.protocols)?.ok_or_else(|| {
-        EngineError::unreadable("the summary provider offers no generation interface")
-    })?;
+    let protocol = if config.backend.route == orch_summarizer_model::capabilities::ROUTE {
+        Some(
+            super::resource::completion_protocol(&provider.protocols)?.ok_or_else(|| {
+                EngineError::unreadable("the summary provider offers no generation interface")
+            })?,
+        )
+    } else {
+        None
+    };
     let parameters = orch_provider_contract::models::composed_model_parameters(
         &model.parameters,
         &model.groups,
         &model.option_layers,
-        Some(&protocol),
+        protocol.as_deref(),
     )
     .map_err(EngineError::unreadable)?;
     orch_summarizer_model::context::fit_window(
         config.context_tokens,
-        config.max_output_tokens,
+        match field {
+            Some(field) => config.output_reserve(field, parameters.needs_reasoning_room()),
+            None => config.goal_output_reserve(parameters.needs_reasoning_room()),
+        },
         parameters
             .context_open()
             .or(parameters.context_window.filter(|window| *window > 0)),
@@ -44,8 +77,47 @@ pub(super) async fn context_tokens(
     .map_err(|error| EngineError::unreadable(super::safe_reason(&error)))
 }
 
+/// The same output-room decision used by the actual request, independent of enabled tuning controls.
+/// Unknown model facts reserve the configured room; they do not enable an effort selection.
+pub(super) async fn reasons(
+    conn: &mut orch_db::Conn,
+    config: &orch_summarizer_model::descriptor::Config,
+) -> Result<bool, EngineError> {
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let Some(model) = orch_db::queries::resources::thread_engine::model(
+        conn,
+        offering.provider,
+        &offering.offering,
+    )
+    .await?
+    else {
+        return Ok(true);
+    };
+    let Some(provider) =
+        orch_db::queries::resources::thread_engine::provider(conn, offering.provider).await?
+    else {
+        return Ok(true);
+    };
+    let protocol = if config.backend.route == orch_summarizer_model::capabilities::ROUTE {
+        let Some(protocol) = super::resource::completion_protocol(&provider.protocols)? else {
+            return Ok(true);
+        };
+        Some(protocol)
+    } else {
+        None
+    };
+    let parameters = orch_provider_contract::models::composed_model_parameters(
+        &model.parameters,
+        &model.groups,
+        &model.option_layers,
+        protocol.as_deref(),
+    )
+    .map_err(EngineError::unreadable)?;
+    Ok(parameters.needs_reasoning_room())
+}
+
 /// The window taken for a model whose entry does not say: what every model that does this work has.
-pub(crate) const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
+const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
 
 /// The share the setting ships with, for a place where it does not read.
 pub(crate) const DEFAULT_SHARE: i64 = 50;
@@ -69,16 +141,27 @@ pub(crate) async fn input_budget(
     thread: Id,
     provider: Id,
     model: &str,
+    output_tokens: i64,
 ) -> Result<InputBudget, EngineError> {
     let window = orch_db::queries::resources::thread_engine::model(conn, provider, model)
         .await?
         .and_then(|row| crate::fork_history::model_window(&row.parameters));
-    let share =
+    Ok(after_output(
+        budget_of(window, handoff_share(conn, thread).await?),
+        output_tokens,
+    ))
+}
+
+pub(super) async fn handoff_share(
+    conn: &mut orch_db::Conn,
+    thread: Id,
+) -> Result<i64, EngineError> {
+    Ok(
         orch_settings::get::<i64>(conn, Place::Node(thread), keys::SUMMARY_HANDOFF_INPUT_SHARE)
             .await?
             .unwrap_or(DEFAULT_SHARE)
-            .clamp(1, 100);
-    Ok(budget_of(window, share))
+            .clamp(1, 100),
+    )
 }
 
 /// The budget for a window and a share, with nothing read.
@@ -97,9 +180,80 @@ pub(crate) fn budget_of(window: Option<i64>, share: i64) -> InputBudget {
     }
 }
 
+fn after_output(mut budget: InputBudget, output_tokens: i64) -> InputBudget {
+    let remaining = budget
+        .window
+        .unwrap_or(UNKNOWN_WINDOW_TOKENS)
+        .saturating_sub(output_tokens.max(0))
+        .max(0);
+    budget.tokens = budget.tokens.min(remaining);
+    budget.bytes = usize::try_from(
+        budget
+            .tokens
+            .saturating_mul(crate::fork_history::CARRY_BYTES_PER_TOKEN),
+    )
+    .unwrap_or(usize::MAX);
+    budget
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_title_and_tags_input_fits_even_when_the_title_has_the_larger_chosen_answer() {
+        use orch_summarizer_contract::descriptor::SummaryField;
+        let config = orch_summarizer_model::descriptor::Config {
+            backend: orch_provider_contract::capabilities::BackendRef {
+                route: orch_summarizer_model::capabilities::ROUTE.into(),
+                offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider: orch_types::new_id(),
+                    offering: "synthetic-summary-model".into(),
+                }),
+                ..Default::default()
+            },
+            params: serde_json::json!({}),
+            answer_max_output_tokens: 120,
+            title_max_output_tokens: 4_096,
+            goal_max_output_tokens: 512,
+            reasoning_tokens: 2_000,
+            context_tokens: 8_192,
+            prompts: Default::default(),
+        };
+        for fields in [
+            vec![SummaryField::Title, SummaryField::Tags],
+            vec![SummaryField::Tags],
+        ] {
+            let field = activity_field(&config, &fields);
+            let Ok(input) = orch_summarizer_model::context::fit_window(
+                config.context_tokens,
+                config.output_reserve(field, true),
+                Some(8_192),
+            ) else {
+                panic!("the configured answer leaves a usable input window");
+            };
+            for field in &fields {
+                assert!(i64::from(input) + config.output_reserve(*field, true) <= 8_192);
+            }
+            if fields == [SummaryField::Tags] {
+                assert_eq!(
+                    input,
+                    8_192 - 2_000 - 120,
+                    "a title not being written reserves no room"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_summarys_input_share_also_leaves_room_for_its_answer_and_reasoning() {
+        let output = 3_024;
+        let budget = after_output(budget_of(Some(4_096), 50), output);
+        assert!(
+            budget.tokens + output <= 4_096,
+            "a percentage of the context is not additional space beyond the model's whole window"
+        );
+    }
 
     #[test]
     fn half_of_a_known_window_is_sent_at_the_carry_rules_bytes_to_a_token() {

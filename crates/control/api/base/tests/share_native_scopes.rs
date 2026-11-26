@@ -15,7 +15,7 @@ use orch_api_contract::share::{
     ShareParts, ShareTo, ShareToThread, ShareWhat, ShareWhatDocument, ShareWithAgents,
 };
 use orch_api_contract::threads::ShareMode;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Id, Json, new_id};
 use rig::Scene;
@@ -23,11 +23,12 @@ use serde_json::json;
 async fn key(s: &Scene, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native sharing records",
             token_hash: &token_hash(&secret),
@@ -135,13 +136,13 @@ async fn share_list_source_and_recipient_sides_bind_the_native_record_subjects_a
         .token(&s.ada.token)
         .body(&CreateThread {
             name: Some("Recipient name sentinel".into()),
-            binding: Some(CreateThreadBinding {
-                agent_id: s.on.agent,
-                provider_id: s.on.provider,
-                arrangement: None,
-            }),
+            binding: Some(CreateThreadBinding::provider(
+                s.on.agent,
+                s.on.provider,
+                None,
+            )),
             model: Some(rig::MODEL.into()),
-            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            environment: Some(EnvironmentChoice::existing(s.on.environment)),
             directory: Some("web".into()),
             agent_access: Some(AgentAccessChoice {
                 where_: AgentAccessWhere::Nothing,

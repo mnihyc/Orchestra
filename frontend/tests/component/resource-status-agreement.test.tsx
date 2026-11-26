@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AdoptionApi from '@/api/adoption';
-import { harnessSessionsQuery } from '@/api/adoption';
+import { harnessSessionsKey } from '@/api/adoption';
 import type * as ResourcesApi from '@/api/resources';
 import { providerKey } from '@/api/resources';
 import { ApiError } from '@/api/client';
@@ -26,11 +26,14 @@ vi.mock('@/api/resources', async (load) => { const actual = await load<typeof Re
   providerQuery: (id: string) => ({ queryKey: actual.providerKey(id), queryFn: calls.read, staleTime: Infinity }),
   hostQuery: (id: string) => ({ queryKey: actual.hostKey(id), queryFn: () => { calls.host(id); return Promise.resolve({ ...detailHost, id, name: provider.runtime?.host?.name ?? detailHost.name }); }, staleTime: Infinity }) }; });
 vi.mock('@/api/adoption', async (load) => { const actual = await load<typeof AdoptionApi>(); return { ...actual,
-  harnessSessionsQuery: (provider: string, agent: string) => ({ ...actual.harnessSessionsQuery(provider, agent), queryFn: () => calls.sessions(provider, agent) }) }; });
+  harnessSessionsPageQuery: (...args: Parameters<typeof actual.harnessSessionsPageQuery>) => {
+    const [provider, agent, , read] = args;
+    return { ...actual.harnessSessionsPageQuery(...args), queryFn: async () => { const items = await calls.sessions(provider, agent); read.captured('catalogue'); return { items, source: 'catalogue', next_cursor: null }; } };
+  } }; });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn(),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string> }) => <a {...attributes} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/providers/acts', () => ({ useProviderActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
 vi.mock('@/features/resources/providers/Threads', () => ({ ProviderThreads: () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
@@ -46,8 +49,32 @@ beforeEach(() => {
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); document.documentElement.classList.toggle('dark', wasDark); if (oldTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = oldTheme; await setLocale('en'); });
 function draw(content: ReactNode) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } });
-  return { ...show(<QueryClientProvider client={cache}>{content}</QueryClientProvider>), cache };
+  const view = show(<QueryClientProvider client={cache}>{content}</QueryClientProvider>);
+  return { ...view, cache, rerender: (next: ReactNode) => view.rerender(<QueryClientProvider client={cache}>{next}</QueryClientProvider>) };
 }
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps an attach attempt's captured eligibility separate from later edits and retires withdrawn facts (${locale})`, async () => {
+  await setLocale(locale);
+  const retry = { last_attempt_at: '2026-10-24T10:00:00Z', next_eligible_at: '2026-10-24T10:00:30Z', last_problem: 'The directory is outside the allowed root', revision: 7 };
+  const environment = { ...detailEnvironment, placement: 'connected' as const, status: 'failed' as const, updated_at: '2026-10-25T10:00:00Z', attach_retry: retry };
+  const view = draw(<EnvironmentStatusText environment={environment} />);
+  expect(screen.queryByText(retry.last_problem)).not.toBeInTheDocument();
+  expect(calls.read).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  expect(body).toHaveTextContent(retry.last_problem);
+  expect(body.querySelector(`time[datetime="${retry.last_attempt_at}"]`)).not.toBeNull();
+  expect(body.querySelector(`time[datetime="${retry.next_eligible_at}"]`)).not.toBeNull();
+  expect(body.querySelector(`time[datetime="${environment.updated_at}"]`)).toBeNull();
+  expect(calls.read).not.toHaveBeenCalled();
+  const missing = { ...environment, attach_retry: null };
+  view.rerender(<EnvironmentStatusText environment={missing} />);
+  await waitFor(() => expect(body).not.toHaveTextContent(retry.last_problem));
+  expect(body).toHaveTextContent(locale === 'en' ? 'Not reported' : '尚未报告');
+  const recovered = { ...missing, status: 'running' as const };
+  view.rerender(<EnvironmentStatusText environment={recovered} />);
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`keeps Activity's header consistent with failures and the accepted recovery (${locale}/${theme})`, async () => {
@@ -56,14 +83,16 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await screen.findByRole('heading', { name: provider.name, level: 1 });
     expect(await screen.findByText(i18n.t('adopt.historyUnavailable'), { exact: true })).toBeVisible();
     expect(screen.queryByText(i18n.t('providers.phrase.ready'), { exact: true })).not.toBeInTheDocument();
-    expect(screen.getAllByRole('alert')).toHaveLength(2); expect(calls.sessions).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByRole('alert')).toHaveLength(1); expect(calls.sessions).toHaveBeenCalledTimes(1);
+    const choose = async (name: string) => { await user.click(screen.getByRole('combobox', { name: i18n.t('adopt.profile') })); await user.click(screen.getByRole('option', { name })); };
+    await choose(other.name); await waitFor(() => expect(calls.sessions).toHaveBeenCalledTimes(2));
+    await choose(detailAgent.name);
     expect(view.cache.getQueryData<Provider>(providerKey(provider.id))?.status).toBe('ready');
-    const heading = screen.getByRole('heading', { name: detailAgent.name });
-    const section = heading.closest('section'); if (section === null) throw new Error('Each session reader needs its own section');
+    const section = screen.getByRole('region', { name: i18n.t('adopt.title') });
     calls.sessions.mockResolvedValue([]); await user.click(within(section).getByRole('button', { name: i18n.t('common.tryAgain') }));
     await waitFor(() => expect(calls.sessions).toHaveBeenCalledTimes(3));
-    expect(await screen.findByText(i18n.t('adopt.historyPartial'), { exact: true })).toBeVisible(); expect(screen.getAllByRole('alert')).toHaveLength(1);
-    act(() => { view.cache.setQueryData(harnessSessionsQuery(provider.id, other.id).queryKey, []); });
+    expect(await screen.findByText(i18n.t('adopt.historyPartial'), { exact: true })).toBeVisible(); expect(screen.queryByRole('alert')).toBeNull();
+    act(() => { view.cache.setQueryData(harnessSessionsKey(provider.id, other.id), []); });
     expect(await screen.findByText(i18n.t('adopt.historyAvailable'), { exact: true })).toBeVisible(); expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.sessions).toHaveBeenCalledTimes(3);
   });
@@ -82,7 +111,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
 }
 
 it('does not read a hidden session list merely to compute a header', async () => {
-  draw(<ProviderActivityStatus harnesses={[{ providerId: provider.id, providerName: provider.name, agent: detailAgent }]} />);
+  draw(<ProviderActivityStatus harnesses={[{ providerId: provider.id, providerName: provider.name, agents: [detailAgent] }]} />);
   await act(async () => { await Promise.resolve(); }); expect(calls.sessions).not.toHaveBeenCalled();
   expect(screen.queryByText(i18n.t('adopt.historyAvailable'))).not.toBeInTheDocument();
 });
