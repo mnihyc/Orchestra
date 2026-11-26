@@ -30,6 +30,41 @@ pub struct UsageEvent {
     pub request_ref: Option<String>,
 }
 
+/// Transformations performed by the native conformance rule, without rejected source text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConformanceFacts {
+    /// Whitespace was normalized.
+    pub flattened: bool,
+    /// A multiline answer was reduced to its first nonempty line.
+    pub first_line_only: bool,
+    /// Characters removed by the chosen character allowance, after field formatting.
+    pub removed_characters: u64,
+    /// Supplied tags absent from the offered choices.
+    pub unknown_tags: u64,
+    /// Supplied tags already retained by this answer.
+    pub duplicate_tags: u64,
+    /// Known, nonduplicate tags beyond the chosen tag allowance.
+    pub over_budget_tags: u64,
+    /// An invalid handoff was rejected whole instead of keeping a command/path prefix.
+    pub rejected_whole: bool,
+}
+
+impl ConformanceFacts {
+    fn include(&mut self, earlier: &Self) {
+        self.flattened |= earlier.flattened;
+        self.first_line_only |= earlier.first_line_only;
+        self.removed_characters = self
+            .removed_characters
+            .saturating_add(earlier.removed_characters);
+        self.unknown_tags = self.unknown_tags.saturating_add(earlier.unknown_tags);
+        self.duplicate_tags = self.duplicate_tags.saturating_add(earlier.duplicate_tags);
+        self.over_budget_tags = self
+            .over_budget_tags
+            .saturating_add(earlier.over_budget_tags);
+        self.rejected_whole |= earlier.rejected_whole;
+    }
+}
+
 /// What a summarizer made.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SummaryResult {
@@ -42,6 +77,10 @@ pub struct SummaryResult {
     /// What the call used, where it used anything the ledger counts.
     #[serde(default)]
     pub usage: Option<UsageEvent>,
+    /// Native observations survive a second in-process conformance boundary. Serialized producer
+    /// replies cannot supply these facts: their words are held to the native rule when received.
+    #[serde(skip)]
+    pub conformance: Option<ConformanceFacts>,
 }
 
 /// A result held to the rule, and whether it had to be discarded.
@@ -52,6 +91,8 @@ pub struct Conformed {
     pub result: SummaryResult,
     /// Whether the output was malformed and nothing is to be written.
     pub discarded: bool,
+    /// Actual transformations, kept separately from usage and from the conformed words.
+    pub facts: ConformanceFacts,
 }
 
 impl SummaryResult {
@@ -87,41 +128,74 @@ impl SummaryResult {
         tag_choices: &[String],
     ) -> Conformed {
         let usage = self.usage;
-        match field {
+        let previous = self.conformance.unwrap_or_default();
+        let count = |text: &str| u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+        let mut made = match field {
             SummaryField::Summary => {
-                let paragraph = self
+                let normalized = self
                     .text
                     .as_deref()
-                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "));
+                let paragraph = normalized
+                    .as_deref()
                     .filter(|text| !text.is_empty())
-                    .map(|text| cut(&text, limits.max_chars).trim_end().to_owned())
+                    .map(|text| cut(text, limits.max_chars).trim_end().to_owned())
                     .filter(|text| !text.is_empty());
+                let facts = ConformanceFacts {
+                    flattened: self
+                        .text
+                        .as_deref()
+                        .zip(normalized.as_deref())
+                        .is_some_and(|(raw, normalized)| raw != normalized),
+                    removed_characters: normalized
+                        .as_deref()
+                        .map_or(0, count)
+                        .saturating_sub(paragraph.as_deref().map_or(0, count)),
+                    ..ConformanceFacts::default()
+                };
                 Conformed {
                     discarded: paragraph.is_none(),
+                    facts,
                     result: SummaryResult {
                         text: paragraph,
                         tags: None,
                         usage,
+                        conformance: None,
                     },
                 }
             }
             SummaryField::Title | SummaryField::Description | SummaryField::Rollup => {
-                let line = self
+                let first = self
                     .text
                     .as_deref()
-                    .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
-                    .map(|line| cut(line, limits.max_chars).trim_end().to_owned());
+                    .and_then(|text| text.lines().find(|line| !line.trim().is_empty()));
+                let formatted = first.map(str::trim);
+                let line = formatted.map(|line| cut(line, limits.max_chars).trim_end().to_owned());
+                let facts = ConformanceFacts {
+                    flattened: first
+                        .zip(formatted)
+                        .is_some_and(|(raw, trimmed)| raw != trimmed),
+                    first_line_only: first.is_some()
+                        && self.text.as_deref().is_some_and(|text| text.contains('\n')),
+                    removed_characters: formatted
+                        .map_or(0, count)
+                        .saturating_sub(line.as_deref().map_or(0, count)),
+                    ..ConformanceFacts::default()
+                };
                 Conformed {
                     discarded: line.is_none(),
+                    facts,
                     result: SummaryResult {
                         text: line,
                         tags: None,
                         usage,
+                        conformance: None,
                     },
                 }
             }
             SummaryField::Tags => {
                 let most = usize::try_from(limits.max_tags).unwrap_or(usize::MAX);
+                let mut facts = ConformanceFacts::default();
                 let tags = self.tags.map(|given| {
                     let mut kept: Vec<String> = Vec::new();
                     for name in given {
@@ -129,9 +203,14 @@ impl SummaryResult {
                             .iter()
                             .find(|choice| choice.eq_ignore_ascii_case(name.trim()))
                         else {
+                            facts.unknown_tags = facts.unknown_tags.saturating_add(1);
                             continue;
                         };
-                        if !kept.contains(choice) && kept.len() < most {
+                        if kept.contains(choice) {
+                            facts.duplicate_tags = facts.duplicate_tags.saturating_add(1);
+                        } else if kept.len() >= most {
+                            facts.over_budget_tags = facts.over_budget_tags.saturating_add(1);
+                        } else {
                             kept.push(choice.clone());
                         }
                     }
@@ -139,35 +218,43 @@ impl SummaryResult {
                 });
                 Conformed {
                     discarded: tags.is_none(),
+                    facts,
                     result: SummaryResult {
                         text: None,
                         tags,
                         usage,
+                        conformance: None,
                     },
                 }
             }
             SummaryField::Handoff => {
-                // Reject a malformed or oversized handoff whole. A character cut can change the
-                // meaning of an exact path or command the next agent is told to use.
-                let text = self
-                    .text
-                    .filter(|text| {
-                        !text.trim().is_empty()
-                            && text.chars().count()
-                                <= usize::try_from(limits.max_chars).unwrap_or(usize::MAX)
-                            && text.split_whitespace().count() <= HANDOFF_MAX_WORDS
-                    })
-                    .map(|text| text.trim().to_owned());
+                // Reject the whole answer: cutting an exact path or command changes its meaning.
+                let text = self.text.filter(|text| {
+                    !text.trim().is_empty()
+                        && text.chars().count()
+                            <= usize::try_from(limits.max_chars).unwrap_or(usize::MAX)
+                        && text.split_whitespace().count() <= HANDOFF_MAX_WORDS
+                });
+                let facts = ConformanceFacts {
+                    rejected_whole: text.is_none(),
+                    flattened: text.as_deref().is_some_and(|text| text != text.trim()),
+                    ..ConformanceFacts::default()
+                };
                 Conformed {
                     discarded: text.is_none(),
+                    facts,
                     result: SummaryResult {
-                        text,
+                        text: text.map(|text| text.trim().to_owned()),
                         tags: None,
                         usage,
+                        conformance: None,
                     },
                 }
             }
-        }
+        };
+        made.facts.include(&previous);
+        made.result.conformance = Some(made.facts.clone());
+        made
     }
 }
 
@@ -176,6 +263,108 @@ mod tests {
     use super::*;
     use crate::summarizer::{DESCRIPTION_MAX_CHARS, TITLE_MAX_CHARS};
     use serde_json::json;
+
+    #[test]
+    fn serialized_producer_claims_cannot_invent_native_transformation_counts() {
+        let supplied: SummaryResult = serde_json::from_value(json!({
+            "text": "ready", "conformance": {"removed_characters": 900, "rejected_whole": true}
+        }))
+        .unwrap();
+        let made = supplied.conform(
+            SummaryField::Summary,
+            &SummaryLimits {
+                max_chars: 100,
+                max_tags: 0,
+            },
+            &[],
+        );
+        assert_eq!(made.facts, ConformanceFacts::default());
+        assert_eq!(made.result.text.as_deref(), Some("ready"));
+    }
+
+    #[test]
+    fn a_shortened_paragraph_keeps_its_actual_transformation_when_it_crosses_another_boundary() {
+        let made = SummaryResult {
+            text: Some("  alpha  beta\ngamma delta  ".into()),
+            usage: Some(used()),
+            ..SummaryResult::default()
+        }
+        .conform(
+            SummaryField::Summary,
+            &SummaryLimits {
+                max_chars: 10,
+                max_tags: 0,
+            },
+            &[],
+        );
+        assert_eq!(made.result.text.as_deref(), Some("alpha beta"));
+        assert!(made.facts.flattened);
+        assert_eq!(made.facts.removed_characters, 12);
+        assert_eq!(made.result.usage, Some(used()));
+        let facts = made.facts.clone();
+        let again = made.result.conform(
+            SummaryField::Summary,
+            &SummaryLimits {
+                max_chars: 1000,
+                max_tags: 0,
+            },
+            &[],
+        );
+        assert_eq!(
+            again.facts, facts,
+            "the already cut result does not acquire a new origin from a later allowance"
+        );
+        assert_eq!(again.result.text.as_deref(), Some("alpha beta"));
+    }
+
+    #[test]
+    fn title_and_tag_adjustments_record_the_decision_that_actually_dropped_each_part() {
+        let title = SummaryResult::text("first line\nsecond line").conform(
+            SummaryField::Title,
+            &limits(SummaryField::Title),
+            &[],
+        );
+        assert!(title.facts.first_line_only);
+        assert_eq!(title.facts.removed_characters, 0);
+        let tags = SummaryResult::tags(&["backend", "BACKEND", "invented", "docs", "infra"])
+            .conform(
+                SummaryField::Tags,
+                &SummaryLimits {
+                    max_chars: 80,
+                    max_tags: 1,
+                },
+                &["backend".into(), "docs".into(), "infra".into()],
+            );
+        assert_eq!(tags.result.tags, Some(vec!["backend".into()]));
+        assert_eq!(tags.facts.unknown_tags, 1);
+        assert_eq!(tags.facts.duplicate_tags, 1);
+        assert_eq!(tags.facts.over_budget_tags, 2);
+    }
+
+    #[test]
+    fn a_rejected_handoff_keeps_the_usage_and_the_whole_rejection_without_retaining_a_command_prefix()
+     {
+        let answer = SummaryResult {
+            text: Some("run /an/exact/command".into()),
+            usage: Some(used()),
+            ..SummaryResult::default()
+        }
+        .conform(
+            SummaryField::Handoff,
+            &SummaryLimits {
+                max_chars: 8,
+                max_tags: 0,
+            },
+            &[],
+        );
+        assert!(answer.discarded && answer.facts.rejected_whole);
+        assert!(answer.result.text.is_none());
+        assert_eq!(answer.result.usage, Some(used()));
+        assert_eq!(
+            answer.facts.removed_characters, 0,
+            "a rejected whole is not a shortened valid handoff"
+        );
+    }
 
     #[test]
     fn a_summary_is_one_paragraph_and_its_requested_size_can_exceed_the_default() {

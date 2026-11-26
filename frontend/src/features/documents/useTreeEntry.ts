@@ -47,10 +47,12 @@ export function useTreeEntry(item: DocumentTreeItem, retained = false, enabled =
       } else if (frame.op === 'resync') {
         generation += 1; subscription?.unsubscribe();
         if (frame.reload === true) {
+          // The next subscription reads the entry again whole: what is shown stays until its snapshot replaces it, and a
+          // delayed read of the former one never lands. A refusal of the reader still ends it (below).
           const held = cache.getQueryCache().find({ queryKey: key, exact: true });
           if (held !== undefined) {
             void held.cancel({ revert: false, silent: true });
-            held.setState({ data: undefined, dataUpdatedAt: 0, error: null, status: 'pending', fetchStatus: 'idle' });
+            held.setState({ dataUpdatedAt: 0, error: null, status: held.state.data === undefined ? 'pending' : 'success', fetchStatus: 'idle' });
           }
         }
         subscribe();

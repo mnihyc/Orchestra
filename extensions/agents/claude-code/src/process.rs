@@ -133,6 +133,12 @@ pub trait Launcher: Send + Sync + std::fmt::Debug {
     fn streams(&self, _spec: &LaunchSpec) -> Option<ProcessStreams> {
         None
     }
+    /// Whether the programs this launcher starts run where the harness runs, as they are, so that what they find
+    /// there (the harness's shell sandbox, see [`crate::sandbox`]) is a fact of that place. A launcher that only
+    /// replays or records the harness says no, and the adapter then declares what the build supports.
+    fn runs_here(&self) -> bool {
+        false
+    }
 }
 
 /// Actual process completion, independent of where its native byte streams are carried.
@@ -192,6 +198,10 @@ impl Launcher for DirectLauncher {
             .envs(&spec.env)
             .current_dir(&spec.cwd);
         command
+    }
+
+    fn runs_here(&self) -> bool {
+        true
     }
 }
 

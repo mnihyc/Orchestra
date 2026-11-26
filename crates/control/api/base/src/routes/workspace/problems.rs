@@ -45,6 +45,8 @@ pub enum Failure {
     Away(String),
     /// Something of the system's own failed.
     Other(String),
+    /// The current HTTP identity or file reach refused before native work.
+    Current(Box<ApiError>),
 }
 
 impl Failure {
@@ -53,6 +55,7 @@ impl Failure {
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Machine(error) => Some(error.code.as_str()),
+            Self::Current(error) => Some(error.code().as_str()),
             _ => None,
         }
     }
@@ -64,6 +67,7 @@ impl Failure {
             Self::Away(why) => ApiError::new(ErrorCode::SourceOffline, why),
             Self::Other(why) => ApiError::internal(why),
             Self::Machine(error) => machine_problem(&error, doing),
+            Self::Current(error) => *error,
         }
     }
 }

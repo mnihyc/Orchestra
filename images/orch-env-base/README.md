@@ -3,7 +3,11 @@
 The image the Default template's environments are made from: Debian (the distribution the stack runs), an
 `agent` account with the ids the template names (1000), `/workspace` and `/home/agent` for the two volumes an
 environment keeps, and what a coding agent reaches for first: a shell, git, `ripgrep`, a C compiler, Python,
-curl and the usual small tools. Beside that it holds three things that a smaller machine goes without:
+curl and the usual small tools, with bubblewrap and socat for Claude Code's shell sandbox. Its Workspace tool
+access starts where the environment's runtime lets bubblewrap make its namespaces (a runtime with a kernel of its own,
+or a machine); in a stock container it cannot, Claude Code then offers Open only and says why, and the container is
+the boundary, as the Default template's Open tool access assumes. Beside that it holds three things that a smaller
+machine goes without:
 
 - **Root without a password**: `sudo` for the `agent` account, so that whoever works there, an agent or a person
   at a shell, installs what the work needs.
@@ -32,6 +36,7 @@ Debian's `libgl1` asks of any X server), the fonts and the browser's libraries 1
 | TigerVNC | 1.12.0 (Debian's `1.12.0+dfsg-8`) | `/usr/bin/Xvnc` | `TIGERVNC_VERSION` | `orch.image.tigervnc` |
 | openbox | 3.6.1 | `/usr/bin/openbox` | `OPENBOX_VERSION` | `orch.image.openbox` |
 | sudo | Debian's (1.9.13p3 today); not pinned, so that its fixes arrive | `/usr/bin/sudo` | | |
+| bubblewrap and socat, what Claude Code's shell sandbox runs commands in on Linux | Debian's (0.8.0 and 1.7.4.4 today); not pinned | `/usr/bin/bwrap`, `/usr/bin/socat` | | |
 
 The pins are build arguments of the [Dockerfile](Dockerfile), each with its version as the default. The build checks
 every one against what was installed and stops where they differ: Node.js against its hash and its own version,
