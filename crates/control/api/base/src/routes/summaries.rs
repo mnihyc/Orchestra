@@ -24,6 +24,10 @@ orch_api_base::api_family_callback! {
 pub struct View {
     pub identity: sources::Identity,
     pub inputs: Vec<KeyResolvedTarget>,
+    /// The stored paragraph's own sources among `inputs`: a view given as a reading needs each of them readable.
+    pub paragraph_inputs: Vec<KeyResolvedTarget>,
+    /// The next refresh's sources among `inputs`, each read as a model's input is.
+    pub proposal_inputs: Vec<KeyResolvedTarget>,
     pub providers: Vec<KeyResolvedTarget>,
     pub snapshot: SummarySnapshot,
     pub policy: orch_types::Hash,

@@ -26,14 +26,14 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
     return <a {...anchor} href={`${path}${query === '' ? '' : `?${query}`}`}>{children}</a>;
   },
 }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
 vi.mock('@/features/usage/Export', () => ({ Export: () => null }));
 // Chart rendering has its own component tests; these cases exercise the report's controlled inputs.
 vi.mock('@/features/usage/Chart', () => ({ UsageChart: () => null }));
-vi.mock('@/api/nodes', () => ({ nodeQuery: (id: string) => ({ queryKey: ['layout-node', id], queryFn: (): Promise<Node> => Promise.resolve(org(id, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')))) }), orgsQuery: {queryKey:['orgs'],queryFn:()=>Promise.resolve([])}, fetchTree:()=>Promise.resolve({nodes:[]}) }));
-vi.mock('@/api/resources', () => ({ providerQuery: () => ({ queryKey: ['layout-provider'], queryFn: () => Promise.resolve(null) }) }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@/api/nodes', async (loadOriginal) => ({ ...await loadOriginal<object>(), nodeQuery: (id: string) => ({ queryKey: ['layout-node', id], queryFn: (): Promise<Node> => Promise.resolve(org(id, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')))) }), orgsQuery: {queryKey:['orgs'],queryFn:()=>Promise.resolve([])}, fetchTree:()=>Promise.resolve({nodes:[]}) }));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(), providerQuery: () => ({ queryKey: ['layout-provider'], queryFn: () => Promise.resolve(null) }) }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/api/usage', async (importOriginal) => {
   const original = await importOriginal<typeof UsageApi>();
   return {
@@ -56,7 +56,7 @@ vi.mock('@/api/usage', async (importOriginal) => {
 afterEach(async () => { cleanup(); usageScene.active = false; document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
 function GlobalNavigation() { return <nav aria-label="Project navigation">Acme</nav>; }
 
-it.each(['usage', 'performance'] as const)('locates every scoped %s split locally while keeping descriptions and None', async (view) => {
+it.each(['usage', 'performance'] as const)('offers every scoped %s split from a dropdown like its neighbours, with descriptions and None', async (view) => {
   usageRead.mockClear(); historyRead.mockClear(); usageScene.active = true;
   const user = userEvent.setup({ delay: null }), onSearch = vi.fn();
   const scope = { kind: 'node', id: '00000000-0000-4000-8000-000000000001' } as const;
@@ -68,50 +68,44 @@ it.each(['usage', 'performance'] as const)('locates every scoped %s split locall
     }} />;
   }
   show(<ControlledReport />);
-  const input = await screen.findByRole('combobox', { name: i18n.t('usage.chart.splitBy') });
+  const split = await screen.findByRole('combobox', { name: i18n.t('usage.chart.splitBy') });
+  // Group by is the same kind of control as Interval beside it (and Measure in the usage view): a dropdown, no text box.
+  expect(split.tagName).toBe('BUTTON');
+  expect(screen.getByRole('combobox', { name: i18n.t('usage.chart.per') }).tagName).toBe('BUTTON');
+  if (view === 'usage') expect(screen.getByRole('combobox', { name: i18n.t('usage.chart.show') }).tagName).toBe('BUTTON');
+  expect(screen.queryByRole('textbox', { name: i18n.t('usage.chart.splitBy') })).toBeNull();
   const expected: (UsageDimension | 'none')[] = ['thread', 'person', 'model','offering','purpose', 'provider', 'agent', 'environment', 'org', 'project', 'tier', 'effort', 'program',
     ...(view === 'performance' ? ['topic' as const] : []), 'none'];
   let reads = usageRead.mock.calls.length;
   expect(reads).toBeGreaterThan(0);
-  // Usage also mounts its ordinary Records table; local choice typing must add no reads.
+  // Usage also mounts its ordinary Records table; opening the list adds no reads.
   await waitFor(() => expect(historyRead).toHaveBeenCalledTimes(view === 'usage' ? 1 : 0));
   const historyReads = historyRead.mock.calls.slice();
-  await user.click(input);
+  await user.click(split);
   expect(expected.length).toBeGreaterThan(10);
-  const options = within(screen.getByRole('listbox')).getAllByRole('option');
+  const options = within(await screen.findByRole('listbox')).getAllByRole('option');
   expect(options).toHaveLength(expected.length);
-  for (const [index, split] of expected.entries()) {
-    expect(options[index]).toHaveAccessibleName(i18n.t(`usagePerf.choices.splits.${split}.name`));
-    expect(options[index]).toHaveAccessibleDescription(i18n.t(`usagePerf.choices.splits.${split}.description`));
+  for (const [index, choice] of expected.entries()) {
+    expect(options[index]).toHaveAccessibleName(i18n.t(`usagePerf.choices.splits.${choice}.name`));
+    expect(options[index]).toHaveAccessibleDescription(i18n.t(`usagePerf.choices.splits.${choice}.description`));
   }
-  await user.type(input, 'program', { skipClick: true });
   expect(onSearch).not.toHaveBeenCalled(); expect(usageRead).toHaveBeenCalledTimes(reads); expect(historyRead.mock.calls).toEqual(historyReads);
-  await user.keyboard('{Enter}');
+  await user.click(options[expected.indexOf('program')]!);
   expect(onSearch).toHaveBeenCalledExactlyOnceWith({ series: 'program' });
   // Applying a committed split reads that series, just as the actual controlled page does.
   reads += 1;
   await waitFor(() => expect(usageRead).toHaveBeenCalledTimes(reads));
   expect(usageRead).toHaveBeenLastCalledWith(expect.objectContaining({ seriesBy: 'program' }));
-  const nextInput = await screen.findByRole('combobox', { name: i18n.t('usage.chart.splitBy') });
-  expect(nextInput).toHaveValue(i18n.t('usagePerf.choices.splits.program.name'));
-  await user.click(nextInput);
-  const nextOptions=within(screen.getByRole('listbox'));
-  await user.type(nextInput, i18n.t('usagePerf.choices.splits.none.name'), { skipClick: true });
-  expect(usageRead).toHaveBeenCalledTimes(reads);
-  expect(nextOptions.getByRole('option', { name: i18n.t('usagePerf.choices.splits.none.name') })).toBeVisible();
-  expect(nextInput).toHaveFocus();
-  expect(nextInput).toHaveValue(i18n.t('usagePerf.choices.splits.none.name'));
-  // Hover changes the active row. Resolve its live element again for the subsequent click.
-  await user.hover(nextOptions.getByRole('option', { name: i18n.t('usagePerf.choices.splits.none.name') }));
-  await user.click(nextOptions.getByRole('option', { name: i18n.t('usagePerf.choices.splits.none.name') }));
+  const next = await screen.findByRole('combobox', { name: i18n.t('usage.chart.splitBy') });
+  expect(next).toHaveTextContent(i18n.t('usagePerf.choices.splits.program.name'));
+  await user.click(next);
+  await user.click(within(await screen.findByRole('listbox')).getByRole('option', { name: i18n.t('usagePerf.choices.splits.none.name') }));
   expect(onSearch).toHaveBeenLastCalledWith({ series: 'none' });
   reads += 1;
   await waitFor(() => expect(usageRead).toHaveBeenCalledTimes(reads));
   expect(usageRead).toHaveBeenLastCalledWith(expect.objectContaining({ seriesBy: undefined }));
   expect(usageRead).toHaveBeenCalledTimes(reads);
   expect(historyRead.mock.calls).toEqual(historyReads);
-  // The independent measure and bucket controls retain their existing finite Select workflow.
-  expect(screen.getByRole('combobox', { name: i18n.t('usage.chart.per') }).tagName).toBe('BUTTON');
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps its local view choices while global navigation opens and closes at ${locale}/${theme}`, async () => {
