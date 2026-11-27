@@ -220,22 +220,33 @@ impl Wanted {
         for entry in &page.owners {
             wanted.entry(entry);
         }
-        for row in &page.rows {
-            for entry in &row.entries {
-                wanted.entry(entry);
-            }
-            for inherited in row.inherited.iter().flatten() {
-                wanted.entry(&inherited.entry);
-                wanted.origin(inherited.from);
-            }
-            if let Some(lock) = &row.locked {
-                wanted.place(lock.by);
-            }
-        }
+        wanted.extend_rows(&page.rows);
         for place in &page.admins_of {
             wanted.place(*place);
         }
         wanted
+    }
+
+    /// Names used by the rows themselves, including inherited origins and locks.
+    pub fn rows(rows: &[orch_authz::pages::RowView]) -> Self {
+        let mut wanted = Self::default();
+        wanted.extend_rows(rows);
+        wanted
+    }
+
+    fn extend_rows(&mut self, rows: &[orch_authz::pages::RowView]) {
+        for row in rows {
+            for entry in &row.entries {
+                self.entry(entry);
+            }
+            for inherited in row.inherited.iter().flatten() {
+                self.entry(&inherited.entry);
+                self.origin(inherited.from);
+            }
+            if let Some(lock) = &row.locked {
+                self.place(lock.by);
+            }
+        }
     }
 
     pub fn entries(entries: &[Entry]) -> Self {

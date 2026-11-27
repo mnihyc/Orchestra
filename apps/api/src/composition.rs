@@ -16,7 +16,7 @@ use orch_config::ServerConfig;
 use orch_db::Db;
 use orch_db::secrets::MasterKey;
 use orch_notifier_email::EmailNotifier;
-use orch_notifier_push::{PushNotifier, Vapid};
+use orch_notifier_push::{Contact, PushNotifier, Vapid, installation_contact};
 use orch_notifier_telegram::TelegramNotifier;
 use orch_notifier_webhook::WebhookNotifier;
 use orch_pki::ca::CaFiles;
@@ -37,10 +37,6 @@ const MASTER_KEY_FILE: &str = "orch_master_key";
 const NODE_TOKEN_FILE: &str = "node_enrollment_token";
 /// The file of the key that signs Web Push messages in the secrets directory.
 const VAPID_KEY_FILE: &str = "orch_vapid_private_key";
-/// How often the bundled node's token is tried again while there is nobody
-/// yet to make it in the name of: the first administrator is a person doing
-/// the first thing there is to do, and the try is one query.
-const NODE_TOKEN_RETRY: Duration = Duration::from_secs(10);
 /// How often the API writes its heartbeat: as often as the worker writes its
 /// own (its `heartbeat` job), so that one reading of staleness fits every part.
 const API_HEARTBEAT: Duration = Duration::from_secs(15);
@@ -95,14 +91,50 @@ fn read_secrets(dir: &Path) -> anyhow::Result<Secrets> {
 /// The notifiers of this deployment, which the requests that set channels up
 /// and try them know: the same ones the worker delivers through. Web Push is
 /// among them where the deployment has a key for it.
-fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifiers> {
+/// The sender contact of each delivery: the configured `[system] web_push_contact`, or else the
+/// installation's current public address when it is HTTPS, or else none (a local HTTP installation).
+fn public_address_contact(db: &Db, config: &ServerConfig) -> Contact {
+    let db = db.clone();
+    let seed = config.system.address_seed();
+    let configured = config.system.web_push_contact.trim().to_owned();
+    Contact::new(move || {
+        let db = db.clone();
+        let seed = seed.clone();
+        let configured = configured.clone();
+        async move {
+            if !configured.is_empty() {
+                return Ok(configured);
+            }
+            let unavailable = |_| {
+                orch_notifier_contract::delivery::DeliverError::temporary(
+                    "message",
+                    "The effective public address cannot be read",
+                )
+            };
+            let mut conn = db.acquire().await.map_err(unavailable)?;
+            let public_url =
+                orch_db::queries::public_addresses::read(&mut conn, &seed, SystemClock.now())
+                    .await
+                    .map_err(unavailable)?
+                    .addresses
+                    .public_url;
+            Ok(installation_contact(&public_url, ""))
+        }
+    })
+}
+
+fn notifiers(
+    secrets_dir: &Path,
+    contact: Contact,
+    configured_contact: &str,
+) -> anyhow::Result<Notifiers> {
     let mut notifiers = Notifiers::new();
     notifiers.register(Arc::new(EmailNotifier::new()))?;
     notifiers.register(Arc::new(WebhookNotifier::new()))?;
     notifiers.register(Arc::new(TelegramNotifier::new()))?;
     let key_file = secrets_dir.join(VAPID_KEY_FILE);
     if key_file.is_file() {
-        match web_push(config, &key_file) {
+        match web_push(&key_file, contact, configured_contact) {
             Ok(push) => {
                 // Meta tells browsers the public half; the private half stays with the notifier.
                 orch_api_core::routes::notifications::install_push_public_key(
@@ -119,8 +151,6 @@ fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifi
     Ok(notifiers)
 }
 
-/// Web Push signed with the deployment's key, which is told to a push service
-/// together with the address of the system.
 /// The built-in sources of a key's facts this program carries, as the connector's program registers them too:
 /// the API names a provider's default source, offers the built-ins and checks a choice of one from this table.
 fn builtin_sources() -> anyhow::Result<Arc<BuiltinSources>> {
@@ -131,13 +161,21 @@ fn builtin_sources() -> anyhow::Result<Arc<BuiltinSources>> {
     Ok(Arc::new(sources))
 }
 
-fn web_push(config: &ServerConfig, key_file: &Path) -> anyhow::Result<PushNotifier> {
+/// The notifier that supplies the registration key and signs with the installation's contact when available.
+fn web_push(
+    key_file: &Path,
+    contact: Contact,
+    configured_contact: &str,
+) -> anyhow::Result<PushNotifier> {
     let secret = orch_config::read_secret(key_file)?;
     let key = std::str::from_utf8(secret.expose()).context("the key is not text")?;
-    let vapid = Vapid::read(key, &config.system.public_url).context(
-        "the key, with [system] public_url as the sender's address, which must start with https://",
-    )?;
-    Ok(PushNotifier::new(vapid))
+    let vapid = Vapid::read(key).context("reading the Web Push signing key")?;
+    if !configured_contact.trim().is_empty() {
+        Vapid::check_contact(configured_contact).context(
+            "the [system] web_push_contact, which must be an https:// or mailto: address",
+        )?;
+    }
+    Ok(PushNotifier::new(vapid, contact))
 }
 
 /// Runs the service until it is asked to stop.
@@ -154,13 +192,21 @@ pub async fn run(
         !config.database.url.is_empty(),
         "database.url is not set (give it as ORCH_DATABASE_URL)"
     );
-    // Request connections: the database ends a session idle in a transaction, and cancels a stuck statement.
-    let db = Db::connect_with_limits(
+    // Request connections: the database ends a session idle in a transaction, and cancels a stuck statement. Some
+    // are kept open and ready while nobody is asking (`db_pool_warm`).
+    let limits = orch_db::pool::Limits::requests(&config.database);
+    let db = Db::connect_kept_warm(
         &config.database.url,
         config.api.db_pool,
         Duration::from_millis(config.database.slow_statement_ms),
         Duration::from_millis(config.database.slow_acquire_ms),
-        orch_db::pool::Limits::REQUESTS,
+        limits,
+        orch_db::pool::Warm::requests(
+            config.api.db_pool_warm,
+            (config.api.db_pool_lifetime_secs > 0)
+                .then(|| Duration::from_secs(config.api.db_pool_lifetime_secs)),
+            limits,
+        ),
     )
     .await
     .context("connecting to the database")?;
@@ -202,6 +248,13 @@ pub async fn run(
         orch_db::migrations::ensure_partitions(&mut conn, clock.now())
             .await
             .context("making partitions")?;
+        orch_db::queries::public_addresses::read(
+            &mut conn,
+            &config.system.address_seed(),
+            clock.now(),
+        )
+        .await
+        .context("reading the effective public addresses")?;
     }
 
     first_start(&db, clock.as_ref())
@@ -241,10 +294,25 @@ pub async fn run(
     orch_api_core::routes::auth::oidc::install_kind(Arc::new(
         orch_identity_oidc::OidcKind::new().context("the client of the identity providers")?,
     ));
+    // The services that can be asked whether a person is one, when the system asks that of them.
+    let human_check_client =
+        Arc::new(orch_human_check::Http::new().context("the client of the human check")?);
+    let human_check: Arc<dyn orch_human_check::Transport> =
+        Arc::<orch_human_check::Http>::clone(&human_check_client);
+    orch_api_core::sign_in::human_check::install_providers(orch_human_check::builtin(&human_check));
+    // And the way the server looks at its own web edge, to see that the pages can reach the service.
+    orch_api_core::sign_in::human_check::install_edge_reader(human_check_client);
     // The ways out of the application that channels and destinations can be made from.
-    orch_api_core::routes::notifications::install_notifiers(
-        notifiers(&config, launch.secrets_dir).context("the notifiers")?,
-    );
+    let notifiers = notifiers(
+        launch.secrets_dir,
+        public_address_contact(&db, &config),
+        &config.system.web_push_contact,
+    )
+    .context("the notifiers")?;
+    orch_worker_core::channel_setup::ensure_default_push(&db, &notifiers, clock.now())
+        .await
+        .context("setting up browser notifications")?;
+    orch_api_core::routes::notifications::install_notifiers(notifiers);
     let link = match &secrets {
         Some(secrets) => Link::new(LinkParts {
             db: db.clone(),
@@ -282,8 +350,14 @@ pub async fn run(
     ));
     if secrets.is_some() {
         let token_file = launch.secrets_dir.join(NODE_TOKEN_FILE);
-        if token_file.is_file() {
-            tokio::spawn(register_node_token(link.clone(), token_file, stop.clone()));
+        if !matches!(token_file.try_exists(), Ok(false)) {
+            let certificates = link.certificates().clone();
+            let cancelled = stop.clone();
+            tokio::spawn(async move {
+                certificates
+                    .register_bundled_node(&token_file, cancelled)
+                    .await
+            });
         }
     }
 
@@ -308,12 +382,12 @@ pub async fn run(
     // The last output of a person's shells is put away in it too, with the environment's secrets taken out.
     orch_api_core::recordings::install(
         blobs.store(),
-        db.clone(),
         secrets.as_ref().map(|each| each.master_key.clone()),
     );
     let cache = Cache::new(&config);
     let sampling = cache.collect_samples(&link);
     let app = Arc::new(AppState {
+        metrics_listener_failed: Default::default(),
         host_ports: Default::default(),
         db,
         config: Arc::clone(&config),
@@ -329,6 +403,9 @@ pub async fn run(
     let housekeeping = orch_api_core::cache::start_housekeeping(&app, &stop);
     let mut registry = Registry::new();
     orch_api_core::routes::mount(&mut registry);
+    orch_api_core::harness_checks::shipped::initialize(&app)
+        .await
+        .context("registering the shipped program builds")?;
     tracing::info!(requests = registry.bound().len(), "requests bound");
     let router = server::router(Arc::clone(&app), registry);
 
@@ -381,15 +458,16 @@ pub async fn run(
         let stop = stop.clone();
         async move {
             let mut every = tokio::time::interval(MEASUREMENTS_UPKEEP);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     () = stop.cancelled() => return,
-                    _ = every.tick() => readings.upkeep(),
+                    _ = every.tick() => crate::upkeep::run(&readings).await,
                 }
             }
         }
     });
-    match tokio::net::TcpListener::bind(&config.api.metrics_bind).await {
+    match app.bind_metrics(&config.api.metrics_bind).await {
         Ok(listener) => {
             tracing::info!(bind = %config.api.metrics_bind, "serving measurements");
             let stop = stop.clone();
@@ -412,7 +490,20 @@ pub async fn run(
         app.link
             .certificates()
             .keep_frontend_certificate(&config)
+            .await
             .context("the web edge’s certificate")?;
+        let retry = app
+            .link
+            .certificates()
+            .publish_frontend_transport(&config)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.detail))
+            .context("the web edge’s HTTPS settings")?;
+        tokio::spawn(app.link.certificates().clone().keep_frontend_transport(
+            Arc::clone(&app.config),
+            stop.clone(),
+            retry,
+        ));
     }
     // The API's own certificate as its listeners show it, renewed in place while it runs.
     let identity = secrets
@@ -569,9 +660,6 @@ async fn heartbeat(
     }
 }
 
-/// Registers the token of the bundled node, and waits for the first
-/// administrator if there is none yet, so that a system that has just been
-/// started needs no second start to have its node.
 /// Keeps the API's own certificate current until `stop`: once two thirds of its life have passed,
 /// the API issues itself another from the authority beside it, which its listeners show from their
 /// next handshake while the connections that stand keep theirs. A failure is tried again at the
@@ -595,6 +683,7 @@ async fn keep_certificate(
                 .link
                 .certificates()
                 .keep_frontend_certificate(&app.config)
+                .await
         {
             tracing::warn!(%error, "the web edge’s certificate could not be renewed");
         }
@@ -616,29 +705,6 @@ async fn keep_certificate(
                 %error,
                 "the API's certificate could not be renewed; it tries again in an hour"
             ),
-        }
-    }
-}
-
-async fn register_node_token(link: Link, file: PathBuf, stop: CancellationToken) {
-    use orch_api_core::certificates::Adopted;
-    loop {
-        match link.certificates().adopt_token_file(&file).await {
-            Ok(Adopted::WaitingForAdministrator) => {
-                tracing::info!("the token of the bundled node waits for the first administrator");
-            }
-            Ok(adopted) => {
-                tracing::info!(?adopted, "the token of the bundled node");
-                return;
-            }
-            Err(fault) => {
-                tracing::warn!(%fault.detail, "the token of the bundled node was not registered");
-                return;
-            }
-        }
-        tokio::select! {
-            () = stop.cancelled() => return,
-            () = tokio::time::sleep(NODE_TOKEN_RETRY) => {}
         }
     }
 }
@@ -667,6 +733,14 @@ async fn stopped() {
 mod tests {
     use super::*;
     use orch_provider_contract::choice::{Keeper, SourceElement, default_source};
+
+    #[test]
+    fn every_shipped_provider_and_image_route_has_a_valid_eligibility_declaration() {
+        let sources = super::builtin_sources().unwrap();
+        let registry = sources.capabilities();
+        assert!(!registry.declarations().routes.is_empty());
+        registry.check_route_schemas().unwrap();
+    }
 
     #[test]
     fn the_program_registers_each_vendor_reader_and_a_key_at_its_address_reads_it_by_default() {

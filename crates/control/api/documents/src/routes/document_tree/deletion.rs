@@ -201,12 +201,13 @@ impl effects::Apply for Reviews {
             let deadline = before.deadline();
             deadline.check()?;
             // The native audience is computed once. A preview has no first business effect.
+            let settings = super::options(ctx, conn).await?;
             let plan = domain::complete_deletion_plan_in(
                 conn,
                 domain::Actor::Person(principal),
                 selected,
                 principal.now(),
-                super::options(ctx),
+                settings,
             )
             .await;
             let plan = super::result(conn, plan).await?;
