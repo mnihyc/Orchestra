@@ -1,10 +1,9 @@
-/** Who gains and who loses what, before a row is cut loose, an entry removed, a default changed or a lock set.
+/** Who gains and who loses what, beside a row cut loose, an entry removed, a default changed or a lock set.
  *
- * A change that takes something away, or that reaches other pages, is asked about once, in a dialog
- * that says what it does and, from the server, whom it reaches: how many pages follow the rows
- * changed, and who gains or loses which permissions on them. A failed preview shows its cause and
- * can be retried; an empty answer is never made up. The change is
- * made only when the person confirms, and the dialog stays, with its refusal, until the answer.
+ * A change that takes something away, or that reaches other pages, is asked about once, in a dialog that says what it
+ * does; whom it reaches comes from the server beside it, the names behind each count opened by whoever wants them. That
+ * account never holds the change up: Confirm waits only for the page the change is made on, and the server's own
+ * checks at the write decide. A failed account shows its cause and can be retried; an empty answer is never made up.
  */
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
@@ -68,6 +67,7 @@ export function Account({ preview }: { preview: PagePreview }) {
   return (
     <div className="flex flex-col gap-2" aria-live="polite">
       <OwnerReadNotice disclosure={preview.owner_reads} />
+      <OwnerReadNotice disclosure={preview.server_host_use} />
       {preview.pages > 1 && (
         <p className="text-sm text-text-muted">
           {t('access.preview.pages', { count: preview.pages })}
@@ -95,7 +95,6 @@ export function ChangePreview({ source, asked, changes, onClose }: { source: Pag
     },
     enabled: wanted && page.data !== undefined,
     retry: false,
-    staleTime: 0,
     gcTime: 0,
   });
 
@@ -107,7 +106,7 @@ export function ChangePreview({ source, asked, changes, onClose }: { source: Pag
       confirmLabel={asked?.confirmLabel ?? ''}
       danger={asked?.danger ?? false}
       pending={changes.busy}
-      disabled={wanted && (page.isPending || page.isError || preview.isPending || preview.isError || preview.isFetching)}
+      disabled={wanted && (page.isPending || page.isError)}
       error={changes.error}
       onConfirm={() => {
         if (asked === null) return;

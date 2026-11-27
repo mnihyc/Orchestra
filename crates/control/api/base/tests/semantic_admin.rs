@@ -42,6 +42,7 @@ async fn only_a_system_admin_reads_where_search_by_meaning_stands_and_an_org_is_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.enabled"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -203,7 +204,7 @@ async fn local_embeddings_uses_ordinary_editable_removable_templates_and_provide
         .call(ProviderCreate, &[])
         .token(&c.root.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Local embeddings".into(),
             home_id: c.acme,
             access: None,
@@ -315,7 +316,35 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
     let c = cast(&world).await;
     places::join(&world, c.acme, c.acme, &c.root, "admin", &c.boss).await;
     let generation = orch_types::new_id();
-    let provider = orch_types::new_id();
+    let provider = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&c.boss.token)
+        .body(&CreateProvider::Api {
+            runtime_location: None,
+            name: "Embedding recipe".into(),
+            home_id: c.acme,
+            access: None,
+            arrangements: None,
+            runtime_config: None,
+            upstreams: vec![Upstream {
+                protocol: "openai-embeddings".into(),
+                base_url: "https://embeddings.invalid/v1".into(),
+                options: json!({"auth":"none"}),
+            }],
+            api_key: None,
+            secrets: None,
+            key_machine_id: None,
+            sources: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the restore control names an existing provider")
+        .provider
+        .base
+        .id;
     sqlx::query("INSERT INTO search_generations (id,org_id,provider_id,model_name,asked_dimensions,dimensions,query_prefix,document_prefix,chunking,state,created_at)
         VALUES ($1,$2,$3,'old-model',256,256,'query: ','text: ','parts-v1:64','active',$4)")
         .bind(generation).bind(c.acme).bind(provider).bind(world.now()).execute(&world.db.pool).await.unwrap();
@@ -325,6 +354,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
@@ -385,6 +415,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
@@ -440,4 +471,79 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
     )
     .await;
     assert_no_system_admin(&refused, "keeping the current model");
+}
+
+#[tokio::test]
+async fn semantic_org_names_are_searched_before_status_pages_and_a_continuation_keeps_the_same_words()
+ {
+    use orch_api_contract::common::CollectionQuery;
+    let world = World::new().await;
+    let c = cast(&world).await;
+    for index in 0..13 {
+        let org = places::make_org(
+            &world,
+            &c.root,
+            &format!("Semantic {index:02}"),
+            &format!("semantic-{index:02}"),
+        )
+        .await
+        .base
+        .id;
+        world
+            .app
+            .call(NodeSettingSet, &[&org, &"search.semantic.enabled"])
+            .token(&c.root.token)
+            .body(&NodeSettingSetBody {
+                model_choice: None,
+                value: json!(true),
+                locked: None,
+                expected_revision: None,
+            })
+            .send()
+            .await
+            .ok();
+    }
+    let mut query = CollectionQuery {
+        q: Some("Semantic 12".to_owned()),
+        limit: Some(1),
+        cursor: None,
+    };
+    let page = world
+        .app
+        .call(AdminSemanticSearchGet, &[])
+        .token(&c.root.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.orgs.len(), 1);
+    assert_eq!(page.orgs[0].org.name.as_deref(), Some("Semantic 12"));
+    assert!(page.orgs_next_cursor.is_none());
+    query.q = Some("Semantic".to_owned());
+    let first = world
+        .app
+        .call(AdminSemanticSearchGet, &[])
+        .token(&c.root.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    let mut ids = std::collections::BTreeSet::from([first.orgs[0].org.id]);
+    let mut next = first.orgs_next_cursor;
+    while let Some(cursor) = next {
+        query.cursor = Some(cursor);
+        let page = world
+            .app
+            .call(AdminSemanticSearchGet, &[])
+            .token(&c.root.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        for row in page.orgs {
+            assert!(ids.insert(row.org.id));
+        }
+        next = page.orgs_next_cursor;
+    }
+    assert_eq!(ids.len(), 13);
 }

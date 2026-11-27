@@ -8,23 +8,46 @@
  * an answer of the API is an answer, and is never asked for again by itself. A write is not repeated
  * here at all: whoever makes one that is safe to repeat says so by its key.
  */
-import { QueryClient, type InvalidateOptions, type InvalidateQueryFilters, type QueryKey } from '@tanstack/react-query';
+import { QueryClient, type InvalidateOptions, type InvalidateQueryFilters, type QueryClientConfig, type QueryKey } from '@tanstack/react-query';
 
-import { ApiError } from '@/api/client';
-import { scheduledReads } from '@/api/readScheduler';
+import { ApiError, client } from '@/api/client';
+import { shellBootstrapIndex } from '@/api/bootstrapIndex';
+import { resourceRowIndex } from '@/api/resourceRowIndex';
+import { scheduledReads, startingRead } from '@/api/readScheduler';
 import { NetworkError, retryPause, retryRead } from '@/lib/requests';
 import { setOrchLinkSource, type OrchLinkAddresses } from '@/lib/orchLinks';
-
-/**
- * How long an answer counts as fresh. Within it a screen that is opened again shows what it has and
- * asks nothing; after it the screen shows what it has and asks behind it. Half a minute covers going
- * back and forth between two screens without a request each time, and nothing a person acts on is
- * read from here alone: what changes while they look arrives by the live connection.
- */
-const FRESH_FOR_MS = 30_000;
+import { readingPreferences } from '@/lib/interfaceReading';
+import { readFreshness, readFreshnessSettings } from '@/api/freshness';
+import { holdAwaitedRead, observeReadAttempts, queryRead } from '@/api/reads';
+import { observedRetryDelay, requestReader } from '@/lib/readAttempts';
 
 /** How long an answer nobody shows is kept: long enough to come back to a screen and find it there. */
 const KEPT_FOR_MS = 5 * 60_000;
+
+/** The marker that every thread read's key carries (`realtime/threadScope.ts`), before its read lifetime and epoch. */
+const THREAD_READ = 'continuation-read';
+
+/** What a thread read's key names apart from its read lifetime, epoch and projection: the thing, its window and the
+ *  selected version (a first, unopened read follows the active one). `null` for a key that is not a thread read's. */
+export function threadReadIdentity(key: QueryKey): string | null {
+  const at = key.indexOf(THREAD_READ);
+  if (at < 0) return null;
+  const selection = key[at + 1] === 'unopened-active' ? null : key[at + 3] ?? null;
+  return JSON.stringify([key.slice(0, at), selection]);
+}
+
+/**
+ * A thread is read again under a new epoch after a reload, a reconnect or a changed history, which gives each of its
+ * reads (outline, summary, messages, turns…) a new key. Until the new key answers, a view keeps showing what the same
+ * read of the same thing showed, as placeholder data, and then swaps in the new answer. An answer that was retired from
+ * the cache (another person, a reset of authority) is never carried over.
+ */
+function keptThreadRead(cache: QueryClient, key: QueryKey) {
+  const identity = threadReadIdentity(key);
+  return (previous: unknown, previousQuery?: { queryHash: string; queryKey: QueryKey }): unknown =>
+    previousQuery !== undefined && identity !== null && cache.getQueryCache().get(previousQuery.queryHash) === previousQuery
+      && threadReadIdentity(previousQuery.queryKey) === identity ? previous : undefined;
+}
 
 /** A passing inspection may become kept while its one detail read finishes into the same cache. */
 export interface ReadOptions {
@@ -36,6 +59,51 @@ export interface ReadOptions {
  * A person's explicit Retry/Refresh still calls that query's refetch directly.
  */
 export class LiveQueryClient extends QueryClient {
+  constructor(config?: QueryClientConfig) {
+    super(config);
+    observeReadAttempts(this);
+    shellBootstrapIndex(this.getQueryCache());
+    resourceRowIndex(this.getQueryCache());
+  }
+
+  private reads = new WeakMap<object, { hash: string; original: object; wrapped: object }>();
+  override query: QueryClient['query'] = (options) => {
+    const queryHash = options.queryHash ?? super.defaultQueryOptions(options).queryHash;
+    const reading = super.query({ ...options, queryHash });
+    const query = this.getQueryCache().get(queryHash);
+    const release = query === undefined || query.state.fetchStatus === 'idle' ? () => undefined : holdAwaitedRead(this, query);
+    return reading.finally(release);
+  };
+  override defaultQueryOptions: QueryClient['defaultQueryOptions'] = (options) => {
+    let defaults = super.defaultQueryOptions(options);
+    const supplied = startingRead(defaults.queryKey);
+    if (supplied !== undefined) defaults = { ...defaults, ...supplied };
+    else if (defaults.staleTime === undefined) defaults = { ...defaults, staleTime: () => readFreshness(options.queryKey) };
+    if (defaults.placeholderData === undefined && threadReadIdentity(defaults.queryKey) !== null) {
+      defaults = { ...defaults, placeholderData: keptThreadRead(this, defaults.queryKey) as typeof defaults.placeholderData };
+    }
+    const read = defaults.queryFn;
+    if (typeof read !== 'function') return defaults;
+    const hash = defaults.queryHash;
+    const held = this.reads.get(read);
+    if (held?.hash === hash && held.wrapped === read) return defaults;
+    // The wrapper preserves the native function signature. A copied function used for a
+    // different hash gets that query's own cancellation and publication checks.
+    let wrapped: typeof read;
+    if (held?.hash === hash) wrapped = held.wrapped as typeof read;
+    else {
+      const original = (held?.original ?? read) as typeof read;
+      wrapped = (context) => {
+        const reader = client.session.getState();
+        return queryRead(this, hash, () => original(context), requestReader(reader.userId, reader.readerVersion));
+      };
+      const receipt = { hash, original, wrapped };
+      this.reads.set(original, receipt);
+      this.reads.set(wrapped, receipt);
+    }
+    return { ...defaults, queryFn: wrapped, ...(defaults.retryDelay === undefined ? {} : { retryDelay: observedRetryDelay(defaults.retryDelay) }) };
+  };
+
   override async invalidateQueries<Key extends QueryKey = QueryKey>(filters: InvalidateQueryFilters<Key> = {}, options?: InvalidateOptions): Promise<void> {
     if (filters.exact !== true) return;
     await super.invalidateQueries(filters, options);
@@ -45,7 +113,7 @@ export class LiveQueryClient extends QueryClient {
 export const queryClient = new LiveQueryClient({
   defaultOptions: {
     queries: {
-      staleTime: FRESH_FOR_MS,
+      staleTime: (query) => readFreshness(query.queryKey),
       gcTime: KEPT_FOR_MS,
       retry: retryRead,
       retryDelay: (attempt) => retryPause(attempt),
@@ -65,9 +133,12 @@ export const queryClient = new LiveQueryClient({
 });
 
 setOrchLinkSource(() => queryClient.getQueryData<OrchLinkAddresses>(['meta']));
+readFreshnessSettings(readingPreferences(queryClient).freshness);
 
 queryClient.getQueryCache().subscribe((event) => {
   if (event.type === 'removed') {
+    const current = queryClient.getQueryCache().get(event.query.queryHash);
+    if (current !== undefined && current !== event.query) return;
     const key: unknown = event.query.queryKey;
     if (Array.isArray(key)) scheduledReads.release(key);
   }

@@ -1,9 +1,9 @@
 import { duplicateEntries } from '@/features/duplicate/target';
-/** Browse the document tree without treating its folders as hierarchy nodes or text editors. */
+/** Browse the document tree without treating its folders as hierarchy nodes or text editors; pick rows to delete them together. */
 import { linkTo } from '@/lib/links';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { useState } from 'react';
+import { type MouseEvent, useState } from 'react';
 import { Copy, FilePlus2, FileText, FileUp, Folder, FolderPlus, MoreHorizontal, Pencil, Share2, Trash2, Undo2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -33,6 +33,9 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { toast } from '@/ui/Toast';
 import { Tooltip } from '@/ui/Tooltip';
 import { InspectionBanner } from '@/features/trace/InspectionBanner';
+import { useDocumentTrash } from '@/features/trash/useDocumentTrash';
+import { placeById } from '@/features/trash/where';
+import { onOwnControl, RowBox, SelectedBar, useRowSelection } from '@/ui/RowSelection';
 import { openImport } from '@/features/people/importHostState';
 
 /** The typed folder reader supplies its anchor; no hierarchy permission is inferred. */
@@ -76,6 +79,18 @@ export function DocumentDirectoryPage({ node, at, retained = false }: { node: st
   });
   const page = view.query.data;
   const directory = page?.directory;
+  const rowKey = (row: DocumentTreeListed) => `${row.entry.item.kind}:${row.entry.item.id}`;
+  const selection = useRowSelection(deleted ? [] : page?.items ?? [], rowKey);
+  const trash = useDocumentTrash();
+  const [trashing, setTrashing] = useState(false);
+  const trashSelected = async () => {
+    setTrashing(true);
+    try {
+      const result = await trash(selection.selected.map((row) => ({ item: row.entry.item, name: row.entry.title })),
+        directory === undefined ? null : placeById(directory.node.id, directory.node.kind, directory.node.name ?? ''));
+      if (result.groups.length > 0) selection.clear();
+    } finally { setTrashing(false); }
+  };
   const title = directory?.folder?.entry.title ?? t('documents.list.title');
   useScreenHeading({ title, icon: Folder, leaf: true, path: directory?.path,
     nodeId: directory?.node.redacted === false ? directory.node.id : undefined,
@@ -100,7 +115,8 @@ export function DocumentDirectoryPage({ node, at, retained = false }: { node: st
       ...(item.kind === 'document' ? duplicateEntries(t, { kind: 'document', id: item.id, name: row.entry.title, directory: row.entry.parent }) : [{ id: 'copy', label: t('documentFolders.actions.copy'), icon: <Copy aria-hidden />, onSelect: () => setAction({ command: 'copy', rows: [row] }) }]),
       { id: 'move', label: t('documentFolders.actions.move'), disabled: row.standing.manage ? false : t('documents.menu.needsManage'), onSelect: () => setAction({ command: 'move', rows: [row] }) },
       { id: 'rename', label: t('documentFolders.actions.rename'), icon: <Pencil aria-hidden />, disabled: item.kind === 'container' ? row.standing.manage ? false : t('documents.menu.needsManage') : row.standing.write ? false : t('documentFolders.needsEdit'), onSelect: () => setAction({ command: 'rename', rows: [row] }) },
-      { id: 'delete', label: t('documentFolders.actions.delete'), icon: <Trash2 aria-hidden />, danger: true, disabled: row.standing.manage ? false : t('documents.menu.needsManage'), onSelect: () => setAction({ command: 'delete', rows: [row] }) },
+      // Delete on a row that is ticked deletes the whole selection, as a file manager does.
+      { id: 'delete', label: t('documentFolders.actions.delete'), icon: <Trash2 aria-hidden />, danger: true, disabled: row.standing.manage ? false : t('documents.menu.needsManage'), onSelect: () => setAction({ command: 'delete', rows: selection.isTicked(row) ? selection.selected : [row] }) },
     ];
   };
   return <Page>
@@ -121,6 +137,9 @@ export function DocumentDirectoryPage({ node, at, retained = false }: { node: st
       onValueChange={(value) => setDeleted(value === 'deleted')} />}
     {make.isError && <ErrorAlert error={make.error} />}
     {restore.isError && <ErrorAlert error={restore.error} />}
+    {selection.selected.length > 0 && <SelectedBar count={selection.selected.length} total={page?.items.length ?? 0} onSelectAll={() => selection.toggleAll(true)} busy={trashing} onClear={selection.clear}>
+      <Button size="sm" variant="danger-ghost" icon={<Trash2 aria-hidden />} pending={trashing} blocked={!selection.selected.some((row) => row.standing.manage)} reason={t('documents.menu.needsManage')} onClick={() => void trashSelected()}>{t('documentFolders.actions.delete')}</Button>
+    </SelectedBar>}
     {view.staleCursor ? <ErrorState error={view.query.error} message={t('documentFolders.changed')}
       action={<Button onClick={() => void view.restart().catch(() => undefined)}>{t('files.tree.reload')}</Button>} />
       : view.query.isError ? <ErrorState error={view.query.error} onRetry={() => void view.retry().catch(() => undefined)} />
@@ -128,11 +147,15 @@ export function DocumentDirectoryPage({ node, at, retained = false }: { node: st
         {page.items.length === 0 ? <EmptyState compact icon={<Folder aria-hidden />} title={t(page.next_cursor === null && view.cursor === null ? 'documentFolders.empty' : 'documentFolders.emptyPage')} />
           : <ul aria-label={title} className="divide-y divide-border rounded-lg border border-border bg-surface">{page.items.map((row) => {
             const item = row.entry.item, menu = menuFor(row);
+            const box = deleted ? undefined : <RowBox name={row.entry.title} checked={selection.isTicked(row)} onChange={(on, range) => selection.toggle(row, on, range)} />;
             const actions = <Menu label={t('files.menu.for', { name: row.entry.title })} entries={menu}
               trigger={<IconButton label={t('files.menu.for', { name: row.entry.title })} icon={<MoreHorizontal aria-hidden />} size="sm" />} />;
             if (item.kind === 'document' && row.document !== undefined && row.document !== null) return <DocumentRow key={`document:${item.id}`} doc={row.document}
-              here={directory?.node.id ?? node} where={false} me={me} name={row.entry.basename} actions={actions} menu={menu} />;
-            const content = <li className="flex items-center gap-3 px-3 py-3" key={`${item.kind}:${item.id}`}>
+              here={directory?.node.id ?? node} where={false} me={me} name={row.entry.basename} actions={actions} menu={menu} select={box}
+              {...(deleted ? {} : { onPick: (event: MouseEvent<HTMLLIElement>) => { selection.click(row, event); } })} />;
+            const content = <li className="flex items-center gap-3 px-3 py-3" key={`${item.kind}:${item.id}`}
+              onClick={deleted ? undefined : (event) => { if (!onOwnControl(event.target)) selection.click(row, event); }}>
+              {box}
               {item.kind === 'container' ? <Folder className="size-4 shrink-0 text-text-muted" aria-hidden /> : <FileText className="size-4 shrink-0 text-text-muted" aria-hidden />}
               {row.entry.deleted_at !== null ? <div className="min-w-0 flex-1"><p className="truncate font-medium">{row.entry.basename}</p>{(row.inspection !== undefined && row.inspection !== null) && <p className="text-xs text-text-muted">{t('documentFolders.retainedUntil')} <RelativeTime at={row.inspection.purge_at} /></p>}</div> : <Link to={item.kind === 'container' ? '/document-folder/$folderId' : '/doc/$documentId'}
                 params={item.kind === 'container' ? { folderId: item.id } : { documentId: item.id }}

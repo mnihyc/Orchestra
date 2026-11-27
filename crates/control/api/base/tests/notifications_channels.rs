@@ -37,6 +37,62 @@ use std::collections::BTreeMap;
 
 const PASSWORD: &str = "hunter2-the-password";
 
+#[tokio::test]
+async fn channel_search_reaches_late_names_and_keeps_the_complete_visible_kind_facts() {
+    let o = Outside::new().await;
+    let far = FarSide::taking().await;
+    o.world
+        .set("outbound.allowed_private_hosts", json!(["127.0.0.1"]))
+        .await;
+    for index in 0..13 {
+        make_own(&o, &o.cai, &format!("Hook {index:02}"), &far.url, None)
+            .await
+            .ok();
+    }
+    let found = o
+        .world
+        .app
+        .call(NotificationChannelList, &[])
+        .token(&o.cai.token)
+        .query(&NotificationChannelListQuery {
+            q: Some("Hook 12".into()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].name, "Hook 12");
+    assert!(found.kinds.iter().any(|kind| kind == "webhook"));
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page = o
+            .world
+            .app
+            .call(NotificationChannelList, &[])
+            .token(&o.cai.token)
+            .query(&NotificationChannelListQuery {
+                q: Some("Hook".into()),
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
+}
+
 async fn make_system(
     o: &Outside,
     by: &Who,
@@ -636,12 +692,12 @@ async fn a_host_on_a_private_address_is_refused_for_an_orgs_and_a_persons_channe
     .await
     .problem();
     assert_eq!(refused.code, ErrorCode::RequestInvalid);
-    // The fault places the address; its explanation names a setting, which a public problem keeps
-    // to the catalogue's sentence.
-    assert_eq!(paths(&refused), ["config"], "{refused:?}");
+    // The fault names the field that gave the address and says in plain words why it is refused; the
+    // setting that would allow it stays out of a public problem.
+    assert_eq!(paths(&refused), ["config.url"], "{refused:?}");
     assert_eq!(
         faults(&refused)[0].1,
-        orch_api_contract::messages::for_code(ErrorCode::RequestInvalid)
+        "is a private address, which only the system's own channels reach unless a system administrator allows it"
     );
     assert_eq!(
         make_own(&o, &o.cai, "Mine", &far.url, None)
@@ -1299,7 +1355,7 @@ async fn the_channels_of_a_root_org_are_listed_to_look_after_for_whoever_may_and
                 .await
         }
     };
-    let theirs = listed(&o.bea, o.acme).await.ok();
+    let theirs = listed(&o.bea, o.acme).await.ok().items;
     assert_eq!(
         theirs.iter().map(|each| each.id).collect::<Vec<_>>(),
         [orgs.id]

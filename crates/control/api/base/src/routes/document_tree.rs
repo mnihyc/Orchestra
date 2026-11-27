@@ -41,7 +41,7 @@ orch_api_base::api_family_callback! {
     slot __ApiCallbackd61ba637ac, __API_CALLBACK_D61BA637AC, __api_set_d61ba637ac;
     base orch_api_base::routes::document_tree;
 
-    fn options<'__api>(arg0: &'__api orch_api_base::registry::Ctx) -> orch_engine::document_tree::Options;
+    async fn options<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn) -> orch_api_base::middleware::requests::ApiResult<orch_engine::document_tree::Options>;
 }
 
 pub async fn result<T>(conn: &mut Conn, value: Result<T, domain::Error>) -> ApiResult<T> {

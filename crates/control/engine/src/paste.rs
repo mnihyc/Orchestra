@@ -3,13 +3,13 @@
 //! The share chooses the default. An explicit message choice, including the always-inline setting,
 //! leaves context compaction to the agent program and does not impose an Orch message-size cap.
 
-use crate::context_fill::{TextKind, estimate_text};
+use crate::context_fill::{TextKind, estimate_text_counts};
 use crate::{Engine, EngineError};
 use orch_api_contract::threads::ContentPart;
 use orch_blob_contract::store::read_all;
 use orch_db::Conn;
 use orch_db::queries::threads::ThreadRow;
-use orch_types::Id;
+use orch_types::{Hash, Id};
 use std::collections::BTreeSet;
 
 /// The shipped share leaves most remaining context for work; the registry makes it changeable.
@@ -30,6 +30,17 @@ pub fn metadata(content: &orch_types::Json) -> orch_types::Json {
             {
                 part.remove("inline_text");
             }
+        }
+    }
+    content
+}
+
+/// Incoming folded metadata never supplies private inline delivery text.
+pub(crate) fn incoming(content: &[ContentPart]) -> Vec<ContentPart> {
+    let mut content = content.to_vec();
+    for part in &mut content {
+        if let ContentPart::PastedText(paste) = part {
+            paste.inline_text = None;
         }
     }
     content
@@ -95,6 +106,12 @@ pub async fn attachment_names(
       WHERE part->>'type' IN ('image','file','pasted_text') AND part->>'name' IS NOT NULL")
         .bind(thread).fetch_all(conn).await.map_err(orch_db::DbError::from)?;
     Ok(names.into_iter().collect())
+}
+
+/// A choice made from current context facts, with the blobs whose bytes are needed before it can run.
+pub(crate) struct PastePreparation {
+    pub content: Vec<ContentPart>,
+    pub missing: Vec<Hash>,
 }
 
 impl Engine {
@@ -164,18 +181,22 @@ impl Engine {
         Ok(())
     }
 
-    /// Verifies folded uploads at sending and records the delivery choice the person previews.
+    /// Chooses delivery from current context and verified counts, without reading stored bytes.
+    /// Missing text goes through ordinary preparation before a turn is admitted.
     pub(crate) async fn prepare_pastes(
         &self,
         conn: &mut Conn,
         thread: &ThreadRow,
         original: &[ContentPart],
-    ) -> Result<Vec<ContentPart>, EngineError> {
+    ) -> Result<PastePreparation, EngineError> {
         if !original
             .iter()
             .any(|part| matches!(part, ContentPart::PastedText(_)))
         {
-            return Ok(original.to_vec());
+            return Ok(PastePreparation {
+                content: original.to_vec(),
+                missing: Vec::new(),
+            });
         }
         let settings = crate::resolved::load(conn, thread.node_id).await?;
         let model = settings.model.as_deref().unwrap_or_default();
@@ -263,15 +284,14 @@ impl Engine {
         });
         let used = reported;
         let mut budget = inline_allowance(window, used, share);
-        let store = self
-            .blobs()
-            .ok_or_else(|| EngineError::unreadable("the upload store is unavailable"))?;
         let mut content = original.to_vec();
+        let mut missing = Vec::new();
         for part in &mut content {
             let ContentPart::PastedText(paste) = part else {
                 continue;
             };
-            paste.inline_text = None;
+            // Only load_pastes writes private inline text; incoming message metadata is scrubbed first.
+            let inline = paste.inline_text.take();
             let forced = paste.delivery == Some(orch_api_contract::threads::PasteDelivery::Inline)
                 || paste.delivery.is_none() && share >= PERCENT;
             let stored = orch_db::queries::storage::blob(conn, &paste.blob)
@@ -296,20 +316,77 @@ impl Engine {
             {
                 continue;
             }
+            let counts = orch_db::queries::storage::paste_counts(conn, &paste.blob).await?;
+            let tokens = counts.map(|(characters, ascii)| {
+                paste.characters = characters;
+                paste.ascii_characters = ascii;
+                estimate_text_counts(
+                    ascii,
+                    characters.saturating_sub(ascii),
+                    family,
+                    TextKind::Prose,
+                )
+            });
+            if !forced && tokens.is_some_and(|tokens| tokens > budget) {
+                continue;
+            }
+            if let Some(tokens) = tokens {
+                budget = budget.saturating_sub(tokens);
+            }
+            if let Some(text) = inline.filter(|_| counts.is_some()) {
+                paste.inline_text = Some(text);
+            } else {
+                missing.push(paste.blob);
+            }
+        }
+        Ok(PastePreparation { content, missing })
+    }
+
+    /// Reads only candidates named by a context snapshot, outside any thread transaction. The writer
+    /// checks that snapshot's input and recalculates the choice under its row afterwards.
+    pub(crate) async fn load_pastes(
+        &self,
+        conn: &mut Conn,
+        thread: &ThreadRow,
+        original: &[ContentPart],
+    ) -> Result<Vec<ContentPart>, EngineError> {
+        let prepared = self.prepare_pastes(conn, thread, original).await?;
+        if prepared.missing.is_empty() {
+            return Ok(prepared.content);
+        }
+        let store = self
+            .blobs()
+            .ok_or_else(|| EngineError::unreadable("the upload store is unavailable"))?;
+        let mut content = prepared.content;
+        for part in &mut content {
+            let ContentPart::PastedText(paste) = part else {
+                continue;
+            };
+            if !prepared.missing.contains(&paste.blob) {
+                continue;
+            }
             let read = store
                 .get(&paste.blob, None)
                 .await
                 .map_err(EngineError::unreadable)?;
             let bytes = read_all(read.body).await.map_err(EngineError::unreadable)?;
+            if Hash::of(&bytes) != paste.blob {
+                return Err(EngineError::unreadable(
+                    "the pasted text's stored bytes are damaged",
+                ));
+            }
             let text = String::from_utf8(bytes.to_vec()).map_err(EngineError::unreadable)?;
             paste.characters = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
             paste.ascii_characters =
                 i64::try_from(text.bytes().filter(u8::is_ascii).count()).unwrap_or(i64::MAX);
-            let tokens = estimate_text(&text, family, TextKind::Prose);
-            if forced || tokens <= budget {
-                budget = budget.saturating_sub(tokens);
-                paste.inline_text = Some(text);
-            }
+            orch_db::queries::storage::remember_paste_counts(
+                conn,
+                &paste.blob,
+                paste.characters,
+                paste.ascii_characters,
+            )
+            .await?;
+            paste.inline_text = Some(text);
         }
         Ok(content)
     }

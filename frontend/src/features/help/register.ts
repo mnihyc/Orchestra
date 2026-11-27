@@ -1,8 +1,10 @@
 /** Registers Help as a workbench view. */
 import { CircleQuestionMark } from 'lucide-react';
 
-import { HelpView } from '@/features/help/HelpView';
-import { registerView } from '@/features/workbench/views';
+import { lazyPart } from '@/features/files/lazy';
+import { registerView, type ViewProps } from '@/features/workbench/views';
+
+const HelpView = lazyPart<ViewProps>(() => import('./HelpView').then((module) => ({ default: module.HelpView })));
 
 /** Registers the Help view under its stable saved-layout identity. */
 export function registerHelpView(): void {

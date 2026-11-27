@@ -60,7 +60,7 @@ async fn a_committed_agent_copy_replayed_in_a_fresh_engine_keeps_every_identity_
     copy.name = Some("research-copy".into());
     let mut tx = area.world.pool.begin().await?;
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut tx).await?;
     let receipt = domain::execute_in(
         &mut tx,
         domain::Actor::Agent { thread: area.agent },
@@ -339,7 +339,7 @@ async fn a_late_second_document_limit_rolls_back_earlier_folder_content_file_pin
     let before = state(&area.world, &[area.topic, destination]).await?;
     let mut tx = area.world.pool.begin().await?;
     let actor = domain::Actor::Agent { thread: area.agent };
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut tx).await?;
     observe_destination(&mut tx, destination).await?;
     let result = domain::execute_in(
         &mut tx,

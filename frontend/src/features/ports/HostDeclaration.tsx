@@ -1,6 +1,6 @@
-/** The host's three explicit port fields, with an unsaved proposal, affected-allocation review and acknowledgement. */
+/** The host's three explicit port fields, saved at once; only a change that closes open ports says so, in one line with the ports on Show. */
 import { useQuery } from '@tanstack/react-query';
-import { Check, Pencil, RefreshCw, Save, X } from 'lucide-react';
+import { Check, Pencil, Save, X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
@@ -29,6 +29,19 @@ export function parsePortRanges(value: string): HostPorts['ranges'] | null {
   return ranges.length === 0 ? null : ranges;
 }
 
+/** Open ports that a change closes: one line, their environments and ports on Show; unknown openings are said as a rule. */
+function ClosingLine({ allocations }: { allocations: HostPortsReview['allocations'] }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  if (allocations === null) return <p className="text-sm text-warning-text">{t('ports.hostForm.closed')}</p>;
+  if (allocations.length === 0) return null;
+  return <div className="flex flex-col gap-2 text-sm">
+    <p className="flex flex-wrap items-center gap-2"><span className="text-warning-text">{t('ports.hostForm.closes', { count: allocations.length })}</span>
+      <Button size="sm" variant="ghost" aria-expanded={open} onClick={() => setOpen(!open)}>{t(open ? 'actions.hide.label' : 'actions.show.label')}</Button></p>
+    {open && <ul className="flex flex-col gap-1">{allocations.map((allocation) => <li key={allocation.opening_id} className="flex flex-wrap gap-x-3 gap-y-1"><span>{allocation.environment.name}</span><span>{t('ports.portNumber',{port:allocation.port})}</span><span>{t(`ports.transport.${allocation.transports}`)}</span></li>)}</ul>}
+  </div>;
+}
+
 function HostPortForm({ id, data, onClose }: { id: string; data: HostPortsReview; onClose: () => void }) {
   const { t } = useTranslation();
   const initial = data.current ?? data.proposal;
@@ -36,27 +49,29 @@ function HostPortForm({ id, data, onClose }: { id: string; data: HostPortsReview
   const [all, setAll] = useState(initial.bind === 'all');
   const [bind, setBind] = useState(initial.bind === 'all' ? '' : initial.bind);
   const [range, setRange] = useState(initial.ranges.map((entry) => `${entry.from}–${entry.to}`).join(', '));
-  const [reviewed, setReviewed] = useState(false);
-  const [clearing, setClearing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const ranges = parsePortRanges(range);
   const valid = address.trim() !== '' && (all || bind.trim() !== '') && ranges !== null;
-  const save = async () => {
-    if (busy || !reviewed || !data.can_edit || data.allocations === null || !clearing && !valid) return;
+  // A smaller range keeps acknowledged listeners until they close; only another Listen on or clearing closes them now.
+  const closesOnSave = data.current !== null && initial.bind !== (all ? 'all' : bind.trim());
+  const clearCloses = data.allocations === null || data.allocations.length > 0;
+  const edit = <T,>(set: (value: T) => void) => (value: T) => { set(value); setClearing(false); };
+  const save = async (clearing: boolean) => {
+    if (busy || !data.can_edit || !clearing && !valid) return;
     setBusy(true); setError(null);
     try { await saveHostPorts(id, clearing ? null : { address: address.trim(), bind: all ? 'all' : bind.trim(), ranges: ranges ?? [] }, data.revision); onClose(); }
     catch (failed) { setError(failed); } finally { setBusy(false); }
   };
-  const changed = () => { setReviewed(false); setClearing(false); };
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={t('ports.hostForm.title')} description={t('ports.hostForm.proposal')} dismissible={!busy} footer={<>
     <Button icon={<X aria-hidden />} onClick={onClose} pending={busy}>{t('ports.cancel')}</Button>
-    {!reviewed && data.current !== null && <Button variant="danger-ghost" icon={<X aria-hidden />} onClick={() => { setClearing(true); setReviewed(true); }}>{t('ports.hostForm.clear')}</Button>}
-    {reviewed ? <Button variant={clearing ? 'danger' : 'primary'} icon={<Save aria-hidden />} pending={busy} blocked={data.allocations === null} onClick={() => void save()}>{t(clearing ? 'ports.hostForm.clear' : 'ports.hostForm.save')}</Button> : <Button icon={<RefreshCw aria-hidden />} blocked={!valid} onClick={() => setReviewed(true)}>{t('ports.hostForm.review')}</Button>}
+    {data.current !== null && <Button variant={clearing ? 'danger' : 'danger-ghost'} icon={<X aria-hidden />} pending={busy} onClick={() => { if (clearCloses && !clearing) setClearing(true); else void save(true); }}>{t('ports.hostForm.clear')}</Button>}
+    <Button variant="primary" icon={<Save aria-hidden />} pending={busy} blocked={!valid} onClick={() => void save(false)}>{t('ports.hostForm.save')}</Button>
   </>}>
     <div className="flex flex-col gap-4">
-      {!clearing && <><Input label={t('ports.hostForm.reached')} value={address} readOnly={reviewed} onChange={(event) => { setAddress(event.target.value); changed(); }} /><div className="flex items-center gap-1 text-sm font-medium">{t('ports.hostForm.bind')}<HelpHint term={t('ports.hostForm.bind')} what={t('ports.hostForm.allAbout')} /></div><RadioGroup<'all' | 'one'> label={t('ports.hostForm.bind')} value={all ? 'all' : 'one'} disabled={reviewed} onValueChange={(next) => { setAll(next === 'all'); changed(); }} variant="list" options={[{ value: 'all', ...choiceOption(t, 'hostBinding.all'), description: t('ports.hostForm.allAbout') }, { value: 'one', ...choiceOption(t, 'hostBinding.one') }]} />{!all && <Input label={t('ports.hostForm.one')} value={bind} readOnly={reviewed} onChange={(event) => { setBind(event.target.value); changed(); }} />}<Input label={t('ports.hostForm.range')} value={range} readOnly={reviewed} onChange={(event) => { setRange(event.target.value); changed(); }} hint={t('ports.rangeHint')} error={ranges === null ? t('ports.hostFormInvalid') : undefined} /></>}
-      {reviewed && <div className="rounded-lg border border-warning/40 bg-warning-subtle p-3"><h3 className="text-sm font-semibold">{t('ports.hostForm.affected')}</h3>{data.allocations === null ? <p className="mt-2 text-sm">{t('ports.hostForm.missingReview')}</p> : <ul className="mt-2 flex flex-col gap-1 text-sm">{data.allocations.map((allocation) => <li key={allocation.opening_id} className="flex flex-wrap gap-x-3 gap-y-1"><span>{allocation.environment.name}</span><span>{t('ports.portNumber',{port:allocation.port})}</span><span>{t(`ports.transport.${allocation.transports}`)}</span></li>)}</ul>}<p className="mt-2 text-sm">{t(clearing || initial.bind !== (all ? 'all' : bind) ? 'ports.hostForm.closed' : 'ports.hostForm.kept')}</p></div>}
+      <Input label={t('ports.hostForm.reached')} value={address} onChange={(event) => edit(setAddress)(event.target.value)} /><div className="flex items-center gap-1 text-sm font-medium">{t('ports.hostForm.bind')}<HelpHint term={t('ports.hostForm.bind')} what={t('ports.hostForm.allAbout')} /></div><RadioGroup<'all' | 'one'> label={t('ports.hostForm.bind')} value={all ? 'all' : 'one'} onValueChange={(next) => edit(setAll)(next === 'all')} variant="list" options={[{ value: 'all', ...choiceOption(t, 'hostBinding.all'), description: t('ports.hostForm.allAbout') }, { value: 'one', ...choiceOption(t, 'hostBinding.one') }]} />{!all && <Input label={t('ports.hostForm.one')} value={bind} onChange={(event) => edit(setBind)(event.target.value)} />}<Input label={t('ports.hostForm.range')} value={range} onChange={(event) => edit(setRange)(event.target.value)} hint={t('ports.rangeHint')} error={ranges === null ? t('ports.hostFormInvalid') : undefined} />
+      {(clearing || closesOnSave) && <ClosingLine allocations={data.allocations} />}
       <p className="text-sm text-text-muted">{t('ports.hostForm.noFirewall')}</p><PortFault error={error} />
     </div>
   </Dialog>;

@@ -11,7 +11,7 @@ const article = 'who-can-see-and-do-what';
 const heading = 'who-may-make-projects-topics-and-threads';
 
 describe('finding who may create things', () => {
-  it.each(['create project', 'start thread', 'make project', 'new topic', '创建项目', '开始线程'])('finds the creation section for %s', (query) => {
+  it.each(['create project', 'start thread', 'make project', 'new topic', '创建项目', '开始会话'])('finds the creation section for %s', (query) => {
     const found = answer(helpEntries(guide.articles), query);
     expect(found.some(({ item }) => item.article.id === article && item.heading?.id === heading)).toBe(true);
   });
@@ -20,7 +20,7 @@ describe('finding who may create things', () => {
     try {
       const localized = localizedGuide(guide, i18n.t);
       const found = answer(helpEntries(localized.articles), 'create project').find(({ item }) => item.heading?.id === heading);
-      expect(found?.item.heading?.text).toBe('谁可以创建项目、话题和线程');
+      expect(found?.item.heading?.text).toBe('谁可以创建项目、话题和会话');
       expect(found?.item.article.id).toBe(article);
     } finally { await setLocale('en'); }
   });
