@@ -49,7 +49,9 @@ async fn a_directory_and_a_volume_with_the_same_content_match_and_bytes_names_an
     let binding = DirectoryBinding {
         path: root.to_string_lossy().into_owned(),
         device: Some(meta.dev()),
-        inode: Some(meta.ino()),
+        inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+            meta.ino(),
+        )),
     };
     let volume = VolumeRequest {
         name: lab.name("fingerprint-volume"),

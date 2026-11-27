@@ -10,12 +10,6 @@ use crate::registry::Ctx;
 
 use crate::routes::nodes::invalid;
 
-use chrono::DateTime;
-
-use chrono::Duration;
-
-use chrono::Utc;
-
 use orch_api_contract::common::ErrorCode;
 
 use orch_api_contract::documents::DocumentCommentUpdateBody;
@@ -89,14 +83,6 @@ fn key(row: &CommentRow, attempt: &Attempt) -> String {
     )
 }
 
-fn since(ctx: &Ctx) -> DateTime<Utc> {
-    i64::try_from(ctx.app.config.api.idempotency_ttl_hours)
-        .ok()
-        .and_then(Duration::try_hours)
-        .and_then(|ttl| ctx.now.checked_sub_signed(ttl))
-        .unwrap_or(DateTime::<Utc>::MIN_UTC)
-}
-
 pub(super) async fn find(
     ctx: &Ctx,
     conn: &mut Conn,
@@ -140,7 +126,8 @@ async fn retained(
     current: &CommentRow,
     attempt: &Attempt,
 ) -> ApiResult<Option<Replay>> {
-    Ok(idempotency::find(conn, current.author_id, &key(current, attempt), since(ctx)).await?)
+    let since = crate::middleware::idempotency::window_since(conn, ctx.now).await?;
+    Ok(idempotency::find(conn, current.author_id, &key(current, attempt), since).await?)
 }
 
 /// Factual presence only for effect-source preparation. The existing writer still checks

@@ -317,15 +317,30 @@ pub(super) struct AvailableEntry {
 
 /// The native retained eligibility check shared by projection and pre-window selection.
 pub(super) async fn available_entries(
+    ctx: &Ctx,
     conn: &mut Conn,
     entries: &[domain::Listed],
-    options: domain::Options,
 ) -> ApiResult<HashMap<domain::Item, AvailableEntry>> {
     let ids: Vec<_> = entries
         .iter()
         .filter(|entry| entry.entry.deleted_at.is_some())
         .map(|entry| entry.entry.item.id())
         .collect();
+    if ids.is_empty() {
+        return Ok(entries
+            .iter()
+            .map(|listed| {
+                (
+                    listed.entry.item,
+                    AvailableEntry {
+                        until: None,
+                        deleted_by: None,
+                    },
+                )
+            })
+            .collect());
+    }
+    let options = options(ctx, conn).await?;
     let retained: HashMap<_, _> = containers::retention_rows(conn, &ids)
         .await?
         .into_iter()
@@ -390,7 +405,7 @@ async fn projected_bounded(
             }
         }
     }
-    let available = available_entries(conn, &read.entries, options(ctx)).await?;
+    let available = available_entries(ctx, conn, &read.entries).await?;
     read.entries
         .retain(|entry| available.contains_key(&entry.entry.item));
     let native: HashMap<_, _> = read
@@ -417,6 +432,7 @@ async fn projected_bounded(
                 continue;
             };
             let banner = orch_api_contract::nodes::DeletedInspection {
+                cleanup_hold: None,
                 deleted_at: Time::new(deleted),
                 deleted_by: facts
                     .and_then(|facts| facts.deleted_by)
@@ -766,7 +782,7 @@ pub(super) async fn page_selected(
     )
     .await;
     let mut selection = result(conn, selection).await?;
-    let available = available_entries(conn, selection.entries(), options(ctx)).await?;
+    let available = available_entries(ctx, conn, selection.entries()).await?;
     selection.retain(|entry| available.contains_key(&entry.entry.item));
     let visible: HashSet<_> = selection
         .entries()

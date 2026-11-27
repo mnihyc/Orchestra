@@ -5,10 +5,13 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::Listed;
 use orch_api_contract::environment::{EnvironmentHolding, EnvironmentList, EnvironmentListQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
+use orch_link_contract::native_target::RuntimeSource;
 use orch_types::{Json, new_id};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[path = "trust_scopes.rs"]
 mod trust;
@@ -69,7 +72,7 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -89,11 +92,19 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     Key { id, secret }
 }
 
+#[derive(Clone, Copy)]
+struct NativeUnit {
+    receiver: Id,
+    source: RuntimeSource,
+    running: bool,
+}
+
 struct Scene {
     world: World,
     team: Team,
     first: Environment,
     second: Environment,
+    native_units: Arc<Mutex<HashMap<Id, NativeUnit>>>,
 }
 
 impl Scene {
@@ -120,29 +131,61 @@ impl Scene {
             .ok()
             .into_full()
             .expect("ordinary standalone creation remains full");
-        // Reuse the ordinary restart fixture's persisted running-unit state. No native RPC is needed.
+        // These are the fixture's own native units, allocated before any operation is admitted.
+        let receiver: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+            .bind(team.host)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        let native_units = Arc::new(Mutex::new(HashMap::new()));
         for environment in [first.base.id, second.base.id] {
+            let runtime = new_id();
+            let source = RuntimeSource {
+                incarnation: Some(new_id()),
+            };
+            let mut tx = world.db.pool.begin().await.unwrap();
+            orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+                .await
+                .unwrap()
+                .unwrap();
             sqlx::query("UPDATE jobs SET state='cancelled',finished_at=$2 WHERE environment_id=$1")
                 .bind(environment)
                 .bind(world.now())
-                .execute(&world.db.pool)
+                .execute(&mut *tx)
                 .await
                 .unwrap();
             sqlx::query("UPDATE environments SET status='running',generation=1 WHERE id=$1")
                 .bind(environment)
-                .execute(&world.db.pool)
+                .execute(&mut *tx)
                 .await
                 .unwrap();
             sqlx::query("INSERT INTO runtimes(id,kind,host_id,unit_name,environment_id,driver,template_id,spec_hash,generation,state,volumes) VALUES($1,'environment',$2,$3,$4,'docker',$5,$6,1,'running','{}')")
-                .bind(new_id()).bind(team.host).bind(format!("scoped-unit-{environment}"))
+                .bind(runtime).bind(team.host).bind(format!("scoped-unit-{environment}"))
                 .bind(environment).bind(team.template).bind([1_u8;32].as_slice())
-                .execute(&world.db.pool).await.unwrap();
+                .execute(&mut *tx).await.unwrap();
+            native_units.lock().unwrap().insert(
+                runtime,
+                NativeUnit {
+                    receiver,
+                    source,
+                    running: true,
+                },
+            );
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut tx, team.host, runtime, source, false
+                )
+                .await
+                .unwrap()
+            );
+            tx.commit().await.unwrap();
         }
         Self {
             world,
             team,
             first,
             second,
+            native_units,
         }
     }
 
@@ -919,6 +962,37 @@ mod retained {
     }
 
     #[tokio::test]
+    async fn kept_environment_search_finds_a_later_name_before_the_page_limit() {
+        let s = Scene::new().await;
+        keep(&s).await;
+        let ordinary = page(
+            &s,
+            &s.team.c.admin.token,
+            s.team.topic,
+            &NodeDeletedEnvironmentListQuery::default(),
+        )
+        .await;
+        let wanted = ordinary.items.last().unwrap();
+        let reply = s
+            .world
+            .app
+            .call(NodeDeletedEnvironmentList, &[&s.team.topic])
+            .token(&s.team.c.admin.token)
+            .query(&json!({"q": wanted.environment.name,"limit":1}))
+            .send_bytes()
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.raw)
+        );
+        let selected: Page<DeletedEnvironment> = serde_json::from_slice(&reply.raw).unwrap();
+        assert_eq!(selected.items, vec![wanted.clone()]);
+        assert!(selected.next_cursor.is_none());
+    }
+
+    #[tokio::test]
     async fn kept_list_keeps_under_cursor_and_current_key_scope_on_each_page() {
         let s = Scene::new().await;
         keep(&s).await;
@@ -929,6 +1003,7 @@ mod retained {
         )
         .await;
         let query = NodeDeletedEnvironmentListQuery {
+            q: None,
             under: Some(true),
             limit: Some(1),
             cursor: None,

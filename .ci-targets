@@ -1,0 +1,11 @@
+# firstday-2: the outsider's provider, the blocked thread's recheck, the deleted shortcut's last name
+test -p orch-api-core --test providers
+test -p orch-api-core --test shortcuts
+test -p orch-api-core --test provider_duplicates
+test -p orch-api-core --test provider_managed
+test -p orch-api-core --test provider_creation_scopes
+test -p orch-api-core --test threads_settings
+test -p orch-engine --test connected
+test -p orch-engine --lib -- jobs::provider_provision
+contracts
+fmt

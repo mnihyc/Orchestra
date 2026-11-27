@@ -7,7 +7,7 @@ CREATE TABLE favorites (
     "position" numeric NOT NULL,
     view jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT favorites_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text]))),
+    CONSTRAINT favorites_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text, 'pool'::text]))),
     CONSTRAINT favorites_pkey PRIMARY KEY (user_id, kind, id),
     CONSTRAINT favorites_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -72,11 +72,23 @@ CREATE INDEX nodes_everything_parent_idx ON nodes USING btree (((parent_id)::tex
 
 CREATE INDEX nodes_name_trgm_idx ON nodes USING gin (name gin_trgm_ops) WHERE (deleted_at IS NULL);
 
+-- Match navigation's numeric base-letter ordering in its supported languages.
+CREATE COLLATION orch_navigation_en (provider=icu,locale='en-u-kn-true-ks-level1',deterministic=false);
+CREATE COLLATION orch_navigation_zh (provider=icu,locale='zh-u-kn-true-ks-level1',deterministic=false);
+CREATE INDEX nodes_navigation_newest_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),id DESC);
+CREATE INDEX nodes_navigation_name_en_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),name COLLATE orch_navigation_en,id);
+CREATE INDEX nodes_navigation_name_zh_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),name COLLATE orch_navigation_zh,id);
+CREATE INDEX nodes_navigation_changed_en_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),(GREATEST(activity_at,updated_at,created_at)) DESC,tree_seq DESC,name COLLATE orch_navigation_en,id);
+CREATE INDEX nodes_navigation_changed_zh_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),(GREATEST(activity_at,updated_at,created_at)) DESC,tree_seq DESC,name COLLATE orch_navigation_zh,id);
+
 CREATE INDEX nodes_org_id_idx ON nodes USING btree (org_id, id);
+CREATE INDEX nodes_org_parent_id_idx ON nodes USING btree (org_id, parent_id, id);
 
 CREATE INDEX nodes_org_tree_idx ON nodes USING btree (org_id, tree_seq);
 
 CREATE INDEX nodes_parent_idx ON nodes USING btree (parent_id) WHERE (deleted_at IS NULL);
+
+CREATE INDEX nodes_place_parent_idx ON nodes USING btree (parent_id, id) WHERE (kind <> 'thread' AND deleted_at IS NULL);
 
 CREATE INDEX nodes_summary_thread_activity_idx ON nodes (updated_at DESC, id DESC)
     WHERE kind = 'thread' AND deleted_at IS NULL AND archived_at IS NULL;
@@ -84,6 +96,10 @@ CREATE INDEX nodes_summary_thread_activity_idx ON nodes (updated_at DESC, id DES
 CREATE INDEX nodes_path_idx ON nodes USING gin (path);
 
 CREATE INDEX nodes_places_idx ON nodes USING btree (id) WHERE ((kind <> 'thread'::text) AND (deleted_at IS NULL));
+
+CREATE INDEX nodes_archived_idx ON nodes (id) WHERE archived_at IS NOT NULL;
+
+CREATE INDEX nodes_deleted_idx ON nodes (id) WHERE deleted_at IS NOT NULL;
 
 CREATE INDEX related_node_folded_name_idx ON nodes USING btree (parent_id, orch_related_name_key(translate(orch_related_tree_name(name), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::text, 'abcdefghijklmnopqrstuvwxyz'::text))) WHERE (deleted_at IS NULL);
 
@@ -203,7 +219,7 @@ CREATE TABLE recents (
     id uuid NOT NULL,
     visit_count double precision DEFAULT 1 NOT NULL,
     visited_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT recents_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text]))),
+    CONSTRAINT recents_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text, 'pool'::text]))),
     CONSTRAINT recents_visit_count_check CHECK (((visit_count >= (0)::double precision) AND (visit_count < 'Infinity'::double precision))),
     CONSTRAINT recents_pkey PRIMARY KEY (user_id, kind, id),
     CONSTRAINT recents_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -288,6 +304,8 @@ CREATE TABLE node_roles (
 CREATE UNIQUE INDEX node_roles_active_key ON node_roles USING btree (node_id, subject_kind, subject_id, subject_role, role) NULLS NOT DISTINCT WHERE (removed_at IS NULL);
 CREATE UNIQUE INDEX node_roles_lasting_key ON node_roles USING btree (node_id, subject_kind, subject_id, subject_role) NULLS NOT DISTINCT WHERE (removed_at IS NULL AND expires_at IS NULL);
 
+CREATE INDEX node_roles_viewer_subject_idx ON node_roles (subject_id) WHERE subject_role='viewer' AND removed_at IS NULL;
+
 CREATE INDEX node_roles_ending_idx ON node_roles USING btree (expires_at) WHERE ((removed_at IS NULL) AND (expires_at IS NOT NULL));
 
 CREATE INDEX node_roles_subject_idx ON node_roles USING btree (subject_kind, subject_id) WHERE (removed_at IS NULL);
@@ -302,6 +320,9 @@ CREATE TABLE node_summary_state (
     last_seq bigint DEFAULT 0 NOT NULL,
     failures bigint DEFAULT 0 NOT NULL,
     reason text,
+    reason_code text,
+    retry_policy jsonb CHECK (retry_policy IS NULL OR jsonb_typeof(retry_policy) = 'object'),
+    automatic_fields jsonb CHECK (automatic_fields IS NULL OR jsonb_typeof(automatic_fields) = 'object'),
     run_id uuid,
     claimed_by uuid,
     claimed_until timestamp with time zone,
@@ -345,6 +366,9 @@ CREATE TABLE group_members (
     CONSTRAINT group_members_member_org_id_fkey FOREIGN KEY (member_org_id) REFERENCES nodes(id) ON DELETE CASCADE,
     CONSTRAINT group_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+-- A viewer-derived membership makes page viewing an input to the holder walk.
+CREATE INDEX group_members_viewer_idx ON group_members (member_node_id) WHERE member_role='viewer';
 
 CREATE INDEX group_members_nested_idx ON group_members USING btree (member_group_id) WHERE (member_group_id IS NOT NULL);
 

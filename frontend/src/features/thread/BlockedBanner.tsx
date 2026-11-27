@@ -14,23 +14,27 @@ import { EnvironmentStartRecovery } from './EnvironmentStartRecovery';
 import { ThreadCallRecovery } from './CallRecovery';
 import { threadSwitchRecovery } from './switchRecovery';
 import { changeModelChoice, isSettingConflict, useRunsWith } from '@/features/composer/runsWith';
+import { goneExplains } from '@/features/composer/GoneLine';
 import { SettingConflict } from '@/features/composer/SettingConflict';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 import { openChange } from '@/features/change/target';
 import type { Thread } from '@/generated/api-types';
-import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, waitingWords } from '@/features/timeline/waiting';
+import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, isProviderRemoved, NATIVE_END_UNCONFIRMED, waitingWords } from '@/features/timeline/waiting';
 import { SandboxActions } from '@/features/resources/SandboxReadiness';
+import { RunAsMachineAllows } from '@/features/composer/SandboxShortfall';
 import { holds } from '@/lib/permissions';
 import { Banner } from '@/ui/Banner';
 import { Button } from '@/ui/Button';
 import { providerQuery } from '@/api/resources';
 import { ProviderReset } from '@/features/resources/providers/Reset';
 import { ApiError } from '@/api/client';
-import { useFormatContext } from '@/lib/appearance';
-import { formatDateTime } from '@/lib/time';
+import { OfflineEpisodeFacts } from './OfflineEpisodeFacts';
 import { Link } from '@tanstack/react-router';
+import { modelPurpose, modelsForPurpose } from '@/features/models/purpose';
+import { splitRecent, useModelHistory } from '@/features/models/history';
+import { ReadFeedback } from '@/ui/ReadFeedback';
 
 /**
  * The plan's other permitted models after a family limit. Model options do not report vendor-family membership,
@@ -49,9 +53,10 @@ function OtherModels({ thread }: { thread: Thread }) {
   });
   const [state, model, family] = last === null ? ['', '', '\u0001'] : last.split('\u0000');
   const waits = state === 'failed' && family !== '\u0001';
-  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: waits });
-  const runs = useRunsWith(thread, true);
+  const parameters = useQuery({ ...parametersQuery(thread.id, true), enabled: waits });
+  const runs = useRunsWith(thread, waits);
   const [open, setOpen] = useState(false);
+  const history = useModelHistory(open);
   const change = useMutation({
     mutationFn: (value: string) => {
       const option = parameters.data?.model.options.find((candidate) => candidate.model_name === value);
@@ -68,26 +73,29 @@ function OtherModels({ thread }: { thread: Thread }) {
   const failed = readError !== null && readError !== undefined;
   const checking = parameters.isPending || parameters.isFetching || runs.pending || reads.some((read) => read.isFetching === true);
   const available = checking || failed ? undefined : parameters.data;
-  const others = available?.model.options.filter(
+  const others = modelsForPurpose(available?.model.options ?? [], 'generation').filter(
     (option) => option.allowed && option.model_name !== model,
-  ) ?? [];
+  );
+  const promoted = splitRecent(others, history.history, (option) => thread.binding === null ? null : { provider_id: thread.binding.provider.id, model_name: option.model_name });
   const reason = checking ? t('thread.blocked.familyChecking') : failed ? t('thread.blocked.familyReadFailed')
     : available === undefined ? t('thread.blocked.familyChecking') : others.length === 0 ? t('thread.blocked.familyNoOther') : undefined;
   const currentModel = available?.model.value;
   const selected = others.some((option) => option.model_name === currentModel) ? currentModel ?? '' : '';
   return (
     <div className="flex flex-col gap-1" data-family-limit>
-      <Select<string>
+      <ResourcePicker<string>
+        pickerKey="thread.recovery-model"
         size="sm"
         label={t('thread.blocked.familyChoose')}
         placeholder={reason ?? t('thread.blocked.familyChoose')}
         value={selected}
         open={reason === undefined && open}
         onOpenChange={setOpen}
-        onValueChange={(value) => change.mutate(value)}
-        options={others.map((option) => ({ value: option.model_name, label: option.display_name, description: option.model_name }))}
+        onValueChange={(value) => { if (thread.binding !== null) history.remember({ provider_id: thread.binding.provider.id, model_name: value }); change.mutate(value); }}
+        options={[...promoted.recent.map((option) => ({ ...option, recent: true })), ...promoted.rest.map((option) => ({ ...option, recent: false }))].map((option) => ({ value: option.model_name, label: option.display_name, group: option.recent ? t('modelPicker.recent') : '', description: modelPurpose(option, 'generation') === 'unknown' ? t('modelPicker.purposeUnknown') : option.model_name }))}
         disabled={reason !== undefined || change.isPending || !runs.ready}
       />
+      <ReadFeedback reads={[history.read]} pending={history.read.isFetching && history.history === undefined} />
       {failed && <ErrorAlert error={readError} action={<Button size="sm" pending={checking} onClick={() => {
         for (const read of reads) if (read.isError === true) void read.refetch?.();
       }}>{t('common.tryAgain')}</Button>} />}
@@ -99,17 +107,25 @@ function OtherModels({ thread }: { thread: Thread }) {
 
 export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed: () => void }) {
   const { t } = useTranslation();
-  const format = useFormatContext();
   const blocked = thread.state === 'blocked' && thread.blocked !== null && thread.lock === null ? thread.blocked : null;
-  const recordedDeadline = blocked?.offline_deadline ?? null;
-  const deadline = recordedDeadline?.turn_id === thread.current_turn_id ? recordedDeadline : null;
   const secondStep = blocked?.reason === 'binding_invalid' && blocked.detail === 'second_step_required';
   const limited = blocked?.reason === 'quota_exceeded';
   const limits = useQuery({ ...limitsQuery(thread.id), enabled: limited && holds(thread.access, 'thread.interact') });
   const providerId = thread.binding?.provider.id ?? '';
   const provider = useQuery({ ...providerQuery(providerId),enabled:blocked?.reason === 'provider_exhausted' && providerId !== '',retry:false });
   const permitted = !(provider.error instanceof ApiError && [403,404].includes(provider.error.status)) && provider.data !== undefined && holds(provider.data.access,'provider.view');
+  // A failure the conversation shows at the turn it ended, with its Try again, is named here in a line, not said again in full.
+  const failedTurn = useThreadPart(thread.id, (view) => {
+    let last: { ordinal: number; failed: boolean } | null = null;
+    for (const turn of view.turns.values()) if (last === null || turn.ordinal > last.ordinal) last = { ordinal: turn.ordinal, failed: turn.state === 'failed' && turn.error !== null };
+    return last?.failed === true;
+  });
+  // What the composer's own read names as gone is said there in one line, with the choice of another; the program's
+  // own composer has no such line. This reads nothing.
+  const composes = holds(thread.access, 'thread.interact') && !thread.archived && thread.program?.id !== 'orch';
+  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: false });
   if (blocked === null) return null;
+  if (composes && goneExplains(parameters.data?.gone ?? [], blocked.reason)) return null;
   if (blocked.detail === 'call_recovery') return <ThreadCallRecovery thread={thread} banner />;
   if (isAgentHistoryRemoving(thread)) return <Banner tone="info">{t('agentHistory.removing')}</Banner>;
   if (blocked.reason === 'environment_unavailable') return <EnvironmentStartRecovery key={JSON.stringify([thread.id, thread.environment?.id])} thread={thread} />;
@@ -143,21 +159,15 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
       }
     >
       <span data-blocked={blocked.reason}>
-        {waitingWords(thread, t)}
-        {deadline !== null && <span className="block text-sm" data-offline-deadline>
-          {deadline.at !== null
-            ? t('thread.blocked.offlineDeadline', { when: formatDateTime(deadline.at, format) })
-            : Number.isSafeInteger(deadline.after_seconds)
-              ? t('thread.blocked.offlineDeadlineDuration', { seconds: deadline.after_seconds, since: formatDateTime(deadline.since, format) })
-              : t('thread.blocked.offlineDeadlineBeyondCalendar', { since: formatDateTime(deadline.since, format) })}
-        </span>}
+        {blocked.reason === 'agent_offline' ? <OfflineEpisodeFacts thread={thread} fallback={waitingWords(thread, t)} />
+          : blocked.reason === 'error' && failedTurn && blocked.detail !== NATIVE_END_UNCONFIRMED ? t('thread.blocked.lastTurnFailed') : waitingWords(thread, t)}
         {!secondStep && !versionMismatch && !manages && blocked.reason !== 'agent_offline' && blocked.reason !== 'quota_exceeded' && blocked.reason !== 'provider_exhausted' && <span className="ml-1 text-text-muted">{t('thread.blocked.manager', { who: thread.owner.display_name })}</span>}
       </span>
     </Banner>
-    {blocked.sandbox!==null && blocked.sandbox!==undefined && <SandboxActions value={blocked.sandbox} />}
+    {blocked.sandbox!==null && blocked.sandbox!==undefined && <div className="flex flex-wrap items-center gap-3 text-sm"><RunAsMachineAllows thread={thread} report={blocked.sandbox.sandbox} /><SandboxActions value={blocked.sandbox} /></div>}
     {blocked.reason === 'provider_exhausted' && manages && <OtherModels thread={thread} />}
     {blocked.reason === 'provider_exhausted' && permitted && <ProviderReset provider={provider.data} />}
-    {blocked.reason === 'provider_unavailable' && providerId !== '' && thread.binding?.provider.status !== 'disabled' && <Link to="/resources/providers/$id" params={{ id:providerId }} search={{ tab:'key' }} className="text-sm text-accent underline">{t('providerPlan.recovery.signin')}</Link>}
+    {blocked.reason === 'provider_unavailable' && !isProviderRemoved(thread) && providerId !== '' && thread.binding?.provider.status !== 'disabled' && <Link to="/resources/providers/$id" params={{ id:providerId }} search={{ tab:'key' }} className="text-sm text-accent underline">{t('providerPlan.recovery.signin')}</Link>}
     </div>
   );
 }

@@ -45,7 +45,7 @@ async fn recursive_delete_and_cross_node_move_exclude_late_child_creation_until_
         )
         .await;
         let actor = domain::Actor::Agent { thread: area.agent };
-        let options = domain::Options::for_engine(&area.world.engine());
+        let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
         let now = Time::new(area.world.clock.now());
         let mut holding = area.world.pool.begin().await?;
         let command = if deleting {
@@ -289,7 +289,7 @@ async fn a_waiting_cross_kind_ascii_folded_collision_commits_exactly_one_entry_i
         let parent = domain::Directory::NodeDocs(area.topic);
         let thread = area.agent;
         let now = Time::new(area.world.clock.now());
-        let options = domain::Options::for_engine(&area.world.engine());
+        let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
         let mut holding = area.world.pool.begin().await?;
         let text = new_id();
         let mut folder = request(

@@ -174,8 +174,36 @@ async fn select(
     Vec<crate::key_operations::native::Facts<orch_api_contract::access_sources::Source>>,
 )> {
     let words = Words::new(query);
-    let all = access::holder_places(conn).await?;
-    let mut frame = scoped::Frame::load(ctx, conn, caller, query, &words, &all).await?;
+    let recent = if query.picker.unwrap_or(false) && words.text.is_empty() {
+        orch_api_base::picker_recents::read(conn, caller.user())
+            .await?
+            .choices
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let kinds = query
+        .kinds
+        .as_ref()
+        .map(|value| value.split(',').map(str::trim).collect::<HashSet<_>>());
+    if kinds.as_ref().is_some_and(|kinds| {
+        kinds.is_empty()
+            || kinds.iter().any(|kind| {
+                ![
+                    "user", "group", "role", "members", "node", "agents", "everyone",
+                ]
+                .contains(kind)
+            })
+    }) {
+        return Err(ApiError::invalid(
+            "kinds",
+            "contains an unknown holder kind",
+        ));
+    }
+    let only_people = kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.len() == 1 && kinds.contains("user"));
+    let all = access::holder_places(conn, only_people).await?;
+    let mut frame = scoped::Frame::load(ctx, conn, caller, query, &words, &all, &recent).await?;
     let principal = frame.principal(ctx, conn, caller).await?;
     let ids: Vec<Id> = all.iter().map(|place| place.id).collect();
     let visible: HashSet<Id> = orch_authz::nodes::holding(
@@ -208,7 +236,7 @@ async fn select(
         start = orch_db::queries::hierarchy::with_ancestors(conn, &[id])
             .await?
             .iter()
-            .filter(|node| node.kind != "thread")
+            .filter(|node| node.kind != "thread" && by_id.contains_key(&node.id))
             .max_by_key(|node| node.path.len())
             .map(|node| node.id);
     }
@@ -407,16 +435,20 @@ async fn select(
     if query.list_places != Some(true)
         && !members
         && !every
-        && tail.is_empty()
-        && !path.contains('.')
-        && !path.starts_with('@')
-        && !path.is_empty()
-        && direct_role.is_none()
+        && includes_kind(query, "group")
+        && !text.contains('.')
+        && !text.starts_with('@')
+        && (!text.is_empty() || query.picker.unwrap_or(false) && recent.contains_key("group"))
     {
-        for group in groups
-            .iter()
-            .filter(|group| group.name.to_lowercase().starts_with(path))
-        {
+        for group in groups.iter().filter(|group| {
+            if text.is_empty() {
+                recent
+                    .get("group")
+                    .is_some_and(|ids| ids.contains(&group.id.to_string()))
+            } else {
+                group.name.to_lowercase().starts_with(text)
+            }
+        }) {
             let Some(place) = by_id.get(&group.org_id) else {
                 continue;
             };
@@ -444,10 +476,10 @@ async fn select(
     if query.list_places != Some(true)
         && !members
         && !every
-        && tail.is_empty()
-        && !path.is_empty()
-        && direct_role.is_none()
+        && includes_kind(query, "user")
+        && (!text.is_empty() || query.picker.unwrap_or(false))
     {
+        let path = text;
         let is_mail = path.contains('@') && !path.starts_with('@');
         let is_address = path.contains('.') && !is_mail;
         let people: Vec<_> = frame.people.iter().map(|row| row.user.clone()).collect();
@@ -523,21 +555,113 @@ async fn select(
         }
     }
     let mut seen = HashSet::new();
-    items.retain(|item| seen.insert(serde_json::to_string(&item.input).unwrap_or_default()));
-    items.sort_by(|one, other| {
-        one.outside
-            .cmp(&other.outside)
-            .then_with(|| one.place.cmp(&other.place))
-            .then_with(|| one.locator.cmp(&other.locator))
+    items.retain(|item| {
+        seen.insert(serde_json::to_string(&item.input).unwrap_or_default())
+            && kinds
+                .as_ref()
+                .is_none_or(|kinds| kinds.contains(holder_kind(&item.input)))
     });
+    let recent_rank = |item: &HolderCandidate| {
+        picker_identity(item, query.list_places == Some(true))
+            .and_then(|(kind, id)| recent.get(kind)?.iter().position(|key| key == &id))
+            .unwrap_or(usize::MAX)
+    };
+    items.sort_by(|one, other| {
+        recent_rank(one).cmp(&recent_rank(other)).then_with(|| {
+            one.outside
+                .cmp(&other.outside)
+                .then_with(|| one.place.cmp(&other.place))
+                .then_with(|| one.locator.cmp(&other.locator))
+        })
+    });
+    use sha2::Digest;
+    let revision = hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&items).map_err(ApiError::internal)?,
+    ));
+    let source = serde_json::to_string(&(
+        "holders",
+        caller.user(),
+        &query.q,
+        query.place_id,
+        query.org_id,
+        query.include_work.unwrap_or(false),
+        query.list_places.unwrap_or(false),
+        query.picker.unwrap_or(false),
+        &query.kinds,
+        revision,
+    ))
+    .map_err(ApiError::internal)?;
+    let page_query = orch_api_contract::common::CollectionQuery {
+        q: Some(query.q.clone()),
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+    };
+    let offset = orch_api_base::collection::after::<usize>(&page_query, &source)?.unwrap_or(0);
+    let limit = usize::try_from(orch_api_base::collection::limit(&page_query)?)
+        .map_err(ApiError::internal)?;
+    if offset > items.len() {
+        return Err(ApiError::invalid("cursor", "is beyond this native source"));
+    }
+    let end = offset.saturating_add(limit).min(items.len());
+    let next_cursor = if end < items.len() {
+        Some(orch_api_base::collection::cursor(
+            &page_query,
+            &source,
+            end,
+        )?)
+    } else {
+        None
+    };
+    let items = items.drain(offset..end).collect::<Vec<_>>();
+    frame.retain(&items);
     let (witness, facts) = frame.finish(ctx, caller)?;
     Ok((
         scoped::Selected {
-            reply: HolderSearchReply { items },
+            reply: HolderSearchReply { items, next_cursor },
             witness,
         },
         facts,
     ))
+}
+
+fn includes_kind(query: &HolderSearchQuery, kind: &str) -> bool {
+    query
+        .kinds
+        .as_ref()
+        .is_none_or(|kinds| kinds.split(',').any(|value| value.trim() == kind))
+}
+
+fn holder_kind(input: &HolderInput) -> &'static str {
+    match input {
+        HolderInput::User { .. } => "user",
+        HolderInput::Group { .. } => "group",
+        HolderInput::Role { .. } => "role",
+        HolderInput::Members { .. } => "members",
+        HolderInput::Node { .. } => "node",
+        HolderInput::Agents { .. } => "agents",
+        HolderInput::Everyone => "everyone",
+    }
+}
+
+fn picker_identity(item: &HolderCandidate, places: bool) -> Option<(&'static str, String)> {
+    match &item.holder {
+        Holder::User { user } => Some(("user", user.id.to_string())),
+        Holder::Group { group } => Some(("group", group.id.to_string())),
+        Holder::Node { node } | Holder::Role { at: Some(node), .. }
+            if places || matches!(&item.holder, Holder::Node { .. }) =>
+        {
+            Some((
+                match node.kind {
+                    NodeKind::Org => "org",
+                    NodeKind::Project => "project",
+                    NodeKind::Topic => "topic",
+                    NodeKind::Thread => "thread",
+                },
+                node.id.to_string(),
+            ))
+        }
+        _ => None,
+    }
 }
 
 #[path = "candidates/scoped.rs"]

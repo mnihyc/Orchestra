@@ -59,7 +59,7 @@ impl native::Selected for Orgs {
         _query: &'a (),
     ) -> BoxFuture<'a, ApiResult<(Vec<DeletedRow>, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
-            let days = ctx.app.config.retention.soft_delete_days;
+            let days = orch_settings::retention::deleted_keep_days(conn).await?;
             let rows = hierarchy::deleted_orgs_of(
                 conn,
                 caller.user(),
@@ -122,7 +122,7 @@ impl native::Selected for Orgs {
     }
 
     fn render<'a>(
-        ctx: &'a Ctx,
+        _ctx: &'a Ctx,
         conn: &'a mut Conn,
         _principal: &'a Principal,
         value: &'a Vec<DeletedRow>,
@@ -132,6 +132,7 @@ impl native::Selected for Orgs {
                 .iter()
                 .filter_map(|row| row.deleted_by)
                 .collect::<Vec<Id>>();
+            let keep_days = orch_settings::retention::deleted_keep_days(conn).await?;
             let people = refusals::user_refs(conn, &users).await?;
             Ok(value
                 .iter()
@@ -146,10 +147,7 @@ impl native::Selected for Orgs {
                     slug: row.slug.clone().unwrap_or_default(),
                     deleted_at: Time::new(row.deleted_at),
                     deleted_by: row.deleted_by.and_then(|user| people.get(&user).cloned()),
-                    purge_at: Time::new(super::removal::purge_at(
-                        row.deleted_at,
-                        ctx.app.config.retention.soft_delete_days,
-                    )),
+                    purge_at: Time::new(super::removal::purge_at(row.deleted_at, keep_days)),
                 })
                 .collect())
         })

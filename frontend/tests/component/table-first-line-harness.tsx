@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { useState } from 'react';
 import { ArrowRight, Ellipsis } from 'lucide-react';
 import { i18n } from '@/i18n';
-import { AllBox, RowBox } from '@/features/resources/acts';
+import { AllBox, RowBox } from '@/ui/RowSelection';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
