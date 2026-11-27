@@ -1,0 +1,9 @@
+# The new cases and the suites around what changed, with the fixes.
+fmt
+test -p orch-authz --test ownership
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test hosts
+test -p orch-api-core --test certificates
+test -p orch-api-core --test accounts
+test -p orchctl --test doctor
+test -p orchctl --bin orchctl -- doctor::net

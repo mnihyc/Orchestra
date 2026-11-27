@@ -22,6 +22,7 @@ import { startOptionsQuery } from '@/api/start';
 import { AccessRequest } from '@/features/access/AccessRequest';
 import type { PlaceRef } from '@/features/navigation/places';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
+import { NoHostLine } from '@/features/resources/hosts/NoHostLine';
 import { BindingPickerScope } from '@/features/resources/PickerContext';
 import { ResourcePicker } from '@/ui/ResourcePicker';
 import type { BindingEnvironment, Machine } from '@/generated/api-types';
@@ -167,6 +168,9 @@ export function Where({ compact = false, place, options, value, onChange, machin
   const [requestedAt, setRequestedAt] = useState<{ context: string; id: string } | null>(() => requesting === null ? null : { context, id: requesting.environment.id });
   const [granted, setGranted] = useState<{ context: string; id: string } | null>(null);
   const mayMake = options.can_create.allowed;
+  // Refused with nothing missing in the place: the person may start work here, and what they lack is a host to make the
+  // environment on (the shipped Default template is everyone's). The line names what fixes that, not the place's managers.
+  const noHost = !mayMake && options.can_create.missing.length === 0;
   const canMakeNew = canCreateEnvironment(options);
   const currentRequest = requesting === null ? null : options.environments.find((row) => row.environment.id === requesting.environment.id) ?? requesting;
   // A refusal identifies who can actually give Use; a visible resource does not imply it is requestable.
@@ -211,7 +215,7 @@ export function Where({ compact = false, place, options, value, onChange, machin
       {listed.length === 0 && (!mayMake || !canMakeNew) && <p className="text-sm text-text-muted">{t('start.where.noExisting')}</p>}
       {/* With the new environment's form open, its host field says it beside the host. */}
       {mayMake && !canMakeNew && !(fresh && onNewEnvironmentChange !== undefined) && <p role="status" className="text-sm text-text-muted">{t('start.where.noHost')}</p>}
-      {!mayMake && <p className="text-sm text-text-muted">{t('start.where.mayNotMake')}</p>}
+      {!mayMake && (noHost ? <NoHostLine kind="environment" hosts={options.hosts} quiet={listed.some(canUseEnvironment)} /> : <p className="text-sm text-text-muted">{t('start.where.mayNotMake')}</p>)}
       {note !== null && <EnvironmentNoteLine note={note} standing={standing} fresh={fresh} />}
       {agentHere !== null && <AgentHereLine here={agentHere} environment={fresh ? null : selected} onChanged={() => onRefresh?.()} />}
       {fresh && mayMake && onNewEnvironmentChange !== undefined && <NewEnvironmentForm assessed={assessed} place={place} hosts={options.hosts} value={newEnvironment} onChange={onNewEnvironmentChange} />}
@@ -243,7 +247,7 @@ export function WhereOptions({ place, options, onChange, machines, machinesLoadi
         <Button size="sm" icon={<Plus aria-hidden />} onClick={() => setMaking(true)} className="self-start">
           {t('start.where.makeOne')}
         </Button>
-      ) : (
+      ) : options.can_create.missing.length === 0 ? null : (
         <details className="text-sm text-text-muted">
           <summary className="cursor-default rounded-md select-none hover:text-text">{t('start.where.mayNotMake')}</summary>
           <div className="mt-2">

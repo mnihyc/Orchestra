@@ -18936,6 +18936,21 @@
       "grantConfirm": "Grant Host Use",
       "grantNotice_one": "{{number}} host installed with the server may share its kernel",
       "grantNotice_other": "{{number}} hosts installed with the server may share its kernel"
+    },
+    "noneFor": {
+      "environment": {
+        "admin": "No host you may use can make a new environment: turn on As admin, or add yourself to Use in a host's Access.",
+        "adminOn": "No host you may use can make a new environment: add yourself to Use in a host's Access.",
+        "owner": "No host you may use can make a new environment: ask <person/> for Use of {{host}}.",
+        "ask": "No host you may use can make a new environment: ask a host's owner or an administrator for Use."
+      },
+      "provider": {
+        "admin": "No host of yours can run it: with As admin on, add yourself to Use in a host's Access, or choose an environment.",
+        "adminOn": "No host of yours can run it: add yourself to Use in a host's Access, or choose an environment.",
+        "owner": "No host of yours can run it: ask <person/> for Use of {{host}}, or choose an environment.",
+        "ask": "No host of yours can run it: ask a host's owner or an administrator for Use, or choose an environment."
+      },
+      "access": "{{host}} · Access"
     }
   },
   "help": {

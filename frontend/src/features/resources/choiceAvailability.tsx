@@ -1,6 +1,6 @@
 /** Readable choices keep their native refusal beside the same resource preview. */
 import type { TFunction } from 'i18next';
-import type { Agent, Environment, Host, Template } from '@/generated/api-types';
+import type { Agent, Environment, Host, PlaceHost, Template } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 
@@ -9,8 +9,21 @@ export function templateUnavailable(template: Template, t: TFunction): string | 
   return holds(template.access, 'template.use') ? null : t('resourceChoices.templateUse');
 }
 
+/** Whether the person may use the host as themself, without the reach As admin adds. */
+export function usesAsThemself(host: Host): boolean {
+  const own = (permission: string) => holds(host.access, permission) && !(host.access.admin_only ?? []).includes(permission);
+  return own('host.use') || own('host.manage');
+}
+
+/** Whether the person may use any of the hosts for it at all, whatever else stands in the way: a host of a place's list,
+ * or one whose Use they hold (as themself, for a provider's container). */
+export function mayUseAnyHost(hosts: readonly (PlaceHost | Host)[], kind: 'environment' | 'provider'): boolean {
+  return hosts.some((entry) => 'automatic' in entry || (kind === 'provider' ? usesAsThemself(entry) : holds(entry.access, 'host.use')));
+}
+
+/** A provider's container runs as its owner, so for it a host counts only where its owner may use it as themself. */
 export function hostUnavailable(host: Host, t: TFunction, kind: 'environment' | 'provider', driver?: string): string | null {
-  if (!holds(host.access, 'host.use')) return t('resourceChoices.hostUse');
+  if (!holds(host.access, 'host.use') || (kind === 'provider' && !usesAsThemself(host))) return t('resourceChoices.hostUse');
   if (!host.schedulable) return t('resourceChoices.unschedulable');
   return host.drivers.some((entry) => (driver === undefined || entry.name === driver) && entry.creates.includes(kind))
     ? null : t('resourceChoices.driver');
