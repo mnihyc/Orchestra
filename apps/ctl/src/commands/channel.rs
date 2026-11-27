@@ -331,7 +331,7 @@ async fn test(
     };
     let surroundings = Surroundings {
         system_name: deployment.config.system.name.clone(),
-        public_url: deployment.config.system.public_url.clone(),
+        address_seed: deployment.config.system.address_seed(),
     };
     let tools = Toolbox {
         master: &master,

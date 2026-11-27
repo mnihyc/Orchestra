@@ -48,6 +48,93 @@ async fn a_ping_is_answered_with_its_number() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_tabs_heartbeat_does_not_wait_for_its_subscription_reauthentication_or_epoch_read()
+{
+    use orch_db::queries::transaction_guard::{self, Scope};
+
+    for operation in ["subscribe", "reauthenticate", "epoch"] {
+        let rig = Rig::with_unstarted_engine().await;
+        let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+        if operation == "epoch" {
+            client.sub(1, "user", None).await;
+            client.expect("subscribed").await;
+        }
+        // Reserve the witness connection before the deliberate lock wait can occupy the pool.
+        let mut observer = rig.pool.acquire().await.unwrap();
+        let mut barrier = rig.pool.begin().await.unwrap();
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        if operation == "reauthenticate" {
+            sqlx::query(
+                "SELECT s.id FROM sessions s JOIN access_tokens a ON a.session_id=s.id
+                 WHERE a.token_hash=$1 FOR UPDATE OF s",
+            )
+            .bind(orch_api_core::middleware::authentication::token_hash(
+                &rig.token,
+            ))
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+            client.send(json!({"op":"reauth","token":rig.token})).await;
+        } else {
+            sqlx::query("LOCK TABLE permission_entries IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            if operation == "subscribe" {
+                client.sub(1, "user", None).await;
+            } else {
+                // Moving only the cache epoch models an unrelated new object. It still asks
+                // the existing subscription to establish its next actual expiry boundary.
+                transaction_guard::request_scope(Scope::Creation, async {
+                    let mut tx = rig.pool.begin().await.unwrap();
+                    orch_db::queries::access::bump_epoch(&mut tx).await.unwrap();
+                    tx.commit().await.unwrap();
+                })
+                .await;
+            }
+        }
+        let waiting = tokio::time::timeout(realtime_support::PATIENCE, async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(blocker)
+                .fetch_one(&mut *observer)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let heartbeat = if waiting.is_ok() {
+            Some(tokio::time::timeout(Duration::from_secs(1), client.heartbeat()).await)
+        } else {
+            None
+        };
+        // Release and retire all owners even when the old sequential reader misses the bar.
+        barrier.rollback().await.unwrap();
+        drop(observer);
+        drop(client);
+        rig.shutdown().await;
+        assert!(
+            waiting.is_ok(),
+            "{operation} must reach the actual database lock"
+        );
+        assert!(
+            heartbeat.is_some_and(|result| result.is_ok()),
+            "a valid tab's heartbeat must finish within one second while {operation} waits"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_does_not_offer_the_protocol_is_closed_with_4409() {
     let rig = Rig::new().await;
     for offered in [&["orch.v0"][..], &[][..]] {
@@ -791,10 +878,18 @@ async fn a_sub_that_reuses_a_number_takes_the_place_of_the_subscription_without_
     assert_eq!(again["id"], 1);
     assert_eq!(rig.server.realtime.subscriptions(), 1);
     assert!(client.is_quiet_for(Duration::from_millis(300)).await);
-    // The same number for another feed takes its place too.
+    // The same number for another feed takes its place too. Making the thread is news for the person's
+    // own feed, which that feed may still carry under this number before the answer; nothing after it.
     let thread = rig.thread("Elsewhere").await;
     client.sub(1, &format!("thread:{thread}"), None).await;
-    let moved = client.expect("subscribed").await;
+    let mut heard = client.until("subscribed").await;
+    let moved = heard.pop().unwrap();
+    assert!(
+        heard
+            .iter()
+            .all(|frame| frame["op"] == "event" && frame["feed"] == "user"),
+        "only the person's own news may come before the answer: {heard:?}"
+    );
     assert_eq!(moved["feed"], format!("thread:{thread}"));
     client.expect("presence").await;
     assert_eq!(rig.server.realtime.subscriptions(), 1);

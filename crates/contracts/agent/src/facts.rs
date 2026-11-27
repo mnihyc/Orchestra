@@ -330,6 +330,9 @@ pub enum HarnessState {
 /// The report of a harness process: what its row says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HarnessStatus {
+    /// Actual process home evidence, including supervised recovery and connector reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<orch_driver_contract::runtime::HarnessHome>,
     /// How it is doing.
     pub status: HarnessState,
     /// Why, in a sentence, when that needs saying.
