@@ -78,12 +78,14 @@ pub(super) fn view(
                 .get(&program.kind)
                 .filter(|entry| entry.path == program.path && entry.version == program.version)
                 .map(|entry| {
-                    orch_api_contract::environment::EnvironmentProgramApproval {
+                    orch_api_contract::machine_programs::ExecutionApproval {
                         // Keep the same empty-name reference used for historical usage writers.
                         // Losing the person record does not revoke a path/version decision.
-                        by: people.get(&entry.by).cloned().unwrap_or_else(|| {
-                            orch_api_contract::users::UserRef {
-                                id: entry.by,
+                        by: people
+                            .get(&entry.confirmation.by)
+                            .cloned()
+                            .unwrap_or_else(|| orch_api_contract::users::UserRef {
+                                id: entry.confirmation.by,
                                 kind: orch_api_contract::users::UserKind::Human,
                                 username: String::new(),
                                 address: None,
@@ -92,9 +94,8 @@ pub(super) fn view(
                                     text: String::new(),
                                     color: 0,
                                 },
-                            }
-                        }),
-                        at: entry.at,
+                            }),
+                        at: entry.confirmation.at,
                     }
                 });
             orch_api_contract::environment::EnvironmentMachineProgram {

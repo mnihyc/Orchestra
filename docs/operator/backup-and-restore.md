@@ -1,77 +1,94 @@
-# Backup and restore
+# Back up and restore Orch
 
-Keep a recoverable set: one database dump and its manifest, a subsequent blob copy, the configuration and
-original secret keys, and any execution volumes your recovery needs. Take the blob copy after **every**
-dump, complete it within `[retention] blob_grace_hours` of that dump's start (24 hours by default), and
-retain that copy for as long as its dump. A current blob copy cannot stand in for the copy of an older dump.
+Keep a copy of an Orch system that you can put back, and prove that you can. At the end you have a daily backup that runs by itself, a copy of it off the host, and a restore you have practised on an isolated host.
 
-`./update.sh backup` validates a database dump, writes the matching `.manifest.json` and publishes a small
-protected Overview record. Pre-update saves use the same writer. This command does **not** copy blobs,
-configuration, secrets or execution volumes. The API imports its record at startup and before Management
-reads it, including after a save made while the API was stopped. Its completion proves the database pair,
-not completion of the separate copies below.
+A recoverable set is: one database dump and its manifest, a blob copy made after that dump, the configuration and the original secret keys, and any execution volumes your recovery needs. A database alone does not restore the keys or the machines' identities.
 
-If the dump pair completed but publishing its Overview record failed, use `./update.sh backup --repair-record <relative-dump-name>`. This verifies the existing pair and repairs only its metadata, preserving its original manual/pre-update cause and completion time. It does not run `pg_dump` again. A failed attempt never makes the last successful backup newer; `backup.warn_days` warns on that success's age (two days by default).
+Examples below use the default data paths. If you set `ORCH_DATA_DIR`, copy the contents of that directory for the paired file backup. When restoring, put those contents in the new installation's selected server directory. Check both data paths in the restored `.env` before first start. Use empty, separate destinations on a practice host.
 
-Test a restore of the complete set on an isolated host before relying on it. Preserve the original authority
-and machine identity so machines can reconnect; a database alone does not restore those identities or keys.
+## Before you start
+
+You need an installed stack ([Install Orch](deployment.md)), room off the host for each set (the database size plus the blobs plus the volumes you keep), and a second host, or at least an empty directory on one, for the practice restore.
 
 ## What to keep
 
 | What | How | How often |
 |------|-----|-----------|
-| The database | `./update.sh backup`: a custom-format dump, read back before it is kept, in `runtime/update-backups/`, taken without stopping anything | Daily; one is also taken before every update and rollback |
-| Blobs, `runtime/data/` | A separate complete copy after its paired dump, completed within `retention.blob_grace_hours` from that dump's start; immutable blobs may be copied live, but a failed/incomplete copy is not a backup | After every manual, pre-update or rollback dump; retain each copy as long as that dump |
+| The database | `./update.sh backup`: a custom-format dump, read back before it is kept, in `runtime/update-backups/`, taken without stopping anything | Daily. One is also taken before every update and rollback |
+| Blobs, `runtime/data/` | A separate complete copy made after its paired dump, finished within `retention.blob_grace_hours` of that dump's start (24 hours by default). Immutable blobs may be copied live, but a failed or partial copy is not a backup | After every manual, pre-update or rollback dump. Keep each copy as long as its dump |
 | `config/`, including `config/secrets/`, and `.env` | A copy, encrypted, off the host | After the first start and after any change |
 | `runtime/node/` | A copy. It is the bundled node's identity; the token it enrolled with is spent, so a node that loses it cannot enroll again | After the first start |
-| Managed volumes: workspaces, homes, a provider's `state` volume with its subscription logins | The driver's own volume backup on each host. Orch's source snapshots cover selected paths in a thread directory, not an entire workspace, home, provider state, mount or external effect | By your policy |
+| Managed volumes: workspaces, homes, a provider's `state` volume with its subscription logins | The driver's own volume backup on each host. Orch's source snapshots cover chosen paths in a thread directory, not a whole workspace, home, provider state, mount or outside effect | By your policy |
 
-Losing `config/secrets/orch_master_key` makes the API keys, authenticator secrets, mail passwords and bot
-tokens in a dump unreadable, and losing `orch_ca_key.pem` means enrolling every machine again: the dump alone
-is not a backup of the system. **The master key cannot be rotated.** Replacing it with a new random key
-does not re-encrypt existing secrets; keep the original key with every database that needs it.
+**Keep the master key.** Losing `config/secrets/orch_master_key` makes the API keys, authenticator secrets, mail passwords and bot tokens in a dump unreadable. Losing `orch_ca_key.pem` means enrolling every machine again. The master key cannot be rotated: a new random key does not re-encrypt the existing secrets, so keep the original with every database that needs it.
 
-A backup job must pair the exact dump it just made with its blob copy. For example, after noting the dump
-name printed by `backup` (replace the angle-bracket placeholders with that exact name and your destination):
+## 1. Take a backup
+
+`./update.sh backup` checks a database dump, writes the matching `.manifest.json` and publishes a small protected record that **Management** reads. Pre-update saves use the same writer. It does not copy blobs, configuration, secrets or volumes. The API imports its record at start and before Management reads it, including after a save made while the API was stopped. Its completion proves the database pair only, not the separate copies below.
+
+1. From `deploy/`, take the dump and note the name it prints.
+2. Copy the dump, its manifest and the blobs as one pair. After a manual dump, for example:
+
+   ```sh
+   umask 077
+   ./update.sh backup
+   dump=$(ls -t runtime/update-backups/*-backup.dump | head -n 1)
+   pair="/backup/orch/$(basename "${dump%.dump}")"
+   install -d -m 700 "$pair"
+   cp -p -- "$dump" "${dump%.dump}.manifest.json" "$pair/"
+   cp -a -- runtime/data "$pair/data"
+   ```
+
+3. Check that the blob copy succeeded and finished within the grace. If it missed the window, take a new dump and a new copy, and do not call the old pair complete.
+4. Copy the config, `.env` and `runtime/node/` (encrypted) off the host, and the pair with them.
+
+**What you will see.** `backup` ends with the dump's name in `runtime/update-backups/` and a published record. `docker compose exec api /opt/orchctl/orchctl doctor` and **Management** show its age; `backup.warn_days` (2 by default) warns on the age of the last success. A failed attempt never makes the last success newer.
+
+If the dump pair finished but publishing its record failed, run `./update.sh backup --repair-record <relative-dump-name>`. It checks the existing pair and repairs only its metadata, keeping its original cause and time. It does not run `pg_dump` again.
+
+## 2. Run it every day
+
+Put the steps in a script and run it from cron or a systemd timer, as the account that owns `deploy/`. This is an example, not a shipped file: adapt the paths and the retention to your policy.
 
 ```sh
+#!/bin/sh
+# /usr/local/sbin/orch-backup.sh
+set -eu
+cd /opt/orch/deploy
 umask 077
 ./update.sh backup
-dump='runtime/update-backups/<exact-dump-name>.dump'
-pair='/backup/orch/<this-dumps-identifier>'
+dump=$(ls -t runtime/update-backups/*-backup.dump | head -n 1)
+pair="/backup/orch/$(basename "${dump%.dump}")"
 install -d -m 700 "$pair"
 cp -p -- "$dump" "${dump%.dump}.manifest.json" "$pair/"
 cp -a -- runtime/data "$pair/data"
 ```
 
-`update.sh` never deletes a dump automatically: the ones taken before updates are what a rollback goes back to. The
-directory grows by the size of the database each time. Verify that the blob copy succeeded and finished
-within the grace before declaring this pair complete. If it misses that window, take a new dump and a new
-copy; do not call the old pair complete. Copy the set off the host. Retention removes a dump, its manifest
-and its paired blobs together; do not prune blob copies earlier or overwrite an older pair with today's data.
-Include dumps kept for rollback in this policy. This pairing protects database/blob references, not the
-consistency of a live external database or a host volume; use that application's backup method too.
+```cron
+# /etc/cron.d/orch-backup: every day at 02:30, as the account orch
+30 2 * * * orch /usr/local/sbin/orch-backup.sh
+```
 
-## Removing a local pair
+Then alert on it: [Monitor an installation](monitoring.md#3-set-the-first-alerts) has the alert for a missing or old backup.
 
-For a local copy under `runtime/update-backups/`, record its pairing immediately
-after verifying the copy. Use the dump's exact name and a relative copy-directory
-name. For example, `./update.sh backup --repair-record <dump-name> --paired-blobs <copy-directory>`.
-Registration records the directory's identity and preserves the original dump's
-snapshot, cause and time. It makes no new dump or copy. The existing
-`retention.blob_grace_hours` window still applies.
+`update.sh` never deletes a dump by itself, because the dumps taken before updates are what a rollback goes back to. The directory grows by the size of the database each time. Retention removes a dump, its manifest and its paired blobs together: do not prune blob copies earlier, and do not overwrite an older pair with today's data. Include the dumps kept for rollback in the policy. This pairing protects the references between the database and the blobs, not a live outside database or a host volume: use that application's own backup too.
 
-Run `./update.sh dumps remove <dump-name>` to review that local pair and type its
-name once. The dump, manifest and recorded copy go together. `--yes` applies an
-already reviewed plan. A missing or changed pairing stays blocked. Copies kept
-elsewhere need their own operator's retention procedure. Removing the pair used
-for rollback also removes that recovery point. An interrupted removal keeps its
-checkpoint for another review; it never claims the pair remains restorable.
+## 3. Remove a local pair
 
-## Putting a system back
+1. After you have checked a copy under `runtime/update-backups/`, record its pairing at once, with the dump's exact name and the copy's directory name:
 
-On a clean directory of the same release (a later release also works; the API applies the schema changes it
-brings when it starts):
+   ```sh
+   ./update.sh backup --repair-record <dump-name> --paired-blobs <copy-directory>
+   ```
+
+   It records the directory's identity and keeps the dump's original snapshot, cause and time. It makes no new dump or copy, and the dump’s recorded `retention.blob_grace_hours` window still applies.
+2. Review the pair and remove it: `./update.sh dumps remove <dump-name>`. Type the name once. The dump, the manifest and the recorded copy go together. `--yes` applies a plan you have already reviewed.
+
+A missing or changed pairing stays blocked. Copies you keep elsewhere need their own retention procedure. Removing the pair used for a rollback also removes that recovery point. An interrupted removal keeps its checkpoint for another review and never claims the pair is still restorable.
+
+## 4. Put a system back
+
+On a clean directory of the same release (a later release also works; the API applies its schema changes when it starts):
 
 ```sh
 mkdir -p /opt/orch && tar -xzf orch-deploy-v0.1.0.tar.gz -C /opt/orch && cd /opt/orch/deploy
@@ -82,23 +99,32 @@ mkdir -p runtime && cp -a /backup/data runtime/data && cp -a /backup/node runtim
 ./update.sh first-start --from /path/to/the/release --restore-database /backup/orch.dump
 ```
 
-`first-start` finds the secrets complete and makes none, starts PostgreSQL, puts the dump in the database
-before the stack starts (this is what `--restore-database` is for; it is accepted by `first-start` and by no
-other command), takes its own first dump of what it restored, starts the stack, and waits until
-`orchctl doctor` passes. Machines reconnect with their existing certificates, because the authority is the
-same.
+Use the blob directory of this exact dump's completed pair, not the newest copy you have. `first-start` finds the secrets complete and makes none, starts PostgreSQL, puts the dump in the database before the stack starts, takes its own first dump of what it restored, starts the stack, and waits until `orchctl doctor` passes. (`--restore-database` is accepted by `first-start` and by no other command.) Machines reconnect with their existing certificates, because the authority is the same. Restore the relevant host-volume backups separately: a thread's source snapshot helps recover its recorded selection but does not replace the volume and sign-in backups.
 
-The restore copy creates `.env` with mode 0600 even if a backup lost its permissions. Keep the restored
-secret files at mode 0600 in `config/secrets/` at mode 0700. The updater corrects `.env` before reading it,
-or refuses with `chmod 600 -- .env` when its owner must do that. Run
-`orchctl doctor --only secrets --env-file .env --secrets-dir config/secrets` to name exposed files.
+- `.env` holds this directory's path (`ORCH_HOME`). Restore at the same path, or change that line.
+- Whatever was written after the dump is not in it. That is also true of a rollback; [Update and roll back](upgrades.md) says what a rollback loses.
+- The restore copy makes `.env` mode 0600 even if the backup lost its permissions. Keep the restored secret files at 0600 in `config/secrets/` at 0700. The updater corrects `.env` before reading it, or stops with `chmod 600 -- .env` when its owner must do that. `orchctl doctor --only secrets --env-file .env --secrets-dir config/secrets` names exposed files.
 
-Use the blob directory belonging to this exact dump's completed pair, not the newest copy available.
-Restore the relevant host-volume backups separately. A thread source snapshot can help recover its
-recorded selection, but does not replace the volume and sign-in backups in the table.
+## 5. Practise a restore
 
-Two things to know:
+Do this before you need it, and again after you change how you back up.
 
-- `.env` holds this directory's path (`ORCH_HOME`). Put the system back at the same path, or change that line.
-- Whatever was written after the dump is not in it. That is the case for a rollback too, and
-  [the upgrade guide](upgrades.md) says what is lost with it.
+1. Take an isolated host or an empty directory, and a copy of one complete set.
+2. Do not point your real DNS name at it, and do not let machines reach it: the restored system holds your machines' identities and would accept them.
+3. Run the steps of section 4 against the set.
+4. Check the result:
+   - `./update.sh first-start` ends with `orchctl doctor` passing.
+   - You can sign in as an administrator, and **Management → System** shows the release you expect.
+   - A thread opens with its conversation, and a file that you know was recorded is there.
+   - The age of the backup in **Management** is the restored dump's, not a new one.
+5. Write down how long it took and what was missing. Remove the drill system afterwards.
+
+## If it does not work
+
+| You see | What to do |
+|---|---|
+| `update.sh` refuses `.env` | Run `chmod 600 -- .env` as its owner |
+| `first-start` does not restore the database | Check the path you gave to `--restore-database`, and that the dump is a complete one from `runtime/update-backups/` (with its manifest) |
+| Machines do not reconnect | The authority differs from the one that issued their certificates: restore `config/` from the same backup, not a new one |
+| API keys, mail or bot tokens do not work after a restore | `orch_master_key` is not the original. It cannot be replaced; restore the original |
+| The backup is reported as old | The last success is older than `backup.warn_days`. Run `./update.sh backup` and read its error |

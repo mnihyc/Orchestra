@@ -3,6 +3,7 @@ import type { AdminMode, MeBootstrapReply } from '../../src/generated/api-types.
 import type { Person, World } from './world.ts';
 
 export async function bootstrap(world: World, person: Person, authorization?: string): Promise<MeBootstrapReply> {
+  const personal_revision = world.users.revision(person.me.username);
   const actor = authorization === undefined ? person : world.browserPerson(authorization);
   async function read<T>(path: string): Promise<T> {
     for (const { part } of world.parts) {
@@ -16,6 +17,7 @@ export async function bootstrap(world: World, person: Person, authorization?: st
   const admin: AdminMode = authorization === undefined
     ? { as_admin: false, available: world.adminModeAvailable(person) } : world.adminMode(authorization);
   return {
+    personal_revision,
     meta: world.metaFor(authorization),
     person: person.me,
     state: await read<MeBootstrapReply['state']>('/me/state'),

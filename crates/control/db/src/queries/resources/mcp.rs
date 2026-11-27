@@ -355,9 +355,12 @@ pub async fn settings(conn: &mut Conn, chain: &[Id]) -> Result<Vec<(Id, Option<I
 
 /// The latest command's observed start result for every named server of this environment.
 pub async fn states(conn: &mut Conn, environment: Id) -> Result<Vec<(String, String)>, DbError> {
-    Ok(sqlx::query_as("SELECT DISTINCT ON (body->>'name') body->>'name',state FROM commands
+    let rows:Vec<(String,String)> = sqlx::query_as("SELECT DISTINCT ON (body->>'name') body->>'name',state FROM commands
         WHERE kind='mcp.start' AND body->>'environment_id'=$1 ORDER BY body->>'name',created_at DESC,id DESC")
-        .bind(environment.to_string()).fetch_all(conn).await?)
+        .bind(environment.to_string()).fetch_all(conn).await?;
+    rows.into_iter()
+        .map(|(name, state)| Ok((orch_types::storable::decode_key(&name)?, state)))
+        .collect()
 }
 
 /// Whether every currently bound harness can take a different MCP set between turns.

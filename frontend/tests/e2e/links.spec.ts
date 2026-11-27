@@ -56,7 +56,7 @@ test('A document that switches a tab off no longer shows it, to anyone', async (
   await signIn(page);
   await openDocument(page, DOCS.plan);
   await page.locator('[data-main-area]').getByRole('button', { name: 'Actions for Rollout plan', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Links tabs…' }).click();
+  await page.getByRole('menuitem', { name: 'Link tabs…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Links tabs' });
   await dialog.getByRole('checkbox', { name: 'Graph' }).click();
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();

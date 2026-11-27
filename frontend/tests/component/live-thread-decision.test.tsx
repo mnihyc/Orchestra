@@ -6,7 +6,7 @@ import type * as ApprovalsApi from '@/api/approvals';
 import { ApprovalCard } from '@/features/timeline/items/Approval';
 import { StateFact } from '@/features/thread/Header';
 import { StatusLine } from '@/features/timeline/StatusLine';
-import { WorkFold } from '@/features/timeline/Steps';
+import { WorkGroup } from '@/features/timeline/Steps';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import type { Approval, Item, Thread } from '@/generated/api-types';
@@ -28,15 +28,15 @@ const at = (ms: number) => new Date(START + ms).toISOString();
 function liveElapsed() {
   const line = document.querySelector<HTMLElement>('[data-status-line]');
   if (line === null) throw new Error('A working turn must have its live line');
-  expect(line).toHaveTextContent(i18n.t('statusItems.generating'));
+  expect(line).toHaveTextContent(i18n.t('thread.now.working'));
   return within(line).getByRole('button', { name: i18n.t('statusItems.items.elapsed') });
 }
-const context: TimelineContext = { threadId: THREAD, threadName: 'Check the redirect', detail: 'summary', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Check the redirect', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 const owner = userRef(me(1, 'ada', 'Ada'));
 const decider = userRef(me(2, 'grace', 'Grace'));
 const thread = { id: THREAD, name: context.threadName, seq: 3, revision: 1, current_turn_id: 'turn-1', state: 'waiting_approval', display: display('waiting_approval', { seq: 3 }), archived: false, lock: null, blocked: null,
-  side_of: null, binding: null, owner, pending_approvals: 1, access: { permissions: ['thread.view', 'thread.interact', 'thread.manage'] } } as Thread;
+  side_of: null, binding: null, owner, pending_approvals: 1, environment: null, environment_permissions: [], access: { permissions: ['thread.view', 'thread.interact', 'thread.manage'] } } as unknown as Thread;
 
 function question(input: boolean): Approval {
   return harnessApproval('ask-1', { threadId: THREAD, itemId: 'request-item', requester: owner, title: input ? 'Choose scope' : 'Run checks',
@@ -49,16 +49,17 @@ function item(approval: Approval, status: Item['status'] = 'pending'): Extract<I
   if (made.kind !== 'approval') throw new Error('The fixture is a request');
   return { ...made, thread_id: THREAD, seq_created: 3, seq_updated: status === 'pending' ? 3 : 4, status, payload: { approval_id: approval.id, approval } };
 }
-function View() {
+function View({ withStop = false }: { withStop?: boolean }) {
   const current = useThreadPart(THREAD, (view) => view.thread);
   const request = useThreadPart(THREAD, (view) => view.items.get('request-item'));
+  const running = useThreadPart(THREAD, (view) => view.turns.get('turn-1')?.state === 'running');
   if (current === null || request?.kind !== 'approval') return null;
   return <TimelineContextValue.Provider value={context}>
     <header data-testid="thread-state"><StateFact thread={current} compact /></header>
     <aside data-testid="state-clock"><StateFact thread={current} /></aside>
     <ApprovalCard item={request} />
-    <StatusLine />
-    <WorkFold turnId="turn-1" ids={['check-1']} open={false} />
+    <StatusLine threadId={THREAD} withStop={withStop} />
+    <WorkGroup rowKey="work:check-1" turnId="turn-1" ids={['check-1']} last live={running} only />
     <TurnFooter turnId="turn-1" />
   </TimelineContextValue.Provider>;
 }
@@ -76,6 +77,27 @@ afterEach(async () => {
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('live decisions in %s / %s', (language, look) => {
   beforeEach(async () => { await setLocale(language); useAppearance.setState({ locale: language, timeZone: 'UTC', theme: look, resolvedTheme: look }); document.documentElement.setAttribute('data-theme', look); });
+  it('withdraws an unanswered request and stops the clock as soon as the turn is lost', () => {
+    const pending = question(false);
+    const started = turn('turn-1', { ordinal: 1, inputId: 'in', state: 'running', startedAt: at(0), waitingSince: at(1000) });
+    const step = command('check-1', { command: 'check redirect', turn: 'turn-1', status: 'in_progress' });
+    threadWriter.reset(THREAD, { thread, turns: [started], items: [step, item(pending)] }, false);
+    const view = show(<View withStop />);
+    expect(screen.getByRole('button', { name: i18n.t('composer.stop') })).toBeVisible();
+    expect(screen.getByRole('button', { name: `${i18n.t('approvals.allowOnce')} · check redirect` })).toBeVisible();
+    act(() => threadWriter.apply(THREAD, {
+      thread: { ...thread, seq: 5, display: display('idle', { seq: 5 }), state: 'idle', current_turn_id: null, pending_approvals: 0 },
+      turns: [{ ...started, state: 'failed', completed_at: at(8000), waiting_since: null, seq_updated: 5,
+        error: { code: 'turn_lost', message: 'Cannot reattach', incomplete: true, retryable: true, said: null, resets_at: null, window: null } }],
+      items: [{ ...step, status: 'failed', seq_updated: 5 }, item({ ...pending, state: 'cancelled', decided_at: at(8000), can_decide: false }, 'cancelled')],
+    }));
+    expect(screen.queryByRole('button', { name: `${i18n.t('approvals.allowOnce')} · check redirect` })).not.toBeInTheDocument();
+    expect(screen.getByText(i18n.t('inbox.actions.approvalCancelled'))).toBeVisible();
+    expect(screen.getAllByText(i18n.t('timeline.failure.turnLost'))).toHaveLength(1);
+    expect(view.container.querySelector('[data-status-line]')).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('composer.stop') })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: i18n.t('timeline.failure.continue') })).toBeEnabled();
+  });
   it.each([false, true])('takes another page’s committed decision and completion, keeping the human wait out (question: %s)', async (input) => {
     vi.useFakeTimers(); vi.setSystemTime(START + 607_000);
     const pending = question(input);
@@ -85,11 +107,15 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     const clock = (ms: number) => formatSpan(ms, { locale: language, timeZone: 'UTC' });
     expect(within(screen.getByTestId('thread-state')).getByText(i18n.t('composer.row.waitingForYou'))).toBeVisible();
-    expect(document.querySelector('[data-status-line]')).toHaveTextContent(i18n.t('timeline.status.waitingApproval', { time: clock(600_000) }));
-    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(clock(7_000));
+    // The line names the request that waits for a person, and its one clock is the turn's working time, which the wait does not run.
+    expect(document.querySelector('[data-status-line]')).toHaveTextContent(i18n.t('thread.now.needsInput'));
+    expect(document.querySelector('[data-status-item="elapsed"]')).toHaveTextContent(clock(7_000));
+    // The work line of a turn that is still at it names no clock of its own: the live line has the one.
+    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(i18n.t('timeline.group.steps'));
+    expect(document.querySelector('[data-fold="turn-1"]')).not.toHaveTextContent(clock(7_000));
     expect(document.querySelector('[data-fold="turn-1"] .animate-spin')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(clock(7_000));
+    expect(document.querySelector('[data-fold="turn-1"]')).not.toHaveTextContent(clock(67_000));
     const resolved: Approval = { ...pending, state: 'approved', can_decide: false, decided_by: decider, decided_at: at(667_000),
       decision: input ? { answers: { scope: ['Login'] } } : { option_id: 'allow_once' } };
     // This is the receiving page: it performs no POST and changes only from the ordinary live rows.
@@ -111,8 +137,9 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
       turns: [{ ...started, state: 'completed', completed_at: at(672_000), waiting_since: null, waited_ms: 660_000, seq_updated: 5 }] }));
     expect(within(screen.getByTestId('thread-state')).getByText(i18n.t('state.idle'))).toBeVisible();
     expect(document.querySelector('[data-status-line]')).toBeNull();
-    expect(document.querySelector('[data-footer="turn-1"]')).toHaveTextContent(clock(12_000));
-    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(clock(12_000));
+    // Once the turn is over its line says how long it worked, without the time spent waiting for a person.
+    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(i18n.t('timeline.group.workedFor', { time: clock(12_000) }));
+    expect(document.querySelector('[data-footer="turn-1"]')).not.toHaveTextContent(clock(12_000));
     expect(calls.read).not.toHaveBeenCalled(); expect(calls.decide).not.toHaveBeenCalled();
   });
 });

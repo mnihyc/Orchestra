@@ -34,6 +34,7 @@ async fn put(
         .call(NodeSettingSet, &[&node, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -207,6 +208,7 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         .call(NodeSettingSet, &[&project, &"chat.enabled"])
         .token(&rules)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
@@ -240,6 +242,37 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(refused.extra["required"], "environment.manage");
     let refused = take_back(&s, &s.cai, thread, "thread.cwd").await.problem();
+    assert_eq!(refused.extra["required"], "environment.manage");
+}
+
+#[tokio::test]
+async fn a_threads_manager_chooses_its_tool_access_in_an_environment_they_only_use() {
+    // The walk's lab: Verify bot manages his thread and not Ada's environment it runs in. Its tool access is his
+    // to choose, as his topic's already was; the widest the environment allows stays its machine's and template's.
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    // Cai reads the org and manages nothing of it: the refusal names the thread's own management.
+    let refused = put(&s, &s.cai, thread, "sandbox.mode", json!("workspace"))
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    assert_eq!(refused.extra["required"], "thread.manage");
+    // Cai now manages the thread, and still not its environment.
+    s.rig
+        .lets_use("node", thread, "thread.manage", &s.cai, json!({}))
+        .await;
+    let written = put(&s, &s.cai, thread, "sandbox.mode", json!("open"))
+        .await
+        .ok();
+    assert_eq!(written.value, Some(json!("open")));
+    assert!(written.writable);
+    let back = take_back(&s, &s.cai, thread, "sandbox.mode").await.ok();
+    assert!(back.own.is_none());
+    // Where the thread starts in the environment stays the environment's to decide.
+    let refused = put(&s, &s.cai, thread, "thread.cwd", json!("web/api"))
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(refused.extra["required"], "environment.manage");
 }
 
