@@ -1,0 +1,3 @@
+# firstday-2 control on next 38f561731d: the two programs whose reds in 45951892105 look unrelated to its change
+test -p orch-api-core --test forks
+test -p orch-api-core --test hosted_environments

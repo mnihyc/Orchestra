@@ -121,7 +121,7 @@ export async function documentTreeFixture(page: Page) {
     if (body.command === 'create_folder' && body.to !== null && body.name !== null) {
       const made = entry('container', randomUUID(), body.name, body.to); rows.set(made.entry.item.id, made); changed.push(made.entry);
     } else if (body.command === 'delete') {
-      if (body.deletion_plan === null) { await route.fulfill({ status: 409, json: { code: 'conflict', detail: 'A complete deletion preview is required.' } }); return; }
+      // As the server: a deletion goes to the trash at once; only Move to another org carries a plan.
       for (const row of selection) { row.entry.deleted_at = '2026-10-17T00:00:00Z'; row.entry.deletion = 'fixture-deletion'; row.inspection = { deleted_at: row.entry.deleted_at, deleted_by: null, purge_at: until, readonly: true }; changed.push(row.entry); }
     } else if (body.command === 'restore') {
       for (const row of selection) { row.entry.deleted_at = null; row.entry.deletion = null; row.inspection = null; changed.push(row.entry); }

@@ -15,7 +15,7 @@ import { UserChip } from '@/ui/UserChip';
 import { show } from './support';
 
 const reads=vi.hoisted(()=>{const rows:CapabilityDef[]=[];return {rows};});
-vi.mock('@/api/admin',async(original)=>({...await original<typeof AdminApi>(),capabilitiesQuery:{queryKey:['person-capabilities'],queryFn:()=>Promise.resolve(reads.rows)}}));
+vi.mock('@/api/admin',async(original)=>({...await original<typeof AdminApi>(),capabilitiesQuery:{queryKey:['person-capabilities'],queryFn:()=>Promise.resolve(reads.rows)},capabilitiesPageQuery:(q:string)=>({queryKey:['person-capabilities','pages',q],initialPageParam:null,queryFn:()=>Promise.resolve({items:reads.rows,next_cursor:null}),getNextPageParam:()=>null})}));
 const appearance=useAppearance.getState();
 const previousTheme=document.documentElement.getAttribute('data-theme');
 afterEach(async()=>{cleanup();useAppearance.setState(appearance);await setLocale('en');if(previousTheme===null)document.documentElement.removeAttribute('data-theme');else document.documentElement.dataset.theme=previousTheme;});

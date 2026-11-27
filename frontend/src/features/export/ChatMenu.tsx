@@ -19,6 +19,7 @@ import { openExport, requestExportAccess } from './ExportHost';
 import { exportEntries } from './menu';
 import { mayExportChat } from './pending';
 import type { ExportTarget } from './target';
+import { useShortcutActs } from '@/features/navigation/shortcuts';
 
 /** What a chat is called in the words of its menu and its dialog: its place, its name, or the people in it. */
 export function chatLabel(chat: Chat, me: string | null): string {
@@ -56,7 +57,8 @@ export function useChatExportEntries(chat: Chat, me: string | null): MenuEntry[]
 export function ChatMenu({ chat, me }: { chat: Chat; me: string | null }) {
   const { t } = useTranslation();
   const exporting = useChatExportEntries(chat, me);
-  const entries: MenuEntry[] = [{ id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'),
+  const shortcuts = useShortcutActs({ kind: 'chat', id: chat.id, name: chatLabel(chat, me) });
+  const entries: MenuEntry[] = [...shortcuts, { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'),
     onSelect: () => void copyText(linkTo({ kind: 'chat', id: chat.id }), t('common.linkCopied')) }, ...exporting];
   return <Menu label={t('export.chatMenu')} align="end" entries={entries} trigger={<IconButton size="sm" label={t('export.chatMenu')} icon={<EllipsisVertical aria-hidden />} />} />;
 }

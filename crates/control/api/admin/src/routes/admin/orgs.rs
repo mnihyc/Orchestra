@@ -6,8 +6,6 @@
 //! of its root), and it is the system, never the org's own owners, that sets them: a limit that its
 //! subject could lift would be none.
 
-use super::SECONDS_PER_DAY;
-
 use super::invalid;
 
 use super::page_size;
@@ -39,8 +37,6 @@ use crate::routes::nodes::Placed;
 use crate::routes::nodes::record;
 
 use chrono::DateTime;
-
-use chrono::Duration;
 
 use chrono::Utc;
 
@@ -235,7 +231,10 @@ async fn select_organizations(
             .as_deref()
             .map(parse_deleted_cursor)
             .transpose()?;
-        let purged_before = ctx.now - kept_for(ctx.app.config.retention.soft_delete_days);
+        let purged_before = orch_settings::retention::deleted_before(
+            ctx.now,
+            orch_settings::retention::deleted_keep_days(conn).await?,
+        );
         let mut rows = Vec::new();
         'pages: loop {
             let batch =
@@ -342,11 +341,6 @@ async fn select_organizations(
     ))
 }
 
-/// How long a deleted org is kept before it is purged.
-fn kept_for(days: u64) -> Duration {
-    Duration::days(i64::try_from(days).unwrap_or(i64::MAX / SECONDS_PER_DAY))
-}
-
 /// The root orgs that were deleted and not purged yet. The org of the engine's views is a live
 /// one; these are built from what is stored, with nothing held on them but the way back, which
 /// is the restore.
@@ -405,6 +399,7 @@ async fn deleted_views(
                 tags: Vec::new(),
                 tags_source: field_source(detail.tags_source.as_deref().unwrap_or("auto")),
                 auto_updated_at: detail.auto_updated_at.map(Time::new),
+                automatic_fields: None,
                 page: PageState::Follows,
                 chat_id: detail.chat_id.unwrap_or_else(Id::nil),
                 archived: detail.archived_at.is_some(),
