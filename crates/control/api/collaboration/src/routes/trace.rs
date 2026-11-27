@@ -223,6 +223,7 @@ pub(crate) async fn entries(
     let names =
         crate::routes::nodes::view::refs(conn, &principal, &node_ids, Policy::default()).await?;
     let mut out = Vec::with_capacity(rows.len());
+    let keep_days = orch_settings::retention::deleted_keep_days(conn).await?;
     for row in rows {
         let base = &row.base;
         // A retained or newer writer's action must not hide the rest of the trail.
@@ -265,12 +266,8 @@ pub(crate) async fn entries(
             let in_window = life.as_ref().is_some_and(|l| {
                 l.purge_at
                     .or_else(|| {
-                        l.deleted_at.map(|at| {
-                            at + chrono::Duration::days(
-                                i64::try_from(ctx.app.config.retention.soft_delete_days)
-                                    .unwrap_or(i64::MAX / 86_400),
-                            )
-                        })
+                        l.deleted_at
+                            .map(|at| orch_settings::retention::purge_at(at, keep_days))
                     })
                     .is_some_and(|at| at > ctx.now)
             });

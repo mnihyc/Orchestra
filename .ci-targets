@@ -1,0 +1,2 @@
+# The new credential case and its neighbours on the trunk with the case alone (no change): the case must fail
+test -p orch-engine --test credentials

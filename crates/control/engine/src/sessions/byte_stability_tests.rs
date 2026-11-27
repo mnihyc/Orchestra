@@ -22,6 +22,7 @@ async fn world() -> TestResult<World> {
         .await?;
     world.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".into(),
             descriptor: serde_json::from_value(descriptor.clone()).map_err(|error| {

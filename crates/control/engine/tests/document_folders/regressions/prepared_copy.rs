@@ -51,7 +51,7 @@ async fn prepared_copy_cut_precedes_header_files_history_and_replay_never_repeat
     let attached = attach(&area.world, source).await?;
     let (request, copy) = command(&area, source, "prepared-copy-once");
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let calls = AtomicUsize::new(0);
     let mut tx = area.world.pool.begin().await?;
     let principal = principal(&area, &mut tx).await?;
@@ -168,7 +168,7 @@ async fn prepared_copy_rejects_another_actor_and_transaction_before_material_or_
     let attached = attach(&area.world, source).await?;
     let (request, copy) = command(&area, source, "prepared-copy-association");
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let calls = AtomicUsize::new(0);
     let mut tx = area.world.pool.begin().await?;
     let principal = principal(&area, &mut tx).await?;
@@ -224,7 +224,7 @@ async fn prepared_copy_late_native_file_failure_rolls_back_header_authority_and_
     let attached = attach(&area.world, source).await?;
     let (request, copy) = command(&area, source, "prepared-copy-late-file");
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let calls = AtomicUsize::new(0);
     let mut tx = area.world.pool.begin().await?;
     sqlx::raw_sql("CREATE FUNCTION refuse_prepared_copy_file() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.document_id::text=current_setting('orch.test.copy_destination',true) THEN RAISE EXCEPTION 'native copied file refused'; END IF; RETURN NEW; END; $$; CREATE TRIGGER refuse_prepared_copy_file BEFORE INSERT ON document_files FOR EACH ROW EXECUTE FUNCTION refuse_prepared_copy_file();").execute(&mut *tx).await?;
@@ -262,7 +262,7 @@ async fn prepared_copy_subjects_cannot_cross_a_transaction_or_upgrade_provisiona
     let attached = attach(&area.world, source).await?;
     let (request, copy) = command(&area, source, "prepared-copy-subject-footprint");
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let mut tx = area.world.pool.begin().await?;
     let principal = principal(&area, &mut tx).await?;
     let actor = domain::Actor::Person(&principal);

@@ -254,7 +254,7 @@ async fn operation_source_replay_uses_only_its_actual_native_result_without_new_
     request.name = Some("native-copied.md".into());
     let actor = domain::Actor::Agent { thread: area.agent };
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let mut tx = area.world.pool.begin().await?;
     let receipt = domain::execute_in(&mut tx, actor, &request, None, now, options).await?;
     tx.commit().await?;

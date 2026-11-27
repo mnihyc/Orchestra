@@ -7,6 +7,7 @@ import type { Job } from '@/generated/api-types';
 import { deliverLiveValue, liveValue } from '@/api/liveValue';
 import { feedSequences } from '@/api/cache';
 import { detailEnvironment } from '../component/resource-detail-fixtures';
+import { NetworkError } from '@/lib/requests';
 
 function wire() {
   const listeners = new Map<string, FeedListener>();
@@ -138,7 +139,7 @@ describe('visible subscriptions', () => {
     expect(read).toHaveBeenCalledTimes(1);
     stop(); cache.clear(); feedSequences.delete(name);
   });
-  it('retires a native authority projection immediately and reloads its environment cut before resubscribing', async () => {
+  it('retires a native authority projection at once, keeps the shown environment, and reloads its cut before resubscribing', async () => {
     const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }), live = wire();
     const key = ['environment', detailEnvironment.id], name = `env:${detailEnvironment.id}`;
     const reads: { signal: AbortSignal; resolve: (value: typeof detailEnvironment) => void }[] = [];
@@ -149,12 +150,13 @@ describe('visible subscriptions', () => {
     const former = reads[0]!;
     live.listeners.get(name)?.onFrame({ op: 'resync', id: 1, feed: name, reload: true });
     expect(former.signal.aborted).toBe(true);
-    expect(cache.getQueryData(key)).toBeUndefined();
+    // What the page shows stays on screen until the fresh cut replaces it.
+    expect(cache.getQueryData(key)).toEqual(detailEnvironment);
     expect(reads).toHaveLength(2);
     expect(live.subscribe).toHaveBeenCalledTimes(1);
-    former.resolve(detailEnvironment);
+    former.resolve({ ...detailEnvironment, name: 'late answer of the former authority' });
     for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
-    expect(cache.getQueryData(key)).toBeUndefined();
+    expect(cache.getQueryData(key)).toEqual(detailEnvironment);
     const current = { ...detailEnvironment, generation: 2, revision: 2, seq: 2 };
     feedSequences.set(name, 2); reads[1]!.resolve(current);
     for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
@@ -164,7 +166,7 @@ describe('visible subscriptions', () => {
     off(); stop(); cache.clear(); feedSequences.delete(name);
   });
 
-  it('rejoins a complete native snapshot at the same sequence without HTTP and removes hidden former projections', () => {
+  it('rejoins a complete native snapshot at the same sequence without HTTP, keeps the shown one until then and removes hidden former projections', () => {
     const cache = new QueryClient(), live = wire();
     const key = ['processes', 'e1'], hidden = ['processes', 'e1', 'hidden'], other = ['processes', 'e2'];
     const former = { as_of: 'before', processes: [{ pid: 12 }] };
@@ -175,7 +177,7 @@ describe('visible subscriptions', () => {
     const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
     live.listeners.get('env:e1:procs')?.onFrame(sync(7, former));
     live.listeners.get('env:e1:procs')?.onFrame({ op: 'resync', id: 1, feed: 'env:e1:procs', reload: true });
-    expect(cache.getQueryData(key)).toBeUndefined();
+    expect(cache.getQueryData(key)).toEqual(former);
     expect(cache.getQueryData(hidden)).toBeUndefined();
     expect(cache.getQueryData(other)).toEqual(former);
     expect(live.listeners.get('env:e1:procs')?.since()).toBeNull();
@@ -221,6 +223,20 @@ describe('visible subscriptions', () => {
     off(); stop(); cache.clear(); feedSequences.delete(name);
   });
 
+  it('keeps the shown environment when its authority re-read fails for the line, and says that it failed', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }), live = wire();
+    const key = ['environment', detailEnvironment.id], name = `env:${detailEnvironment.id}`;
+    cache.setQueryData(key, detailEnvironment); feedSequences.set(name, 1);
+    const read = vi.fn().mockRejectedValueOnce(new NetworkError('failed'));
+    const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+    const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
+    live.listeners.get(name)?.onFrame({ op: 'resync', id: 1, feed: name, reload: true });
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+    expect(cache.getQueryData(key)).toEqual(detailEnvironment);
+    expect(cache.getQueryState(key)?.error).toBeInstanceOf(NetworkError);
+    off(); stop(); cache.clear(); feedSequences.delete(name);
+  });
+
   it('refreshes the browser capability baseline before partial native lists can reuse an old privileged view', async () => {
     const cache = new QueryClient(), live = wire(), key = ['environment-browsers', 'e1'];
     const previous = { support: { programs: ['old-private-program'] }, browsers: [], profiles: [{ id: 'private' }],
@@ -231,9 +247,12 @@ describe('visible subscriptions', () => {
     const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
     const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
     live.listeners.get('env:e1:browsers')?.onFrame({ op: 'resync', id: 1, feed: 'env:e1:browsers', reload: true });
-    expect(cache.getQueryData(key)).toBeUndefined();
+    // Shown until the fresh baseline replaces it; no partial frame is merged into it meanwhile (the feed rejoins after the read).
+    expect(cache.getQueryData(key)).toEqual(previous);
+    expect(live.subscribe).toHaveBeenCalledTimes(1);
     for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
     expect(read).toHaveBeenCalledTimes(1);
+    expect(cache.getQueryData(key)).toEqual(current);
     live.listeners.get('env:e1:browsers')?.onFrame(event({ browsers: [], profiles: [] }));
     expect(cache.getQueryData(key)).toEqual(current);
     off(); stop(); cache.clear();

@@ -59,6 +59,63 @@ impl Rig {
 }
 
 #[tokio::test]
+async fn a_directory_page_marks_a_denied_file_and_a_vanished_sibling_beside_a_readable_file()
+-> Proof {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new()?;
+    for name in ["a-first", "b-private", "c-vanishing", "d-readable"] {
+        std::fs::write(rig.root.join(name), name)?;
+    }
+    let first = rig.read(rig.binding.clone(), None, 1).await?;
+    assert_eq!(first.entries[0].name, "a-first");
+    let cursor = first
+        .next_cursor
+        .as_deref()
+        .ok_or("expected another page")?;
+    let private = rig.root.join("b-private");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000))?;
+    std::fs::remove_file(rig.root.join("c-vanishing"))?;
+    let page = rig.read(rig.binding.clone(), Some(cursor), 4).await?;
+    // A connector running as root may still read a file with mode zero.
+    let denied = std::fs::File::open(&private)
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+    let expected = if denied { "permission_denied" } else { "file" };
+    let rows = serde_json::to_value(page.entries)?;
+    assert_eq!(rows.as_array().ok_or("expected a listing")?.len(), 3);
+    for (index, (name, kind)) in [
+        ("b-private", expected),
+        ("c-vanishing", "vanished"),
+        ("d-readable", "file"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(rows[index]["name"], name);
+        assert_eq!(rows[index]["type"], kind);
+    }
+
+    let attachment = Attachment::new();
+    let operation = attachment.begin(&rig.cache, None).await?;
+    let completion = rig
+        .cache
+        .read_prefixed_in(
+            &operation,
+            rig.binding.clone(),
+            rig.files.clone(),
+            RelPath::root(),
+            None,
+            4,
+            "b-",
+        )
+        .await?;
+    let rows = serde_json::to_value(completion.entries)?;
+    assert_eq!(rows[0]["name"], "b-private");
+    assert_eq!(rows[0]["type"], expected);
+    Ok(())
+}
+
+#[tokio::test]
 async fn every_sibling_is_discoverable_in_sorted_bounded_pages_of_one_revision() -> Proof {
     let rig = Rig::new()?;
     std::fs::create_dir(rig.root.join("Z-dir"))?;
@@ -157,6 +214,7 @@ async fn real_long_paths_hit_the_serialized_bound_before_the_row_bound_without_l
         assert!(found.len() <= 2_000);
         cursor = page.next_cursor;
     }
+    found.sort();
     assert_eq!(found, names);
     Ok(())
 }
@@ -215,14 +273,52 @@ async fn continuation_is_attachment_generation_mount_path_bound_and_actual_use_r
         "b"
     );
     rig.clock.advance(chrono::Duration::minutes(5));
-    assert!(matches!(
-        rig.read(rig.binding.clone(), Some(cursor), 1).await,
-        Err(HostError::Stale { .. })
-    ));
-    assert_eq!(rig.cache.ledger.used.load(Ordering::Acquire), 0);
+    let renewed = rig.read(rig.binding.clone(), Some(cursor), 1).await?;
+    assert_eq!(
+        renewed.entries[0].name, "b",
+        "idle renewal preserves continuation"
+    );
+    assert_eq!(renewed.revision, used.revision);
     assert_eq!(
         rig.read(rig.binding.clone(), None, 1).await?.entries[0].name,
         "a"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn directory_allowances_change_without_releasing_resources_that_are_still_in_use() -> Proof {
+    let rig = Rig::new()?;
+    let policy = orch_link_contract::commands::WorkspaceLimits {
+        directory_slots: 2,
+        directory_builds: 2,
+        directory_cache_bytes: 32768,
+        directory_page_bytes: 300,
+        directory_idle_secs: 900,
+        ..Default::default()
+    };
+    rig.cache.configure(rig.binding.environment, &policy);
+    assert_eq!(rig.cache.operations.available(), 2);
+    let held = rig.cache.build.clone().acquire_owned().await?;
+    rig.cache.configure(
+        rig.binding.environment,
+        &orch_link_contract::commands::WorkspaceLimits {
+            directory_builds: 1,
+            ..policy.clone()
+        },
+    );
+    assert_eq!(rig.cache.build.available_permits(), 0);
+    drop(held);
+    assert_eq!(rig.cache.build.available_permits(), 1);
+    for n in 0..12 {
+        std::fs::write(rig.root.join(format!("name-{n:02}")), b"")?;
+    }
+    let first = rig.read(rig.binding.clone(), None, 100_000).await?;
+    assert!(serde_json::to_vec(&first.entries)?.len() <= 300);
+    assert!(first.next_cursor.is_some());
+    assert_eq!(
+        first.expires_at.get(),
+        rig.clock.now() + chrono::Duration::seconds(900)
     );
     Ok(())
 }
@@ -337,6 +433,7 @@ fn page_outcome(value: &Result<Page>) -> &'static str {
         Ok(_) => "Ok(Page)",
         Err(error) => match error {
             HostError::Cancelled => "Cancelled",
+            HostError::FileReachDenied => "FileReachDenied",
             HostError::NotFound(_) => "NotFound",
             HostError::Ignored(_) => "Ignored",
             HostError::Exists(_) => "Exists",
@@ -351,6 +448,7 @@ fn page_outcome(value: &Result<Page>) -> &'static str {
             HostError::ExecNotOffered(_) => "ExecNotOffered",
             HostError::McpImportDisabled => "McpImportDisabled",
             HostError::McpAddDisabled => "McpAddDisabled",
+            HostError::CloneStalled(_) => "CloneStalled",
             HostError::Timeout(_) => "Timeout",
             HostError::Busy(_) => "Busy",
             HostError::Content(_) => "Content",
@@ -377,7 +475,10 @@ fn entry(name: &str, payload: usize, at: Time) -> DirEntry {
 fn serialized_bytes_split_before_row_limit_and_merge_quota_includes_all_files() -> Proof {
     let rig = Rig::new()?;
     std::fs::create_dir_all(&rig.cache.directory)?;
-    assert_eq!(rig.cache.ledger.maximum, 1024 * 1024 * 1024);
+    assert_eq!(
+        rig.cache.ledger.maximum.load(Ordering::Acquire),
+        orch_link_contract::commands::WorkspaceLimits::default().directory_cache_bytes
+    );
     let cancel = CancellationToken::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut builder = Builder {
@@ -443,7 +544,7 @@ fn pinned_and_intermediate_work_is_busy_instead_of_exceeding_one_host_quota() ->
     let cache = Arc::get_mut(&mut rig.cache).ok_or("cache unexpectedly shared")?;
     cache.ledger = Arc::new(Ledger {
         used: AtomicU64::new(0),
-        maximum: 128,
+        maximum: AtomicU64::new(128),
     });
     std::fs::create_dir_all(&cache.directory)?;
     let mut kept = Stored::new(cache)?;
@@ -520,5 +621,140 @@ async fn lru_evicts_only_unpinned_metadata_and_forget_keeps_active_quota_charged
     assert_eq!(first.revision, pinned.revision);
     drop(pinned);
     assert_eq!(rig.cache.ledger.used.load(Ordering::Acquire), 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wide_changing_folder_delivers_a_first_page_and_keeps_its_remaining_children_reachable()
+-> Proof {
+    const CHILDREN: usize = 200_000;
+    let rig = Rig::new()?;
+    for n in 0..CHILDREN {
+        std::fs::write(rig.root.join(format!("file-{n:06}")), b"")?;
+    }
+    let limits = orch_link_contract::commands::WorkspaceLimits {
+        directory_page_bytes: 64 * 1024,
+        ..Default::default()
+    };
+    rig.cache.configure(rig.binding.environment, &limits);
+    for pass in 0..2 {
+        let mut held = rig.cache.testing.hold_capture();
+        let cache = Arc::clone(&rig.cache);
+        let files = rig.files.clone();
+        let binding = rig.binding.clone();
+        let first = tokio::spawn(async move {
+            cache
+                .read(binding, files, RelPath::root(), None, 1_000)
+                .await
+        });
+        held.entered().await?;
+        let churn = rig.root.join(format!("changed-during-capture-{pass}"));
+        std::fs::write(&churn, b"native change")?;
+        std::fs::remove_file(&churn)?;
+        rig.cache.invalidate(
+            rig.binding.environment,
+            rig.binding.attachment,
+            &[RelPath::root()],
+            false,
+        );
+        held.release()?;
+        let mut page = tokio::time::timeout(Duration::from_secs(30), first).await???;
+        assert!(
+            !page.entries.is_empty(),
+            "the first visible rows cannot wait for a stable complete level"
+        );
+        assert!(serde_json::to_vec(&page.entries)?.len() <= limits.directory_page_bytes as usize);
+        let revision = page.revision;
+        let mut seen = vec![false; CHILDREN];
+        let mut count = 0;
+        loop {
+            assert_eq!(page.revision, revision);
+            for entry in &page.entries {
+                if let Some(number) = entry.name.strip_prefix("file-") {
+                    let number: usize = number.parse()?;
+                    assert!(
+                        !seen[number],
+                        "a continuing folder observation repeats no stable child"
+                    );
+                    seen[number] = true;
+                    count += 1;
+                }
+            }
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            page = rig.read(rig.binding.clone(), Some(&cursor), 1_000).await?;
+            assert!(count <= CHILDREN);
+        }
+        assert_eq!(count, CHILDREN);
+        assert!(seen.into_iter().all(|present| present));
+        rig.cache
+            .join_searches(rig.binding.environment, rig.binding.attachment)
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_name_candidates_are_charged_and_backpressured_before_they_are_cloned() -> Proof {
+    use crate::index::Index;
+    use orch_api_contract::workspace::FileSearchIn;
+    use orch_link_contract::commands::{FsSearch, IndexMode};
+    let rig = Rig::new()?;
+    for number in 0..1200 {
+        std::fs::write(
+            rig.root
+                .join(format!("needle-{number:04}-{}", "x".repeat(190))),
+            b"",
+        )?;
+    }
+    let index = Arc::new(Index::new(IndexMode::Full, 5000));
+    index.scan(
+        rig.files.root(),
+        &Arc::new(crate::ignore::IgnoreRules::new(&[], true)),
+    )?;
+    let limits = orch_link_contract::commands::WorkspaceLimits {
+        directory_page_bytes: 16 * 1024,
+        directory_cache_bytes: 128 * 1024,
+        ..Default::default()
+    };
+    rig.cache.configure(rig.binding.environment, &limits);
+    let page = rig
+        .cache
+        .search(
+            rig.binding.clone(),
+            rig.files.clone(),
+            FsSearch {
+                access: orch_link_contract::commands::FsAccess::roots(),
+                environment_id: rig.binding.environment,
+                path: String::new(),
+                query: "needle".into(),
+                scope: FileSearchIn::Names,
+                cursor: None,
+                regex: false,
+                case: true,
+                glob: None,
+                limit: 1_000_000,
+            },
+            Some(Arc::clone(&index)),
+        )
+        .await?;
+    let rows = page.names.as_ref().ok_or("name results absent")?.len();
+    assert!(rows > 0 && rows < 1200);
+    assert!(page.next_cursor.is_some());
+    assert!(
+        index.hint_clones.load(std::sync::atomic::Ordering::Relaxed) <= rows + 3,
+        "only the delivered rows and bounded producer lookahead are cloned, never the row preference"
+    );
+    assert!(
+        rig.cache
+            .ledger
+            .used
+            .load(std::sync::atomic::Ordering::Acquire)
+            <= limits.directory_cache_bytes
+    );
+    rig.cache
+        .join_searches(rig.binding.environment, rig.binding.attachment)
+        .await?;
     Ok(())
 }

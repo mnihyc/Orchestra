@@ -1,4 +1,4 @@
-/** A deleted topic that is brought back stays in its project's list when the frames that say it was deleted come late: after the list was read again, and in order with the frames that say it came back. */
+/** A topic deleted from a selection and brought back by Undo stays in its project's list when the frames that say it was deleted come late: after the list was read again, and in order with the frames that say it came back. */
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 
 import { ACME, scenario, signIn } from './support.ts';
@@ -27,18 +27,14 @@ for (const width of [1440, 400]) {
     await page.goto(`/project/${ACME.web}?view=list&status=all`);
     const topic = page.getByRole('checkbox', { name: 'Select Upgrade deps', exact: true });
     await topic.check();
-    await page.getByRole('region', { name: 'Selected topics' }).getByRole('button', { name: 'Delete', exact: true }).click();
-    const review = page.getByRole('dialog', { name: 'Review selected places', exact: true });
-    await expect(review).toContainText('Gone for good');
     // The feed is slow: what it says of the deletion and of the Undo comes after the answers of both acts and after the list was read again.
     socket.hold();
-    await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
-    const results = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
-    await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
-    await results.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
-    await expect(results.getByRole('heading', { name: 'Undo results', exact: true })).toBeVisible();
-    await expect(results.getByText('Succeeded', { exact: true })).toHaveCount(2);
-    await results.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();
+    // Delete asks nothing: the selection goes to the trash, and one line says so with Undo.
+    await page.getByRole('region', { name: 'Selected topics' }).getByRole('button', { name: 'Delete', exact: true }).click();
+    const notices = page.getByRole('region', { name: /^Notifications/ });
+    await expect(notices.getByText('Moved “Upgrade deps” to Trash', { exact: true })).toBeVisible();
+    await notices.getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect(notices.getByText('“Upgrade deps” is back', { exact: true })).toBeVisible();
     // The answer of the Undo brought the list up to date.
     await expect(topic).toBeVisible();
     socket.release();

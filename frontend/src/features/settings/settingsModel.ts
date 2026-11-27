@@ -118,6 +118,7 @@ const NARROWING: Readonly<Record<SettingDef['merge'], boolean>> = {
   union: false,
   intersect: true,
   map: false,
+  map_stricter: true,
   append: false,
   min: true,
   max: true,
@@ -169,7 +170,7 @@ export function provenanceOf(setting: Pick<ResolvedSetting, 'own' | 'source' | '
   if (setting.own !== null) return { kind: 'here', locked: setting.own.locked };
   const { scope, node } = setting.source;
   if (scope === 'default' || scope === 'environment') return { kind: 'default', scope };
-  if (scope === 'environment_own' || scope === 'provider_own' || scope === 'host_own') return { kind: 'here', locked: false };
+  if (scope === 'environment_own' || scope === 'provider_own' || scope === 'host_own' || scope === 'pool_own') return { kind: 'here', locked: false };
   return { kind: 'inherited', scope, place: node?.name ?? null };
 }
 
@@ -200,9 +201,12 @@ export type Shape =
 const numberOrNull = (value: unknown): number | null => (typeof value === 'number' ? value : null);
 
 /** A served capability list narrows the registry's enum, including a set of enum members. */
-export function availableShape(shape: Shape, available: readonly string[] | null | undefined): Shape {
+export function availableShape(shape: Shape, available: readonly string[] | null | undefined,
+  choices?: readonly { mode: string; available: boolean; reason: string | null }[] | null): Shape {
   if (available === null || available === undefined) return shape;
-  if (shape.type === 'choice') return { ...shape, values: shape.values.filter((value) => available.includes(value)) };
+  if (shape.type === 'choice') return { ...shape, values: shape.values.filter((value) => available.includes(value)),
+    unavailable: [...(shape.unavailable ?? []).filter((held) => choices?.some((choice) => choice.mode === held.value) !== true),
+      ...(choices ?? []).filter((choice) => !choice.available).map((choice) => ({ value: choice.mode, reason: choice.reason ?? 'not_supported_by_build' }))] };
   if (shape.type === 'list') return { ...shape, item: availableShape(shape.item, available) };
   if (shape.type === 'nullable') return { ...shape, of: availableShape(shape.of, available) };
   return shape;

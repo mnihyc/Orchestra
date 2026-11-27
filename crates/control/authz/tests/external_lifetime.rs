@@ -15,14 +15,14 @@ use orch_types::{Id, Time};
 use serde_json::{Value, json};
 use support::{World, user_holder};
 
-/// Sets `sharing.external_max_days` to `days` at `place`.
+/// Sets `sharing.external_max_minutes` in minutes from `days` at `place`.
 async fn bound(w: &World, place: Id, days: i64) {
     sqlx::query(
-        "INSERT INTO settings (node_id, key, value) VALUES ($1, 'sharing.external_max_days', $2)
+        "INSERT INTO settings (node_id, key, value) VALUES ($1, 'sharing.external_max_minutes', $2)
          ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value",
     )
     .bind(place)
-    .bind(json!(days))
+    .bind(json!(days * 24 * 60))
     .execute(&w.db.pool)
     .await
     .unwrap();

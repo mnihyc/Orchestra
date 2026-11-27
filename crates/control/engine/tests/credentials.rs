@@ -144,6 +144,7 @@ async fn stand_on(world: World) -> Stand {
     for (machine, id) in [(&world.machine, world.machine_id), (&env.machine, env.id)] {
         script(&world, machine, id, K::AgentStart, |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(declared()).unwrap(),
@@ -863,6 +864,91 @@ async fn a_native_harness_that_needs_a_copy_of_the_login_is_not_offered_to_an_en
     assert_eq!(bound_in(&s, thread).await, "credential_shared");
 }
 
+/// A thread of the profile `agent` in the environment on the provider's own machine.
+async fn made_beside(
+    s: &Stand,
+    agent: Id,
+    arrangement: Option<ArrangementType>,
+    name: &str,
+) -> Result<orch_engine::binding::CreatedThread, CreateThreadError> {
+    s.world
+        .engine()
+        .create_thread(
+            &Caller::session(s.world.ada),
+            NewThread {
+                topic: s.world.topic,
+                name: name.to_owned(),
+                agent,
+                provider: s.world.provider,
+                environment: s.world.environment,
+                directory: "web".to_owned(),
+                arrangement,
+                model: Some(common::MODEL.to_owned()),
+                effort: None,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn another_profile_of_the_native_harness_beside_the_tools_is_offered_only_a_copy_the_provider_allows()
+ {
+    // The login is in the home of the provider's own profile. Another profile of the same harness on the
+    // provider's machine works on a copy of it: where the provider allows only `separated`, nothing is
+    // offered that the first turn would refuse for want of a form of the credential.
+    let s = stand().await;
+    let pool = s.world.pool.pool();
+    let other = new_id();
+    sqlx::query(
+        "INSERT INTO agents (id, name, owner_id, org_id, home_id, harness_kind, profile, descriptor)
+         VALUES ($1, 'Another profile', $2, $3, $3, 'fake', '{}', $4)",
+    )
+    .bind(other)
+    .bind(s.world.ada)
+    .bind(s.world.root)
+    .bind(declared())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE providers SET arrangements = ARRAY['separated'] WHERE id = $1")
+        .bind(s.world.provider)
+        .execute(pool)
+        .await
+        .unwrap();
+    for requested in [None, Some(ArrangementType::Together)] {
+        let result = made_beside(&s, other, requested, "beside the tools").await;
+        assert!(
+            matches!(
+                result,
+                Err(CreateThreadError::Incompatible(
+                    Incompatible::ArrangementNotAllowed {
+                        by: NotAllowedBy::Provider
+                    }
+                ))
+            ),
+            "{requested:?}: {result:?}"
+        );
+    }
+    // The provider's own profile there uses the login itself.
+    let own = made_beside(&s, s.world.agent, Some(ArrangementType::Together), "own")
+        .await
+        .unwrap();
+    assert_eq!(own.arrangement.form, None);
+    // A provider that allows a copy gives the other profile one, in a form its harness accepts.
+    sqlx::query(
+        "UPDATE providers SET arrangements = ARRAY['separated','credential_shared'] WHERE id = $1",
+    )
+    .bind(s.world.provider)
+    .execute(pool)
+    .await
+    .unwrap();
+    let copied = made_beside(&s, other, Some(ArrangementType::Together), "with a copy")
+        .await
+        .unwrap();
+    assert_eq!(copied.arrangement.kind, ArrangementType::Together);
+    assert!(copied.arrangement.form.is_some(), "{copied:?}");
+}
+
 #[tokio::test]
 async fn an_entry_that_names_the_copy_lets_it_be_made() {
     let s = stand().await;
@@ -946,8 +1032,9 @@ async fn a_copy_is_issued_sealed_to_the_machine_of_the_harness_and_given_to_it_b
 }
 
 #[tokio::test]
-async fn a_harness_that_asks_for_a_credential_again_within_thirty_seconds_has_its_turn_failed() {
-    let s = stand().await;
+async fn a_harness_can_renew_a_recent_shared_copy_without_ending_its_turn() {
+    let clock = orch_testkit::clock::manual();
+    let s = stand_on(World::observed_with_clock(Arc::new(clock)).await).await;
     let thread = s.thread(ArrangementType::CredentialShared, "shared").await;
     s.say(thread, "hello").await;
     let start = s.turn_start(thread, 0).await;
@@ -961,18 +1048,20 @@ async fn a_harness_that_asks_for_a_credential_again_within_thirty_seconds_has_it
         }),
     )
     .await;
-    s.world.wait_turn(start.turn_id, "failed").await;
-    let error: Json = sqlx::query_scalar("SELECT error FROM turns WHERE id = $1")
-        .bind(start.turn_id)
-        .fetch_one(s.world.pool.pool())
-        .await
-        .unwrap();
-    assert_eq!(error["code"], "provider_unauthorized", "{error}");
+    eventually(
+        "the requested replacement copy to be given without moving the clock",
+        || async { s.audited("provider.credential_issued").await.len() >= 2 },
+    )
+    .await;
+    assert_eq!(s.world.turn_state(start.turn_id).await, "running");
     assert_eq!(
         s.bodies(K::ProviderCredentialIssue).len(),
-        1,
-        "no second copy was issued so soon after the first"
+        2,
+        "the request receives another copy without an arbitrary delay"
     );
+    assert_eq!(s.bodies(K::AgentCredentialSet).len(), 2);
+    assert_eq!(s.holder().await, None, "the provider retains custody");
+    s.finish_turn(thread, &start).await;
 }
 
 #[tokio::test]

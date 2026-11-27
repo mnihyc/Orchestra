@@ -107,8 +107,16 @@ pub async fn references(conn: &mut Conn, environment: Id) -> Result<Vec<Volume>,
 
 /// A failed fork records its unpublished destination before rollback schedules cleanup.
 pub async fn is_scratch(conn: &mut Conn, environment: Id) -> Result<bool, DbError> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE kind='thread_fork' AND plan->>'scratch_cleanup'=$1::text AND NOT (plan ? 'committed'))")
-        .bind(environment).fetch_one(conn).await?)
+    Ok(!scratch_among(conn, &[environment]).await?.is_empty())
+}
+
+/// Unpublished rollback destinations among a bounded set of environment rows.
+pub async fn scratch_among(conn: &mut Conn, environments: &[Id]) -> Result<Vec<Id>, DbError> {
+    if environments.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar::<_, Id>("SELECT DISTINCT e.id FROM environments e JOIN jobs j ON j.plan->>'scratch_cleanup'=e.id::text WHERE e.id=ANY($1::uuid[]) AND j.kind='thread_fork' AND j.plan ? 'scratch_cleanup' AND NOT (j.plan ? 'committed')")
+        .bind(environments).fetch_all(conn).await?)
 }
 
 /// Forgets unpublished scratch only after the old rollback removed its unit and files.
@@ -322,10 +330,11 @@ pub async fn definition(conn: &mut Conn, runtime: Id) -> Result<Option<Json>, Db
     let frozen = sqlx::query_scalar("SELECT plan->'retained_spec' FROM jobs WHERE kind='environment_remove' AND plan->>'retained_runtime'=$1::text AND plan->'retained_spec' IS NOT NULL AND plan->'retained_spec'<>'null'::jsonb ORDER BY created_at DESC,id DESC LIMIT 1")
         .bind(runtime).fetch_optional(&mut *conn).await?;
     if frozen.is_some() {
-        return Ok(frozen);
+        return Ok(frozen.map(orch_types::storable::decode_exact).transpose()?);
     }
     let mut saved: Option<Json> = sqlx::query_scalar("SELECT plan->'created_spec' FROM jobs WHERE plan->>'runtime'=$1::text AND plan->'created_spec' IS NOT NULL ORDER BY created_at DESC,id DESC LIMIT 1")
         .bind(runtime).fetch_optional(&mut *conn).await?;
+    saved = saved.map(orch_types::storable::decode_exact).transpose()?;
     if let Some(spec) = saved.as_mut()
         && let Some(mounts) = crate::queries::resources::mounts::applied(conn, runtime).await?
     {
@@ -349,7 +358,7 @@ pub async fn removal_origin(
     revision: i64,
 ) -> Result<crate::audit::Origin, DbError> {
     let row: Option<RemovalOrigin> = sqlx::query_as(
-        "SELECT ip,user_agent,request_id,CASE WHEN as_admin AND actor_kind='user' THEN actor_id END AS as_admin FROM audit_log WHERE action='environment.removal_scheduled' AND object_id=$1 AND details->>'removal_revision'=$2::text ORDER BY at,id LIMIT 1",
+        "SELECT host(ip) AS ip,user_agent,request_id,CASE WHEN as_admin AND actor_kind='user' THEN actor_id END AS as_admin FROM audit_log WHERE action='environment.removal_scheduled' AND object_id=$1 AND details->>'removal_revision'=$2::text ORDER BY at,id LIMIT 1",
     )
     .bind(environment)
     .bind(revision)
@@ -371,9 +380,11 @@ pub async fn started_purge(
     environment: Id,
     revision: i64,
 ) -> Result<Option<(Option<Id>, Json)>, DbError> {
-    Ok(sqlx::query_as("SELECT created_by,plan FROM jobs WHERE
+    let row:Option<(Option<Id>,Json)> = sqlx::query_as("SELECT created_by,plan FROM jobs WHERE
         (environment_id=$1 AND kind='environment_purge' AND plan->>'removal_revision'=$2::text AND plan->>'purge_started'='true')
         OR (kind='storage_cleanup' AND plan->'cleanup_purges' @> jsonb_build_object($1::uuid::text,jsonb_build_object('revision',$2::bigint,'started',true)))
         ORDER BY created_at,id LIMIT 1")
-        .bind(environment).bind(revision).fetch_optional(conn).await?)
+        .bind(environment).bind(revision).fetch_optional(conn).await?;
+    row.map(|(by, plan)| Ok((by, orch_types::storable::decode_exact(plan)?)))
+        .transpose()
 }
