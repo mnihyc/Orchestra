@@ -13,7 +13,9 @@ use support::FullTokenReply as _;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{Node, NodeArchive, NodeGet, NodeUnarchive};
-use orch_api_contract::ownership::{NodeDelete, NodeDeleteBody, NodeRestore};
+use orch_api_contract::ownership::{
+    NodeDelete, NodeDeleteBody, NodeDeleted, NodeRestore, NodeRestoreBody,
+};
 use orch_api_contract::threads::{Delivery, ThreadSyncGet, ThreadSyncGetQuery};
 use orch_link_contract::commands::CommandKind;
 use orch_types::Id;
@@ -642,6 +644,8 @@ async fn confirmed_environment_deletion_settles_idle_and_running_bindings_and_pr
         let query = EnvironmentDeleteQuery {
             confirm: "Workspace".to_owned(),
             at: Some(at),
+            expected_keep_days: None,
+            expected_revision: None,
         };
         let refused = scene
             .rig
@@ -747,24 +751,65 @@ async fn confirmed_environment_deletion_settles_idle_and_running_bindings_and_pr
     }
 }
 
+/// Deleting a home puts the environments at home in it in the trash with it: their running work stops, nothing of
+/// them is removed, and their removal is dated at the trash's end, committed with the deleted home; the deletion
+/// says how many went. Undo brings them back as they stood, stopped, with the threads still in them. Deleting a
+/// topic used to remove its environments at once, and Undo brought the topic back without them, its threads in none.
 #[tokio::test]
-async fn deleting_a_home_commits_a_cleanup_plan_together_with_its_threads_and_node() {
+async fn deleting_a_home_puts_its_environments_in_the_trash_with_it_and_undo_brings_them_back() {
     let scene = scene().await;
     let thread = scene.thread().await.base.id;
-    delete(&scene, scene.tree.topic.base.id).await;
+    let topic = scene.tree.topic.base.id;
+    let environment = scene.on.environment;
+    let at_home: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM environments e JOIN nodes n ON n.id = e.home_node_id
+          WHERE $1 = ANY(n.path) AND e.deleted_at IS NULL",
+    )
+    .bind(topic)
+    .fetch_one(scene.rig.db.pool())
+    .await
+    .unwrap();
+    assert!(at_home >= 1);
+    let deleted: NodeDeleted = scene
+        .rig
+        .world
+        .app
+        .call(NodeDelete, &[&topic])
+        .token(&scene.ada.token)
+        .body(&NodeDeleteBody::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(deleted.environments, Some(at_home));
     let mut conn = scene.rig.db.acquire().await.unwrap();
-    let promise =
-        orch_db::queries::environments::retained::removal(&mut conn, scene.on.environment)
-            .await
-            .unwrap()
-            .unwrap();
+    let promise = orch_db::queries::environments::retained::removal(&mut conn, environment)
+        .await
+        .unwrap()
+        .unwrap();
     drop(conn);
     assert_eq!(promise.removed_keep_days, Some(7));
     assert_eq!(promise.deleted_by, Some(scene.ada.id()));
-    assert_eq!(promise.removal_revision, 1);
-    assert!(
-        promise.removal_phase.is_some(),
-        "the durable cleanup promise commits with the deleted home"
+    assert_eq!(promise.removal_phase.as_deref(), Some("scheduled"));
+    let (status, removed, remove_at, trashed): (
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT e.status, e.deleted_at, e.remove_at, n.deleted_at FROM environments e, nodes n
+          WHERE e.id = $1 AND n.id = $2",
+    )
+    .bind(environment)
+    .bind(topic)
+    .fetch_one(scene.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(status, "disabled", "its running work stops");
+    assert_eq!(removed, None, "nothing of it is removed");
+    assert_eq!(
+        remove_at,
+        Some(trashed.unwrap() + chrono::Duration::days(30)),
+        "its removal waits for the trash's end"
     );
     assert_eq!(
         scalar(
@@ -775,13 +820,43 @@ async fn deleting_a_home_commits_a_cleanup_plan_together_with_its_threads_and_no
         .await,
         1
     );
-    let current: Option<Id> =
-        sqlx::query_scalar("SELECT environment_id FROM threads WHERE node_id=$1")
+    let bound = || async {
+        sqlx::query_scalar::<_, Option<Id>>("SELECT environment_id FROM threads WHERE node_id=$1")
             .bind(thread)
             .fetch_one(scene.rig.db.pool())
             .await
-            .unwrap();
-    assert_eq!(current, None);
+            .unwrap()
+    };
+    assert_eq!(bound().await, Some(environment));
+    let restored = scene
+        .rig
+        .world
+        .app
+        .call(NodeRestore, &[&topic])
+        .token(&scene.ada.token)
+        .body(&NodeRestoreBody {
+            undo_delete: deleted.deletion_id,
+            expected_deletion_id: None,
+        })
+        .send()
+        .await;
+    assert_eq!(restored.status, 200, "{:?}", restored.body);
+    let (status, remove_at, phase): (
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    ) = sqlx::query_as("SELECT status, remove_at, removal_phase FROM environments WHERE id = $1")
+        .bind(environment)
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(status, "stopped");
+    assert_eq!(
+        (remove_at, phase),
+        (None, None),
+        "Undo withdraws the removal"
+    );
+    assert_eq!(bound().await, Some(environment));
     assert_eq!(scene.rig.turn_starts(thread).len(), 0);
     scene.rig.engine.stop();
 }
@@ -803,6 +878,8 @@ async fn keeping_an_environment_cannot_withdraw_a_removal_that_begins_while_the_
         .query(&EnvironmentDeleteQuery {
             confirm: "Workspace".to_owned(),
             at: Some(at),
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await

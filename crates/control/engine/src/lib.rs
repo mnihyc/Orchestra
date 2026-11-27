@@ -23,6 +23,8 @@
 //! caps, the tools of the `orch` server. Until they exist each of those
 //! blocks or refuses, and never lets a turn through unchecked.
 #![forbid(unsafe_code)]
+// Proving Send through thread creation, permission evaluation, and its SQL reads exceeds rustc's default depth of 128.
+#![recursion_limit = "256"]
 
 // In-crate regression tests share the integration fixture's real database and scripted link.
 #[cfg(test)]
@@ -51,11 +53,13 @@ pub mod commands;
 pub mod component_update_authority;
 pub mod component_update_origin;
 pub mod config;
+pub mod configuration_application;
 pub mod context_fill;
 pub mod continuations;
 pub mod copies;
 pub mod copy_out;
 pub mod credentials;
+pub mod database_retry;
 pub mod delivery;
 pub mod displays;
 pub mod document_tree;
@@ -63,6 +67,7 @@ pub mod engine;
 pub mod enrollment_authority;
 pub mod environment_creation;
 pub mod environment_mcp;
+pub mod environment_preparation;
 pub mod environments;
 pub mod error;
 pub mod export_layout;
@@ -118,12 +123,15 @@ pub mod preparation;
 pub mod programs;
 pub mod projections;
 pub mod provider_fact_reads;
+mod provider_force;
 pub mod provider_policy;
 pub mod provider_recovery;
+pub mod provider_relay;
 pub mod provider_runtime;
 pub mod provider_setup;
 pub mod provider_sources;
 pub mod providers;
+mod queue_eligibility;
 pub mod rates;
 pub mod raw_events;
 pub mod reaper;
@@ -135,6 +143,7 @@ pub mod related;
 pub mod reports;
 pub mod request_actions;
 pub mod resolved;
+pub mod resource_choice;
 pub mod resource_facts;
 pub mod resource_pause;
 pub mod retention;
@@ -150,6 +159,7 @@ pub mod side_threads;
 pub mod skills;
 pub mod source;
 mod source_retention;
+mod start_wait;
 pub mod storage;
 mod streaming;
 pub mod summaries;
@@ -158,6 +168,7 @@ pub mod temporary_environments;
 pub mod thread_move;
 pub mod token_density;
 pub mod tools;
+pub mod transfers;
 pub mod trust;
 pub mod turns;
 pub mod unit;

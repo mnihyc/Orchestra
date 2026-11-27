@@ -1,0 +1,25 @@
+# firstday-2: an outsider's new provider or environment; a place's environments go to the trash with it
+test -p orch-api-core --test providers
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test standalone_creation
+test -p orch-api-core --test provider_duplicates
+test -p orch-api-core --test provider_creation_scopes
+test -p orch-api-core --test karchive_delete
+test -p orch-api-core --test undo_delete
+test -p orch-api-core --test undo_delete_exact
+test -p orch-api-core --test node_delete_native_scopes
+test -p orch-api-core --test members
+test -p orch-api-core --test manage_is_the_thing
+test -p orch-api-core --test kguard_nodes
+test -p orch-api-core --test forks
+test -p orch-api-core --test trace_walk
+test -p orch-api-core --test shortcuts
+test -p orch-api-core --test threads_settings
+test -p orch-engine --test connected
+test -p orch-engine --test updates
+test -p orch-engine --lib -- membership
+test -p orch-engine --lib -- jobs::provider_provision
+test -p orch-engine --lib -- jobs::continuation
+contracts
+fmt
+clippy

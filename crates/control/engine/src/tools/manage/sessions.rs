@@ -329,12 +329,8 @@ impl Engine {
             "recoverable":asked.command==Command::Delete}),
         ];
         if asked.command == Command::Delete {
-            let until = now
-                .get()
-                .checked_add_signed(
-                    Duration::from_std(self.inner.config.soft_delete).unwrap_or(Duration::MAX),
-                )
-                .unwrap_or(DateTime::<Utc>::MAX_UTC);
+            let days = orch_settings::retention::deleted_keep_days(&mut tx).await?;
+            let until = orch_settings::retention::purge_at(now.get(), days);
             affected[0]["until"] = json!(until);
             for (kind, id, revision) in &set {
                 if *id != target {

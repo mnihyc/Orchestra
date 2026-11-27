@@ -1,0 +1,157 @@
+/** The sub-agents of a thread, running and finished, read from the steps that started them.
+ *
+ * Each is one entry: its name, where it stands, how long it has run, what it used where that was recorded, and one line of what it is
+ * doing or what it came to. A finished one stays in the list. The current native roster takes precedence over recorded
+ * transcript state, including a child that outlives its parent's turn or was lost with its session.
+ */
+import type { TFunction } from 'i18next';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
+import { outlineQuery } from '@/api/threads';
+import { useThreadReadRef } from '@/realtime/threadReadContext';
+import { useDebounced } from '@/lib/debounce';
+import { useTranslation } from 'react-i18next';
+
+import { recordedItem } from '@/features/timeline/historical';
+import { isOver } from '@/features/timeline/rows';
+import { subagentLine, subagentTask, subagentToolCount } from '@/features/timeline/subagents';
+import type { BackgroundWork, OutlineEntry, SubagentState } from '@/generated/api-types';
+import { agentCatalogItems, type ThreadView, useThreadPart } from '@/realtime/stores/thread';
+
+export interface AgentEntry {
+  /** The step that started it. */
+  id: string;
+  /** Where its own items are. */
+  stream: string;
+  turnId: string | null;
+  name: string;
+  /** Its kind, as its program names it (`Explore`). */
+  role: string | null;
+  /** How many tools it has used, where the page holds all of its items. */
+  tools: number | null;
+  /** `recorded`: a session that has ended marked it as running; nothing says how it came out. */
+  state: SubagentState | 'lost' | 'recorded';
+  startedAt: string | null;
+  durationMs: number | null;
+  /** What it wrote, where its program recorded it. */
+  tokensOut: number | null;
+  /** A question or an approval of its own waits for a person. */
+  waiting: boolean;
+  line: { kind: 'activity' | 'result'; text: string } | null;
+  /** The running work the roster knows, for Stop. */
+  task: BackgroundWork | null;
+}
+
+export type AgentGroup = 'active' | 'done';
+
+export function agentGroup(entry: AgentEntry): AgentGroup {
+  return entry.state === 'running' ? 'active' : 'done';
+}
+
+export function listAgents(view: Pick<ThreadView, 'items' | 'streams' | 'turns' | 'segments' | 'hasNewer'>, tasks: readonly BackgroundWork[], t: TFunction, stored: readonly OutlineEntry[] = []): AgentEntry[] {
+  const entries = new Map<string, { seq: number; updated: number; entry: AgentEntry }>();
+  for (const point of stored) {
+    const facts = point.agent;
+    if (point.kind !== 'subagent' || facts === undefined || facts === null) continue;
+    const state = facts.state === 'running' && facts.recorded ? 'recorded' : facts.state;
+    entries.set(point.item_id, { seq: point.seq, updated: facts.updated_seq, entry: {
+      id: point.item_id, stream: facts.stream, turnId: facts.turn_id, name: facts.name === null || facts.name === '' ? t('timeline.step.subagentUnnamed') : facts.name, role: null, tools: null, state,
+      startedAt: facts.started_at, durationMs: facts.duration_ms, tokensOut: facts.tokens_out,
+      waiting: false, line: facts.result === null ? null : { kind: state === 'running' ? 'activity' : 'result', text: facts.result }, task: null,
+    } });
+  }
+  for (const item of view.items.values()) {
+    if (item.kind !== 'tool_call' || item.payload.tool.kind !== 'subagent') continue;
+    if ((entries.get(item.id)?.updated ?? -1) > item.seq_updated) continue;
+    const tool = item.payload.tool;
+    const turn = item.turn_id === null ? undefined : view.turns.get(item.turn_id);
+    const recorded = tool.state === 'running' && (recordedItem(item, view.segments) || turn !== undefined && isOver(turn));
+    const state = recorded ? 'recorded' : tool.state;
+    const output = turn?.usage_detail?.by_subagent.find((share) => share.stream === tool.child_stream)?.tokens.output_tokens;
+    entries.set(item.id, { seq: item.seq_created, updated: item.seq_updated, entry: {
+      id: item.id, stream: tool.child_stream, turnId: item.turn_id, name: subagentTask(tool) ?? t('timeline.step.subagentUnnamed'),
+      role: tool.role === null || tool.role === '' ? null : tool.role, tools: null, state,
+      startedAt: item.payload.started_at, durationMs: item.payload.duration_ms, tokensOut: output ?? null, waiting: false,
+      line: subagentLine(view, tool.child_stream, state === 'running', t), task: null,
+    } });
+  }
+  // A native roster is independently authoritative even when its start row is outside the item window.
+  for (const task of tasks) {
+    if (task.kind !== 'subagent') continue;
+    const held = entries.get(task.item_id);
+    if (held !== undefined && held.entry.turnId !== null && held.entry.turnId !== task.turn_id) continue;
+    const state = task.state === 'stopped' ? 'interrupted' : task.state;
+    const entry: AgentEntry = held === undefined ? {
+      id: task.item_id, stream: '', turnId: task.turn_id, name: task.label || t('timeline.step.subagentUnnamed'), role: null, tools: null, state,
+      startedAt: null, durationMs: null, tokensOut: null, waiting: false, line: null, task: null,
+    } : { ...held.entry, state };
+    entry.task = state === 'running' ? task : null;
+    entries.set(task.item_id, { seq: held?.seq ?? Number.MAX_SAFE_INTEGER, updated: held?.updated ?? 0, entry });
+  }
+  for (const { entry } of entries.values()) {
+    const running = entry.state === 'running';
+    const own = view.streams.get(entry.stream) ?? [];
+    entry.waiting = running && own.some((id) => { const held = view.items.get(id); return held?.kind === 'approval' && held.status === 'pending'; });
+    entry.line = subagentLine(view, entry.stream, running, t) ?? entry.line;
+    // Counted only where the step that started it is held: its items follow it.
+    entry.tools = view.items.has(entry.id) ? subagentToolCount(view, entry.stream) : null;
+  }
+  return [...entries.values()].sort((one, other) => one.seq - other.seq).map(({ entry }) => entry);
+}
+
+/** What the header says of the agents: how many, and a dot where one needs a person, one works, or (when none does) one failed. */
+export function agentsSummary(entries: readonly AgentEntry[]): { count: number; dot: 'waiting' | 'working' | 'failed' | 'lost' | null } {
+  const dot = entries.some((entry) => entry.waiting) ? 'waiting' : entries.some((entry) => entry.state === 'running') ? 'working' : entries.some((entry) => entry.state === 'failed') ? 'failed' : entries.some((entry) => entry.state === 'lost') ? 'lost' : null;
+  return { count: entries.length, dot };
+}
+
+const NO_TASKS: readonly BackgroundWork[] = [];
+
+export interface AgentHistory {
+  query: string;
+  setQuery: (text: string) => void;
+  loading: boolean;
+  error: unknown;
+  hasMore: boolean;
+  more: () => void;
+}
+
+/** Compact history pages keep finished children discoverable without loading their conversation bodies. */
+export function useAgentCatalog(threadId: string, tasks: readonly BackgroundWork[] = NO_TASKS, historyReady = true): { entries: AgentEntry[]; count: number | null; history: AgentHistory } {
+  const { t } = useTranslation();
+  const read = useThreadReadRef(threadId);
+  const items = useThreadPart(threadId, agentCatalogItems);
+  const streams = useThreadPart(threadId, (view) => view.streams);
+  const turns = useThreadPart(threadId, (view) => view.turns);
+  const segments = useThreadPart(threadId, (view) => view.segments);
+  const hasOlder = useThreadPart(threadId, (view) => view.hasOlder);
+  const hasNewer = useThreadPart(threadId, (view) => view.hasNewer);
+  const [query, setQuery] = useState('');
+  const q = useDebounced(query.trim().toLocaleLowerCase(), 250);
+  const remote = hasOlder || hasNewer;
+  const options = outlineQuery(read, { selection: 'agents', q });
+  const readHistory = remote && historyReady && options.enabled;
+  const pages = useInfiniteQuery({ ...options, enabled: readHistory, refetchOnMount: 'always', refetchOnWindowFocus: false, retry: false });
+  const local = useMemo(() => listAgents({ items, streams, turns, segments, hasNewer }, tasks, t), [items, streams, turns, segments, hasNewer, tasks, t]);
+  const entries = useMemo(() => {
+    const stored = remote ? pages.data?.pages.flatMap((page) => page.entries) ?? [] : [];
+    const all = stored.length === 0 ? local : listAgents({ items, streams, turns, segments, hasNewer }, tasks, t, stored);
+    const matches = new Set(stored.map((point) => point.item_id));
+    return q === '' ? all : all.filter((entry) => matches.has(entry.id) || `${entry.name}\n${entry.line?.text ?? ''}`.toLocaleLowerCase().includes(q));
+  }, [items, streams, turns, segments, hasNewer, tasks, t, pages.data, q, remote, local]);
+  const observed = useMemo(() => [...items.values()].reduce((last, item) => item.kind === 'tool_call' && item.payload.tool.kind === 'subagent' ? Math.max(last, item.seq_updated) : last, 0), [items]);
+  const last = useRef(observed);
+  const { refetch } = pages;
+  useEffect(() => {
+    if (last.current !== observed && readHistory) void refetch();
+    last.current = observed;
+  }, [observed, readHistory, refetch]);
+  const page = pages.data?.pages[0];
+  const added = page === undefined ? 0 : [...items.values()].filter((item) => item.kind === 'tool_call' && item.payload.tool.kind === 'subagent' && item.seq_created > page.seq).length;
+  const count = !remote ? local.length : page?.total === undefined || page.total === null ? null : Math.max(page.total + added, local.length);
+  return { entries, count, history: {
+    query, setQuery, loading: remote && pages.isFetching || q !== query.trim().toLocaleLowerCase(),
+    error: remote ? pages.error : null, hasMore: remote && pages.hasNextPage,
+    more: () => { if (pages.data === undefined) void pages.refetch(); else void pages.fetchNextPage(); },
+  } };
+}
