@@ -1,3 +1,5 @@
+import type { NameSearch } from '@/api/search';
+import { pickerNamePage } from './picker-name-fixture';
 import { useSelectedOrg } from '@/shell/org';
 /** Search keeps its visible filter groups, category choices and result actions consistent across languages and themes. */
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -43,6 +45,7 @@ vi.mock('@/api/search', async (original) => {
     receive({type: 'source', source: 'meaning', state: 'done', reason: null, received: 0});
     receive({type: 'cursor', cursor: page.next_cursor});
   }, searchQuery: (filters: Parameters<typeof SearchApi.searchQuery>[0]) => ({ ...api.searchQuery(filters), queryFn: () => calls.read(filters) }),
+    pickerNamesQuery: (s: NameSearch) => pickerNamePage(s, () => calls.names(s)),
     namesQuery: (...args: Parameters<typeof SearchApi.namesQuery>) => ({ ...api.namesQuery(...args), queryFn: () => Promise.resolve({ items: calls.names(...args), partial: false }) }),
   };
 });

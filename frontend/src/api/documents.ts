@@ -70,18 +70,19 @@ export function documentPage(page: { items: readonly unknown[]; next_cursor: str
 // ---------------------------------------------------------------- reading
 
 /** The documents written beside a node, the most recently changed first; with `under`, those beside the nodes below it too. */
-export const documentsOfNodeQuery = (nodeId: string, options: { under?: boolean; deleted?: boolean; participating?: boolean; batch?: boolean } = {}) =>
+export const documentsOfNodeQuery = (nodeId: string, options: { under?: boolean; deleted?: boolean; participating?: boolean; batch?: boolean; q?: string } = {}) =>
   infiniteQueryOptions({
-    queryKey: [...documentsKey(nodeId), options.under === true, options.deleted === true, options.participating === true] as const,
+    queryKey: [...documentsKey(nodeId), options.under === true, options.deleted === true, options.participating === true, ...(options.q?.trim() ? [options.q.trim()] : [])] as const,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
-      (options.batch === true && pageParam === null && options.under !== true && options.deleted !== true && options.participating !== true
+      (options.batch === true && pageParam === null && options.under !== true && options.deleted !== true && options.participating !== true && !options.q?.trim()
         ? firstDocumentPage(nodeId, DOCUMENTS_PAGE, signal) : ok(
         api.GET('/nodes/{id}/documents', {
           params: {
             path: { id: nodeId },
             query: {
               limit: DOCUMENTS_PAGE,
+              ...(options.q?.trim() ? { q: options.q.trim() } : {}),
               ...(pageParam === null ? {} : { cursor: pageParam }),
               ...(options.under === true ? { under: true } : {}),
               ...(options.participating === true ? { participating: true } : {}),
@@ -93,6 +94,14 @@ export const documentsOfNodeQuery = (nodeId: string, options: { under?: boolean;
       )).then(documentPage),
     getNextPageParam: (page) => page.next_cursor,
   });
+
+/** One native reference page; a caret asks for the next page only when its reader chooses Show more. */
+export const documentReferencePageQuery = (nodeId: string, query: string, cursor: string | null) => queryOptions({
+  queryKey: [...documentsKey(nodeId), true, false, false, 'references', query, cursor] as const,
+  queryFn: ({ signal }) => ok(api.GET('/nodes/{id}/documents', {
+    params: { path: { id: nodeId }, query: { under: true, q: query, limit: DOCUMENTS_PAGE, ...(cursor === null ? {} : { cursor }) } }, signal,
+  })).then(documentPage),
+});
 
 /** One document with what the caller holds on it, which is what the page needs to decide what it may do. */
 export const documentQuery = (id: string) =>
@@ -162,10 +171,6 @@ export function renameDocument(id: string, title: string): Promise<Document> {
 /** Writes a document's description, which is the writer's from then on; empty takes it away. */
 export function describeDocument(id: string, description: string): Promise<Document> {
   return ok(api.PATCH('/documents/{id}', { params: { path: { id } }, body: { description } }));
-}
-
-export function deleteDocument(id: string): Promise<void> {
-  return done(api.DELETE('/documents/{id}', { params: { path: { id } } }));
 }
 
 export function restoreDocument(id: string): Promise<Document> {

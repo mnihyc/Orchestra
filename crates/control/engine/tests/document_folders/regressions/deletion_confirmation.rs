@@ -16,7 +16,7 @@ async fn deletion_source_packets_keep_their_transaction_actor_and_ordinary_manag
         "deletion-source-packet",
     );
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let actor = domain::Actor::Agent { thread: area.agent };
     let mut tx = area.world.pool.begin().await?;
     let sources = domain::prepare_deletion_sources_in(&mut tx, actor, &command).await?;
@@ -102,7 +102,7 @@ async fn deletion_digest_keeps_complete_native_membership_pins_and_durable_repla
     );
     let now = Time::new(area.world.clock.now());
     let actor = domain::Actor::Agent { thread: area.agent };
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let mut tx = area.world.pool.begin().await?;
     let sources = domain::prepare_deletion_sources_in(&mut tx, actor, &command).await?;
     assert_eq!(sources.entries().len(), 2);
@@ -176,7 +176,7 @@ async fn deletion_digest_refuses_new_members_material_or_labels_and_never_substi
         );
         let now = Time::new(area.world.clock.now());
         let actor = domain::Actor::Agent { thread: area.agent };
-        let options = domain::Options::for_engine(&area.world.engine());
+        let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
         let mut tx = area.world.pool.begin().await?;
         let plan = domain::plan_delete_in(&mut tx, actor, &command, now, options).await?;
         let digest = plan.stamp.deletion_digest()?;
@@ -226,7 +226,7 @@ async fn deletion_digest_refuses_new_members_material_or_labels_and_never_substi
         "digest-needs-native-manage",
     );
     let now = Time::new(area.world.clock.now());
-    let options = domain::Options::for_engine(&area.world.engine());
+    let options = domain::Options::for_engine(&mut *area.world.pool.acquire().await?).await?;
     let mut tx = area.world.pool.begin().await?;
     let owner =
         orch_authz::Principal::load(&mut tx, orch_authz::Caller::session(area.world.ada), now)

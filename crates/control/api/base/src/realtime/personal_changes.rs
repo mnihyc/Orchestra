@@ -24,8 +24,51 @@ pub(crate) async fn project(
     inner: &Inner,
     connection: &Connection,
     mut event: UserEvent,
-) -> Result<UserEvent, Fail> {
+) -> Result<Option<UserEvent>, Fail> {
     let user = connection.user;
+    if let UserEvent::Subscription {
+        node_id,
+        level,
+        source,
+        effective_level,
+    } = &mut event
+    {
+        let mut conn = inner.db.acquire().await?;
+        let Some(principal) =
+            super::subscriptions::principal_for_connection(inner, &mut conn, connection).await?
+        else {
+            return Ok(None);
+        };
+        let visible = orch_authz::nodes::holding(
+            &mut conn,
+            &principal,
+            &[*node_id],
+            crate::middleware::authorization::VIEW,
+            orch_authz::Act::Use,
+            orch_authz::Policy::default(),
+        )
+        .await
+        .map_err(Fail::other)?;
+        if visible.is_empty() {
+            return Ok(None);
+        }
+        // A notification is a wakeup, never a source snapshot that may overwrite a later choice.
+        let row = orch_db::queries::hierarchy::subscriptions_on(&mut conn, user, &[*node_id])
+            .await?
+            .pop();
+        let effective =
+            orch_db::queries::notifications::subscribers::level_of(&mut conn, user, *node_id)
+                .await?;
+        *effective_level =
+            Some(serde_json::from_value(Json::String(effective)).map_err(Fail::other)?);
+        (*level, *source) = match row {
+            Some(row) => (
+                Some(serde_json::from_value(Json::String(row.level)).map_err(Fail::other)?),
+                Some(serde_json::from_value(Json::String(row.source)).map_err(Fail::other)?),
+            ),
+            None => (None, None),
+        };
+    }
     if let UserEvent::State { key, value } = &mut event {
         let named = serde_json::to_value(key).map_err(Fail::other)?;
         let mut conn = inner.db.acquire().await?;
@@ -123,5 +166,5 @@ pub(crate) async fn project(
             }
         }
     }
-    Ok(event)
+    Ok(Some(event))
 }

@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "incremental": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "lib": [
       "ES2023",
@@ -23,6 +24,7 @@
     "playwright.config.ts",
     "playwright.native.config.ts",
     "playwright.paste.config.ts",
+    "playwright.profile.config.ts",
     "e2e",
     "tests/doubles",
     "tests/e2e",

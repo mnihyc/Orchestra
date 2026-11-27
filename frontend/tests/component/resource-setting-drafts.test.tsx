@@ -7,11 +7,13 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { agentKey, checkTemplate, templateKey, updateAgent, updateTemplate } from '@/api/resources';
 import type * as ResourcesApi from '@/api/resources';
+import type * as ImpactApi from '@/api/resource-impact';
 import { AgentScreen } from '@/features/resources/agents/Profile';
 import { TemplateScreen } from '@/features/resources/templates/Template';
-import type { Agent, Template } from '@/generated/api-types';
+import type { Agent, Template, FactTarget,ResourceImpact,ResourceImpactQuery } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+skipOverflowFallback();
 import { harnessName } from '../doubles/harness-names';
 
 const server = vi.hoisted(() => ({ agent: vi.fn<() => Promise<Agent>>(), template: vi.fn<() => Promise<Template>>() }));
@@ -25,12 +27,24 @@ vi.mock('@/api/resources', async (load) => {
     driversQuery: { queryKey: ['drivers'], queryFn: () => Promise.resolve([{ name: 'docker', descriptor: { spec_schemas: { environment: schema } } }]), staleTime: Infinity },
   };
 });
+vi.mock('@/api/resource-impact',async(load)=>{
+  const actual=await load<typeof ImpactApi>();
+  return {...actual,resourceImpactQuery:(target:FactTarget,options:ResourceImpactQuery={})=>{
+    const query=actual.resourceImpactQuery(target,options);
+    if(target.object.kind!=='template'||target.object.id!=='recipe')return query;
+    const empty={count:0,threads:0,visible:[],hidden:0,since:null};
+    const impact:ResourceImpact={target,name:'Research runtime',stopping:false,applications:[],application_complete:true,
+      facts:{subject:{kind:'resource',object:target.object},as_of:'2026-10-15T12:00:00Z',dependents:[],dependents_complete:true,uses:null},
+      activity:{running:empty,waiting:empty,stopped:empty}};
+    return {...query,queryFn:()=>Promise.resolve(impact)};
+  }};
+});
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn() }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/resources/agents/acts', () => ({ useAgentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
 vi.mock('@/features/resources/templates/acts', () => ({ useTemplateActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/TemplateGuideLink', () => ({ TemplateGuideLink: () => null }));
 vi.mock('@/features/help/GuideLink', () => ({ GuideLink: () => null }));
 // These cases exercise the real tabs and forms; routing and title-bar registration are tested by the browser walks.
@@ -107,7 +121,9 @@ it('reviews a template conflict, preserves an unedited newer description and sav
   const nextSpec = { image: 'mine', plugin: { enabled: true } };
   vi.mocked(updateTemplate).mockResolvedValue({ ...fresh, revision: 3, spec: nextSpec });
   await user.click(screen.getByRole('button', { name: i18n.t('settings.compact.keepDraft') }));
-  await user.click(screen.getByRole('button', { name: i18n.t('templates.spec.save') }));
+  const save=screen.getByRole('button', { name: i18n.t('templates.spec.save') });
+  await waitFor(()=>expect(save).not.toHaveAttribute('aria-disabled','true'));
+  await user.click(save);
   await waitFor(() => expect(updateTemplate).toHaveBeenCalledExactlyOnceWith(template.id, { expected_revision: 2, spec: nextSpec }));
   expect(client.getQueryData<Template>(templateKey(template.id))?.description).toBe('Other writer’s notes');
 });

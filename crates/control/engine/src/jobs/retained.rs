@@ -481,6 +481,11 @@ impl Kept {
 
 #[async_trait]
 impl Phased for Kept {
+    // A purge job uses one removal command ID. A fresh purge job can try again after the host refuses it.
+    fn answers_are_final(&self) -> bool {
+        self.purge
+    }
+
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         let plan = job.plan().await?;
         if plan.get("lifecycle_committed").and_then(Json::as_bool) == Some(true) {

@@ -5,6 +5,7 @@ use common::{World, queued, steering, turn_ended};
 use orch_authz::Caller;
 use orch_link_contract::commands::{Command, CommandKind};
 use orch_link_contract::events::TurnOutcome;
+use orch_types::Json;
 use serde_json::json;
 
 fn session_open_count(world: &World, transport_only: bool) -> usize {
@@ -95,6 +96,60 @@ async fn command_task(
         .await;
     task_recorded(world, thread, &task, "running").await;
     task
+}
+
+#[tokio::test]
+async fn background_status_reads_running_and_current_lost_work_without_replaying_completed_tasks() {
+    use orch_link_contract::background::BackgroundTaskState;
+    let world = World::new().await;
+    let thread = world.thread("Long background history").await;
+    let (started, _) = world.running_turn(thread, "Keep the build visible").await;
+    let task = command_task(&world, thread, started.turn_id).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let row = orch_db::queries::threads::thread(&mut tx, thread)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,turn_id,continuation_id,kind,status,payload,native_ref,seq_created,seq_updated) SELECT md5('old-background-'||n)::uuid,i.thread_id,i.segment_id,i.turn_id,i.continuation_id,i.kind,'completed',jsonb_set(i.payload,'{background_tasks}',jsonb_build_object('finished',jsonb_build_object('task',jsonb_set($2::jsonb,'{state}','\"completed\"'),'self_waking',true))), 'old-background-'||n,n+4000,n+4000 FROM items i CROSS JOIN generate_series(1,1000) AS n WHERE i.thread_id=$1 AND i.native_ref='background-command'")
+        .bind(thread).bind(serde_json::to_value(&task).unwrap()).execute(&mut *tx).await.unwrap();
+    let mut lost = task;
+    lost.id = "lost-task".into();
+    lost.state = BackgroundTaskState::Lost;
+    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{background_tasks}',(payload->'background_tasks')||jsonb_build_object('lost',jsonb_build_object('task',$2::jsonb,'lost_at',$3::jsonb,'self_waking',true))) WHERE thread_id=$1 AND native_ref='background-command'")
+        .bind(thread).bind(serde_json::to_value(&lost).unwrap()).bind(serde_json::to_value(world.clock.time()).unwrap()).execute(&mut *tx).await.unwrap();
+    let reads = "SELECT COALESCE(sum(seq_tup_read+idx_tup_fetch),0)::bigint FROM pg_stat_xact_user_tables WHERE relid='items'::regclass";
+    let before: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    let status = orch_engine::background_wake::status(&mut tx, &row, &[], false)
+        .await
+        .unwrap();
+    let after: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(
+        status.tasks.len(),
+        2,
+        "a mixed item supplies each live or current lost task exactly once"
+    );
+    assert_eq!(
+        status
+            .tasks
+            .iter()
+            .filter(|task| task.state == BackgroundTaskState::Running)
+            .count(),
+        1
+    );
+    assert_eq!(
+        status
+            .tasks
+            .iter()
+            .filter(|task| task.state == BackgroundTaskState::Lost)
+            .count(),
+        1
+    );
+    assert!(
+        after - before <= 3,
+        "background status reread {} historical item rows",
+        after - before
+    );
+    tx.rollback().await.unwrap();
 }
 
 async fn native_finished(
@@ -196,6 +251,67 @@ async fn background_wake_is_on_by_default_and_an_inherited_change_waits_for_sess
         })
         .unwrap();
     assert!(!last.background_wake);
+}
+
+#[tokio::test]
+async fn native_work_state_changes_refresh_the_environment_once_without_a_page_action() {
+    use orch_link_contract::background::{BackgroundTaskState, BackgroundTasks};
+
+    let world = World::new().await;
+    let thread = world.thread("Idle supervision").await;
+    let (turn, _) = world.running_turn(thread, "Begin").await;
+    let before: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    let mut task = command_task(&world, thread, turn.turn_id).await;
+    let running: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert!(
+        running > before,
+        "the native-work guard reaches the environment feed"
+    );
+    task.state = BackgroundTaskState::Completed;
+    task.can_end = false;
+    let report = BackgroundTasks {
+        self_waking: true,
+        native_idle: false,
+        tasks: vec![task.clone()],
+        native_wake: None,
+    };
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::BackgroundTasks(report.clone()),
+        )
+        .await;
+    task_recorded(&world, thread, &task, "completed").await;
+    let finished: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert!(finished > running);
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::BackgroundTasks(report),
+        )
+        .await;
+    task_recorded(&world, thread, &task, "completed").await;
+    let repeated: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated, finished,
+        "an unchanged native observation sends no extra environment update"
+    );
 }
 
 #[tokio::test]
@@ -485,6 +601,14 @@ async fn instruction_refresh_waits_for_live_work_without_replacing_its_session_g
         .await;
     world.wait_state(thread, "idle").await;
     let segment = world.segment_of(thread).await;
+    let accepted = world
+        .scalar::<Json>(
+            "SELECT configuration_application FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert!(accepted["accepted_session_revision"].as_i64().unwrap() > 0);
+    assert!(accepted["pending_kinds"].as_array().unwrap().is_empty());
     world
         .set(
             world.topic,
@@ -503,6 +627,24 @@ async fn instruction_refresh_waits_for_live_work_without_replacing_its_session_g
         .unwrap();
     let second = world.turn_start(thread, 1).await;
     assert_eq!(world.segment_of(thread).await, segment);
+    let deferred = world
+        .scalar::<Json>(
+            "SELECT configuration_application FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert_eq!(
+        deferred["accepted_session_revision"],
+        accepted["accepted_session_revision"]
+    );
+    assert_eq!(deferred["accepted_at"], accepted["accepted_at"]);
+    assert_eq!(deferred["deferred_by_background"], true);
+    assert!(
+        deferred["pending_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("instructions"))
+    );
     assert_eq!(
         world
             .seen
@@ -539,6 +681,18 @@ async fn instruction_refresh_waits_for_live_work_without_replacing_its_session_g
         .await
         .unwrap();
     world.turn_start(thread, 2).await;
+    let refreshed = world
+        .scalar::<Json>(
+            "SELECT configuration_application FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert!(
+        refreshed["accepted_session_revision"].as_i64()
+            > accepted["accepted_session_revision"].as_i64()
+    );
+    assert!(refreshed["pending_kinds"].as_array().unwrap().is_empty());
+    assert_eq!(refreshed["deferred_by_background"], false);
     assert!(world.seen.of_kind(CommandKind::SessionOpen).iter().any(|command| {
         matches!(command, Command::SessionOpen(open) if open.instructions.contains("NEW-INSTRUCTIONS-AFTER-TASKS"))
     }));
@@ -574,7 +728,8 @@ async fn human_input_without_a_background_hold_preserves_the_existing_ordinary_q
 }
 
 #[tokio::test]
-async fn stop_holds_its_future_completion_until_human_input_without_resuming_the_ordinary_queue() {
+async fn a_stopped_turns_task_never_starts_a_turn_by_itself_and_its_result_arrives_with_the_next_input_a_person_lets_run()
+ {
     use orch_link_contract::background::{BackgroundTaskState, BackgroundTasks};
     let world = World::new().await;
     let thread = world.thread("Stop completion hold").await;
@@ -608,27 +763,54 @@ async fn stop_holds_its_future_completion_until_human_input_without_resuming_the
             }),
         )
         .await;
-    common::eventually("the stopped turn's completion to be held", || async {
-        sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state_detail='background_stopped')")
+    let held_completion = || async {
+        sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state='pending' AND state_detail='background_stopped')")
             .bind(thread).fetch_one(world.pool.pool()).await.unwrap()
-    }).await;
+    };
+    common::eventually("the stopped turn's completion to be held", held_completion).await;
     assert_eq!(world.turn_starts(thread).len(), 1);
+    // A message a person sends while the Stop holds the queue starts nothing either: the finished task does not
+    // take the turn it was stopped from (no paid work that nobody asked for), and waits, shown as finished.
     world
         .engine()
         .submit_input(&caller, thread, queued("I am back"))
         .await
         .unwrap();
-    let next = world.turn_start(thread, 1).await;
-    assert!(next.text.starts_with("Background task \"Build\" finished"));
+    world.engine().wake(thread);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(
+        world.turn_starts(thread).len(),
+        1,
+        "a stopped turn's task never starts a turn by itself"
+    );
+    assert!(held_completion().await);
     let held: bool = sqlx::query_scalar("SELECT queue_held FROM thread_inputs WHERE id=$1")
         .bind(waiting.input.id)
         .fetch_one(world.pool.pool())
         .await
         .unwrap();
+    assert!(held, "the ordinary queue stays held by the Stop");
+    // Resumed, the queue runs the person's messages, and the finished task's result arrives with the first of them.
+    let sync = world.sync(thread).await;
+    world
+        .engine()
+        .resume_queue(&caller, thread, sync.thread.queue.revision)
+        .await
+        .unwrap();
+    let next = world.turn_start(thread, 1).await;
+    assert!(next.text.contains("Already queued"), "{}", next.text);
     assert!(
-        held,
-        "a new input releases completion holds but does not resume the ordinary queue"
+        next.text.contains("Background task \"Build\" finished"),
+        "{}",
+        next.text
     );
+    // The result counts as given once the program takes the turn that carries it.
+    world.say(thread, common::turn_began(next.turn_id)).await;
+    common::eventually(
+        "the result to be delivered with the person's message",
+        || async { !held_completion().await },
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -691,6 +873,9 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: world.opening_of(thread).await,
+                    uncertain: false,
                     reason: "the native process ended".into(),
                 },
             ),
@@ -745,6 +930,91 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
         .bind(thread).fetch_one(world.pool.pool()).await.unwrap();
     assert!(lost);
     assert_eq!(world.turn_starts(thread).len(), 1);
+}
+
+#[tokio::test]
+async fn a_command_using_an_existing_session_keeps_its_source_while_its_owner_holds_the_thread() {
+    use orch_db::queries::{link, session_dependencies, threads};
+    use orch_link_contract::commands::{SerialKey, SessionBackground, SessionBackgroundEnd};
+    let world = World::new().await;
+    let thread = world.thread("Held native End").await;
+    let (turn, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, turn_ended(turn.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_state(thread, "idle").await;
+    let segment = world.segment_of(thread).await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let original = session_dependencies::target(&mut conn, thread, Some(segment))
+        .await
+        .unwrap();
+    let orch_link_contract::commands::NativeTarget::Session(binding) = &original else {
+        panic!("the original background session must keep its own session target");
+    };
+    assert_eq!(binding.opening_id, Some(world.opening_of(thread).await));
+    let mut held = world.pool.begin().await.unwrap();
+    threads::lock(&mut held, thread).await.unwrap();
+    let key = SerialKey::Thread(thread).wire();
+    for provided in [false, true] {
+        for (kind, body) in [
+            (
+                CommandKind::SessionBackground,
+                serde_json::to_value(SessionBackground {
+                    limits: Default::default(),
+                    thread_id: thread,
+                    segment_id: segment,
+                    cursor: None,
+                })
+                .unwrap(),
+            ),
+            (
+                CommandKind::SessionBackgroundEnd,
+                serde_json::to_value(SessionBackgroundEnd {
+                    thread_id: thread,
+                    segment_id: segment,
+                    command_id: "actual-native-task".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            let id = orch_types::new_id();
+            let inserted = tokio::time::timeout(
+                common::PATIENCE,
+                link::insert_command(
+                    &mut conn,
+                    &link::NewCommand {
+                        content_transit: false,
+                        native_target: provided.then_some(&original),
+                        id,
+                        machine_id: world.machine_id,
+                        kind: kind.as_str(),
+                        body: &body,
+                        serial_key: key.as_deref(),
+                        deadline_at: world.clock.now()
+                            + chrono::Duration::seconds(i64::from(kind.deadline_secs())),
+                    },
+                    world.clock.now(),
+                ),
+            )
+            .await;
+            if inserted.is_err() {
+                held.rollback().await.unwrap();
+                panic!(
+                    "an existing-session command cannot wait on its own controller's thread lock"
+                );
+            }
+            assert!(inserted.unwrap().unwrap());
+            assert_eq!(
+                session_dependencies::command_native_target(&mut conn, id)
+                    .await
+                    .unwrap(),
+                Some(original.clone())
+            );
+        }
+    }
+    held.rollback().await.unwrap();
+    drop(conn);
+    world.shutdown().await;
 }
 
 #[tokio::test]

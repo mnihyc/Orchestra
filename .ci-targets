@@ -1,0 +1,3 @@
+# The API's binding option and binding cases, on the same commit
+test -p orch-api-core --test binding_options
+test -p orch-api-core --test binding_set

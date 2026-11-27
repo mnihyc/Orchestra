@@ -44,7 +44,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const catalogue=locale==='en'?en:zh;
     const words=catalogue.calls;
     const common=catalogue.common;
-    const turnRetry = (id: string) => page.locator(`[data-footer="${id}"]`).getByRole('button', { name: catalogue.timeline.footer.retry, exact: true });
+    // A turn carries its acts under it, or on its answer where it has one.
+    const turnRetry = (id: string, answer?: string) => page.locator(answer === undefined ? `[data-footer="${id}"]` : `[data-item="${answer}"] [data-hover-actions]`).getByRole('button', { name: catalogue.timeline.footer.retry, exact: true });
     const counts={settingsWrites:0,recoveryReads:0,recoveryActions:[] as string[]};
     page.on('request',(request)=>{
       if(new URL(request.url()).pathname.endsWith('/settings/calls.rules') && request.method()==='PUT') counts.settingsWrites++;
@@ -135,7 +136,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(counts.recoveryReads).toBeGreaterThan(beforeReopen);
     expect(counts.recoveryReads-beforeReopen).toBeLessThanOrEqual(2);
     await expect(page.getByText(catalogue.timeline.failure.incomplete,{exact:true})).toHaveCount(0);
-    await expect(turnRetry('recovery-turn-2')).toHaveAttribute('aria-disabled', 'true');
+    await expect(turnRetry('recovery-turn-2','recovery-partial-2')).toHaveAttribute('aria-disabled', 'true');
     await info.attach('continuing',{body:await page.screenshot({path:info.outputPath('continuing.png')}),contentType:'image/png'});
 
     const input='recovery-automatic-input',id='recovery-automatic-turn',at=new Date().toISOString();
@@ -153,14 +154,15 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const annotation=page.getByText(automatic,{exact:false});
     await expect(annotation).toBeVisible();
     await expect(page.getByText(catalogue.timeline.failure.incomplete,{exact:true})).toHaveCount(0);
-    await expect(turnRetry('recovery-turn-2')).not.toHaveAttribute('aria-disabled');
+    await expect(turnRetry('recovery-turn-2','recovery-partial-2')).not.toHaveAttribute('aria-disabled');
     const event=page.locator('[data-recovery-event]');
     await expect(event).toHaveCount(1);
     await expect(event).toContainText(words.causes.model_refused);
     await expect(event).toContainText(words.attempt.replace('{{attempt}}','1').replace('{{total}}','3'));
     await expect(event.getByRole('link')).toHaveAttribute('href',/setting=calls\.rules/);
     await expect(event.locator('time')).toHaveCount(1);
-    await expect(page.locator('[data-item="recovery-automatic-message"]')).toContainText('Ada');
+    // One person writes in this thread, so her messages carry no name: the rule's Continue is drawn as hers, with its note.
+    await expect(page.locator('[data-item="recovery-automatic-message"] [data-automatic-input]')).toHaveText(automatic);
     const latest=page.getByRole('button',{name:catalogue.timeline.jump,exact:true});
     if(await latest.isVisible()) await latest.click();
     // The latest agent work can extend below its automatic-input annotation.
