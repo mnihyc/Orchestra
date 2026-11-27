@@ -14,9 +14,37 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `error:clone_stalled` | 仓库传输超过空闲时限仍无进展。会话显示远端名称并提供重试。 |
+| `error:turn_lost` | Orch 无法重新连接到已受理的轮次。结束时间为 Orch 确认失联的时间，程序最终结果未知。请先检查工作，再选择重试或继续。 |
+| `error:public_address.busy` | 另一个公共地址更改仍在准备，当前地址继续生效。 |
+| `error:public_address.unverified` | 无法验证此浏览器来源地址，当前地址继续生效。 |
+| `error:public_address.mismatch` | 此浏览器来源地址未能证明其提供的是此安装。 |
+| `error:public_address.frontend_not_ready` | 前端尚未载入准备好的证书，当前地址继续生效。 |
+| `error:request.too_early` | HTTP 425：写入或会改变状态的登录跳转在 TLS 提前数据阶段到达，执行前即被拒绝，没有产生更改。安全握手完成后可重试；安全读取仍然可用。 |
 | `error:request.invalid` | 请求中有内容不符合要求。请检查填写的内容后重试。 |
 | `error:request.value_refused` | 请求中有一个值无法保存。请检查填写的内容后重试。 |
 | `error:admin.risk_not_acknowledged` | 这项更改有风险，需要先确认。请勾选确认后重试。 |
+| `error:ask.not_in_list` | 该模型不在本组织的 Ask 模型列表中。请从列表中选择模型。 |
+| `error:ask.model_disabled` | 该模型已关闭。请选择其他模型。 |
+| `error:ask.provider_unavailable` | 该模型的提供方当前不可用。请选择其他模型，或联系管理该提供方的人。 |
+| `error:ask.no_interface` | 该模型的提供方不提供对话方式。请选择其他模型。 |
+| `error:ask.options_refused` | 所选的模型选项不被允许。请修改，或使用模型的默认选项。 |
+| `error:ask.model_not_allowed` | 本组织的策略不允许使用该模型。请选择其他模型。 |
+| `error:ask.provider_not_allowed` | 本组织的策略不允许使用该模型的提供方。请选择其他模型。 |
+| `error:ask.payer_unset` | Ask 设为由写入该设置的人付费，而此人已无法确认。请联系管理员重新设置付费方。 |
+| `error:ask.no_use` | 你不能在本组织使用该模型的提供方。请联系管理它的人为你开放。 |
+| `error:ask.identity_not_usable` | 你对该提供方的使用权限不包含此模型的默认选项。请选择其他模型。 |
+| `error:ask.use_excludes` | 你对该提供方的使用权限不包含此模型或推理强度。请选择其他项。 |
+| `error:ask.payer_no_use` | 为本组织 Ask 付费的人不能使用该提供方。请联系管理员。 |
+| `error:ask.payer_excludes` | 为本组织 Ask 付费的人不能使用此模型或推理强度。请选择其他项。 |
+| `error:ask.no_keeper` | 该提供方没有保管密钥的机器。请联系管理它的人设置。 |
+| `error:ask.keeper_offline` | 保管该提供方密钥的机器已离线。请稍后重试，或选择其他模型。 |
+| `error:ask.cap_reached` | 已达到 Ask 的用量上限。请在额度重置后重试，或联系管理员。 |
+| `error:ask.other_organization` | 此页面属于另一个组织。请在该组织中提问。 |
+| `error:ask.root_refused` | 你本人无法打开这个组织。Ask 以你本人的身份回答，而不是以管理员身份，因此“以管理员身份”不能打开它。请使用你所属的组织。 |
+| `error:ask_context_too_long` | 整段对话即使归纳完整的旧轮次后也无法放入模型窗口。请选择容量更大的允许模型、新建对话，或保留为线程；原记录仍留在历史中。 |
+| `error:ask_turn_too_long` | 当前问题及其读取内容本身就无法放入窗口。请缩小问题范围或选择容量更大的模型；归纳旧消息无法缩小这一轮。 |
+| `error:ask_unavailable` | 本次提问无法完成。请查看当前原因，并在提供重试时重试；之后仍可继续这段对话。 |
 | `error:environment.none_usable` | 没有可供这个会话使用的环境，你也无权创建。请让管理环境的人为你开放权限。 |
 | `error:auth.required` | 你尚未登录。请登录后重试。 |
 | `error:auth.invalid_token` | 登录状态已失效，请重新登录。 |
@@ -38,7 +66,7 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:sharing.external_lifetime_exceeded` | 组织外人员的访问期限必须更短。请选择更早的结束时间。 |
 | `error:authz.denied` | 你没有这项权限。请联系管理它的人。 |
 | `error:registration.closed` | 这里没有开放注册。请向你要加入的团队索取邀请。 |
-| `error:registration.invite_required` | 这个系统通过邀请加入。请向你要加入的团队成员索取邀请链接。 |
+| `error:registration.invite_required` | 这个系统通过邀请加入。请向你要加入的组织成员索取邀请链接。 |
 | `error:sharing.external_forbidden` | 你不能在这里添加组织之外的人。请联系组织管理员。 |
 | `error:provider.subscription_not_allowed` | 这里的策略不允许使用这种智能体的订阅。请选择其他提供方，或联系当前位置的管理者。 |
 | `error:provider.not_allowed` | 这里不允许使用这个提供方。请选择允许的提供方，或让当前位置的管理者检查限制。 |
@@ -59,7 +87,7 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:ports.port_in_use` | 审核的主机端口无法绑定全部所选传输协议。请重新审核号码。 |
 | `error:ports.program_conflict` | 端口程序已改变，或 TCP 前缀冲突。请审核当前选项。 |
 | `error:ports.not_listening` | 此环境中没有服务监听这个端口。请先启动服务，再重试。 |
-| `error:ports.domain_missing` | 浏览器入口需要端口域名。请让系统运营者配置域名，或使用辅助程序。 |
+| `error:ports.domain_missing` | 浏览器入口需要端口域名。请让系统管理员配置域名，或使用辅助程序。 |
 | `error:ports.unavailable` | 端口服务暂不可用。请检查环境的连接后重试。 |
 | `error:tunnel.gateway_unreachable` | 这些机器无法连接到同一个网关。请检查机器的网络连接后重试。 |
 | `error:chat.not_allowed` | 这里无法进行聊天。请选择有聊天权限的位置，或联系管理者。 |
@@ -76,6 +104,7 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:access.locked` | 这项设置已被上级锁定，不能在这里更改。请打开决定它的位置，或联系管理者。 |
 | `error:policy.not_delegated` | 这项设置由机器自己掌握。请让所有者更改设置，或将其交给 Orch 管理。 |
 | `error:conflict.stale_revision` | 刚才有人改动了它。请查看当前状态后重试。 |
+| `error:conflict.concurrent_change` | 同时发生的更改中断了此操作，请重试。这不表示提交的编辑版本已过期。 |
 | `error:conflict.exists` | 这个名称或取值已被占用，请换一个。 |
 | `error:conflict.idempotency_mismatch` | 同一请求被以不同的内容重复发送。请刷新后重试。 |
 | `error:conflict.confirmation_required` | 这一步需要你先确认。请查看它将共享或更改的内容，然后确认。 |
@@ -86,7 +115,7 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:project.too_deep` | 文件夹的嵌套层数已达上限。请选择更接近顶层的文件夹。 |
 | `error:org.closed` | 这个组织不再接收新成员。请让系统管理员解除限制。 |
 | `error:access.too_many_requests` | 你等待处理的访问申请已达到这里允许的数量。请等其中一个被处理，或撤回一个。 |
-| `error:org.flat` | 这个组织内不能再建组织。请选择其他上级，或让系统管理员允许此操作。 |
+| `error:org.flat` | 这个组织内不能再建部门。请选择其他上级，或让系统管理员允许此操作。 |
 | `error:owner.last` | 不能移除最后一位所有者。请先指定另一位。 |
 | `error:member.exists` | 这个人已经是成员了。请移动他们，而不是再次邀请。 |
 | `error:member.same_domain` | 这个组织已经是此人的归属组织。请选择其他组织以移动此人。 |
@@ -95,8 +124,8 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:thread.not_idle` | 会话正忙。请等它结束，或者先停止它。 |
 | `error:thread.not_running` | 会话已不再运行。请查看最新结果后再发送消息。 |
 | `error:thread.use_switch` | 这个会话已有历史。请使用“切换”更换提供方、智能体或环境。 |
-| `error:thread.side` | 旁支会话不支持这项操作。请打开其主会话继续。 |
-| `error:thread.side_limit` | 这个会话打开的旁支会话已达上限。请先关闭一个。 |
+| `error:thread.side` | 旁路会话不支持这项操作。请打开其主会话继续。 |
+| `error:thread.side_limit` | 这个会话打开的旁路会话已达上限。请先关闭一个。 |
 | `error:goal.exists` | 这里已有进行中的目标。请先编辑或清除它。 |
 | `error:goal.limit_reached` | 目标已达限额。请先提高限额，再继续。 |
 | `error:input.not_pending` | 这条消息已不在等待中。请查看当前队列后再更改它。 |
@@ -120,16 +149,17 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:preflight.expired` | 这个方案已经过期，请重新生成。 |
 | `error:resource.in_use` | 它仍在使用中，无法删除。请先解除占用。 |
 | `error:admin.last_admin` | 不能移除最后一位系统管理员。请先指定另一位。 |
-| `error:upload.offset` | 上传位置与服务器保存的位置不符。请从服务器已保存的位置重试上传。 |
+| `error:upload.offset` | 此分片与已接收的字节不一致，或文件尚未上传完整。请重试上传。 |
 | `error:route.not_ready` | 这个渠道还无法送达给你。请先完成设置。 |
 | `error:export.too_large` | 这份归档会超过这里允许的大小。请少选一些。 |
-| `error:export.too_many` | 这份归档包含的内容会超过这里允许的数量。请少选一些。 |
+| `error:export.too_many` | 这个包包含的内容会超过这里允许的数量。请少选一些。 |
 | `error:export.nothing` | 这里没有你可以导出为文件的内容。请选择有权导出的内容，或联系管理者。 |
 | `error:import.too_large` | 这次导入会超过这里允许的大小。请少选一些。 |
 | `error:import.too_many` | 这次导入包含的内容会超过这里允许的数量。请少选一些。 |
 | `error:import.nothing` | 这里没有你可以带入这个位置的内容。请换一个来源或位置。 |
 | `error:import.invalid` | 这不是 Orch 包，也不是可以导入的文件。请检查文件后重试。 |
 | `error:import.undone` | 这次导入已被撤销，或正在撤销。 |
+| `error:summary.nothing_new` | 这里没有可供摘要的新内容，所以没有发起摘要。等有新内容写入或发出后再试。 |
 | `error:gone` | 这个链接已被使用或已过期。请索取新链接。 |
 | `error:docs.too_large` | 这样会使文档超出限制。请删除部分内容，或拆分为多份文档。 |
 | `error:share.too_large` | 这份副本超过了这里的大小限制。请减少要共享的内容。 |
@@ -138,16 +168,31 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:workspace.source_failed` | 无法准备文件。请检查环境的连接；如使用仓库，还请检查其地址和访问权限，然后重试。 |
 | `error:git.failed` | Git 未能完成操作。请先检查仓库的当前状态，再重试。 |
 | `error:auth.locked` | 这个账号的尝试次数过多。请稍后再试，或者换一种方式登录。 |
+| `error:human_check.required` | 这里需要先完成人机验证。请刷新页面后完成验证。 |
+| `error:human_check.failed` | 未通过人机验证，请重新验证。 |
+| `error:human_check.expired` | 人机验证已过期或已被使用，请重新验证。 |
+| `error:human_check.unavailable` | 无法连接人机验证服务。请稍后重试，或联系管理员。 |
+| `error:human_check.edge_blocked` | 网站入口的内容安全策略还不允许页面访问这个服务，所以没有人能通过验证。请先在入口允许它：见运维指南中的“人机验证”。 |
 | `error:rate_limited` | 短时间内请求过多。请稍等片刻后重试。 |
 | `error:internal` | 服务器未能完成这个请求，请重试。 |
 | `error:source.offline` | 运行它的机器处于离线状态。请重新连接，或联系所有者后重试。 |
 | `error:agent.offline` | 暂时无法连接到智能体，请稍后重试。 |
 | `error:provider.unavailable` | 提供方暂时不可用，请稍后重试。 |
-| `error:harness.sessions_no_runtime` | 此智能体尚未在此提供方上运行。请先使用该智能体开始一个会话，再查看其已有会话。 |
+| `error:harness.sessions_no_runtime` | 此智能体尚未在此提供方上运行。请先使用该智能体开始一个会话，再查看其已有的程序会话。 |
 | `error:harness.sessions_unavailable` | 此智能体未能列出已有会话。请检查其所在机器后重试。 |
+| `error:native_web_no_end` | 原生程序未在已解析的等待时间内报告该网页操作结束。此行说明原因并关闭，轮次继续运行。之后真正到达的结束事件仍可更新同一行，不需要手动停止轮次。 |
+| `error:native_web_action_unproven` | 无法将保留证据匹配到确切的操作、轮次、归属、模型或受支持格式。保留操作已报告的状态，用量保持未知；缺少证据不代表操作失败。 |
+| `error:native_web_action_failed` | 确切匹配的保留原生结果报告失败。操作保留原始详情并标记失败；这本身不会让文字轮次失败。 |
+| `error:native_result_timed_out` | 证据原因：可选的保留结果读取达到声明的等待时间。其他会话继续运行，操作已报告的结果保留为未验证。 |
+| `error:native_result_buffer_full` | 证据原因：等待会话的有序输入缓冲区已满。Orch 结束可选证据读取，处理全部保留及当前输入，不会丢弃任何输入。 |
+| `error:native_result_ordering_unknown` | 证据原因：必须先处理保留的子代理引入记录，才能安全确定新到达子代理输入的归属。只结束该会话的可选证据读取，并保留输入顺序。 |
+| `error:native_result_session_closed` | 证据原因：归属会话在可选证据完成前关闭。迟到的证据不会附加到其他会话。 |
+| `error:native_result_session_changed` | 证据原因：会话、片段、原生归属或结果来源已不再匹配此次读取。丢弃旧证据，不会更新替代会话或记入其用量。 |
 | `error:harness.channels_unavailable` | 无法读取发布渠道。请检查此服务器的网络访问，或设置镜像。 |
 | `error:provider.reset_stale` | 重置项或可用数量已变更。请刷新并重新确认当前重置项。 |
 | `error:provider.reset_unavailable` | 此提供方目前无法使用重置。请刷新其信息或联系管理者。 |
 | `error:environment.unavailable` | 环境暂时不可用，请稍后重试。 |
 | `error:network.restricted_unavailable` | 请求的网络限制尚未验证。请重试更改，或在新的计划中明确选择开放网络。 |
 | `error:network.host_denied` | 网络策略拒绝了这个地址。请选择允许的地址，或联系机器所有者。 |
+| `error:provider.relay_unavailable` | 此提供方的 API 转发已关闭或不可用。管理者可为密钥提供方开放选定模型；订阅自动化使用普通线程。 |
+| `error:invalid_timezone` | 无法解析已保存的时区。设有安静时段的对外通知保持等待，不消耗投递尝试次数，收件箱仍可使用。时区恢复有效后会自动继续投递，不会擅自改用 UTC。 |

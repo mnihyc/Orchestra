@@ -20,9 +20,12 @@ public_url = "https://orch.example.com"
 # Other browser origins served by this installation. IP addresses and ports must be explicit.
 # Links from these addresses open on the address already in use; Copy link uses public_url.
 alternate_urls = []
+# Optional HTTPS or mailto contact shared with browser push services. Defaults to the
+# public HTTPS address. For a loopback trial, set this for services that require a contact.
+# web_push_contact = "mailto:ops@example.com"
 
 [release]
-# The updater and read-only checks share this base address; ORCH_RELEASE_URL overrides it.
+# The updater and read-only checks share this base address. ORCH_RELEASE_URL in .env overrides it; empty that line to use this one.
 # Scheduled notices ship off (release.check_days = 0). Management reads the hourly cache. No check installs anything.
 # url = "https://releases.example.com/orch/releases" # defaults to this repository's GitHub releases
 request_timeout_secs = 10
@@ -38,6 +41,9 @@ internal_bind = "0.0.0.0:8444"
 # Plain HTTP, on the stack's own network only.
 metrics_bind = "0.0.0.0:9100"
 db_pool = 32
+# Connections kept open and ready while nobody is asking; each serves for four hours before it is replaced.
+db_pool_warm = 8
+db_pool_lifetime_secs = 14400
 # The API has no published port: everything that reaches it is the web edge,
 # which says who the browser was.
 trusted_proxy_cidrs = [] # Compose supplies its control network; add operator edge/CDN ranges there.
@@ -91,11 +97,11 @@ trust = "pinned"
 [link]
 heartbeat_secs = 20
 dead_after_secs = 60
-max_frame_bytes = 262144
+max_frame_bytes = 262144                     # the largest frame on a session's wire
+max_message_bytes = 16777216                 # ordinary message allowance; paged catalogue values span it in parts
 tunnel_window_bytes = 1048576
 tunnel_resume_grace_secs = 60
 tunnel_session_idle_secs = 60                # unused tunnel-only sessions; active work protects them
-tunnel_replay_buffer_bytes = 8388608
 port_connections_max = 64                    # parallel assets/colleagues, bounded per environment
 port_waiting_max = 16                        # a short burst waiting for the ordinary ten-second open result
 port_buffer_bytes = 262144                   # quarter MiB per TCP direction; at most 32 MiB replay
@@ -118,6 +124,13 @@ migrations_dir = "/opt/orch/migrations"
 # Warn with statement text/placeholders, never bound values; successful slow pool acquisitions too.
 slow_statement_ms = 1000
 slow_acquire_ms = 1000
+# Startup database deadlines in milliseconds; restart the affected service after changing them.
+# acquire_timeout_ms = 10000              # positive; includes opening a pooled connection
+# request_statement_timeout_ms = 15000    # API statements; zero disables the deadline
+# background_statement_timeout_ms = 0     # worker and maintenance statements; zero disables it
+# idle_transaction_timeout_ms = 10000     # idle transactions; zero disables the deadline
+# Statements each connection keeps prepared, so that they are not parsed and planned again; zero keeps none.
+# prepared_statements = 512
 
 [storage]
 # blobs/, uploads/ and tmp/ below it: runtime/data on the host.
@@ -151,7 +164,7 @@ expired_renew_grace_days = 90
 service_dns_names = ["api", "gateway", "worker", "gateway.orch.internal"]
 
 # The bundled node.
-# Legacy driver/port/storage/hook declarations are imported once into its machine policy.
+# Its machine policy is runtime/node/config.toml, initialized from config/node.toml on first start.
 # Inspect with `orch-node policy show`; change hooks with `orch-node policy set hooks '{...}'`.
 [node]
 # Restricted egress follows this node's HTTPS_PROXY when unset. Set an HTTP
@@ -174,8 +187,6 @@ enroll_timeout_secs = 120
 socket = "/var/run/docker.sock"
 # What gateway.orch.internal resolves to inside the runtimes the node makes.
 gateway_host = "host-gateway"
-# Whether this host builds images from Dockerfiles.
-builds = true
 # The size, in GB, of the file that holds the data of Docker running inside an environment (a sparse file: it takes the
 # room its contents take, and this is how far they may grow).
 # docker_inside_gb = 100

@@ -111,12 +111,18 @@ impl reply::Projection for Content {
     }
     fn prepare<'a>(
         ctx: &'a Ctx,
-        _conn: &'a mut Conn,
+        conn: &'a mut Conn,
         _principal: &'a Principal,
         _id: &'a Id,
         row: &'a IdentityProviderRow,
     ) -> BoxFuture<'a, ApiResult<(IdentityProvider, Vec<native::Facts<Source>>)>> {
-        Box::pin(async move { Ok((shown(&ctx.app.config, row.clone()), Vec::new())) })
+        Box::pin(async move {
+            let addresses = crate::public_addresses::read(&ctx.app, conn).await?;
+            Ok((
+                shown(&addresses.addresses.public_url, row.clone()),
+                Vec::new(),
+            ))
+        })
     }
     fn render<'a>(
         _ctx: &'a Ctx,

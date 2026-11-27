@@ -148,6 +148,7 @@ async fn roles_name_all_owners_and_a_viewer_chip_marks_actual_owners_including_n
             .call(PermissionPeopleList, &[&"nodes", &project])
             .token(&t.other.token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: format!("role:{}:viewer", t.root),
                 limit: Some(1),
                 cursor,
@@ -194,6 +195,7 @@ async fn roles_name_all_owners_and_a_viewer_chip_marks_actual_owners_including_n
         .call(PermissionPeopleList, &[&"nodes", &project])
         .token(&t.other.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("role:{}:viewer", t.root),
             limit: None,
             cursor: None,
@@ -250,6 +252,7 @@ async fn search(
             place_id: Some(place),
             include_work: Some(false),
             list_places: None,
+            ..Default::default()
         })
         .send()
         .await
@@ -574,7 +577,8 @@ async fn group_cycles_and_a_sixth_level_are_refused_without_changing_any_members
         .token(&t.owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(members.is_empty());
 }
 
@@ -818,4 +822,174 @@ async fn everyone_in_a_place_includes_a_page_only_guest_without_opening_the_plac
             "view removal ends this dynamic holder"
         );
     }
+}
+
+#[tokio::test]
+async fn holder_people_are_recent_first_and_every_matching_person_has_a_native_page() {
+    use orch_api_contract::personal::{MePickerRecentChoice, MePickerRecentCreate};
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let mut expected = Vec::new();
+    for index in 0..41 {
+        let who = person(&world, &format!("candidate{index:02}")).await;
+        join(&world, t.root, t.dep2, &who, "viewer", &t.owner).await;
+        expected.push(who.id());
+    }
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&t.owner.token)
+        .body(&MePickerRecentChoice {
+            kind: "user".into(),
+            key: expected[40].to_string(),
+        })
+        .send()
+        .await
+        .ok();
+    let opening = format!(
+        "q=&picker=true&kinds=user&org_id={}&place_id={}&limit=1",
+        t.root, t.dep2
+    );
+    let first = world
+        .app
+        .call(HolderSearch, &[])
+        .token(&t.owner.token)
+        .raw_query(&opening)
+        .send()
+        .await
+        .ok();
+    assert!(matches!(&first.items[0].input, HolderInput::User { id } if *id == expected[40]));
+    let mut next: Option<String> = None;
+    let mut found = Vec::new();
+    loop {
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("q", "c")
+            .append_pair("picker", "true")
+            .append_pair("kinds", "user")
+            .append_pair("org_id", &t.root.to_string())
+            .append_pair("place_id", &t.dep2.to_string())
+            .append_pair("limit", "1");
+        if let Some(cursor) = &next {
+            query.append_pair("cursor", cursor);
+        }
+        let page = world
+            .app
+            .call(HolderSearch, &[])
+            .token(&t.owner.token)
+            .raw_query(&query.finish())
+            .send()
+            .await
+            .ok();
+        next = serde_json::to_value(&page).unwrap()["next_cursor"]
+            .as_str()
+            .map(str::to_owned);
+        for row in page.items {
+            let HolderInput::User { id } = row.input else {
+                panic!("a user-only field gets a user");
+            };
+            assert!(
+                !found.contains(&id),
+                "native continuation never repeats a chosen holder"
+            );
+            found.push(id);
+        }
+        if next.is_none() {
+            break;
+        }
+    }
+    found.sort();
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn source_places_have_native_continuations_without_a_loaded_tree_limit() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let mut expected = Vec::new();
+    for index in 0..13 {
+        expected.push(
+            make_project(&world, &t.owner, t.dep2, &format!("Destination {index}"))
+                .await
+                .base
+                .id,
+        );
+    }
+    let mut next: Option<String> = None;
+    let mut found = Vec::new();
+    loop {
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("q", "Destination")
+            .append_pair("picker", "true")
+            .append_pair("list_places", "true")
+            .append_pair("org_id", &t.root.to_string())
+            .append_pair("place_id", &t.dep2.to_string())
+            .append_pair("limit", "1");
+        if let Some(cursor) = &next {
+            query.append_pair("cursor", cursor);
+        }
+        let page = world
+            .app
+            .call(HolderSearch, &[])
+            .token(&t.owner.token)
+            .raw_query(&query.finish())
+            .send()
+            .await
+            .ok();
+        next = serde_json::to_value(&page).unwrap()["next_cursor"]
+            .as_str()
+            .map(str::to_owned);
+        for row in page.items {
+            let HolderInput::Role { at: Some(id), .. } = row.input else {
+                panic!("a source result keeps its placed identity");
+            };
+            found.push(id);
+        }
+        if next.is_none() {
+            break;
+        }
+    }
+    found.sort();
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn a_holder_picker_finds_the_whole_visible_person_or_group_name_as_well_as_a_locator() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    sqlx::query("UPDATE users SET display_name='Grace Example' WHERE id=$1")
+        .bind(t.bob.id())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let team = group(&world, &t.owner, t.dep3, "Release crew").await;
+    let people = format!(
+        "q=Grace%20Example&picker=true&kinds=user&org_id={}&place_id={}&limit=1",
+        t.root, t.dep2
+    );
+    let found = world
+        .app
+        .call(HolderSearch, &[])
+        .token(&t.owner.token)
+        .raw_query(&people)
+        .send()
+        .await
+        .ok();
+    assert!(matches!(&found.items[0].input, HolderInput::User { id } if *id == t.bob.id()));
+    let groups = format!(
+        "q=Release%20crew&picker=true&kinds=group&org_id={}&place_id={}&limit=1",
+        t.root, t.dep2
+    );
+    let found = world
+        .app
+        .call(HolderSearch, &[])
+        .token(&t.owner.token)
+        .raw_query(&groups)
+        .send()
+        .await
+        .ok();
+    assert!(matches!(&found.items[0].input, HolderInput::Group { id } if *id == team.id));
 }

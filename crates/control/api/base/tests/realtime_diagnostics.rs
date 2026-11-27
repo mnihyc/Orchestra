@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
 mod realtime_support;
 
 use orch_api_core::realtime::raw_traffic;
@@ -37,6 +39,118 @@ async fn next_what(client: &mut Client, what: &str) -> Value {
             return frame["data"].clone();
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thread_opening_and_its_live_provider_seed_keep_the_same_first_screen_budget() {
+    use orch_engine::ingest::{ItemSpec, add_item};
+    use orch_engine::unit::Unit;
+    let rig = Rig::new().await;
+    the_provider_manager_is_allowed(&rig).await;
+    let thread = rig.thread("Compact live screen").await;
+    let turn = rig.send(thread, "Keep this first screen bounded").await;
+    let segment = rig.segment_of(thread).await;
+    let schema = json!({"context_window":200000,"request_options":{"openai-responses":{
+        "type":"object","description":"unopened schema ".repeat(1000)}}});
+    for n in 0..95 {
+        sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by) VALUES($1,$2,$3,$3,$4,true,'manual',$5)")
+            .bind(new_id()).bind(rig.provider).bind(format!("unopened-{n}"))
+            .bind(&schema).bind(rig.ada).execute(rig.pool.pool()).await.unwrap();
+    }
+    let listing: Vec<_> = (0..96)
+        .map(|n| json!({"model_name":format!("listed-{n}"),"listed":true,"parameters":schema}))
+        .collect();
+    sqlx::query(
+        "INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2) ON CONFLICT (provider_id) DO UPDATE SET models = EXCLUDED.models",
+    )
+    .bind(rig.provider)
+    .bind(json!(listing))
+    .execute(rig.pool.pool())
+    .await
+    .unwrap();
+    let output = json!({"inline":"fixture output ".repeat(70),"total_len":1050,"truncated":false,"blob":null});
+    let payload = json!({"title":"Read a module","started_at":rig.clock.now(),"duration_ms":1,
+        "tool":{"kind":"command","command":"inspect module","cwd":"/workspace","exit_code":0,"background":false,"process_id":null,"actions":[],"output":output}});
+    let mut tx = rig.pool.begin().await.unwrap();
+    {
+        let mut unit = Unit::new(&mut tx, rig.clock.now());
+        for n in 0..200 {
+            let reference = format!("live-screen-{n}");
+            add_item(
+                &mut unit,
+                &ItemSpec {
+                    thread,
+                    segment,
+                    turn: Some(turn.turn_id),
+                    stream: "main",
+                    parent: None,
+                    kind: "tool_call",
+                    status: "completed",
+                    author: None,
+                    payload: &payload,
+                    native_ref: Some(&reference),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+    let first = reqwest::Client::new()
+        .get(format!(
+            "http://{}/api/v1/threads/{thread}/opening",
+            rig.server.addr
+        ))
+        .bearer_auth(&rig.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let mut reader = Client::signed_in(rig.server.addr, &rig.token).await;
+    reader
+        .sub(1, &format!("provider-row:{}", rig.provider), None)
+        .await;
+    let subscribed = reader.expect("subscribed").await;
+    let seed_frame = reader.frame().await;
+    assert_eq!(seed_frame["op"], "event");
+    assert_eq!(seed_frame["data"]["what"], "changed");
+    let seed = &seed_frame["data"];
+    assert_eq!(seed["provider"]["id"], rig.provider.to_string());
+    for member in ["models", "upstreams", "config", "sources", "runtime_config"] {
+        assert!(
+            seed["provider"].get(member).is_none(),
+            "{member} belongs to the unopened provider page"
+        );
+    }
+    let bytes = first.len()
+        + serde_json::to_vec(&subscribed).unwrap().len()
+        + serde_json::to_vec(&seed_frame).unwrap().len();
+    assert!(
+        bytes < 120000,
+        "HTTP and the initial provider frame together used {bytes} bytes"
+    );
+    realtime_support::coordinator_ready(&rig).await;
+    sqlx::query("UPDATE providers SET name='Live compact name',revision=revision+1 WHERE id=$1")
+        .bind(rig.provider)
+        .execute(rig.pool.pool())
+        .await
+        .unwrap();
+    tokio::time::timeout(realtime_support::PATIENCE, async {
+        loop {
+            let changed = next_what(&mut reader, "changed").await;
+            if changed["provider"]["name"] == "Live compact name" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the compact owner still receives live provider changes");
+    drop(reader);
+    rig.server.stop().await;
 }
 
 // Only structural diagnostics: no receipt, token, certificate or native payload is printed.
@@ -174,7 +288,7 @@ async fn enrollment_case(node: bool) {
                     arch: Arch::X86_64,
                 },
                 connector_version: "1.0.0".to_owned(),
-                protocol_versions: vec![1],
+                protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
                 roles: vec![if node { Role::Node } else { Role::Agent }],
             },
             &orch_db::audit::Origin::default(),
@@ -234,22 +348,61 @@ async fn enrollment_case(node: bool) {
         "recovery reads exactly the same admitted native projection"
     );
     no_enrollment_event(&mut peer, Duration::from_millis(300)).await;
+    let session = orch_types::new_id();
+    let mut conn = rig.pool.acquire().await.unwrap();
+    orch_db::queries::resources::set_session_presence(
+        &mut conn,
+        enrolled.machine_id,
+        true,
+        None,
+        Some(session),
+        rig.clock.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    // The issuer has only the original personal subscription. No object subscription or HTTP read yet.
+    let arrival = enrollment_event(&mut issuer, receipt).await;
+    if node {
+        assert!(arrival.host.unwrap().machine.online);
+    } else {
+        assert!(arrival.machine.unwrap().base.online);
+    }
+    no_enrollment_event(&mut peer, Duration::from_millis(300)).await;
     let mut stream = Client::signed_in(rig.server.addr, &rig.token).await;
     stream.sub(2, &resource.to_string(), None).await;
     stream.expect("subscribed").await;
-    next_what(&mut stream, "changed").await;
-    sqlx::query("UPDATE machines SET online=true,last_seen_at=$2 WHERE id=$1")
-        .bind(enrolled.machine_id)
-        .bind(rig.clock.now())
-        .execute(rig.pool.pool())
-        .await
-        .unwrap();
     let online = next_what(&mut stream, "changed").await;
     if node {
         assert_eq!(online["row"]["value"]["machine"]["online"], true);
     } else {
         assert_eq!(online["row"]["value"]["online"], true);
     }
+    for (online, id) in [(false, session), (true, orch_types::new_id())] {
+        let mut conn = rig.pool.acquire().await.unwrap();
+        orch_db::queries::resources::set_session_presence(
+            &mut conn,
+            enrolled.machine_id,
+            online,
+            None,
+            Some(id),
+            rig.clock.now(),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        let changed = next_what(&mut stream, "changed").await;
+        let row = &changed["row"]["value"];
+        assert_eq!(
+            if node {
+                &row["machine"]["online"]
+            } else {
+                &row["online"]
+            },
+            online
+        );
+    }
+    no_enrollment_event(&mut issuer, Duration::from_millis(300)).await;
     let mut foreign = Client::signed_in(rig.server.addr, &peer_token).await;
     foreign.sub(3, &resource.to_string(), None).await;
     let denied = foreign.expect("error").await;
@@ -388,6 +541,15 @@ async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_
             );
             let row = &frame["data"]["row"]["value"];
             let mut unrelated = row.clone();
+            if row["facts_requested_at"] != initial["row"]["value"]["facts_requested_at"] {
+                // The ordinary read claims this held instant and makes Refresh wait for the configured interval.
+                assert_eq!(row["facts_requested_at"], json!(rig.clock.time()));
+                let next = rig.clock.now() + rig.server.engine.config().provider_facts.page;
+                assert_eq!(row["facts_refresh"], json!({
+                    "eligible": false, "next_at": orch_types::Time::new(next), "source_minimum": false
+                }));
+                unrelated["facts_refresh"] = initial["row"]["value"]["facts_refresh"].clone();
+            }
             for field in ["harnesses", "sources", "updated_at", "facts_requested_at"] {
                 unrelated[field] = initial["row"]["value"][field].clone();
             }
@@ -437,6 +599,7 @@ async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_
         rig.agent,
         rig.machine_id,
         &orch_db::queries::resources::thread_engine::HarnessReport {
+            home: None,
             status: "online",
             detail: None,
             version: Some("1.0.0"),
@@ -454,6 +617,10 @@ async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_
     assert!(
         changed["row"]["value"]["sources"] == settled["row"]["value"]["sources"],
         "the later harness diagnostic is independent of the completed initial source reads"
+    );
+    assert_eq!(
+        changed["row"]["value"]["facts_refresh"], settled["row"]["value"]["facts_refresh"],
+        "a harness-only change does not change when the provider may be refreshed"
     );
     let reports = changed["row"]["value"]["harnesses"].as_array().unwrap();
     assert_eq!(reports.len(), 1);
@@ -694,6 +861,7 @@ async fn every_sign_in_step_reaches_managers_and_no_step_reaches_a_viewer() {
     let mut receiver = StreamReceiver::new(BTreeMap::new(), vec![Role::Provider]);
     let steps = ["starting", "awaiting_user", "completed"];
     let events = steps.iter().enumerate().map(|(n, state)| EvbEntry {
+        native_opening_id: None,
         seq: i64::try_from(n).unwrap() + 1, at: rig.clock.time(), kind: "provider.login".to_owned(),
         body: json!({"state": state, "method": "login", "shows": [], "asks": null, "expires_at": null, "error": null}),
     }).collect();
@@ -788,6 +956,8 @@ async fn a_new_raw_frame_arrives_masked_and_a_later_subscriber_receives_no_old_f
         .await;
     client.expect("subscribed").await;
     let event = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 1,
         direction: "in".to_owned(),
         payload: json!({"Authorization": "must-never-arrive", "message": "hello"}),
@@ -1020,6 +1190,7 @@ async fn report_how_many_raw_events_one_api_process_passes_on_in_a_second() {
     };
     let events = (1..=count)
         .map(|seq| EvbEntry {
+            native_opening_id: None,
             seq,
             at: rig.clock.time(),
             kind: "raw.frame".to_owned(),
@@ -1055,5 +1226,50 @@ async fn report_how_many_raw_events_one_api_process_passes_on_in_a_second() {
         count as f64 / began.elapsed().as_secs_f64()
     );
     drop(client);
+    rig.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_feed_of_a_unit_that_a_host_runs_is_followed_by_whoever_sees_the_host_and_refused_to_the_rest()
+ {
+    let rig = Rig::new().await;
+    let outsider = orch_types::new_id();
+    let (host, unit) = {
+        let mut conn = rig.pool.acquire().await.unwrap();
+        orch_db::queries::identity::testing::insert_user(&mut conn, outsider, "unit-outsider")
+            .await
+            .unwrap();
+        let (host, template) = container_units::host_and_template(
+            &mut conn,
+            rig.ada,
+            rig.root,
+            "Feed",
+            rig.clock.now(),
+        )
+        .await;
+        let unit = container_units::provider_unit(
+            &mut conn,
+            host,
+            template,
+            rig.provider,
+            rig.clock.now(),
+        )
+        .await;
+        (host, unit)
+    };
+    let outsider_token = rig.token_for(outsider, chrono::Duration::days(1)).await;
+    let feed = Feed::Resource {
+        kind: ResourceKind::Machine,
+        id: unit,
+    };
+    let mut keeper = Client::signed_in(rig.server.addr, &rig.token).await;
+    keeper.sub(1, &feed.to_string(), None).await;
+    keeper.expect("subscribed").await;
+    let mut stranger = Client::signed_in(rig.server.addr, &outsider_token).await;
+    stranger.sub(1, &feed.to_string(), None).await;
+    assert_eq!(stranger.expect("error").await["code"], "forbidden");
+    let _ = host;
+    drop(keeper);
+    drop(stranger);
     rig.server.stop().await;
 }

@@ -95,6 +95,7 @@ impl FileDocument {
                 let directory = body.path == "web";
                 assert!(directory || body.path == "web/out/result.bin");
                 Ok(CommandResult::FsStat(FileStat {
+                    facts: None,
                     entry: DirEntry {
                         name: if directory { "web" } else { "result.bin" }.to_owned(),
                         path: body.path.clone(),
@@ -127,6 +128,7 @@ impl FileDocument {
                 assert!(body.mount.is_none());
                 assert!(body.max_bytes.is_some_and(|limit| limit >= size));
                 Ok(CommandResult::FsFetch(FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
                     hash,
                     size,
                     mtime_ns,

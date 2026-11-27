@@ -7,6 +7,7 @@
  * a department's routing address is used in the link, never displayed as its description.
  */
 import { Link } from '@tanstack/react-router';
+import type { MouseEvent, ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { NodeMenuButton } from '@/features/navigation/NodeMenu';
@@ -20,6 +21,7 @@ import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
 import { StateChip } from '@/ui/StateChip';
 import { ContainedThreadStateIcon } from '@/ui/ThreadState';
 import { Tooltip } from '@/ui/Tooltip';
+import { onOwnControl } from '@/ui/RowSelection';
 
 /** What needs a look in a place, as the chips a card, a row and a board's card share: nothing is drawn where nothing needs it. */
 export function AttentionChips({ stats, className }: { stats: Pick<PlaceStats, 'running' | 'waiting' | 'approvals' | 'blocked'>; className?: string }) {
@@ -41,14 +43,19 @@ const CARD =
 /** A full wrapping title; the row's details and menu remain separate keyboard targets. */
 const CARD_LINK = 'focus-inset block font-medium leading-5 wrap-anywhere text-text hover:underline';
 
-function Mark({ children }: { children: React.ReactNode }) {
+function Mark({ children }: { children: ReactNode }) {
   return <span className="flex h-(--control-sm) w-5 shrink-0 items-center justify-center text-text-muted">{children}</span>;
 }
 
-export function ProjectCard({ project, stats }: { project: Project; stats: PlaceStats }) {
+export function ProjectCard({ project, stats, select, onPick }: { project: Project; stats: PlaceStats;
+  /** The box that ticks the row, first in it, in a list that picks rows. */
+  select?: ReactNode;
+  /** A click on the row outside its own controls, for `Shift` and `Ctrl`/`⌘` picking. */
+  onPick?: (event: MouseEvent<HTMLElement>) => void }) {
   const { t } = useTranslation();
   return (
-    <article className={CARD}>
+    <article className={CARD} onClick={onPick === undefined ? undefined : (event) => { if (!onOwnControl(event.target)) onPick(event); }}>
+        {select}
         <Mark>
           <NodeIcon kind="project" color={project.color} own={project.custom_color} />
         </Mark>

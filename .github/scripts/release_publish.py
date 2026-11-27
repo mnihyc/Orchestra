@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from release_ci import wait as wait_for_ci
@@ -14,6 +15,14 @@ from release_gate import VERSION, compare, version as parse_version
 
 # Concurrent publishers each re-read after a repair; five attempts bound a persistent conflict.
 LATEST_ATTEMPTS = 5
+NOTES_DIR = Path(".github/release-notes")
+# The status line of a release's notes and its pre-release flag say the same thing (release-notes/TEMPLATE.md).
+PRE_RELEASE_STATUS = re.compile(r"^\*\*Status:\*\* Pre-release\.", re.M)
+
+
+def is_prerelease(tag, notes):
+    """A version with a pre-release part, or one whose notes give its status as a pre-release."""
+    return bool(parse_version(tag)[1]) or (notes.is_file() and PRE_RELEASE_STATUS.search(notes.read_text()) is not None)
 
 def run(*command):
     return subprocess.run(command, check=True, text=True, capture_output=True).stdout.strip()
@@ -42,9 +51,9 @@ def check_release_assets(release, directory, *, partial=False, image_update=Fals
     return sorted(set(local) - set(remote))
 
 
-def is_latest(tag, releases):
+def is_latest(tag, releases, *, prerelease=False):
     """Only the highest published stable version is the Latest release."""
-    if parse_version(tag)[1]:
+    if prerelease or parse_version(tag)[1]:
         return False
     return not any(not release.get("draft") and not release.get("prerelease")
                    and VERSION.fullmatch(release.get("tag_name", ""))
@@ -135,13 +144,14 @@ def main():
         listing["images"].append({"name": "orch-env-base", "reference": reference, "digest": digest})
         listing_path.write_text(json.dumps(listing, indent=2) + "\n")
     subprocess.run(["cargo", "xtask", "package", "--out", str(args.release.resolve()), "--check", "--check-source", "--require-all-connectors"], check=True)
-    notes = Path(".github/release-notes") / f"{tag}.md"
+    notes = NOTES_DIR / f"{tag}.md"
+    prerelease = is_prerelease(tag, notes)
     wait_for_ci(tag, commit, args.repo, once=True)
     tagged_commit = json.loads(run("gh", "api", f"repos/{args.repo}/commits/{tag}"))["sha"]
     if tagged_commit != commit:
         raise ValueError("the tag no longer names the verified commit; nothing published")
     pages = json.loads(run("gh", "api", "--paginate", "--slurp", f"repos/{args.repo}/releases?per_page=100"))
-    latest = is_latest(tag, [item for page in pages for item in page])
+    latest = is_latest(tag, [item for page in pages for item in page], prerelease=prerelease)
     if release is not None:
         missing = check_release_assets(release, args.release, partial=release["draft"], image_update=publish_images)
         if missing:
@@ -150,11 +160,11 @@ def main():
             subprocess.run(["gh", "release", "upload", tag, str(listing_path), "--repo", args.repo, "--clobber"], check=True)
         if release["draft"]:
             subprocess.run(["gh", "release", "edit", tag, "--repo", args.repo, "--draft=false", "--verify-tag",
-                            f"--latest={str(latest).lower()}", "--notes-file", str(notes)], check=True)
+                            f"--prerelease={str(prerelease).lower()}", f"--latest={str(latest).lower()}",
+                            "--notes-file", str(notes)], check=True)
     else:
-        prerelease = ["--prerelease"] if parse_version(tag)[1] else []
         subprocess.run(["gh", "release", "create", tag, "--repo", args.repo, "--verify-tag", "--target", commit,
-                        f"--latest={str(latest).lower()}", *prerelease, "--title", f"Orch {version}",
+                        f"--latest={str(latest).lower()}", *(["--prerelease"] if prerelease else []), "--title", f"Orch {version}",
                         "--notes-file", str(notes), *map(str, sorted(args.release.iterdir()))], check=True)
     reconcile_latest(args.repo)
     print(f"Release {tag} published with verified assets")

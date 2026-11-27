@@ -42,7 +42,7 @@ use orch_api_contract::common::ErrorCode;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::operation_sources::Declaration;
 
@@ -208,7 +208,7 @@ async fn require_sources(conn: &mut Conn, principal: &Principal, window: &Window
 
 impl native::Selected for ThreadSnapshots {
     type Source = Role;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = Window;
     type Reply = Page<Snapshot>;
     const DECLARATION: &'static Declaration<Role> = &sources::THREAD_SNAPSHOT_LIST;
@@ -217,11 +217,12 @@ impl native::Selected for ThreadSnapshots {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(Window, Vec<native::Facts<Role>>)>> {
         Box::pin(async move {
             let thread = ctx.id("id")?;
-            let after = query.cursor.as_deref().map(after_of).transpose()?;
+            let after = after_of(ctx, query)?;
+            let page_size = crate::collection::limit(query)?;
             let current = environment_rows::thread_place(conn, thread)
                 .await?
                 .and_then(|place| place.environment_id);
@@ -290,10 +291,13 @@ impl native::Selected for ThreadSnapshots {
                         conn,
                         thread,
                         after,
-                        i64::from(query.limit()) + 1,
+                        i64::from(page_size) + 1,
                         false,
                         &[],
-                        Some(&permitted_origins),
+                        storage::SnapshotFilter {
+                            origins: Some(&permitted_origins),
+                            text: query.q.as_deref().unwrap_or(""),
+                        },
                     )
                     .await?;
                     if !selected.is_empty() {
@@ -327,13 +331,16 @@ impl native::Selected for ThreadSnapshots {
                 conn,
                 thread,
                 after,
-                i64::from(query.limit()) + 1,
+                i64::from(page_size) + 1,
                 manual,
                 &recorded,
-                native::modern(caller).then_some(permitted_origins.as_slice()),
+                storage::SnapshotFilter {
+                    origins: native::modern(caller).then_some(permitted_origins.as_slice()),
+                    text: query.q.as_deref().unwrap_or(""),
+                },
             )
             .await?;
-            let limit = usize::try_from(query.limit()).map_err(ApiError::internal)?;
+            let limit = usize::try_from(page_size).map_err(ApiError::internal)?;
             let continuation = if found.len() > limit {
                 found.pop()
             } else {
@@ -342,7 +349,8 @@ impl native::Selected for ThreadSnapshots {
             let next_cursor = found
                 .last()
                 .filter(|_| continuation.is_some())
-                .map(cursor_of);
+                .map(|row| cursor_of(ctx, query, row))
+                .transpose()?;
             let sources =
                 Source::from_thread_rows(thread, current, found).ok_or_else(ApiError::not_found)?;
             let continuation = continuation
@@ -366,7 +374,7 @@ impl native::Selected for ThreadSnapshots {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _: &'a PageQuery,
+        _: &'a CollectionQuery,
         opened: &'a Window,
     ) -> BoxFuture<'a, ApiResult<(Window, Vec<native::Facts<Role>>)>> {
         Box::pin(async move {
@@ -451,7 +459,7 @@ impl native::Selected for ThreadSnapshots {
         _: &'a Ctx,
         conn: &'a mut Conn,
         principal: &'a Principal,
-        _: &'a PageQuery,
+        _: &'a CollectionQuery,
         opened: &'a Window,
         fresh: &'a Window,
     ) -> BoxFuture<'a, ApiResult<bool>> {

@@ -18,7 +18,7 @@ use orch_link::framing::Connection;
 use orch_link::session::{self, Accepted, EndReason, SessionEvent, SessionSender};
 use orch_link_contract::backplane::{BackplaneFrame, MachineDown, MachineUp};
 use orch_link_contract::frames::Frame;
-use orch_link_contract::version::ByeCode;
+use orch_link_contract::version::{ByeCode, Limits};
 use orch_types::Id;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -27,6 +27,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// One session that stands.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionEntry {
+    pub(crate) tools_synced: bool,
     pub(crate) capabilities: Vec<String>,
     pub(crate) purpose: orch_link_contract::gateways::SessionPurpose,
     pub(crate) session_id: Id,
@@ -127,15 +128,51 @@ impl Sessions {
 
     /// Business/control delivery and API-owned attachments use only a primary.
     pub(crate) fn primary_sender_of(&self, machine: Id) -> Option<SessionSender> {
+        self.primary_session_of(machine).map(|(_, sender)| sender)
+    }
+
+    /// The primary identity and sender are read together, including during replacement.
+    pub(crate) fn primary_session_of(&self, machine: Id) -> Option<(Id, SessionSender)> {
         self.lock()
             .by_machine
             .get(&machine)
             .filter(|entry| entry.purpose.is_primary())
-            .map(|entry| entry.sender.clone())
+            .map(|entry| (entry.session_id, entry.sender.clone()))
     }
 
     pub(crate) fn has_primary(&self, machine: Id) -> bool {
         self.primary_sender_of(machine).is_some()
+    }
+
+    pub(crate) fn tool_control(
+        &self,
+        control: orch_link_contract::tool_sessions::ToolSessionControl,
+    ) {
+        let mut registry = self.lock();
+        let senders = registry
+            .by_machine
+            .values_mut()
+            .filter_map(|entry| {
+                if !entry.purpose.is_primary() {
+                    return None;
+                }
+                let send = !control.available || entry.tools_synced;
+                if !control.available {
+                    entry.tools_synced = false;
+                }
+                send.then(|| entry.sender.clone())
+            })
+            .collect::<Vec<_>>();
+        drop(registry);
+        for sender in senders {
+            let _ = sender.send(Frame::ToolSessionControl(control.clone()));
+        }
+    }
+
+    pub(crate) fn tool_sync(&self, machine: Id, available: bool) {
+        if let Some(entry) = self.lock().by_machine.get_mut(&machine) {
+            entry.tools_synced = available;
+        }
     }
 
     /// The machine a session token was given to, and the fingerprint of the
@@ -183,6 +220,26 @@ impl Sessions {
         for sender in senders {
             sender.end();
         }
+    }
+
+    /// Removes sessions negotiated under different limits before the new API sees them.
+    pub(crate) fn take_other_limits(&self, limits: Limits) -> Vec<(Id, SessionEntry)> {
+        let mut registry = self.lock();
+        let changed: Vec<Id> = registry
+            .by_machine
+            .iter()
+            .filter(|(_, entry)| entry.sender.limits() != limits)
+            .map(|(machine, _)| *machine)
+            .collect();
+        let mut removed = Vec::with_capacity(changed.len());
+        for machine in changed {
+            if let Some(entry) = registry.by_machine.remove(&machine) {
+                registry.by_token.remove(&entry.token);
+                metrics::gauge!("orch_link_sessions", "placement" => entry.placement.clone(), "trust" => entry.trust).decrement(1.0);
+                removed.push((machine, entry));
+            }
+        }
+        removed
     }
 
     /// Observes the actual gateway-side link meters, without machine identifiers in labels.
@@ -236,24 +293,34 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
     let machine = auth.machine_id;
     let purpose = auth.purpose;
     let inner = &gateway.inner;
-    let replaced = inner.sessions.install(
-        machine,
-        SessionEntry {
-            capabilities: auth.capabilities.clone(),
-            purpose,
-            session_id,
-            sender: sender.clone(),
-            token: session_token,
-            fingerprint,
-            ip: remote_ip,
-            placement: placement.unwrap_or_else(|| "unknown".to_owned()),
-            trust: if tls == orch_link_contract::session::TlsMode::Mutual {
-                "pinned"
-            } else {
-                "public"
+    let replaced = {
+        // The API may have returned while this handshake was in flight. Installing
+        // and refreshing limits share this lock so that an old session cannot escape renewal.
+        let api = inner.api.read().unwrap_or_else(PoisonError::into_inner);
+        if sender.limits() != api.limits {
+            sender.end();
+            return;
+        }
+        inner.sessions.install(
+            machine,
+            SessionEntry {
+                tools_synced: false,
+                capabilities: auth.capabilities.clone(),
+                purpose,
+                session_id,
+                sender: sender.clone(),
+                token: session_token,
+                fingerprint,
+                ip: remote_ip,
+                placement: placement.unwrap_or_else(|| "unknown".to_owned()),
+                trust: if tls == orch_link_contract::session::TlsMode::Mutual {
+                    "pinned"
+                } else {
+                    "public"
+                },
             },
-        },
-    );
+        )
+    };
     let replaced = match replaced {
         Ok(replaced) => replaced,
         Err(unused) => {
@@ -279,6 +346,10 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
         )
     });
     if purpose.is_primary() {
+        let mut control = inner.relay.with(|relay| relay.tool_control_snapshot());
+        control.available = false;
+        control.refreshing = true;
+        let _ = sender.send(Frame::ToolSessionControl(control));
         inner.backplane.send(BackplaneFrame::MachineUp(MachineUp {
             capabilities: auth.capabilities.clone(),
             purpose,
