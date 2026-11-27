@@ -1,0 +1,78 @@
+[chromium] › tests/accessibility/settings.spec.ts › a person’s own pages: profile, security with its dialogs, tokens and the interface
+[chromium] › tests/accessibility/settings.spec.ts › an org’s sections general, departments, members, as the person who makes its rules
+[chromium] › tests/accessibility/settings.spec.ts › an org’s sections groups, roles, defaults, as the person who makes its rules
+[chromium] › tests/accessibility/settings.spec.ts › the dialogs of an org’s settings: a member moved, held out and removed, a group’s people, a tag, a channel
+[chromium] › tests/accessibility/settings.spec.ts › a department’s sections and the settings editor with a lock above
+[chromium] › tests/accessibility/settings.spec.ts › a project’s settings, section by section, and a topic’s
+[chromium] › tests/accessibility/settings.spec.ts › the pages general, members, defaults for somebody who may only read them
+[chromium] › tests/accessibility/settings.spec.ts › a project’s policies for somebody who may only read them
+[chromium] › tests/accessibility/settings.spec.ts › a group's place picker keeps its accessible keyboard owner at 1440px in en
+[chromium] › tests/accessibility/thread.spec.ts › a conversation that is over: messages, work folded and shown, a change with its difference, and the footer
+[chromium] › tests/accessibility/thread.spec.ts › a conversation that runs: a thought, a command with its output, text that is being written, and a way to stop it
+[chromium] › tests/accessibility/thread.spec.ts › a turn that failed with its error and one that was stopped
+[chromium] › tests/accessibility/thread.spec.ts › what waits in the queue, and the ways of sending that the button opens
+[chromium] › tests/accessibility/thread.spec.ts › the dialog that makes a thread, with its parts and its refusal
+[chromium] › tests/accessibility/thread.spec.ts › conversation and controls share one keyboard viewport while the history stays virtual
+[chromium] › tests/accessibility/thread.spec.ts › a reader's Home takes the shared viewport to the top and nothing takes them back down when the page is 1 times slow and stalled for 300 ms
+[chromium] › tests/accessibility/thread.spec.ts › a reader's Home takes the shared viewport to the top and nothing takes them back down when the page is 1 times slow and stalled for 700 ms
+[chromium] › tests/accessibility/thread.spec.ts › a reader who scrolled up is shown where the new rows are: the jump stays in view and takes them to the end at 1440px
+[chromium] › tests/e2e/search.spec.ts › turning off every conversation kind keeps the result set empty
+[chromium] › tests/e2e/search.spec.ts › one search box leads the page with a desktop filter column, phone sheet and a quiet beside action
+[chromium] › tests/e2e/search.spec.ts › a search is kept to a place, and two characters are enough inside a topic
+[chromium] › tests/e2e/search.spec.ts › owner and edited date narrow documents on desktop and phone
+[chromium] › tests/e2e/search.spec.ts › Show more reveals the received results and retains newest-first order
+[chromium] › tests/e2e/search.spec.ts › a conversation the person may not read is not searched
+[chromium] › tests/e2e/search.spec.ts › find in the conversation: a bar under the header, the hits lit, and Enter going to the next older one
+[chromium] › tests/e2e/search.spec.ts › the finder lists find in the conversation among the commands of a thread
+[chromium] › tests/e2e/vnc.spec.ts › a display Orch opened shows its line for programs, one an agent announced its sentence, and the viewer draws
+[chromium] › tests/e2e/vnc.spec.ts › watching sends no key and no pointer; Work in it sends them
+[chromium] › tests/e2e/vnc.spec.ts › two viewers are two clients of the display
+[chromium] › tests/e2e/vnc.spec.ts › closing each kind says what happens to it
+[chromium] › tests/e2e/vnc.spec.ts › nothing found and each way of being off
+[chromium] › tests/e2e/vnc.spec.ts › the view by keyboard as far as the viewer allows, and with axe in both themes
+[chromium] › tests/accessibility/admin.spec.ts › the sections of machines, each drawn with what it holds
+[chromium] › tests/accessibility/admin.spec.ts › the sections of people, each drawn with what it holds
+[chromium] › tests/accessibility/admin.spec.ts › the sections of system, each drawn with what it holds
+[chromium] › tests/accessibility/admin.spec.ts › what opens above the rest: an owner named, a provider added, a capability and a build
+[chromium] › tests/e2e/first-steps.spec.ts › an unfinished root offers setup without repeating its name or probing a model
+[chromium] › tests/e2e/first-steps.spec.ts › a new team is created in the existing form before its first provider or invitation
+[chromium] › tests/e2e/first-steps.spec.ts › loading or failed observations do not invent missing setup, and lost View exposes no old facts
+[chromium] › tests/e2e/first-steps.spec.ts › the compact card works by keyboard at 1440 and 400 in both themes (en)
+[chromium] › tests/e2e/builtin-native-placement.spec.ts › built-in native fork requires a destination and offers no source workspace (en)
+[chromium] › tests/e2e/builtin-native-placement.spec.ts › built-in native switch requires a destination and offers no source workspace (en)
+[chromium] › tests/e2e/builtin-native-placement.spec.ts › reviews an actual program source before a native switch (en)
+[chromium] › tests/e2e/installation-reach.spec.ts › the environment Overview and thread Environment panel show the same per-thread reach
+[chromium] › tests/e2e/installation-reach.spec.ts › a cut response on a phone shows missing permissions and loses old facts when the read is refused
+[chromium] › tests/e2e/installation-reach.spec.ts › Management sends one explicit release check, refreshes its record through the registry and offers only a command to copy
+[chromium] › tests/e2e/setting-own.spec.ts › a blank own field never sends ancestors on first or repeated saves, and Reset removes only own
+[chromium] › tests/e2e/setting-own.spec.ts › a higher lock shows the effective value and source while retaining the ignored own value
+[chromium] › tests/e2e/setting-own.spec.ts › late loss of permission preserves the failed own draft, and a reader never gets an enabled Save
+[chromium] › tests/accessibility/finder.spec.ts › the bar that finds in a conversation, in both themes
+[chromium] › tests/accessibility/finder.spec.ts › the help beside a screen, its tabs, an article, and the help as a page, in both themes
+[chromium] › tests/e2e/admin-messages.spec.ts › org sends one retryable Markdown message in en/light/1440
+[chromium] › tests/e2e/admin-messages.spec.ts › system sends one retryable Markdown message in en/light/1440
+[chromium] › tests/e2e/custody-host-plans.spec.ts › host data, waits and leftovers 1440px light en
+[chromium] › tests/e2e/custody-host-plans.spec.ts › permanent loss plan and result 1440px light en
+[chromium] › tests/e2e/image-generation.spec.ts › an image allowance keeps the successful text turn and the image opens en/light/1440
+[chromium] › tests/e2e/image-generation.spec.ts › a paid image stays viewable when file delivery fails en
+[chromium] › tests/e2e/move-out.spec.ts › native cross-org agents move (en/light/1440)
+[chromium] › tests/e2e/move-out.spec.ts › native cross-org providers move (en/light/1440)
+[chromium] › tests/e2e/view-purpose-captions.spec.ts › a single chat tab keeps its purpose and target (1440/en)
+[chromium] › tests/e2e/view-purpose-captions.spec.ts › a single personal space tab keeps its purpose and target (1440/en)
+[chromium] › tests/accessibility/trace.spec.ts › kept rows and explicit purge and Remove confirmations fit a phone and remain accessible
+[chromium] › tests/e2e/ask-help.spec.ts › Ask help is reachable and free of model calls (en, 1440, light)
+[chromium] › tests/e2e/builtin-program-facts.spec.ts › built-in thread facts stay distinct from an unbound native thread (en)
+[chromium] › tests/e2e/codex-standalone-search.spec.ts › declared standalone search choices en/light/400
+[chromium] › tests/e2e/custody-storage.spec.ts › storage report 1440px light en
+[chromium] › tests/e2e/driver-features.spec.ts › a cluster declares features without another request (en/light/1440)
+[chromium] › tests/e2e/family-model-read.spec.ts › family model read stays visible en/light/1440
+[chromium] › tests/e2e/harness-observation-history.spec.ts › native observations survive the thread tab click path (en, light)
+[chromium] › tests/e2e/keys.spec.ts › an action takes the keys pressed for it, and keys another action has are refused with its name
+[chromium] › tests/e2e/mcp-image-results.spec.ts › a returned MCP image opens with its call and a failed sibling stays visible en/light/1440
+[chromium] › tests/e2e/one-scroller.spec.ts › no pane scrolls inside another the same way, on a desk
+[chromium] › tests/e2e/private-thread-navigation.spec.ts › a private thread parent preserves the chosen navigation in light
+[chromium] › tests/e2e/remaining-read-availability.spec.ts › pending port read retry en/light
+[chromium] › tests/e2e/settings-rows.spec.ts › 146 rows, one view-only notice, guarded save/Undo and lazy reach at both widths in en/light
+[chromium] › tests/e2e/summary-options.spec.ts › summary target defaults survive a scoped save (en/light/1440)
+[chromium] › tests/e2e/thread-options.spec.ts › thread request options en/light
+[chromium] › tests/e2e/view-tab-menus.spec.ts › view-tab menus preserve their acts and focus at 1440px in light

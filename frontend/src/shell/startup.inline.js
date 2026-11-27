@@ -75,6 +75,10 @@
   for (var page of plan.pages) {
     if (new RegExp(page.pattern).test(scope.location.pathname)) { files.push.apply(files, page.files); break; }
   }
+  // The frame's words are the first the application draws with, in the language the device draws in until the person's own
+  // is known (`lib/deviceAppearance.ts`): asked for as its code is (below), rather than once the application has run. The
+  // sign-in page asks for its own words.
+  var frameWords = plan.words && !isLogin.test(scope.location.pathname) ? ['assets/words/' + deviceLocale() + '-' + plan.words + '.json'] : [];
   var held = new Set();
   for (var link of scope.document.querySelectorAll('link[rel="modulepreload"]')) held.add(link.getAttribute('href'));
   // The screen's own code is asked for as the document's own scripts are: a browser holds back requests of low priority a
@@ -96,7 +100,7 @@
     if (!painted) return;
     if (frameNeeded) preload(plan.common);
     if (released) return;
-    released = true; preload(files); releaseScripts();
+    released = true; preload(files); preloadKept(frameWords); releaseScripts();
   }
   function read(path, options) {
     var sentAt = Date.now();
@@ -307,6 +311,18 @@
     }
   }
   preloadKept(keptFiles);
+  function deviceLocale() {
+    try {
+      var kept = JSON.parse(scope.localStorage.getItem('orch.appearance') || 'null');
+      if (kept && (kept.locale === 'en' || kept.locale === 'zh-CN')) return kept.locale;
+    } catch { /* A device without its storage draws in its browser's language. */ }
+    for (var language of (scope.navigator && scope.navigator.languages) || []) {
+      if (language === 'en' || language === 'zh-CN') return language;
+      if (/^zh/i.test(language)) return 'zh-CN';
+      if (/^en/i.test(language)) return 'en';
+    }
+    return 'en';
+  }
   if (isLogin.test(scope.location.pathname)) {
     preload(files);
     if (plan.application) {
@@ -325,5 +341,19 @@
     release(false);
   }
   var navigation = scope.performance && scope.performance.getEntriesByType ? scope.performance.getEntriesByType('navigation')[0] : null;
-  if (navigation && /^(h2|h3)/.test(navigation.nextHopProtocol)) release(false);
+  var multiplexed = !!navigation && /^(h2|h3)/.test(navigation.nextHopProtocol);
+  // A document the worker answered names no protocol: its code is in the browser's cache, as the document was.
+  var answeredHere = !!navigation && navigation.nextHopProtocol === '';
+  // Over HTTP/1.1 the application's code and the frame's words are asked for at once, on connections of their own: they are
+  // the largest files before a page's first content, and asking for them once the entry had run put the entry's whole
+  // transfer before them on a first visit. Over h2 the one connection is left to the session and the entry until the shell
+  // has painted, and they come with the page's code. A returning page asks for them with the files it kept, from the
+  // browser's cache.
+  if (!multiplexed && !isLogin.test(scope.location.pathname)) {
+    if (plan.application) preload([plan.application.file]);
+    preloadKept(frameWords);
+  }
+  // The page's code follows the shell's paint where it does not share a connection with the session: over h2, and from the
+  // cache. Over HTTP/1.1 it follows the session's answer.
+  if (multiplexed || answeredHere) release(false);
 })

@@ -8,7 +8,7 @@ import type { ChunkingContext, ModuleInfo } from 'rolldown';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 
-import { type BuiltChunk, firstScreenPlan, firstWaveFiles, firstWavePlugin, threadShellWorkerPlugin } from '../../build/first-wave';
+import { type BuiltChunk, firstScreenPlan, firstWaveFiles, firstWavePlugin, shellScreens, shellWorkerPlugin } from '../../build/first-wave';
 import { staticChunkGroup } from '../../build/frame-chunks';
 import { vocabularyPlan } from '../../build/vocabulary';
 import type { HtmlReads } from '@/api/htmlReads';
@@ -480,10 +480,61 @@ it('fetches the code and styles its address needed last time with the document, 
       words: [...document.querySelectorAll<HTMLLinkElement>('link[rel="preload"][as="fetch"]')].map((link) => [link.getAttribute('href'), link.crossOrigin]) };
   };
   // A style is preloaded in the mode its stylesheet asks it (anonymous), so that it is fetched once.
-  expect(open('assets/application-2.js')).toEqual({ scripts: ['/assets/initial.js', '/assets/route-machines.js'], styles: [['/assets/route-machines.css', 'anonymous']],
-    words: [['/assets/words/en-ab12.json', 'anonymous']] });
-  // Another release names other files.
-  expect(open('assets/application-1.js')).toEqual({ scripts: ['/assets/initial.js'], styles: [], words: [] });
+  expect(open('assets/application-2.js')).toEqual({ scripts: ['/assets/initial.js', '/assets/route-machines.js', '/assets/application-2.js'],
+    styles: [['/assets/route-machines.css', 'anonymous']], words: [['/assets/words/en-ab12.json', 'anonymous']] });
+  // Another release names other files; its application's code is asked at once all the same.
+  expect(open('assets/application-1.js')).toEqual({ scripts: ['/assets/initial.js', '/assets/application-2.js'], styles: [], words: [] });
+});
+
+it('asks for the frame words in the device language with the entry over HTTP/1.1, after the paint over h2, and none on the sign-in page', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/shell/startup.inline.js'), 'utf8');
+  const open = (path: string, appearance: unknown, languages: string[], protocol = 'http/1.1') => {
+    const document = new DOMParser().parseFromString('<html><head></head><body></body></html>', 'text/html');
+    const stored: Record<string, string> = appearance === undefined ? {} : { 'orch.appearance': JSON.stringify(appearance) };
+    const performance = { mark: () => undefined, getEntriesByType: () => [{ nextHopProtocol: protocol }] };
+    const window: { __orchStartupReads?: HtmlReads } & Record<string, unknown> = {
+      fetch: vi.fn(() => new Promise<Response>(() => undefined)), document, location: new URL(`https://example.invalid${path}`),
+      navigator: { languages }, AbortController, Intl, Date, TextDecoder, performance, localStorage: { getItem: (key: string) => stored[key] ?? null } };
+    runInNewContext(`${source}(window,plan);`, { window, plan: { entry: ['assets/initial.js'], common: [], pages: [], words: 'frame-part' },
+      URL, Request, Response, Headers, AbortController, Promise, Date, Intl });
+    const words = () => [...document.querySelectorAll<HTMLLinkElement>('link[rel="preload"][as="fetch"]')].map((link) => [link.getAttribute('href'), link.crossOrigin]);
+    const atOnce = words();
+    window.__orchStartupReads?.painted();
+    return { atOnce, painted: words() };
+  };
+  const zh = [['/assets/words/zh-CN-frame-part.json', 'anonymous']];
+  expect(open('/resources/machines', { theme: 'dark', density: 'compact', locale: 'zh-CN' }, ['en-US'])).toEqual({ atOnce: zh, painted: zh });
+  expect(open('/resources/machines', undefined, ['de-DE', 'zh-TW'])).toEqual({ atOnce: zh, painted: zh });
+  expect(open('/', { locale: 'fr' }, ['en-GB']).atOnce).toEqual([['/assets/words/en-frame-part.json', 'anonymous']]);
+  // The one h2 connection carries the session and the entry first; the words follow once the shell has painted.
+  expect(open('/resources/machines', undefined, ['en-US'], 'h2')).toEqual({ atOnce: [], painted: [['/assets/words/en-frame-part.json', 'anonymous']] });
+  expect(open('/login', undefined, ['en-US'])).toEqual({ atOnce: [], painted: [] });
+});
+
+it('asks for the application code with the entry over HTTP/1.1 and leaves an h2 connection to the session until the paint', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/shell/startup.inline.js'), 'utf8');
+  const open = (protocol: string) => {
+    const document = new DOMParser().parseFromString('<html><head></head><body></body></html>', 'text/html');
+    const performance = { mark: () => undefined, getEntriesByType: () => [{ nextHopProtocol: protocol }] };
+    const window: { __orchStartupReads?: HtmlReads } & Record<string, unknown> = {
+      fetch: vi.fn(() => new Promise<Response>(() => undefined)), document, location: new URL('https://example.invalid/resources/machines'),
+      AbortController, Intl, Date, TextDecoder, performance, localStorage: { getItem: () => null } };
+    runInNewContext(`${source}(window,plan);`, { window, plan: { entry: ['assets/initial.js'], common: ['assets/Shell.js'],
+      pages: [{ pattern: '^/resources/machines$', files: ['assets/machines.js'] }],
+      application: { file: 'assets/application-2.js', styles: [], initializers: [] } }, URL, Request, Response, Headers, AbortController, Promise, Date, Intl });
+    const scripts = () => [...document.querySelectorAll('link[rel="modulepreload"]')].map((link) => link.getAttribute('href'));
+    const atOnce = scripts();
+    window.__orchStartupReads?.painted();
+    return { atOnce, painted: scripts() };
+  };
+  // Over HTTP/1.1 the page's code follows the session's answer (which never comes here).
+  expect(open('http/1.1')).toEqual({ atOnce: ['/assets/initial.js', '/assets/application-2.js'],
+    painted: ['/assets/initial.js', '/assets/application-2.js'] });
+  // A document the worker answered names no protocol: it is the browser's own, with a cache that holds the code, which
+  // is asked for at once and released with the shell's paint.
+  expect(open('')).toEqual({ atOnce: ['/assets/initial.js', '/assets/application-2.js'],
+    painted: ['/assets/initial.js', '/assets/application-2.js', '/assets/machines.js'] });
+  expect(open('h2')).toEqual({ atOnce: ['/assets/initial.js'], painted: ['/assets/initial.js', '/assets/machines.js'] });
 });
 
 it('fetches the frame and the code the landing needed last time once the sign-in form has painted', () => {
@@ -521,8 +572,22 @@ it('permits only the response nonce for the inline request starter at the stock 
   expect(script).not.toContain("'unsafe-inline'");
 });
 
+const routeChunks: Record<string, BuiltChunk> = {
+  'thread.js': chunk('thread.js', { isDynamicEntry: true, facadeModuleId: '/app/src/routes/thread/$threadId/index.tsx' }),
+  'providers.js': chunk('providers.js', { isDynamicEntry: true, facadeModuleId: '/app/src/routes/resources/providers/index.tsx' }),
+  'home.js': chunk('home.js', { isDynamicEntry: true, facadeModuleId: '/app/src/routes/index.tsx' }),
+  'login.js': chunk('login.js', { isDynamicEntry: true, facadeModuleId: '/app/src/routes/login/index.tsx' }),
+};
+
+it('opens every screen but sign-in from the worker, sign-in keeping the document that carries its policy', () => {
+  const screens = shellScreens(routeChunks).map((pattern) => new RegExp(pattern));
+  const opened = (path: string) => screens.some((screen) => screen.test(path));
+  for (const path of ['/', `/thread/${threadId}`, '/resources/providers', '/resources/providers/']) expect(opened(path)).toBe(true);
+  for (const path of ['/login', '/login/', '/assets/thread.js', '/api/v1/meta', '/resources/providers/x/y']) expect(opened(path)).toBe(false);
+});
+
 it('pins the finished public document to the worker and changes both together on an update', async () => {
-  const hook = threadShellWorkerPlugin(() => ['initial-hash', 'login-hash']).generateBundle;
+  const hook = shellWorkerPlugin(() => ['initial-hash', 'login-hash']).generateBundle;
   if (typeof hook !== 'object' || !('handler' in hook)) throw new Error('The finished document must be available.');
   const revisions: string[] = [];
   const starter = '<script nonce="__ORCH_CSP_NONCE__" data-orch-startup></script>';
@@ -530,20 +595,21 @@ it('pins the finished public document to the worker and changes both together on
     const document = `<html><head>${starter}</head><body>${revision}</body></html>`;
     const emitFile = vi.fn<(file: { fileName: string; source: string }) => string>(() => '');
     await hook.handler.call({ emitFile } as unknown as ThisParameterType<typeof hook.handler>, {} as Parameters<typeof hook.handler>[0],
-      { 'index.html': { type: 'asset', source: document } } as unknown as Parameters<typeof hook.handler>[1], false);
+      { 'index.html': { type: 'asset', source: document }, ...routeChunks } as unknown as Parameters<typeof hook.handler>[1], false);
     const emitted = new Map(emitFile.mock.calls.map(([file]) => [file.fileName, file]));
     const digest = createHash('sha256').update(JSON.stringify(document)).digest();
-    const asset = emitted.get(`assets/thread-shell-${digest.toString('hex')}.json`);
+    const asset = emitted.get(`assets/shell-${digest.toString('hex')}.json`);
     const worker = emitted.get('sw.js');
     if (!asset || !worker) throw new Error('The build must emit the public document and its worker.');
     const login = emitted.get('login.html')?.source;
     expect(login).toContain('<template data-orch-login-meta><!--# include virtual="/internal/login-meta"');
     expect(login).toContain('</template>' + starter);
     expect(login).toContain('<meta name="orch-login-words" content="initial-hash login-hash">');
-    expect(asset).toMatchObject({ fileName: `assets/thread-shell-${digest.toString('hex')}.json`, source: JSON.stringify(document) });
+    expect(asset).toMatchObject({ fileName: `assets/shell-${digest.toString('hex')}.json`, source: JSON.stringify(document) });
     expect(worker.fileName).toBe('sw.js');
     expect(worker.source).toContain(`sha256-${digest.toString('base64')}`);
     expect(worker.source).toContain('/' + asset.fileName);
+    expect(worker.source).toContain(JSON.stringify(shellScreens(routeChunks)));
     revisions.push(worker.source);
   }
   expect(revisions[0]).not.toBe(revisions[1]);
@@ -551,7 +617,7 @@ it('pins the finished public document to the worker and changes both together on
 
 function threadWorker() {
   const template = '<!doctype html><script nonce="__ORCH_CSP_NONCE__" data-orch-startup>start()</script>';
-  const asset = '/assets/thread-shell-fixture.json';
+  const asset = '/assets/shell-fixture.json';
   const nonce = '00112233445566778899aabbccddeeff';
   const policy = `default-src 'self'; script-src 'self' 'nonce-${nonce}'; frame-ancestors 'none'`;
   const fetch = vi.fn<(arg: string | Request, init?: RequestInit) => Promise<Response>>((arg) => {
@@ -566,7 +632,7 @@ function threadWorker() {
   const self = { location: new URL('https://example.invalid/sw.js'),
     addEventListener: (name: string, listener: (event: FetchEvent) => void) => listeners.set(name, listener) };
   const script = readFileSync(resolve(process.cwd(), 'public/sw.js'), 'utf8');
-  runInNewContext(script.replace('const threadShell = null;', `const threadShell = ${JSON.stringify({ url: asset, integrity: 'sha256-fixture' })};`),
+  runInNewContext(script.replace('const shell = null;', `const shell = ${JSON.stringify({ url: asset, integrity: 'sha256-fixture', screens: shellScreens(routeChunks) })};`),
     { self, fetch, URL, Headers, Response, crypto });
   const navigate = (path: string, method = 'GET', mode = 'navigate') => {
     let answer: Promise<Response> | undefined;
@@ -594,7 +660,13 @@ it('opens a returning thread from the immutable public shell with a fresh docume
   expect(nonces.size).toBe(2);
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([asset, asset]);
   expect(fetch.mock.calls[0]?.[1]).toMatchObject({ cache: 'force-cache', credentials: 'omit', integrity: 'sha256-fixture' });
-  for (const path of ['/login', '/api/v1/auth/session', 'https://other.invalid/thread/' + threadId]) expect(navigate(path)).toBeUndefined();
+  // Every other screen opens from the same document, with its own nonce.
+  for (const path of ['/', '/resources/providers']) {
+    const answer = await navigate(path);
+    expect(answer?.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(await answer?.text()).not.toContain('__ORCH_CSP_NONCE__');
+  }
+  for (const path of ['/login', '/api/v1/auth/session', '/assets/thread.js', 'https://other.invalid/thread/' + threadId]) expect(navigate(path)).toBeUndefined();
   expect(navigate(`/thread/${threadId}`, 'POST')).toBeUndefined();
   expect(navigate(`/thread/${threadId}`, 'GET', 'cors')).toBeUndefined();
 });

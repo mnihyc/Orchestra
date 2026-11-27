@@ -61,7 +61,7 @@ async fn a_thread_opening_and_its_live_provider_seed_keep_the_same_first_screen_
         .map(|n| json!({"model_name":format!("listed-{n}"),"listed":true,"parameters":schema}))
         .collect();
     sqlx::query(
-        "UPDATE providers SET facts=facts || jsonb_build_object('models',$2::jsonb) WHERE id=$1",
+        "INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2) ON CONFLICT (provider_id) DO UPDATE SET models = EXCLUDED.models",
     )
     .bind(rig.provider)
     .bind(json!(listing))

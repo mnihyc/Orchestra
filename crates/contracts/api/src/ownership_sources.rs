@@ -231,7 +231,8 @@ pub const RESTORE: Declaration<Source> = Declaration {
 };
 
 /// A node's intrinsic hierarchy cascade is one effect; independent native resource/member acts
-/// retain their actual subjects. The successful NodeDeleted acknowledgement contains only an id.
+/// retain their actual subjects. The successful NodeDeleted acknowledgement contains only an id, and for a person's own
+/// session how many environments went to the trash with it where there were any.
 pub const DELETE_FACETS: &[FacetSpec] = &[
     FacetSpec::required(
         KeyAction::Manage,

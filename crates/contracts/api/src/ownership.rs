@@ -351,6 +351,10 @@ pub struct NodeDeleteBody {
 pub struct NodeDeleted {
     /// The deletion group; `null` for a side thread that was closed.
     pub deletion_id: Option<Id>,
+    /// How many environments at home in what was deleted went to the trash with it: their running work stopped, and
+    /// they come back with it. Given to a person's own session only, where there were any; otherwise absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<i64>,
 }
 
 /// How many of each kind deleting a node removes, itself among them, and the documents beside them.

@@ -870,3 +870,58 @@ async fn doctor_reports_the_stored_address_apart_from_the_file_seed_and_probes_t
     assert!(ran.line("public-address").contains("revision"));
     assert!(ran.says("edge-page", "ok") && ran.says("edge-api", "ok"));
 }
+
+/// The README's trial is served at a loopback address. Inside the API's container that address is the container
+/// itself, so the edge checks the stored address would get are skipped there with the reason, and the run passes;
+/// `./update.sh doctor` tries them from the host. Named with `--only`, they are tried as asked.
+#[tokio::test]
+async fn a_loopback_public_address_is_not_tried_from_inside_the_stack_unless_named() {
+    let test = TestDb::fresh().await;
+    let files = tempfile::tempdir().unwrap();
+    let config = files.path().join("orch.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[system]\npublic_url = \"http://127.0.0.1:1\"\n[database]\nmigrations_dir = \"{}\"\n",
+            migrations_dir().display()
+        ),
+    )
+    .unwrap();
+    let environment = vec![("ORCH_DATABASE_URL".to_owned(), test.url.clone())];
+    let inside = run_doctor(
+        vec![
+            "--config".into(),
+            config.display().to_string(),
+            "--skip".into(),
+            "secrets,database,api,gateway,worker,node,human-check".into(),
+        ],
+        environment.clone(),
+    )
+    .await;
+    assert_eq!(inside.status, 0, "{:#?}", inside.lines);
+    for id in ["edge-page", "edge-api"] {
+        assert!(inside.says(id, "skip"), "{}", inside.line(id));
+        assert!(inside.line(id).contains("loopback"), "{}", inside.line(id));
+        assert!(
+            inside.line(id).contains("./update.sh doctor"),
+            "{}",
+            inside.line(id)
+        );
+    }
+    let named = run_doctor(
+        vec![
+            "--config".into(),
+            config.display().to_string(),
+            "--only".into(),
+            "edge-page".into(),
+        ],
+        environment,
+    )
+    .await;
+    assert_eq!(named.status, 1, "{:#?}", named.lines);
+    assert!(
+        named.says("edge-page", "FAIL"),
+        "{}",
+        named.line("edge-page")
+    );
+}

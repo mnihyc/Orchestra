@@ -2,7 +2,8 @@
  *
  * What is selected inside another selected place goes with that place and is not asked for again. A screen that was
  * showing something deleted goes to the place above before the tree drops it. The line says how many running threads
- * the act stopped, names whatever was refused, and offers Show (the trash of the place it lay in) and Undo.
+ * the act stopped and how many environments went with the places, stopped, names whatever was refused, and offers
+ * Show (the trash of the place it lay in) and Undo, which brings the environments back with them.
  */
 import { useNavigate } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
@@ -71,6 +72,7 @@ export function usePlaceTrash(): (places: readonly PlaceRef[]) => Promise<TrashR
       closed: result.done.filter(({ receipt }) => receipt.deletion_id === null).map(({ item }) => item.name),
       refused: result.failed.map(({ item, error }) => ({ name: item.name, reason: describe(error).message })),
       stopped: result.done.reduce((total, { item }) => total + (running.get(item.id) ?? 0), 0),
+      environments: result.done.reduce((total, { receipt }) => total + (receipt.environments ?? 0), 0),
       ...(trashOf === null ? {} : { show: () => openNodeDialog({ type: 'deleted', node: trashOf }) }),
       ...(result.done.some(({ receipt }) => receipt.deletion_id !== null) ? { undo: () => restorePlaces(result.done, (error) => describe(error).message) } : {}),
     });
