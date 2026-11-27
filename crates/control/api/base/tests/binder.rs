@@ -10,7 +10,7 @@ use chrono::Duration;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::routes::Access::{Cookie, Public, Session, User};
 use orch_api_core::middleware::authentication::{
-    ACCESS_TOKEN_PREFIX, API_TOKEN_PREFIX, new_token, token_hash,
+    ACCESS_TOKEN_PREFIX, new_api_token, new_token, token_hash,
 };
 use orch_api_core::middleware::requests::{ApiError, ApiResult};
 use orch_api_core::registry::{Answer, Ctx, Registry};
@@ -263,7 +263,7 @@ async fn initial_app(world: &World) -> TestApp {
 
 async fn rule_probe_key(world: &World) -> (orch_types::Id, String) {
     let id = orch_types::new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let scope = serde_json::json!({"rules":[{
         "target":{"kind":"account","id":world.user,"reach":"self"},
@@ -356,7 +356,10 @@ async fn world() -> World {
     let now = clock::start();
     let user = orch_types::new_id();
     let session = orch_types::new_id();
-    let (session_token, api_token) = (new_token(ACCESS_TOKEN_PREFIX), new_token(API_TOKEN_PREFIX));
+    let (session_token, api_token) = (
+        new_token(ACCESS_TOKEN_PREFIX),
+        new_api_token(orch_types::new_id()),
+    );
     sqlx_setup(&db, user, session, &session_token, &api_token, now).await;
     let mut registry = Registry::new();
     registry
@@ -398,9 +401,14 @@ async fn sqlx_setup(
     )
     .await
     .unwrap();
-    orch_db::queries::identity::testing::insert_api_token(&mut conn, user, &token_hash(api))
-        .await
-        .unwrap();
+    orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        orch_api_contract::api_keys::key_id(api).unwrap(),
+        user,
+        &token_hash(api),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

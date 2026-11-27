@@ -427,13 +427,14 @@ async fn node_standing(
         return Err(Error::Suspended { org: closing.org() });
     }
     let everything = crate::nodes::every_permission([site.kind]);
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         Policy::default(),
         graph,
         std::slice::from_ref(&site),
         &everything,
+        std::slice::from_ref(&site),
     )
     .await?;
     let holds = |permission| !frame.ways(&site, permission).is_empty();
@@ -746,13 +747,14 @@ pub async fn inspection_orgs(
     }
     let graph = Graph::load(conn, orgs).await?;
     let sites: Vec<_> = orgs.iter().filter_map(|org| graph.site_of(*org)).collect();
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         Policy::default(),
         graph,
         &sites,
         &[Permission::DirectsView],
+        &[],
     )
     .await?;
     Ok(sites

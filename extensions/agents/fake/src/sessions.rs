@@ -37,6 +37,8 @@ pub const SESSIONS_DIR: &str = "sessions";
 pub const EXPORTS_DIR: &str = "exports";
 /// The file of the home that remembers what has been numbered.
 const STATE_FILE: &str = "state.json";
+/// The file of the home that keeps the harness's own sign-in, readable by the home's account alone.
+const SIGNIN_FILE: &str = "signin.json";
 
 /// What a session numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +243,32 @@ impl Home {
             .root
             .join(EXPORTS_DIR)
             .join(format!("{native_session_ref}-{number}.{extension}")))
+    }
+
+    /// The sign-in the harness kept, when it is signed in. A file that cannot be understood is no sign-in.
+    pub fn load_signin(&self) -> Result<Option<crate::credentials::KeptSignin>, AdapterError> {
+        match std::fs::read(self.root.join(SIGNIN_FILE)) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_error("the kept sign-in cannot be read", &e)),
+        }
+    }
+
+    /// Keeps the sign-in where only the home's account reads it, or forgets it when signed out.
+    pub fn keep_signin(
+        &self,
+        kept: Option<&crate::credentials::KeptSignin>,
+    ) -> Result<(), AdapterError> {
+        let path = self.root.join(SIGNIN_FILE);
+        let Some(kept) = kept else {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(io_error("the kept sign-in cannot be removed", &e)),
+            };
+        };
+        let bytes = serde_json::to_vec(kept).map_err(|e| AdapterError::Internal(e.to_string()))?;
+        write_privately(&path, &bytes)
     }
 
     /// Writes a session.
@@ -481,6 +509,29 @@ impl Home {
 
 fn size_of(bytes: &[u8]) -> i64 {
     i64::try_from(bytes.len()).unwrap_or(i64::MAX)
+}
+
+/// Writes `bytes` at `path` as one change, readable and writable by the file's owner alone.
+fn write_privately(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+    use std::io::Write;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".writing");
+    let temporary = PathBuf::from(temporary);
+    let _ = std::fs::remove_file(&temporary);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|e| io_error("a file cannot be written", &e))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| io_error("a file cannot be written", &e))?;
+    std::fs::rename(&temporary, path).map_err(|e| io_error("a file cannot be put in place", &e))
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
@@ -762,7 +813,10 @@ mod tests {
 
     fn spec(mode: SessionMode) -> SessionSpec {
         SessionSpec {
+            opening_id: orch_types::new_id(),
+            opening_command: None,
             settings: SessionSettings {
+                output_capture_bytes: 67_108_864,
                 native_model: None,
                 agent_id: orch_types::new_id(),
                 thread_id: orch_types::new_id(),
@@ -784,6 +838,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 instructions: String::new(),
                 memory: None,

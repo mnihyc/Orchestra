@@ -1,0 +1,4 @@
+# The new cases on the tree without the fixes: each is expected to fail.
+test -p orch-authz --test ownership -- only_me_on_a_resource_of_the_system
+test -p orch-api-core --test hosted_environments -- the_administrator_made_at_setup
+test -p orchctl --test doctor -- a_loopback_public_address
