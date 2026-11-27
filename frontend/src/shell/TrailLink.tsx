@@ -1,32 +1,35 @@
-/** A way to a place above the screen in view, drawn as a real link: a plain press goes there inside the application, and a press with a modifier or the middle button opens it in a tab of the browser.
- *
- * The title bar's path and the arrow beside a heading both lead to the same places, so both are drawn
- * from the same parts. The address is built by the router from the route and what its address says,
- * so that the filter a list was left with comes back with it.
- */
-import { type AnyRouter, useRouter } from '@tanstack/react-router';
-import type { MouseEvent, ReactNode } from 'react';
+/** Real links retain browser gestures while ordinary application paths use the current router. */
+import { type AnyRouter, type RegisteredRouter, useRouter } from '@tanstack/react-router';
+import type { ComponentProps, MouseEvent, ReactNode } from 'react';
 
+import { isPlainClick } from '@/lib/linkClick';
 import type { TrailPart } from '@/shell/screen';
 
-/** The address a way leads to. */
+/** A path's existing caller may open its panel; downloads, server endpoints and other origins stay native. */
+export function PathLink({ href, onClick, children, ...anchor }: ComponentProps<'a'>) {
+  const router = useRouter({ warn: false }) as RegisteredRouter | undefined;
+  const go = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (anchor['aria-disabled'] === true || anchor['aria-disabled'] === 'true') { event.preventDefault(); return; }
+    onClick?.(event);
+    if (router === undefined || !isPlainClick(event) || href === undefined || href.startsWith('#')
+      || (anchor.target !== undefined && anchor.target !== '' && anchor.target !== '_self')
+      || (anchor.download !== undefined && anchor.download !== false)) return;
+    let destination: URL;
+    try { destination = new URL(href, window.location.href); } catch { return; }
+    if (destination.origin !== window.location.origin || !['http:', 'https:'].includes(destination.protocol)
+      || destination.pathname.startsWith('/api/')) return;
+    event.preventDefault();
+    router.history.push(`${destination.pathname}${destination.search}${destination.hash}`);
+  };
+  return <a {...anchor} href={href} onClick={go}>{children}</a>;
+}
+
+/** The address a way leads to, with its previous list search state. */
 export function trailHref(router: AnyRouter, part: TrailPart): string {
-  // The route is named by a string the parts carry, so it is not one the router's types know.
   return router.buildLocation({ to: part.to, ...(part.search === undefined ? {} : { search: part.search }) } as never).href;
 }
 
 export function TrailLink({ part, className, children }: { part: TrailPart; className?: string | undefined; children?: ReactNode }) {
   const router = useRouter();
-  const href = trailHref(router, part);
-  const go = (event: MouseEvent<HTMLAnchorElement>) => {
-    // A press that asks for a tab of the browser, or for anything else than going here, is the browser's.
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    event.preventDefault();
-    router.history.push(href);
-  };
-  return (
-    <a href={href} className={className} onClick={go}>
-      {children ?? part.label}
-    </a>
-  );
+  return <PathLink href={trailHref(router, part)} className={className}>{children ?? part.label}</PathLink>;
 }

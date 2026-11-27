@@ -22,7 +22,7 @@ use orch_authz::resources::Seen;
 struct Hosts;
 
 pub(super) fn mount(registry: &mut Registry) {
-    read::register::<Hosts, _, _>(registry, api::HostGet, api::HostList);
+    read::register_children::<Hosts, _, _>(registry, api::HostGet, api::HostList);
 }
 
 impl Family for Hosts {

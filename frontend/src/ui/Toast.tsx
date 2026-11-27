@@ -5,6 +5,7 @@
  * said beside that control, never here. A notice with an action stays until it is used or dismissed;
  * ordinary success leaves by itself, while failures stay until they are put away.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { CircleAlert, CircleCheck, Info, X } from 'lucide-react';
 import { Toast as Primitive } from 'radix-ui';
 import { Activity, type ReactNode } from 'react';
@@ -20,14 +21,30 @@ export const TOAST_SHOWN_MS = 4_000;
 
 export type ToastTone = 'success' | 'info' | 'danger';
 
+/** Something to do about a notice, on its one line of acts. */
+export interface ToastAct {
+  label: string;
+  icon?: ReactNode;
+  run: () => void;
+  href?: string;
+  /** Using it leaves the notice up (Show beside an Undo); every other act puts the notice away. */
+  keep?: boolean;
+}
+
 export interface ToastOptions {
   tone: ToastTone;
   title: string;
   description?: string;
   /** A pending background act remains visible until its caller dismisses this notice on completion. */
   persistent?: boolean;
-  /** One thing to do about it. */
-  action?: { label: string; icon?: ReactNode; run: () => void };
+  /** What to do about it: one act, or a few on one line (Show · Undo). */
+  action?: ToastAct | readonly ToastAct[];
+}
+
+/** The acts of a notice, in the order they stand. */
+export function toastActs(action: ToastOptions['action']): readonly ToastAct[] {
+  if (action === undefined) return [];
+  return 'label' in action ? [action] : action;
 }
 
 interface Shown extends ToastOptions {
@@ -52,6 +69,8 @@ function dismiss(id: number): void {
   useToasts.setState((state) => ({ shown: state.shown.filter((entry) => entry.id !== id) }));
 }
 
+const ACT_CLASSES = 'inline-flex items-center gap-1 rounded-sm font-medium text-accent-text hover:underline [&_svg]:size-4';
+
 const TONES: Record<ToastTone, { icon: string; Icon: typeof Info }> = {
   success: { icon: 'text-success', Icon: CircleCheck },
   info: { icon: 'text-info', Icon: Info },
@@ -69,11 +88,12 @@ export function Toaster({ children }: { children?: ReactNode }) {
       <Activity mode={prompting ? 'hidden' : 'visible'}>
       {shown.map((entry) => {
         const { icon, Icon } = TONES[entry.tone];
+        const acts = toastActs(entry.action);
         return (
           <Primitive.Root
             key={entry.id}
             type={entry.tone === 'danger' ? 'foreground' : 'background'}
-            duration={entry.tone === 'danger' || entry.persistent === true || entry.action !== undefined ? Number.POSITIVE_INFINITY : TOAST_SHOWN_MS}
+            duration={entry.tone === 'danger' || entry.persistent === true || acts.length > 0 ? Number.POSITIVE_INFINITY : TOAST_SHOWN_MS}
             onOpenChange={(open) => {
               if (!open) dismiss(entry.id);
             }}
@@ -87,15 +107,21 @@ export function Toaster({ children }: { children?: ReactNode }) {
                   {entry.description}
                 </Primitive.Description>
               )}
-              {entry.action !== undefined && (
-                <Primitive.Action
-                  altText={entry.action.label}
-                  className="mt-1 inline-flex self-start items-center gap-1 rounded-sm font-medium text-accent-text hover:underline [&_svg]:size-4"
-                  onClick={entry.action.run}
-                >
-                  {entry.action.icon}
-                  {entry.action.label}
-                </Primitive.Action>
+              {acts.length > 0 && (
+                <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
+                  {acts.map((act) => {
+                    const label = act.href === undefined ? <>{act.icon}{act.label}</> : <PathLink href={act.href}>{act.icon}{act.label}</PathLink>;
+                    return act.keep === true ? (
+                      act.href === undefined
+                        ? <button key={act.label} type="button" className={ACT_CLASSES} onClick={act.run}>{label}</button>
+                        : <span key={act.label} className={ACT_CLASSES} onClickCapture={act.run}>{label}</span>
+                    ) : (
+                      <Primitive.Action key={act.label} asChild={act.href !== undefined} altText={act.label} className={ACT_CLASSES} onClick={act.run}>
+                        {label}
+                      </Primitive.Action>
+                    );
+                  })}
+                </div>
               )}
             </div>
             <Primitive.Close

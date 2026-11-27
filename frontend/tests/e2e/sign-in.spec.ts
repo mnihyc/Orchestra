@@ -52,7 +52,7 @@ test('a wrong password is said at its field, and the right one gets in', async (
   await page.getByLabel('Password', { exact: true }).fill('not her password');
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page.getByText('Wrong name or password.')).toBeVisible();
+  await expect(page.getByText('Wrong username or password.')).toBeVisible();
   // The name stays, the password is to be typed again, and the keyboard is already there.
   await expect(page.getByLabel('Username or email address')).toHaveValue('ada');
   await expect(page.getByLabel('Password', { exact: true })).toHaveValue('');
@@ -156,7 +156,7 @@ test('eight wrong passwords lock a name, for a stranger as for its person', asyn
   for (let attempt = 1; attempt <= 8; attempt += 1) {
     await page.getByLabel('Password', { exact: true }).fill(`guess number ${attempt}`);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.getByText('Wrong name or password.')).toBeVisible();
+    await expect(page.getByText('Wrong username or password.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sign in' })).not.toHaveAttribute('aria-busy', 'true');
   }
 

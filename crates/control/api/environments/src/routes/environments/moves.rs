@@ -153,6 +153,17 @@ async fn places(
             }
         })
         .collect::<Vec<_>>();
+    let machine_ids: Vec<_> = subjects
+        .iter()
+        .filter(|(kind, _)| kind == "machine")
+        .map(|(_, id)| *id)
+        .collect();
+    let mut capacity = orch_api_base::routes::environments::places::machine_capacities(
+        &mut conn,
+        &principal,
+        &machine_ids,
+    )
+    .await?;
     let grouping = crate::routes::resources::grouping::Prepared::select(&mut conn, &subjects)
         .await?
         .choices(&ctx.app, &mut conn, &principal, None, None)
@@ -171,6 +182,7 @@ async fn places(
                 }
             }
             api::EnvironmentMovePlace::Machine(machine) => {
+                machine.capacity = capacity.remove(&machine.machine.id);
                 if let Some(meta) = grouping
                     .iter()
                     .find(|row| row.kind == "machine" && row.id == machine.machine.id)
@@ -694,6 +706,7 @@ async fn move_operation(
         ));
     }
     Ok(orch_engine::notifications::NotificationOperation {
+        actor: principal.user(),
         id,
         kind: "move".into(),
         name: state.name,

@@ -1,0 +1,7 @@
+test -p orch-telemetry --lib
+test -p orch-telemetry --test full_disk
+test -p orch-telemetry --test files_only
+test -p orch-link --test full_disk
+test -p orch-link --test commands
+clippy
+fmt

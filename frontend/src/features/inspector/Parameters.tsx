@@ -6,10 +6,11 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Check, Lock, SlidersHorizontal } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { OrchToolsFacts } from './OrchToolsFacts';
 import { PortTools } from './PortTools';
 import { programNameIn } from '@/features/resources/programNames';
 import { EmptyState } from '@/ui/EmptyState';
-import { choiceOption, offeredChoice } from '@/i18n/choices';
+import { offeredChoice } from '@/i18n/choices';
 
 import { parametersQuery } from '@/api/threads';
 import { isApprovalMode } from '@/features/composer/ApprovalMode';
@@ -30,46 +31,21 @@ import { useAppearance } from '@/lib/appearance';
 import { useAfterDelay } from '@/lib/afterDelay';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
-import { Input } from '@/ui/Input';
-import { ChoiceLocator, type ChoiceLocatorOption } from '@/ui/ChoiceLocator';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 
-import { SchemaInput } from '@/features/resources/templates/SchemaForm';
+import { ParameterInput, parameterInfo, PARAMETER_GROUPS } from '@/features/models/ParameterInput';
 
 import { ThreadRules } from '@/features/approvals/ThreadRules';
 import { ThreadLinks } from '@/features/source/Links';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
+import { RequestOptionsDisclosure } from '@/features/models/RequestOptions';
 
 import { ThreadPanel } from './ThreadPanel';
 import { CapabilityRoutes } from './CapabilityRoutes';
 import { PersonalReads } from './PersonalReads';
 import { ProgramBuild } from '@/features/resources/agents/ProgramBuild';
-import { applyWord } from './words';
 
-/** How a parameter is declared, as far as this view reads it: the rest of the declaration is the agent's own. */
-interface Declared {
-  title: string;
-  description: string;
-  group: string;
-  type: string;
-  options: { value: string; label: string }[] | null;
-}
-
-function declared(parameter: ParameterView): Declared {
-  const def = (typeof parameter.def === 'object' && parameter.def !== null ? parameter.def : {}) as Record<string, unknown>;
-  const choices = def.resolved_options ?? def.options;
-  const options = Array.isArray(choices) ? (choices as { value?: unknown; label?: unknown }[]).filter((one) => typeof one.value === 'string').map((one) => ({ value: String(one.value), label: typeof one.label === 'string' ? one.label : String(one.value) })) : null;
-  return {
-    title: typeof def.title === 'string' ? def.title : parameter.key,
-    description: typeof def.description === 'string' ? def.description : '',
-    group: GROUPS.find((group) => group === def.group) ?? 'advanced',
-    type: typeof def.type === 'string' ? def.type : 'string',
-    options,
-  };
-}
-
-const GROUPS = ['model', 'behaviour', 'safety', 'advanced', 'provider'] as const;
 /** How long "Saved" stays by a value that was written. */
 const SAVED_SHOWN_MS = 2_000;
 
@@ -98,12 +74,7 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
     await runs.refuse(error, parameter.key);
     if (isSettingConflict(error)) setOpen(true);
   };
-  const info = declared(parameter);
-  if (parameter.key === 'web_search') {
-    info.title = t('webSearch.title');
-    info.description = t('webSearch.perUseHint');
-    info.options = info.options?.map((option) => ({...option, label: offeredChoice(t, 'webSearch', option.value)?.label ?? option.label})) ?? null;
-  }
+  const info = parameterInfo(parameter, t);
   const set = useMutation({
     mutationFn: (value: unknown) => runs.write(parameter.key, value),
     onError: refused,
@@ -121,14 +92,12 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
   const providerFixed = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null && Object.hasOwn(definition.provider_constraint, 'const');
   const current = providerDraft !== null ? providerDraft.value : parameter.value ?? definition.resolved_default ?? definition.default ?? null;
   if (providerDraft !== null && set.status === 'success' && providerDraft.read !== JSON.stringify(parameter.value)) setProviderDraft(null);
-  const shownValue = typeof current === 'string' || typeof current === 'number' ? String(current) : '';
   const constraint = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null ? definition.provider_constraint as Record<string, unknown> : null;
   const isSwitch = constraint === null && (info.type === 'bool' || info.type === 'boolean');
-  return (
-    <li className="flex min-w-0 flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row" data-provider-interface={providerInterface ?? undefined}>
+  const content = <>
       <div className="flex flex-wrap items-center gap-2">
         {isSwitch ? <Switch className="min-w-0 flex-1" label={info.title} checked={current === true} disabled={!can || set.isPending} onCheckedChange={(on) => set.mutate(on)} />
-          : <span className="min-w-0 flex-1 text-sm font-medium text-text">{info.title}</span>}
+          : providerInterface === null && <span className="min-w-0 flex-1 text-sm font-medium text-text">{info.title}</span>}
         {!providerFixed && <Provenance source={parameter.source} />}
         {providerFixed && <span className="text-xs text-text-muted">{t('providerOptions.fixedByProvider')}</span>}
         {locked && (
@@ -147,43 +116,16 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
           </span>
         )}
       </div>
-      {constraint !== null ? <SchemaInput root={constraint} schema={providerInterface === null ? constraint : { ...constraint, title: info.title }} value={current} parts={[parameter.key]} hideHeading={providerInterface !== null} disabled={!can || set.isPending || reset.isPending} problems={[]} driver="provider-options" onChange={(value) => {
-        if (providerInterface !== null) setProviderDraft({ value, read: JSON.stringify(parameter.value) });
-        set.mutate(value);
-      }} /> : !isSwitch && (info.options !== null ? (
-        <ChoiceLocator<string>
-          size="sm"
-          label={info.title}
-          hideLabel
-          value={typeof current === 'string' ? current : ''}
-          valueLabel={info.options.some((option) => option.value === current) ? undefined : shownValue}
-          open={open}
-          onOpenChange={setOpen}
-          onValueChange={(value) => set.mutate(value)}
-          options={info.options.map((option): ChoiceLocatorOption<string> => ({ value: option.value, ...choiceOption(t, 'dynamic.value', { name: option.label, context: info.title }), description: info.description }))}
-          disabled={!can || set.isPending}
-        />
-      ) : (
-        <Input
-          key={shownValue}
-          label={info.title}
-          hideLabel
-          defaultValue={shownValue}
-          readOnly={!can}
-          onBlur={(event) => {
-            const text = event.target.value;
-            if (can && text !== shownValue) set.mutate(info.type === 'int' || info.type === 'number' ? Number(text) : text);
-          }}
-        />
-      ))}
-      <p className="text-xs text-text-subtle">
-        {applyWord(t, parameter.apply)}
-        {why !== null && ` · ${why}`}
-      </p>
+      {(constraint !== null || !isSwitch) && <ParameterInput info={info} parameterKey={parameter.key} value={current} constraint={constraint}
+        providerInterface={providerInterface !== null} disabled={!can || set.isPending || constraint !== null && reset.isPending} open={open} onOpenChange={setOpen}
+        onChange={(value) => { if (providerInterface !== null) setProviderDraft({ value, read: JSON.stringify(parameter.value) }); set.mutate(value); }} />}
+      {why !== null && <p className="text-xs text-text-subtle">{why}</p>}
       {set.error !== null && <ErrorAlert error={set.error} />}
       {reset.error !== null && <ErrorAlert error={reset.error} />}
-    </li>
-  );
+  </>;
+  return <li className="flex min-w-0 flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row" data-provider-interface={providerInterface ?? undefined}>
+    {providerInterface === null ? content : <RequestOptionsDisclosure label={info.title} value={current} reveal={set.error !== null || reset.error !== null}>{content}</RequestOptionsDisclosure>}
+  </li>;
 }
 
 /** The inspector reads the composer's choices and edits only the other native parameters. */
@@ -214,7 +156,7 @@ export function ParametersPanel({ access }: { access: Pick<WorkspaceAccess, 'thr
     const def = readDef(parameter.def);
     return def === null || (kindOf(def) === null && def.options !== 'efforts');
   });
-  const grouped = GROUPS.map((group) => ({ group, rows: generic.filter((parameter) => declared(parameter).group === group && parameter.key !== 'reasoning_effort') })).filter((entry) => entry.rows.length > 0);
+  const grouped = PARAMETER_GROUPS.map((group) => ({ group, rows: generic.filter((parameter) => parameterInfo(parameter).group === group && parameter.key !== 'reasoning_effort') })).filter((entry) => entry.rows.length > 0);
   return (
     <div className="h-full overflow-auto" data-testid="parameters-panel">
       <section aria-label={t('inspector.parameters.currentChoices')} className="flex flex-col gap-2 border-b border-border px-3 py-2">
@@ -247,6 +189,7 @@ export function ParametersPanel({ access }: { access: Pick<WorkspaceAccess, 'thr
         <ThreadLinks thread={access.thread} readOnly={threadReadState(view).readOnly} />
       </section>
       <CapabilityRoutes value={'capabilities' in data ? data.capabilities : undefined} />
+      {!threadReadState(view).readOnly && <div className="border-b border-border px-3 py-2"><OrchToolsFacts thread={access.thread.id} summary={data.orch_tools} authority={JSON.stringify([access.thread.access, access.thread.path, access.thread.current_segment_id])} /></div>}
       <PortTools value={'port_tools' in data ? data.port_tools : undefined} error={query.error} onRetry={() => void query.refetch()} />
       <PersonalReads threadId={access.thread.id} />
       {!writable && grouped.length > 0 && <p className="px-3 py-2 text-xs text-text-muted">{t('inspector.parameters.needsManage', { name: access.thread.owner.display_name })}</p>}
@@ -273,7 +216,6 @@ export function ParametersPanel({ access }: { access: Pick<WorkspaceAccess, 'thr
       {data.subagent_limits !== null && data.subagent_limits !== undefined && (supportsAtOnce || supportsDepth) && <div className="px-3 py-2 text-sm">
         {supportsAtOnce && <p>{t('inspector.parameters.subagentsAtOnce', { count: data.subagent_limits.limits.at_once })}</p>}
         {supportsDepth && <p>{t('inspector.parameters.subagentDepth', { count: data.subagent_limits.limits.depth })}</p>}
-        <p className="text-text-muted">{t('inspector.parameters.subagentsApply')}</p>
       </div>}
     </div>
   );

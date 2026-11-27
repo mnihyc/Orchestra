@@ -181,14 +181,17 @@ impl Engine {
         }
         let added_since = rows::added_since(conn, import, row.created_at).await?;
         let edited_since = rows::edited_since(conn, import, user).await?;
-        let keep = chrono::Duration::from_std(self.inner.config.soft_delete).unwrap_or_default();
+        let days = orch_settings::retention::deleted_keep_days(conn).await?;
         Ok(ImportUndoPlan {
             import,
             counts,
             merged,
             added_since,
             edited_since,
-            restore_until: Time::new(self.inner.clock.now() + keep),
+            restore_until: Time::new(orch_settings::retention::purge_at(
+                self.inner.clock.now(),
+                days,
+            )),
             blockers,
         })
     }

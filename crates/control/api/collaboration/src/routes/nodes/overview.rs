@@ -75,7 +75,7 @@ fn part<T>(ctx: &Ctx, answer: ApiResult<T>, bounded: bool) -> OverviewPart<T> {
             };
             let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
             OverviewPart::Failed {
-                problem,
+                problem: Box::new(problem),
                 retry_after,
             }
         }
@@ -248,7 +248,7 @@ async fn prepare_inner(
         &principal,
         orch_api_contract::search::NameSearchListQuery {
             kinds: Some("thread".into()),
-            limit: Some(orch_api_contract::search::NAME_SEARCH_LIMIT_MAX),
+            limit: Some(orch_api_contract::search::NAME_SEARCH_OVERVIEW_COUNT),
             org_id: Some(org.base.org_id),
             ..Default::default()
         },
@@ -426,19 +426,24 @@ pub(super) async fn get(
     _query: OrgOverviewGetQuery,
     (): (),
 ) -> ApiResult<Answer<OrgOverviewResponse>> {
-    let mut conn = ctx.app.db.begin_snapshot().await?;
-    let principal = ctx.operation_principal(&mut conn).await?;
-    let prepared = ctx.operation_data::<PreparedOverview>()?;
-    let data = projection::disclose_read(
-        &ctx,
-        &mut conn,
-        principal.caller(),
-        prepared.response.clone(),
-        prepared.data.clone(),
-        "the organization overview is no longer readable",
-    )
+    let mut tx = ctx.page_read_snapshot().await?;
+    let data = orch_authz::read_facts::scope(&mut tx, move |conn| {
+        Box::pin(async move {
+            let principal = ctx.operation_principal(conn).await?;
+            let prepared = ctx.operation_data::<PreparedOverview>()?;
+            projection::disclose_read(
+                &ctx,
+                conn,
+                principal.caller(),
+                prepared.response.clone(),
+                prepared.data.clone(),
+                "the organization overview is no longer readable",
+            )
+            .await
+        })
+    })
     .await?;
-    conn.commit().await.map_err(DbError::from)?;
+    tx.commit().await.map_err(DbError::from)?;
     Ok(Answer::from(data).header(http::header::CACHE_CONTROL, "no-store"))
 }
 

@@ -8,6 +8,8 @@ summary: Preview and follow references, request access and describe documents wi
 
 # References and access
 
+A reference is a link to a thing in Orch. It carries the name that was shared and shows a preview if you may read the thing. This page explains addresses, previews and what happens when you lack access.
+
 ## Installation addresses
 
 Links from this installation's public address or declared alternate addresses open on the address you are using. **Copy link** uses the public address when configured. An alternate IP and its port are recognized only when declared; look-alike hosts and other websites with the same paths stay external links. A link never grants access. See [Ask's address handling](ask.md#installation-addresses).
@@ -38,7 +40,7 @@ optional reason and press **Send**. Its owners will be asked without revealing
 their names in the card. A waiting request can be taken back.
 
 Only one request by you may wait on the same thing. The usual pending-request
-limit and request expiry apply. People outside the org can ask only when the
+limit and request expiry apply. People outside the organization can ask only when the
 thing may be shared with them.
 
 A direct chat belongs to its two participants: its locked card has no request form.
@@ -51,7 +53,7 @@ expiry ends membership and greys the reference again.
 
 People who may decide see the same decision on the reference card and in Inbox
 or Approvals. Pick a duration to give the requested access to that person on
-this one thing. The shipped choices are one day, seven days, thirty days and
+this one thing. The choices that come with Orch are one day, seven days, thirty days and
 **Always**. The place can change these choices. **Other…** opens the full decision
 for fewer permissions, narrower options or another end date. **Deny** accepts an
 optional note.
@@ -113,4 +115,4 @@ An agent's **Where you are** message gives its own conversation path. It can
 read earlier turns, search that path, or download the whole conversation for
 its own tools, including turns from before its context was shortened.
 
-For the viewing choice offered when sending a copied reference, see [Copy links and share viewing when sending](link-sharing.md).
+See [Send a link or reference](link-sharing.md) for how access works when the recipient opens it.
