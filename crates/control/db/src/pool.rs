@@ -130,6 +130,185 @@ impl Limits {
     }
 }
 
+/// How many of a pool's connections are kept open and ready while its service is idle, and how long a connection
+/// serves. PostgreSQL answers a connection it has served for a while faster than a new one: the connection keeps the
+/// statements its pool prepared, and the catalogue, plans and functions they use. On the team fixture a page's
+/// first opening on new connections took 231 ms where the same opening took 148-168 ms on used ones, and a pool
+/// whose idle connections closed after ten minutes met every opening after a pause with new ones (D-3146).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Warm {
+    /// Connections kept open while the service is idle. A connection beyond them that sits idle is closed, one
+    /// each [`Warm::pass`]; zero keeps none, and an idle connection closes after ten minutes.
+    pub connections: u32,
+    /// How long a connection serves before it is replaced; none for no bound.
+    pub lifetime: Option<Duration>,
+    /// How many of the statements its siblings ran most a new connection prepares (and has PostgreSQL plan once)
+    /// before it serves.
+    pub statements: usize,
+    /// How often the pool's keeper looks at its idle connections.
+    pub pass: Duration,
+}
+
+impl Warm {
+    /// No connection kept open: the pool of a tool or of a test.
+    pub const NONE: Self = Self {
+        connections: 0,
+        lifetime: Some(Duration::from_secs(30 * 60)),
+        statements: 0,
+        pass: Duration::from_secs(60),
+    };
+
+    /// The API's: `connections` kept open, each serving for `lifetime`, preparing half the statements a connection
+    /// keeps prepared (the other half is room for the rest of what it runs).
+    #[must_use]
+    pub const fn requests(connections: u32, lifetime: Option<Duration>, limits: Limits) -> Self {
+        Self {
+            connections,
+            lifetime,
+            statements: limits.prepared_statements / 2,
+            pass: Duration::from_secs(60),
+        }
+    }
+}
+
+/// A statement the pool's connections ran, as a new connection prepares it.
+struct Hot {
+    sql: String,
+    types: Vec<u32>,
+    runs: i64,
+}
+
+/// What a pool's keeper shares with the pool: that the pool opened a connection, and the statements it learned.
+struct Keeper {
+    warm: Warm,
+    wake: tokio::sync::Notify,
+    hot: std::sync::Mutex<Vec<Hot>>,
+}
+
+/// A connection that has prepared this many statements has served: what it ran is worth preparing elsewhere.
+const LEARN_FROM: usize = 32;
+
+impl Keeper {
+    /// Learns what a served idle connection ran most, from PostgreSQL's own list of its prepared statements.
+    async fn learn(&self, conn: &mut Conn) {
+        let rows: Result<Vec<(String, Vec<i64>, i64)>, sqlx::Error> = sqlx::query_as(
+            "SELECT statement, parameter_types::oid[]::int8[], generic_plans + custom_plans FROM pg_prepared_statements
+              WHERE NOT from_sql ORDER BY generic_plans + custom_plans DESC LIMIT $1",
+        )
+        .bind(i64::try_from(self.warm.statements).unwrap_or(i64::MAX))
+        .persistent(false)
+        .fetch_all(&mut *conn)
+        .await;
+        let Ok(rows) = rows else {
+            return;
+        };
+        let Ok(mut hot) = self.hot.lock() else {
+            return;
+        };
+        // What this connection ran counts with what the others ran; older counts weigh half, so that what is no
+        // longer run gives way.
+        for each in hot.iter_mut() {
+            each.runs /= 2;
+        }
+        for (sql, types, runs) in rows {
+            match hot.iter_mut().find(|each| each.sql == sql) {
+                Some(each) => each.runs = each.runs.saturating_add(runs),
+                None => hot.push(Hot {
+                    sql,
+                    types: types
+                        .into_iter()
+                        .filter_map(|oid| u32::try_from(oid).ok())
+                        .collect(),
+                    runs,
+                }),
+            }
+        }
+        hot.sort_by_key(|each| std::cmp::Reverse(each.runs));
+        hot.truncate(self.warm.statements);
+    }
+
+    /// Prepares the learned statements on a connection that has not served, and has PostgreSQL plan each once
+    /// (`EXPLAIN (GENERIC_PLAN)`, nothing run), so that its first requests find them and what they use ready. A
+    /// statement that does not prepare here is left for its first use, and to the next connections too: the list keeps
+    /// what prepares, so that a prepared connection holds all of it.
+    async fn prepare(&self, conn: &mut Conn) {
+        use sqlx::Executor as _;
+        let hot: Vec<(String, Vec<u32>)> = match self.hot.lock() {
+            Ok(hot) => hot
+                .iter()
+                .map(|each| (each.sql.clone(), each.types.clone()))
+                .collect(),
+            Err(_) => return,
+        };
+        let mut refused = Vec::new();
+        for (sql, types) in hot {
+            let types: Vec<_> = types
+                .into_iter()
+                .map(|oid| sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(oid)))
+                .collect();
+            if (&mut *conn)
+                .prepare_with(sqlx::AssertSqlSafe(sql.clone()).into_sql_str(), &types)
+                .await
+                .is_err()
+            {
+                refused.push(sql);
+                continue;
+            }
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("EXPLAIN (GENERIC_PLAN) {sql}")))
+                .execute(&mut *conn)
+                .await;
+        }
+        if !refused.is_empty()
+            && let Ok(mut hot) = self.hot.lock()
+        {
+            hot.retain(|each| !refused.contains(&each.sql));
+        }
+    }
+}
+
+/// Keeps a pool's connections warm: prepares what its served connections ran on each idle connection that holds
+/// less than half of it (one the pool opened, in the background, never on a request's way), learns that list from
+/// them, and closes, one each pass, an idle connection beyond the warm ones. A pass follows each connection the pool
+/// opens and comes at least every `pass`; a connection busy during one is looked at on the next. It takes one idle
+/// connection at a time and gives it back at once, so that a request is never without one. Ends when the pool is
+/// closed.
+async fn keep_warm(pool: sqlx::PgPool, keeper: std::sync::Arc<Keeper>) {
+    loop {
+        tokio::select! {
+            () = keeper.wake.notified() => {}
+            () = tokio::time::sleep(keeper.warm.pass) => {}
+        }
+        if pool.is_closed() {
+            return;
+        }
+        let mut learned = false;
+        let idle = pool.num_idle();
+        // The one idle longest is taken first.
+        let mut beyond = u32::try_from(idle).unwrap_or(u32::MAX) > keeper.warm.connections;
+        for _ in 0..idle {
+            let Some(mut conn) = pool.try_acquire() else {
+                break;
+            };
+            if beyond {
+                beyond = false;
+                // A connection that does not close cleanly is gone all the same.
+                let _ = conn.close().await;
+                continue;
+            }
+            let served = sqlx::Connection::cached_statements_size(&*conn);
+            if !learned && served >= LEARN_FROM {
+                learned = true;
+                keeper.learn(&mut conn).await;
+            }
+            let known = keeper.hot.lock().map_or(0, |hot| hot.len());
+            if known > 0 && served < known / 2 {
+                keeper.prepare(&mut conn).await;
+            }
+            conn.return_to_pool().await;
+        }
+    }
+}
+
 /// The pool's figures, exported by every service that holds one: its size, its connections in use and
 /// idle, the wait for a connection, and what the development guard reported.
 pub mod metrics_names {
@@ -739,18 +918,56 @@ impl Db {
         slow_acquire: Duration,
         limits: Limits,
     ) -> Result<Self, DbError> {
+        Self::connect_kept_warm(
+            url,
+            connections,
+            slow_statement,
+            slow_acquire,
+            limits,
+            Warm::NONE,
+        )
+        .await
+    }
+
+    /// [`Db::connect_with_limits`], keeping `warm` connections open and ready ([`Warm`]): they are opened before
+    /// this returns, and a keeper task looks after them until the pool is closed.
+    pub async fn connect_kept_warm(
+        url: &str,
+        connections: u32,
+        slow_statement: Duration,
+        slow_acquire: Duration,
+        limits: Limits,
+        warm: Warm,
+    ) -> Result<Self, DbError> {
         let options = limits.apply(
             PgConnectOptions::from_str(url)?
                 .application_name("orch")
                 .log_slow_statements(log::LevelFilter::Warn, slow_statement),
         );
+        let keeper = std::sync::Arc::new(Keeper {
+            warm,
+            wake: tokio::sync::Notify::new(),
+            hot: std::sync::Mutex::new(Vec::new()),
+        });
+        let told = std::sync::Arc::clone(&keeper);
         let pool = PgPoolOptions::new()
             .max_connections(connections)
+            .min_connections(warm.connections.min(connections))
+            // The keeper closes the idle connections beyond the warm ones; without warm ones they close as before.
+            .idle_timeout((warm.connections == 0).then_some(Duration::from_secs(10 * 60)))
+            .max_lifetime(warm.lifetime)
+            .after_connect(move |_, _| {
+                told.wake.notify_one();
+                Box::pin(async { Ok(()) })
+            })
             .acquire_timeout(limits.acquire_timeout)
             .acquire_slow_level(log::LevelFilter::Warn)
             .acquire_slow_threshold(slow_acquire)
             .connect_with(options)
             .await?;
+        if warm.connections > 0 {
+            tokio::spawn(keep_warm(pool.clone(), keeper).with_current_subscriber());
+        }
         metrics::describe_gauge!(metrics_names::MAX, "The largest size of the database pool");
         metrics::describe_histogram!(
             metrics_names::ACQUIRE_SECONDS,
@@ -1193,6 +1410,120 @@ mod tests {
             prepared > distinct,
             "the connection keeps {prepared} statements prepared after running {distinct} distinct ones twice"
         );
+    }
+
+    /// How many of the statements `SELECT <n>::bigint + $1` each of the pool's `connections` holds prepared, as
+    /// PostgreSQL lists them for each session.
+    async fn prepared_on_each(db: &Db, connections: usize) -> Vec<i64> {
+        let mut held = Vec::new();
+        for _ in 0..connections {
+            held.push(db.acquire().await.unwrap());
+        }
+        let mut counts = Vec::new();
+        for conn in &mut held {
+            counts.push(
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_prepared_statements WHERE statement LIKE 'SELECT %::bigint + $1'",
+                )
+                .persistent(false)
+                .fetch_one(&mut **conn)
+                .await
+                .unwrap(),
+            );
+        }
+        counts
+    }
+
+    #[tokio::test]
+    async fn every_warm_connection_comes_to_hold_what_another_ran_without_serving_it() {
+        let test = TestDb::fresh().await;
+        let warm = Warm {
+            connections: 4,
+            lifetime: None,
+            statements: 64,
+            pass: Duration::from_millis(50),
+        };
+        let db = Db::connect_kept_warm(
+            &test.url,
+            4,
+            SLOW_DEFAULT,
+            SLOW_DEFAULT,
+            Limits::REQUESTS,
+            warm,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.pool().size(),
+            4,
+            "the warm connections are open before the pool serves"
+        );
+        let distinct = 40_i64;
+        {
+            let mut conn = db.acquire().await.unwrap();
+            for statement in 0..distinct {
+                let _: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT {statement}::bigint + $1"
+                )))
+                .bind(1_i64)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+            }
+        }
+        let started = Instant::now();
+        let mut counts = prepared_on_each(&db, 4).await;
+        while counts.iter().any(|count| *count < distinct)
+            && started.elapsed() < Duration::from_secs(20)
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            counts = prepared_on_each(&db, 4).await;
+        }
+        assert_eq!(
+            counts,
+            vec![distinct; 4],
+            "each connection holds the statements another ran"
+        );
+        db.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn idle_connections_beyond_the_warm_ones_close_and_the_warm_ones_stay() {
+        let test = TestDb::fresh().await;
+        let warm = Warm {
+            connections: 1,
+            lifetime: None,
+            statements: 64,
+            pass: Duration::from_millis(50),
+        };
+        let db = Db::connect_kept_warm(
+            &test.url,
+            3,
+            SLOW_DEFAULT,
+            SLOW_DEFAULT,
+            Limits::REQUESTS,
+            warm,
+        )
+        .await
+        .unwrap();
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(db.acquire().await.unwrap());
+        }
+        assert_eq!(db.pool().size(), 3);
+        drop(held);
+        let started = Instant::now();
+        while db.pool().size() > 1 && started.elapsed() < Duration::from_secs(20) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            db.pool().size(),
+            1,
+            "the idle connections beyond the warm one were closed"
+        );
+        tokio::time::sleep(warm.pass * 4).await;
+        assert_eq!(db.pool().size(), 1, "the warm one stays open while idle");
+        db.pool().close().await;
     }
 
     #[tokio::test]

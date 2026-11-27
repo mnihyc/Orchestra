@@ -192,13 +192,21 @@ pub async fn run(
         !config.database.url.is_empty(),
         "database.url is not set (give it as ORCH_DATABASE_URL)"
     );
-    // Request connections: the database ends a session idle in a transaction, and cancels a stuck statement.
-    let db = Db::connect_with_limits(
+    // Request connections: the database ends a session idle in a transaction, and cancels a stuck statement. Some
+    // are kept open and ready while nobody is asking (`db_pool_warm`).
+    let limits = orch_db::pool::Limits::requests(&config.database);
+    let db = Db::connect_kept_warm(
         &config.database.url,
         config.api.db_pool,
         Duration::from_millis(config.database.slow_statement_ms),
         Duration::from_millis(config.database.slow_acquire_ms),
-        orch_db::pool::Limits::requests(&config.database),
+        limits,
+        orch_db::pool::Warm::requests(
+            config.api.db_pool_warm,
+            (config.api.db_pool_lifetime_secs > 0)
+                .then_some(Duration::from_secs(config.api.db_pool_lifetime_secs)),
+            limits,
+        ),
     )
     .await
     .context("connecting to the database")?;

@@ -576,11 +576,11 @@ async fn adding_a_model_saves_the_defaults_shown_and_keeps_cleared_optional_choi
     let world = world().await;
     let c = company(&world).await;
     let id = provider(&world, &c.boss, c.acme, None).await.base.id;
-    let mut facts = json!({ "models": discovered()["suggestions"].clone() });
-    facts["models"][0]["parameters"]["input_images"] = json!(true);
-    sqlx::query("UPDATE providers SET facts=$2 WHERE id=$1")
+    let mut listed = discovered()["suggestions"].clone();
+    listed[0]["parameters"]["input_images"] = json!(true);
+    sqlx::query("INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2) ON CONFLICT (provider_id) DO UPDATE SET models = EXCLUDED.models")
         .bind(id)
-        .bind(facts)
+        .bind(listed)
         .execute(&mut *world.conn().await)
         .await
         .unwrap();
