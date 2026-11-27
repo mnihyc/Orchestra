@@ -56,6 +56,14 @@ pub enum NativeLocation {
     Kept(Id, Id),
 }
 
+orch_api_base::api_family_callback! {
+    bind __api_bind_a94d90d474, __api_install_a94d90d474, __api_callback_a94d90d474;
+    slot __ApiCallbacka94d90d474, __API_CALLBACK_A94D90D474, __api_set_a94d90d474;
+    base orch_api_base::routes::resources::mounts;
+
+    async fn seen<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: orch_types::Id) -> orch_api_base::middleware::requests::ApiResult<Option<(orch_api_contract::resources::MachineRef, Option<orch_api_contract::resources::HostRef>)>>;
+}
+
 impl PreparedInventory {
     pub fn preserves_sources(&self, fresh: &Self) -> bool {
         let items = fresh
