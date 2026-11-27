@@ -10,8 +10,8 @@ use orch_agent_contract::descriptor::{
     AgentDescriptor, AgentTerminal, ApprovalMode, ApprovalReviewerSupport, ArrangementEntry,
     ArrangementType, AuxiliaryModels, Capabilities, EffortSupport, ExecutorBuild, HarnessInfo,
     HarnessSupport, McpSupport, MemoryKind, NativeProvider, OrchToolsSupport, PlanMechanics,
-    PlanProceed, PlanProposal, RuntimeTemplate, SandboxMode, SessionReload, SkillsSupport,
-    UsageContext, classify_version,
+    PlanProceed, PlanProposal, RuntimeTemplate, SessionReload, SkillsSupport, UsageContext,
+    classify_version,
 };
 use orch_agent_contract::events::HarnessRequestKind;
 use orch_agent_contract::login::{LoginKind, LoginMethodDef, LoginYields};
@@ -20,6 +20,7 @@ use serde_json::json;
 
 use crate::config::{ADAPTER_VERSION, KIND, SUBSCRIPTION_TITLE, SUPPORTED_RANGE};
 use crate::parameters::definitions;
+use crate::sandbox::SandboxSupport;
 use crate::tools::tool_set;
 
 /// The executor the harness works through when it is with its provider.
@@ -93,16 +94,19 @@ pub fn credentials() -> CredentialSupport {
             CredentialForm {
                 form: FORM_ACCESS_TOKEN.to_owned(),
                 custody: Custody::Shared,
+                expires: false,
                 lifetime_secs: Some(ACCESS_TOKEN_LIFETIME_SECS),
             },
             CredentialForm {
                 form: FORM_OAUTH_TOKEN.to_owned(),
                 custody: Custody::Shared,
+                expires: false,
                 lifetime_secs: None,
             },
             CredentialForm {
                 form: FORM_LOGIN.to_owned(),
                 custody: Custody::Transferred,
+                expires: false,
                 lifetime_secs: None,
             },
         ],
@@ -238,7 +242,7 @@ pub fn capabilities() -> Capabilities {
 }
 
 /// The approval modes the harness has here. The harness refuses to bypass permissions when it runs as the
-/// administrator, so `bypass` is declared only where it does not. Native auto review stays gated.
+/// administrator, so `bypass` is declared only where it does not. Orch checks Auto on the selected build.
 #[must_use]
 pub fn approval_modes(as_root: bool) -> Vec<ApprovalMode> {
     let mut modes = vec![ApprovalMode::Ask, ApprovalMode::OnRequest];
@@ -254,8 +258,7 @@ pub fn approval_modes(as_root: bool) -> Vec<ApprovalMode> {
 /// The feature a conformance case proves for Auto.
 const AUTO_FEATURE: &str = "approval_modes.auto";
 
-/// Whether the manifest has the conformance case that proves Auto's reviewer on a build. Without it Auto is not
-/// offered, whatever else says so.
+/// Whether this adapter declares an Auto conformance case. The build checker records its result.
 #[must_use]
 pub fn auto_proven() -> bool {
     manifest().proves(AUTO_FEATURE)
@@ -342,9 +345,15 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
     words
 }
 
-/// Everything the adapter declares of the harness `version`.
+/// Everything the adapter declares of the harness `version`, where its sandbox starts.
 #[must_use]
 pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
+    descriptor_where(version, as_root, &SandboxSupport::declared())
+}
+
+/// Everything the adapter declares of the harness `version` where it runs: its shell sandbox as it was found there.
+#[must_use]
+pub fn descriptor_where(version: &str, as_root: bool, sandbox: &SandboxSupport) -> AgentDescriptor {
     AgentDescriptor {
         kind: KIND.to_owned(),
         adapter_version: ADAPTER_VERSION,
@@ -357,6 +366,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         arrangements: vec![
             entry(ArrangementType::KeySeparated),
             entry(ArrangementType::CredentialShared),
+            entry(ArrangementType::HandedOver),
             ArrangementEntry {
                 kind: ArrangementType::Separated,
                 executor: Some(EXECUTOR.to_owned()),
@@ -367,7 +377,6 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
                     tool_set::CUSTOM.to_owned(),
                 ]),
             },
-            entry(ArrangementType::HandedOver),
             entry(ArrangementType::Together),
         ],
         native_provider: Some(NativeProvider {
@@ -395,11 +404,14 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         direct_protocols: Vec::new(),
         credentials: credentials(),
         runtime_template: Some(runtime_template()),
+        approval_auto: None,
         approval_modes: approval_modes(as_root),
-        sandbox_modes: vec![SandboxMode::Workspace, SandboxMode::Open],
-        // Offered only once the exact loaded build's conformance proves every action path (plan-mode naming or
-        // an allowed-tools list proves neither); until then an aside is refused with why.
-        side_thread_modes: Vec::new(),
+        sandbox_modes: sandbox.modes(),
+        sandbox_reason: sandbox.reason.clone(),
+        // The native trial checks an empty inventory and forces a forbidden action through the real program.
+        side_thread_modes: if manifest().proves("side_thread_modes.no_tools") {
+            vec![orch_agent_contract::descriptor::SideReading::NoTools]
+        } else { Vec::new() },
         capabilities: {
             let mut declared = capabilities();
             if !crate::config::input_prefix_supported(version) {
@@ -407,6 +419,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
             }
             declared
         },
+        features: Default::default(),
         parameters: definitions(),
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({
@@ -473,6 +486,7 @@ mod tests {
         }
     }
     use super::*;
+    use orch_agent_contract::descriptor::SandboxMode;
 
     #[test]
     fn what_the_adapter_declares_holds_together() {
@@ -502,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn the_arrangements_are_in_the_order_the_adapter_prefers_them() {
+    fn native_credentials_are_preferred_before_orchs_tools_when_their_use_is_allowed() {
         let declared = descriptor("2.1.296", false);
         let kinds: Vec<_> = declared
             .arrangements
@@ -514,8 +528,8 @@ mod tests {
             [
                 ArrangementType::KeySeparated,
                 ArrangementType::CredentialShared,
-                ArrangementType::Separated,
                 ArrangementType::HandedOver,
+                ArrangementType::Separated,
                 ArrangementType::Together
             ]
         );

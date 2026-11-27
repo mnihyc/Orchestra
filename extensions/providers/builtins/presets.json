@@ -59,5 +59,17 @@
         "base_url": "https://api.deepseek.com/anthropic"
       }
     ]
+  },
+  "Google Gemini": {
+    "upstreams": [
+      {
+        "protocol": "google-interactions",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta"
+      },
+      {
+        "protocol": "openai-chat",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
+      }
+    ]
   }
 }

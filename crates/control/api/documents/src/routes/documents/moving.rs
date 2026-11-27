@@ -162,12 +162,13 @@ impl effects::ApplyOwned for Moves {
                 let packet = Arc::try_unwrap(packet).map_err(|_| {
                     ApiError::internal("the native movement packet is still in use")
                 })?;
+                let options = crate::routes::document_tree::options(ctx, &mut tx).await?;
                 let result = document_tree_domain::apply_document_movement_in(
                     &mut tx,
                     document_tree_domain::Actor::Person(principal),
                     packet,
                     principal.now(),
-                    crate::routes::document_tree::options(ctx),
+                    options,
                     move || before.check(),
                 )
                 .await?;
