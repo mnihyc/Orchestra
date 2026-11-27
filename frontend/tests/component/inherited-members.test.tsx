@@ -15,7 +15,8 @@ const root: NodeRef = { id: 'acme', kind: 'org', name: 'Acme', redacted: false }
 const department = org('dep2', 'dep2', 'Research', ADA, { parent_id: 'acme', org_id: 'acme', depth: 1, member_count: 0 });
 const held = (id: string, role: RoleHeld['role']): RoleHeld => ({ id, role, subject: { kind: 'user', id: BEA.id, user: { ...BEA, address: 'acme.bea' } },
   node: root, domain: true, revision: 1, outside: false, created_at: '2026-10-15T00:00:00Z', created_by: ADA, expires_at: null, note: '' });
-vi.mock('@/api/access', async (original) => ({ ...await original<typeof Access>(), rolesQuery: (id: string) => ({ queryKey: ['inherited-roles', id], queryFn: () => {
+vi.mock('@/api/access', async (original) => ({ ...await original<typeof Access>(), rolesPageQuery:(id:string,q:string)=>({queryKey:['fixture-role-pages',id,q],initialPageParam:null,queryFn:()=>{calls.roles(id);return Promise.resolve({owners:[],own:[],above:[held('viewer','viewer'),held('developer','developer')],can_give:[],items:[],next_cursor:null});},getNextPageParam:()=>null}),
+  rolesQuery: (id: string) => ({ queryKey: ['inherited-roles', id], queryFn: () => {
   calls.roles(id); return Promise.resolve({ own: [], above: [held('viewer', 'viewer'), held('developer', 'developer')], can_give: [] });
 } }) }));
 const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const;

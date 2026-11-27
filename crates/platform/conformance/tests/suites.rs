@@ -83,13 +83,19 @@ struct WrongRange(orch_blob_local::LocalBlobStore);
 
 #[async_trait]
 impl BlobStore for WrongRange {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.0.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         content: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.0.put(hash, size, content).await
+        publication.check(self.lifetimes(), hash)?;
+        self.0.put_held(hash, size, content, publication).await
     }
     async fn get(&self, hash: &Hash, _: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         self.0.get(hash, None).await
@@ -100,8 +106,13 @@ impl BlobStore for WrongRange {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.0.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.0.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.0.delete_held(hash, retirement).await
     }
 }
 
@@ -153,11 +164,9 @@ async fn unverified_executor_platforms_are_not_offered_and_cannot_start() {
         ] {
             let available = implementation.available(&environment).await;
             assert!(!available.available);
-            assert!(
-                available
-                    .reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("declared for Linux"))
+            assert_eq!(
+                available.reason.as_deref(),
+                Some("the machine's native system requires confirmation")
             );
             assert!(implementation.start(&environment).await.is_err());
         }
@@ -229,11 +238,11 @@ fn agent_fixture(home: &std::path::Path, work: &std::path::Path, faults: Value) 
     for index in 0..2 {
         let thread = new_id();
         sessions.push(serde_json::from_value(json!({
-            "agent_id":profile,"thread_id":thread,"segment_id":new_id(),"mode":"new",
+            "agent_id":profile,"thread_id":thread,"segment_id":new_id(),"opening_id":new_id(),"mode":"new",
             "native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":work,"instruction_root_marker":false,
             "directory":work,"cwd":work,"mounts":[],"model":"fake-large","effort":null,"params":{},
-            "approval_mode":"on_request","sandbox_mode":"workspace","instructions":"Complete the controlled turn.",
-            "memory":null,"arrangement":"together","orch_tools":[],"raw_events":false,
+            "approval_mode":"on_request","web_action_wait_secs":120,"sandbox_mode":"workspace","instructions":"Complete the controlled turn.",
+            "memory":null,"arrangement":"together","orch_tools":[],"output_capture_bytes":67108864, "raw_events":false,
             "session_key":format!("{index:032x}"),"archive":null,"history":null,
             "provider":{"path":"native","provider_id":provider},
             "exec":{"executor":null,"tool_set":null,"environment_id":new_id(),"generation":1},"mcp":[]
@@ -465,6 +474,9 @@ fn a_translator_that_loses_fragmented_bytes_fails_the_stream_rule() {
             base_url: "http://127.0.0.1:41000".into(),
             options: json!({}),
             credential: None,
+            output_tokens: 4096,
+            session: None,
+            model: None,
         },
         request: TranslatedRequest {
             method: "POST".into(),
