@@ -1,0 +1,5 @@
+# Another profile of a native harness beside the tools works on a copy of the login: the credential cases (the new case
+# and the copy cases beside it), the together cases, and the API's binding option and binding cases
+test -p orch-engine --test credentials
+test -p orch-engine --test together
+test -p orch-engine --test connected

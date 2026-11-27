@@ -34,7 +34,7 @@ use orch_access_contract::permissions::ResourceKind;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::operation_sources::Declaration;
 
@@ -129,7 +129,7 @@ async fn sources(conn: &mut Conn, rows: Vec<storage::SnapshotRow>) -> ApiResult<
 
 impl native::Selected for Snapshots {
     type Source = Role;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = Window;
     type Reply = Page<Snapshot>;
     const DECLARATION: &'static Declaration<Role> = &ENVIRONMENT_SNAPSHOT_LIST;
@@ -137,12 +137,13 @@ impl native::Selected for Snapshots {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(Window, Vec<native::Facts<Role>>)>> {
         Box::pin(async move {
             let (principal, facts) = root(ctx, conn, caller).await?;
             require(ctx, conn, &principal).await?;
-            let after = query.cursor.as_deref().map(after_of).transpose()?;
+            let after = after_of(ctx, query)?;
+            let page_size = crate::collection::limit(query)?;
             let administrative =
                 orch_engine::archive::custody_inspection(&principal, None).is_some();
             let mut rows = storage::snapshots_of_environment(
@@ -151,11 +152,12 @@ impl native::Selected for Snapshots {
                 principal.user(),
                 administrative,
                 after,
-                i64::from(query.limit()) + 1,
+                i64::from(page_size) + 1,
+                query.q.as_deref().unwrap_or(""),
             )
             .await?;
             let continuation =
-                if rows.len() > usize::try_from(query.limit()).map_err(ApiError::internal)? {
+                if rows.len() > usize::try_from(page_size).map_err(ApiError::internal)? {
                     rows.pop()
                 } else {
                     None
@@ -163,7 +165,8 @@ impl native::Selected for Snapshots {
             let next_cursor = rows
                 .last()
                 .filter(|_| continuation.is_some())
-                .map(cursor_of);
+                .map(|row| cursor_of(ctx, query, row))
+                .transpose()?;
             let continuation = match continuation {
                 Some(row) => Some(
                     Source::from_row(conn, row)
@@ -185,7 +188,7 @@ impl native::Selected for Snapshots {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         opened: &'a Window,
     ) -> BoxFuture<'a, ApiResult<(Window, Vec<native::Facts<Role>>)>> {
         Box::pin(async move {
@@ -251,7 +254,7 @@ impl native::Selected for Snapshots {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         principal: &'a Principal,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         opened: &'a Window,
         fresh: &'a Window,
     ) -> BoxFuture<'a, ApiResult<bool>> {

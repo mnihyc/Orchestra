@@ -76,6 +76,8 @@ const NOT_SERVED: &str = "the connector on its machine does not take the role of
 /// What a person asks when they make an environment.
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
+    /// The native producer's private request identity, retained across preparation checkpoints.
+    pub identity: Option<Id>,
     /// Who makes it, and owns it.
     pub owner: Id,
     /// Its name; `Main` when left out.
@@ -86,7 +88,7 @@ pub struct Request<'a> {
     pub template: Option<Id>,
     /// The host: `Some(Some(host))` names one, `Some(None)` and `None` leave the choice to the
     /// scheduler or to what the home resolves.
-    pub host: Option<Option<Id>>,
+    pub host: Option<Option<orch_provider_contract::pools::Target>>,
     /// Its own values, an object of keys of scope environment.
     pub config: &'a Json,
 }
@@ -167,6 +169,7 @@ pub struct Made {
 /// here is that something can be made: the template, a host.
 /// Opaque native creation operands, selected without inserting an Environment or a job.
 pub struct PreparedCreation {
+    id: Id,
     owner: Id,
     home: Id,
     template: Id,
@@ -176,6 +179,10 @@ pub struct PreparedCreation {
     name: String,
     host_entry: Option<Id>,
     template_entry: Option<Id>,
+    pool_choice: Option<Id>,
+    pool_entries: Vec<Id>,
+    pool_path: Vec<crate::resource_choice::Hop>,
+    preview: bool,
 }
 impl PreparedCreation {
     /// The actual settings home chosen by the native planner.
@@ -194,6 +201,10 @@ impl PreparedCreation {
     pub fn mounts(&self) -> &[Id] {
         &self.mounts
     }
+    /// Actual nested Pool operands, independently narrowed beside the chosen host.
+    pub fn pools(&self) -> Vec<Id> {
+        self.pool_path.iter().map(|hop| hop.pool_id).collect()
+    }
 }
 
 /// Makes an Environment and its first provision using the ordinary native preparation.
@@ -207,7 +218,7 @@ pub async fn create(
     apply_creation(conn, now, &prepared, || Ok(())).await
 }
 
-/// Resolve native creation, permission-entry capacity locks and duplicate-name checks without writes.
+/// Prepare an accepted creation and reserve its exact native host choice in the caller's transaction.
 pub async fn prepare_creation(
     conn: &mut orch_db::Conn,
     now: DateTime<Utc>,
@@ -224,6 +235,28 @@ pub async fn prepare_creation_bounded(
     principal: &Principal,
     request: &Request<'_>,
     bound: Option<&crate::operation_scope::Prepared>,
+) -> Result<PreparedCreation, CreateError> {
+    prepare_creation_inner(conn, now, principal, request, bound, false).await
+}
+
+/// Read-only planning uses current feasibility and never draws or advances a pool policy.
+pub async fn preview_creation_bounded(
+    conn: &mut orch_db::Conn,
+    now: DateTime<Utc>,
+    principal: &Principal,
+    request: &Request<'_>,
+    bound: Option<&crate::operation_scope::Prepared>,
+) -> Result<PreparedCreation, CreateError> {
+    prepare_creation_inner(conn, now, principal, request, bound, true).await
+}
+
+async fn prepare_creation_inner(
+    conn: &mut orch_db::Conn,
+    now: DateTime<Utc>,
+    principal: &Principal,
+    request: &Request<'_>,
+    bound: Option<&crate::operation_scope::Prepared>,
+    preview: bool,
 ) -> Result<PreparedCreation, CreateError> {
     check_initial_program_consent(request.config)
         .map_err(|reason| CreateError::Runtime(reason.to_owned()))?;
@@ -254,7 +287,7 @@ pub async fn prepare_creation_bounded(
     if request.template.is_some() {
         own.insert(keys::ENV_TEMPLATE_ID.to_owned(), json!(template_id));
     }
-    if let Some(Some(host)) = request.host {
+    if let Some(host) = &request.host {
         own.insert(keys::ENV_HOST_ID.to_owned(), json!(host));
     }
     let own = Json::Object(own);
@@ -265,29 +298,68 @@ pub async fn prepare_creation_bounded(
         crate::isolation::check_template(&wanted.template.spec, runtime)
             .map_err(CreateError::Runtime)?;
     }
-    let named: Option<Id> = match request.host {
-        Some(Some(host)) => Some(host),
-        _ => places::resolved_for_new(conn, request.home, &own, keys::ENV_HOST_ID)
+    let target: Option<orch_provider_contract::pools::Target> = match &request.host {
+        Some(host) => host.clone(),
+        None => places::resolved_for_new(conn, request.home, &own, keys::ENV_HOST_ID)
             .await?
-            .and_then(|value| serde_json::from_value(value).ok()),
+            .filter(|value| !value.is_null())
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(EngineError::from)?,
     };
+    let named = target
+        .as_ref()
+        .and_then(orch_provider_contract::pools::Target::single_host);
     let minutes_idle =
         places::resolved_for_new(conn, request.home, &own, keys::ENV_RECYCLE_IDLE_MINUTES)
             .await?
             .and_then(|value| value.as_i64())
             .unwrap_or(IDLE_MINUTES_DEFAULT);
-    let mut listed = places::host_places(
-        conn,
-        principal,
-        &Ask {
-            home: request.home,
-            wanted: &wanted,
-            current: None,
-            minutes_idle,
-            now,
-        },
-    )
-    .await?;
+    let id = request.identity.map_or_else(new_id, |input| {
+        ids::derived(
+            "environment.creation",
+            &[
+                input.as_bytes(),
+                request.owner.as_bytes(),
+                request.home.as_bytes(),
+                request.name.unwrap_or(DEFAULT_NAME).as_bytes(),
+            ],
+        )
+    });
+    let ask = Ask {
+        home: request.home,
+        wanted: &wanted,
+        current: None,
+        minutes_idle,
+        now,
+    };
+    let selected = if let Some(target) = &target {
+        crate::resource_choice::host::select(
+            conn,
+            principal,
+            &crate::resource_choice::host::Request {
+                ask: &ask,
+                target,
+                config: &own,
+                bound,
+                creation: (!preview).then_some(id),
+            },
+        )
+        .await?
+    } else {
+        None
+    };
+    let (pool_choice, pool_path) = selected.as_ref().map_or((None, vec![]), |placement| {
+        (placement.choice, placement.path.clone())
+    });
+    let mut listed = if target.is_some() {
+        selected
+            .into_iter()
+            .map(|placement| placement.place)
+            .collect()
+    } else {
+        places::host_places(conn, principal, &ask).await?
+    };
     if let Some(bound) = bound {
         crate::environment_creation::bound_candidates(
             conn,
@@ -295,92 +367,15 @@ pub async fn prepare_creation_bounded(
             bound,
             template_id,
             &wanted.mounts,
+            &pool_path.iter().map(|hop| hop.pool_id).collect::<Vec<_>>(),
             &mut listed,
         )
         .await?;
     }
     let chosen = places::choose(&listed, named).map_err(CreateError::NoPlace)?;
-    // An omitted choice still uses the host's default, which the template may restrict.
-    if wanted.runtime_class.is_none() {
-        let descriptor = chosen
-            .host
-            .drivers
-            .get(&wanted.template.driver)
-            .unwrap_or(&Json::Null);
-        let default = orch_driver_contract::isolation::class_in(descriptor, None)
-            .map(|class| class.name)
-            .or_else(|| {
-                descriptor
-                    .get("default_runtime")
-                    .and_then(Json::as_str)
-                    .map(str::to_owned)
-            });
-        if let Some(runtime) = default {
-            crate::isolation::check_template(&wanted.template.spec, &runtime)
-                .map_err(CreateError::Runtime)?;
-        } else if wanted
-            .template
-            .spec
-            .get("allowed_runtimes")
-            .and_then(Json::as_array)
-            .is_some_and(|allowed| !allowed.is_empty())
-        {
-            return Err(CreateError::Runtime("the host must report its default runtime before this template's allowed runtimes can be checked".to_owned()));
-        }
-    }
-    if let Some(policy) = setting::<Json>(
-        conn,
-        SettingsPlace::Node(request.home),
-        keys::ENVIRONMENTS_RUNTIMES,
-    )
-    .await?
-    {
-        crate::isolation::check_host_policy(
-            &policy,
-            chosen
-                .host
-                .drivers
-                .get(&wanted.template.driver)
-                .unwrap_or(&Json::Null),
-            wanted.runtime_class.as_deref(),
-        )
-        .map_err(CreateError::Runtime)?;
-    }
-    let data_sources = places::resolved_for_new(conn, request.home, &own, keys::ENV_DATA_SOURCES)
-        .await?
-        .map(serde_json::from_value::<orch_driver_contract::runtime::EnvironmentDataSources>)
-        .transpose()
-        .map_err(|error| CreateError::DataSources(error.to_string()))?
-        .unwrap_or_default();
-    if data_sources.borrows_directories() {
-        if named.is_none() {
-            return Err(CreateError::DataSources(
-                "choose a machine before choosing an existing directory there".into(),
-            ));
-        }
-        let host = host_rows::host(conn, chosen.host.id)
-            .await?
-            .ok_or(CreateError::NoHome)?;
-        let machine = orch_db::queries::resources::machine(conn, host.machine_id)
-            .await?
-            .ok_or(CreateError::NoHome)?;
-        check_machine_data_sources(conn, &machine, &data_sources)
-            .await
-            .map_err(CreateError::DataSources)?;
-        if host
-            .drivers
-            .get(&wanted.template.driver)
-            .and_then(|driver| driver.get("data_storage"))
-            .and_then(|data| data.get("existing_directory"))
-            .and_then(Json::as_bool)
-            != Some(true)
-        {
-            return Err(CreateError::DataSources(
-                "this driver has not offered existing directories; choose data made by Orch".into(),
-            ));
-        }
-    }
-    if let Some(created) = &chosen.created
+    validate_creation_host(conn, request.home, &wanted, &own, chosen, named.is_some()).await?;
+    if !preview
+        && let Some(created) = &chosen.created
         && !orch_authz::environments::reserve_capacity(conn, created).await?
     {
         return Err(CreateError::NoPlace(places::capacity_reached(chosen)));
@@ -401,6 +396,7 @@ pub async fn prepare_creation_bounded(
         return Err(CreateError::Taken(Some(existing)));
     }
     Ok(PreparedCreation {
+        id,
         owner: request.owner,
         home: request.home,
         template: template_id,
@@ -410,6 +406,13 @@ pub async fn prepare_creation_bounded(
         name: name.to_owned(),
         host_entry,
         template_entry,
+        pool_choice,
+        pool_entries: chosen
+            .created
+            .as_ref()
+            .map_or_else(Vec::new, |created| created.pool_entries.clone()),
+        pool_path,
+        preview,
     })
 }
 
@@ -420,8 +423,13 @@ pub async fn apply_creation(
     prepared: &PreparedCreation,
     before: impl FnOnce() -> Result<(), EngineError> + Send,
 ) -> Result<Made, CreateError> {
+    if prepared.preview {
+        return Err(
+            EngineError::unreadable("a placement preview cannot create an environment").into(),
+        );
+    }
     before()?;
-    let id = new_id();
+    let id = prepared.id;
     let made = rows::insert_managed(
         conn,
         &NewManaged {
@@ -458,6 +466,8 @@ pub async fn apply_creation(
         }
         Err(error) => return Err(error.into()),
     }
+    orch_db::queries::environments::record_creation_entries(conn, id, &prepared.pool_entries)
+        .await?;
     let state = rows::environment(conn, id)
         .await?
         .ok_or(CreateError::NoHome)?;
@@ -471,8 +481,104 @@ pub async fn apply_creation(
             ))));
         }
     };
+    orch_db::queries::jobs::merge_plan(
+        conn,
+        job.id,
+        &json!({"admitted_host":prepared.host,"pool_choice":prepared.pool_choice,
+            "pool_choice_required":prepared.pool_choice.is_some()}),
+        now,
+    )
+    .await?;
     crate::temporary_environments::ensure(conn, id, now).await?;
     Ok(Made { id, job })
+}
+
+/// The same runtime and existing-directory checks run before a host can enter pool ranking.
+pub(crate) async fn validate_creation_host(
+    conn: &mut orch_db::Conn,
+    home: Id,
+    wanted: &places::Wanted,
+    config: &Json,
+    chosen: &places::HostPlace,
+    named: bool,
+) -> Result<(), CreateError> {
+    // An omitted choice still uses the host's default, which the template may restrict.
+    if wanted.runtime_class.is_none() {
+        let descriptor = chosen
+            .host
+            .drivers
+            .get(&wanted.template.driver)
+            .unwrap_or(&Json::Null);
+        let default = orch_driver_contract::isolation::class_in(descriptor, None)
+            .map(|class| class.name)
+            .or_else(|| {
+                descriptor
+                    .get("default_runtime")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned)
+            });
+        if let Some(runtime) = default {
+            crate::isolation::check_template(&wanted.template.spec, &runtime)
+                .map_err(CreateError::Runtime)?;
+        } else if wanted
+            .template
+            .spec
+            .get("allowed_runtimes")
+            .and_then(Json::as_array)
+            .is_some_and(|allowed| !allowed.is_empty())
+        {
+            return Err(CreateError::Runtime("the host must report its default runtime before this template's allowed runtimes can be checked".to_owned()));
+        }
+    }
+    if let Some(policy) =
+        setting::<Json>(conn, SettingsPlace::Node(home), keys::ENVIRONMENTS_RUNTIMES).await?
+    {
+        crate::isolation::check_host_policy(
+            &policy,
+            chosen
+                .host
+                .drivers
+                .get(&wanted.template.driver)
+                .unwrap_or(&Json::Null),
+            wanted.runtime_class.as_deref(),
+        )
+        .map_err(CreateError::Runtime)?;
+    }
+    let data_sources = places::resolved_for_new(conn, home, config, keys::ENV_DATA_SOURCES)
+        .await?
+        .map(serde_json::from_value::<orch_driver_contract::runtime::EnvironmentDataSources>)
+        .transpose()
+        .map_err(|error| CreateError::DataSources(error.to_string()))?
+        .unwrap_or_default();
+    if data_sources.borrows_directories() {
+        if !named {
+            return Err(CreateError::DataSources(
+                "choose a machine before choosing an existing directory there".into(),
+            ));
+        }
+        let host = host_rows::host(conn, chosen.host.id)
+            .await?
+            .ok_or(CreateError::NoHome)?;
+        let machine = orch_db::queries::resources::machine(conn, host.machine_id)
+            .await?
+            .ok_or(CreateError::NoHome)?;
+        check_machine_data_sources(conn, &machine, &data_sources)
+            .await
+            .map_err(CreateError::DataSources)?;
+        if host
+            .drivers
+            .get(&wanted.template.driver)
+            .and_then(|driver| driver.get("data_storage"))
+            .and_then(|data| data.get("existing_directory"))
+            .and_then(Json::as_bool)
+            != Some(true)
+        {
+            return Err(CreateError::DataSources(
+                "this driver has not offered existing directories; choose data made by Orch".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The controller can reject an obviously outside path from reported policy. The machine always
@@ -560,15 +666,21 @@ pub async fn start(
     if state.remove_at.is_some() {
         return Err(StartError::BeingRemoved);
     }
-    if rows::live_runtime(conn, environment)
-        .await?
+    if orch_db::queries::runtime_incarnations::environment_withdrawn(conn, environment).await? {
+        return Err(StartError::Unavailable(
+            "its original unit is being stopped".into(),
+        ));
+    }
+    let runtime = rows::live_runtime(conn, environment).await?;
+    if runtime
+        .as_ref()
         .is_some_and(|runtime| runtime.state == "stopping")
     {
         return Err(StartError::Unavailable(
             "the host has not confirmed the previous stop".to_owned(),
         ));
     }
-    if let Some(runtime) = rows::live_runtime(conn, environment).await?
+    if let Some(runtime) = &runtime
         && let Some(blocked) = crate::network::blocked(conn, runtime.id).await?
     {
         return Err(StartError::Unavailable(
@@ -579,7 +691,10 @@ pub async fn start(
         status::RUNNING => return Ok(Starting::Up),
         status::NONE | status::FAILED => Mode::Make,
         status::STOPPED => {
-            if rows::live_runtime(conn, environment).await?.is_some() {
+            if runtime
+                .as_ref()
+                .is_some_and(|runtime| !runtime.loss_missing)
+            {
                 Mode::Start
             } else {
                 Mode::Make
@@ -694,6 +809,8 @@ pub struct AcceptedStop {
     pub(crate) machine: Option<Id>,
     pub(crate) generation: i32,
     pub(crate) runtime: Option<Id>,
+    pub(crate) runtime_source: Option<orch_link_contract::native_target::RuntimeSource>,
+    pub(crate) control: Option<orch_db::queries::runtime_controls::Intent>,
 }
 
 #[derive(Clone, Copy)]
@@ -825,6 +942,16 @@ impl Engine {
         if let Some(check) = &checkpoint {
             check.check(self.inner.clock.as_ref())?;
         }
+        rows::lock_environment(&mut tx, environment)
+            .await?
+            .ok_or(StartError::NotFound)?;
+        if orch_db::queries::runtime_incarnations::environment_withdrawn(&mut tx, environment)
+            .await?
+        {
+            return Err(StartError::Unavailable(
+                "its original unit is being stopped".into(),
+            ));
+        }
         // Runtime updates: an owner-requested wake updates before starting the old unit.
         let started = match self
             .update_on_start(&mut tx, environment, principal, now)
@@ -951,13 +1078,23 @@ impl Engine {
         &self,
         environment: Id,
     ) -> Result<Standing, EngineError> {
-        let (state, machine_facts) = {
-            let mut conn = self.inner.db.acquire().await?;
+        let (state, machine_facts, withdrawn) = {
+            let mut conn = self.inner.db.begin_snapshot().await?;
             (
                 rows::environment(&mut conn, environment).await?,
                 orch_db::queries::environment_facts::of(&mut conn, environment).await?,
+                orch_db::queries::runtime_incarnations::environment_withdrawn(
+                    &mut conn,
+                    environment,
+                )
+                .await?,
             )
         };
+        if withdrawn {
+            return Ok(Standing::Unavailable(
+                "its original unit is being stopped".into(),
+            ));
+        }
         let Some(state) = state else {
             return Ok(Standing::Ready);
         };
@@ -1115,13 +1252,20 @@ impl Engine {
             let mut conn = self.inner.db.acquire().await?;
             if let Some(job) =
                 orch_db::queries::jobs::changes::environment_hold(&mut conn, environment).await?
+                && !crate::jobs::runtime_commands::owned_provision_hold(
+                    &mut conn,
+                    &job,
+                    environment,
+                    accepted.and_then(|accepted| accepted.control.as_ref()),
+                )
+                .await?
             {
                 return Err(StopError::Unavailable(format!("held by job {}", job.id)));
             }
         }
         match state.status.as_str() {
             status::STOPPED | status::NONE => return Ok(()),
-            status::RUNNING | status::OFFLINE => {}
+            status::RUNNING | status::OFFLINE | status::PROVISIONING => {}
             other => return Err(StopError::Unavailable(other.to_owned())),
         }
         if reason == StopReason::Idle {
@@ -1133,6 +1277,106 @@ impl Engine {
                 return Ok(());
             }
         }
+        let (runtime, source, control) = {
+            let mut tx = self.inner.db.begin().await?;
+            let registered = rows::lock_environment(&mut tx, environment)
+                .await?
+                .filter(|current| current.deleted_at.is_none())
+                .ok_or(StopError::NotFound)?;
+            if registered.owner_id != state.owner_id
+                || registered.home_node_id != state.home_node_id
+                || registered.machine_id != state.machine_id
+                || registered.generation != state.generation
+            {
+                return Err(StopError::Unavailable(
+                    "the original environment registration changed".into(),
+                ));
+            }
+            let runtime = rows::live_runtime(&mut tx, environment).await?;
+            let source = if let Some(runtime) = &runtime {
+                orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+            } else {
+                None
+            };
+            if accepted.is_some_and(|accepted| {
+                runtime.as_ref().map(|runtime| runtime.id) != accepted.runtime
+                    || (source != accepted.runtime_source
+                        && !source
+                            .and_then(|source| source.incarnation)
+                            .is_some_and(|id| {
+                                accepted
+                                    .control
+                                    .as_ref()
+                                    .is_some_and(|control| control.pending().contains(&id))
+                            }))
+            }) {
+                return Err(StopError::Unavailable(
+                    "the accepted environment native start changed".into(),
+                ));
+            }
+            let control = if let Some(accepted) = accepted {
+                accepted.control.clone()
+            } else if let Some(runtime) = &runtime {
+                let pending =
+                    orch_db::queries::runtime_incarnations::stop(&mut tx, runtime.id).await?;
+                if let Some(pending) = pending
+                    && orch_db::queries::runtime_controls::owns_current_source(
+                        &mut tx,
+                        &pending.control,
+                    )
+                    .await?
+                    && orch_db::queries::runtime_controls::is_current(&mut tx, &pending.control)
+                        .await?
+                {
+                    Some(pending.control)
+                } else {
+                    Some(
+                        orch_db::queries::runtime_controls::accept(
+                            &mut tx,
+                            runtime.id,
+                            orch_types::new_id(),
+                        )
+                        .await?,
+                    )
+                }
+            } else {
+                None
+            };
+            if let Some(control) = &control
+                && !orch_db::queries::runtime_controls::is_current(&mut tx, control).await?
+            {
+                return Err(StopError::Unavailable(
+                    "a newer environment control superseded this stop".into(),
+                ));
+            }
+            if let (Some(runtime), Some(control)) = (&runtime, &control) {
+                if !orch_db::queries::runtime_incarnations::prepare_stop(
+                    &mut tx,
+                    runtime.id,
+                    control,
+                    self.inner.clock.now(),
+                )
+                .await?
+                {
+                    return Err(StopError::Unavailable(
+                        "the original pending Start is not owned by this Stop".into(),
+                    ));
+                }
+                let by = match reason {
+                    StopReason::Person(by) | StopReason::Recycle(by) => Some(by),
+                    StopReason::Idle => None,
+                };
+                orch_db::queries::runtime_controls::withdraw_previous_job(
+                    &mut tx,
+                    control,
+                    by,
+                    self.inner.clock.now(),
+                )
+                .await?;
+            }
+            tx.commit().await.map_err(DbError::from)?;
+            (runtime, source, control)
+        };
         self.clear_turns(environment, interrupt, reason).await?;
         // A credential that was handed over is brought home before the unit stops, as the first thing
         // that is done; one that cannot be leaves the environment as it is (the part that keeps
@@ -1148,22 +1392,43 @@ impl Engine {
                 }
                 other => StopError::CredentialReturnFailed(other.to_string()),
             })?;
-        let runtime = {
-            let mut conn = self.inner.db.acquire().await?;
-            rows::live_runtime(&mut conn, environment).await?
-        };
-        if accepted
-            .is_some_and(|accepted| runtime.as_ref().map(|runtime| runtime.id) != accepted.runtime)
+        let mut tx = self.inner.db.begin().await?;
+        let current_state = rows::lock_environment(&mut tx, environment)
+            .await?
+            .filter(|current| current.deleted_at.is_none())
+            .ok_or(StopError::NotFound)?;
+        if current_state.owner_id != state.owner_id
+            || current_state.home_node_id != state.home_node_id
+            || current_state.machine_id != state.machine_id
+            || current_state.generation != state.generation
         {
             return Err(StopError::Unavailable(
-                "the accepted environment unit changed".into(),
+                "the original environment registration changed during stop preparation".into(),
+            ));
+        }
+        let current = rows::live_runtime(&mut tx, environment).await?;
+        let current_source = if let Some(current) = &current {
+            orch_db::queries::runtime_incarnations::current(&mut tx, current.id).await?
+        } else {
+            None
+        };
+        if current.as_ref().map(|row| row.id) != runtime.as_ref().map(|row| row.id)
+            || (current_source != source
+                && !current_source
+                    .and_then(|source| source.incarnation)
+                    .is_some_and(|id| {
+                        control
+                            .as_ref()
+                            .is_some_and(|control| control.pending().contains(&id))
+                    }))
+        {
+            return Err(StopError::Unavailable(
+                "the original environment native start changed during stop preparation".into(),
             ));
         }
         let Some(runtime) = runtime else {
-            // No unit: only the record stands.
-            let mut conn = self.inner.db.acquire().await?;
             rows::set_status(
-                &mut conn,
+                &mut tx,
                 environment,
                 &[status::RUNNING, status::OFFLINE],
                 status::STOPPED,
@@ -1171,23 +1436,27 @@ impl Engine {
                 self.inner.clock.now(),
             )
             .await?;
+            tx.commit().await.map_err(DbError::from)?;
             return Ok(());
         };
-        let began = {
-            let mut conn = self.inner.db.acquire().await?;
-            rows::set_runtime_state(
-                &mut conn,
-                runtime.id,
-                &[runtime_state::RUNNING, runtime_state::STOPPING],
-                runtime_state::STOPPING,
-                None,
-                self.inner.clock.now(),
-            )
-            .await?
+        let Some(control) = control else {
+            return Err(StopError::Unavailable(
+                "the original runtime is gone".into(),
+            ));
         };
-        if !began {
-            return Err(StopError::Unavailable(runtime.state));
+        if !orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            runtime.id,
+            &control,
+            self.inner.clock.now(),
+        )
+        .await?
+        {
+            return Err(StopError::Unavailable(
+                "the original stop was superseded or the runtime no longer accepts it".into(),
+            ));
         }
+        tx.commit().await.map_err(DbError::from)?;
         self.finish_stop(environment, runtime.id).await
     }
 
@@ -1202,16 +1471,34 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
-        let Some(host) = host else {
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
+        if host.is_none() {
             return Err(StopError::Host("the host is gone".to_owned()));
+        }
+        let stop = {
+            let mut conn = self.inner.db.acquire().await?;
+            let stop = orch_db::queries::runtime_incarnations::stop(&mut conn, runtime)
+                .await?
+                .ok_or_else(|| {
+                    StopError::Unavailable("the stop has no original native source".into())
+                })?;
+            if !stop.ready {
+                return Ok(());
+            }
+            if !orch_db::queries::runtime_controls::owns_current_source(&mut conn, &stop.control)
+                .await?
+            {
+                return Err(StopError::Unavailable(
+                    "the original native start changed".into(),
+                ));
+            }
+            stop
         };
-        let stamp = row.updated_at.timestamp_micros().to_le_bytes();
-        let command = Outgoing::new(
-            ids::derived(
-                "node.runtime.stop",
-                &[runtime.as_bytes().as_slice(), &stamp],
-            ),
-            host.machine_id,
+        let mut command = Outgoing::new(
+            stop.id,
+            stop.control.machine(),
             SerialKey::Runtime(runtime),
             &NodeRuntimeStop {
                 runtime_id: runtime,
@@ -1219,6 +1506,18 @@ impl Engine {
             },
         )
         .map_err(EngineError::from)?;
+        command =
+            command.with_native_target(orch_link_contract::native_target::NativeTarget::Lifecycle(
+                orch_link_contract::native_target::LifecycleTarget {
+                    pending: stop.control.pending().to_vec(),
+                    subject: orch_link_contract::native_target::LifecycleSubject::Runtime {
+                        runtime_id: runtime,
+                    },
+                    observed: stop.source.incarnation,
+                    opening: None,
+                    revision: stop.revision,
+                },
+            ));
         let id = command.id;
         self.inner
             .commands
@@ -1231,11 +1530,61 @@ impl Engine {
         )
         .await;
         let now = self.inner.clock.now();
-        let mut conn = self.inner.db.acquire().await?;
+        let mut tx = self.inner.db.begin().await?;
+        rows::lock_environment(&mut tx, environment).await?;
+        if let Ok(Ok(crate::commands::Outcome::Succeeded(result))) = &waited
+            && orch_db::queries::runtime_controls::bind_stopped(
+                &mut tx,
+                &stop.control,
+                id,
+                result,
+                Some(&stop.registration),
+            )
+            .await?
+            .is_none()
+        {
+            tx.commit().await.map_err(DbError::from)?;
+            return Err(StopError::Unavailable(
+                "the canonical Stop belongs to an older original; its data was kept".into(),
+            ));
+        }
+
+        let current = rows::runtime(&mut tx, runtime).await?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        if !orch_db::queries::runtime_controls::owns_current_source(&mut tx, &stop.control).await?
+            || !stop.registration.matches(&mut tx, &stop.control).await?
+        {
+            return Err(StopError::Unavailable(
+                "the old stop reply does not confirm the current native start".into(),
+            ));
+        }
+        if current.state != runtime_state::STOPPING {
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(());
+        }
+        if orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+            .await?
+            .as_ref()
+            != Some(&stop)
+        {
+            return Err(StopError::Unavailable(
+                "the old stop reply does not confirm the current stop".into(),
+            ));
+        }
+        // A host that has no such unit has nothing left to stop: the unit is stopped, and the host's word that it
+        // has none is written down, so that the next start makes a unit and does not start one.
+        let missing = matches!(
+            &waited,
+            Ok(Ok(crate::commands::Outcome::Failed(error)))
+                if error.code == orch_link_contract::commands::ErrorCode::NotFound.as_str()
+        );
+        let stopped = missing || matches!(&waited, Ok(Ok(crate::commands::Outcome::Succeeded(_))));
         match waited {
-            Ok(Ok(crate::commands::Outcome::Succeeded(_))) => {
-                rows::set_runtime_state(
-                    &mut conn,
+            _ if stopped => {
+                let moved = rows::set_runtime_state(
+                    &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
                     runtime_state::STOPPED,
@@ -1243,32 +1592,51 @@ impl Engine {
                     now,
                 )
                 .await?;
+                if moved && missing {
+                    rows::set_unit_missing(&mut tx, runtime, true).await?;
+                }
                 rows::set_status(
-                    &mut conn,
+                    &mut tx,
                     environment,
-                    &[status::RUNNING, status::OFFLINE],
+                    &[status::RUNNING, status::OFFLINE, status::PROVISIONING],
                     status::STOPPED,
                     None,
                     now,
                 )
                 .await?;
-                rows::close_shells(&mut conn, environment, now).await?;
+                rows::close_shells(&mut tx, environment, now).await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Ok(())
             }
             Ok(Ok(crate::commands::Outcome::Failed(error))) => {
                 rows::set_runtime_state(
-                    &mut conn,
+                    &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
-                    runtime_state::RUNNING,
-                    None,
+                    runtime_state::STOPPING,
+                    Some(&format!(
+                        "Stop unconfirmed: {}: {}",
+                        error.code, error.detail
+                    )),
                     now,
                 )
                 .await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Err(StopError::Host(format!("{}: {}", error.code, error.detail)))
             }
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
-                // The host has not said: the unit stands `stopping` and the schedule asks again.
+                // The host has not said: the unit stands `stopping`, dated again so that the next asking is a new
+                // command and not the one that ran out, and the schedule asks again.
+                rows::set_runtime_state(
+                    &mut tx,
+                    runtime,
+                    &[runtime_state::STOPPING],
+                    runtime_state::STOPPING,
+                    row.state_detail.as_deref(),
+                    now,
+                )
+                .await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Err(StopError::Host(
                     "the host did not answer in time; the stop is tried again".to_owned(),
                 ))
@@ -1365,6 +1733,11 @@ pub(crate) struct AttachWith {
     /// Whether the machine indexes the whole tree for use while it is offline, or only lists it when asked:
     /// the resolved `workspace.index`.
     pub(crate) index: IndexMode,
+    /// Resolved working allowances sent with the same attachment.
+    pub(crate) workspace: orch_link_contract::commands::WorkspaceLimits,
+    /// What the index, the recordings and the listings of the workspace leave out: the resolved
+    /// `workspace.ignore`, patterns written as in a gitignore file.
+    pub(crate) ignore: Vec<String>,
 }
 
 impl Default for AttachWith {
@@ -1382,8 +1755,77 @@ impl Default for AttachWith {
             executors: Vec::new(),
             // The same fallback as attach_with when workspace.index has not been set.
             index: IndexMode::Full,
+            workspace: Default::default(),
+            ignore: Vec::new(),
         }
     }
+}
+
+/// Resolves the same workspace defaults used by native attachment and interactive requests.
+pub async fn workspace_limits(
+    conn: &mut orch_db::Conn,
+    environment: Id,
+) -> Result<orch_link_contract::commands::WorkspaceLimits, EngineError> {
+    workspace_limits_at(conn, SettingsPlace::Environment(environment)).await
+}
+
+/// Resolves file-reader defaults for an independently authorized place or environment.
+pub async fn workspace_limits_at(
+    conn: &mut orch_db::Conn,
+    place: orch_settings::Place,
+) -> Result<orch_link_contract::commands::WorkspaceLimits, EngineError> {
+    let names = [
+        keys::WORKSPACE_DIRECTORY_ENTRIES,
+        keys::WORKSPACE_SEARCH_RESULTS,
+        keys::WORKSPACE_ARCHIVE_RESULTS,
+        keys::WORKSPACE_INDEX_ENTRIES,
+        keys::WORKSPACE_INDEX_SCAN_SECS,
+        keys::WORKSPACE_IGNORE_MAX_BYTES,
+        keys::WORKSPACE_IGNORE_CACHE_BYTES,
+        keys::WORKSPACE_DIRECTORY_IDLE_SECS,
+        keys::WORKSPACE_DIRECTORY_SLOTS,
+        keys::WORKSPACE_DIRECTORY_CACHE_BYTES,
+        keys::WORKSPACE_DIRECTORY_BUILDS,
+        keys::WORKSPACE_DIRECTORY_PAGE_BYTES,
+        keys::WORKSPACE_SEARCH_SLICE_SECS,
+        keys::WORKSPACE_GIT_DIFF_BYTES,
+    ];
+    let defs = names
+        .into_iter()
+        .map(|key| {
+            orch_settings_contract::registry::get(key).ok_or_else(|| {
+                EngineError::unreadable("workspace working allowances are not registered")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot =
+        orch_settings::Snapshot::load(conn, place, orch_settings::Wanted::Keys(&defs)).await?;
+    let value = |key| -> Result<u64, EngineError> {
+        let def = orch_settings_contract::registry::get(key).ok_or_else(|| {
+            EngineError::unreadable("a workspace working allowance is not registered")
+        })?;
+        snapshot
+            .resolve(def)
+            .value
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| EngineError::unreadable("a workspace working allowance is invalid"))
+    };
+    Ok(orch_link_contract::commands::WorkspaceLimits {
+        directory_entries: value(keys::WORKSPACE_DIRECTORY_ENTRIES)?,
+        search_results: value(keys::WORKSPACE_SEARCH_RESULTS)?,
+        archive_results: value(keys::WORKSPACE_ARCHIVE_RESULTS)?,
+        index_entries: value(keys::WORKSPACE_INDEX_ENTRIES)?,
+        index_scan_secs: value(keys::WORKSPACE_INDEX_SCAN_SECS)?,
+        ignore_max_bytes: value(keys::WORKSPACE_IGNORE_MAX_BYTES)?,
+        ignore_cache_bytes: value(keys::WORKSPACE_IGNORE_CACHE_BYTES)?,
+        directory_idle_secs: value(keys::WORKSPACE_DIRECTORY_IDLE_SECS)?,
+        directory_slots: value(keys::WORKSPACE_DIRECTORY_SLOTS)?,
+        directory_cache_bytes: value(keys::WORKSPACE_DIRECTORY_CACHE_BYTES)?,
+        directory_builds: value(keys::WORKSPACE_DIRECTORY_BUILDS)?,
+        directory_page_bytes: value(keys::WORKSPACE_DIRECTORY_PAGE_BYTES)?,
+        search_slice_secs: value(keys::WORKSPACE_SEARCH_SLICE_SECS)?,
+        git_diff_bytes: value(keys::WORKSPACE_GIT_DIFF_BYTES)?,
+    })
 }
 
 /// Works out what an attach carries, from what the environment and its home node give it.
@@ -1430,6 +1872,13 @@ pub(crate) async fn attach_with(
     )
     .await?
     .unwrap_or(IndexMode::Full);
+    let ignore = setting::<Vec<String>>(
+        conn,
+        SettingsPlace::Environment(environment),
+        keys::WORKSPACE_IGNORE,
+    )
+    .await?
+    .unwrap_or_default();
     let sources = orch_settings::resolve(
         conn,
         SettingsPlace::Environment(environment),
@@ -1479,6 +1928,8 @@ pub(crate) async fn attach_with(
         secrets,
         executors,
         index,
+        workspace: workspace_limits(conn, environment).await?,
+        ignore,
     })
 }
 
@@ -1536,13 +1987,15 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
         with.data_sources.clone()
     };
     EnvAttach {
+        workspace: with.workspace.clone(),
+
         resources: with.resources,
         data_generation: with.data_generation,
         storage: with.storage.clone(),
         data_sources,
         environment_id: environment,
         workspace_root: root.map(str::to_owned),
-        ignore: Vec::new(),
+        ignore: with.ignore.clone(),
         index: with.index,
         mounts: root.map(|_| with.mounts.clone()),
         variables: with.variables.clone(),
@@ -1552,7 +2005,124 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
 
 // ---------------------------------------------------------------- directories on people's machines
 
+/// Whether a key changes the effective file coverage or working allowances of a running workspace.
+#[must_use]
+pub fn is_workspace_setting(key: &str) -> bool {
+    matches!(
+        key,
+        keys::WORKSPACE_IGNORE
+            | keys::WORKSPACE_INDEX
+            | keys::WORKSPACE_INDEX_ENTRIES
+            | keys::WORKSPACE_INDEX_SCAN_SECS
+            | keys::WORKSPACE_IGNORE_MAX_BYTES
+            | keys::WORKSPACE_IGNORE_CACHE_BYTES
+            | keys::WORKSPACE_DIRECTORY_IDLE_SECS
+            | keys::WORKSPACE_DIRECTORY_SLOTS
+            | keys::WORKSPACE_DIRECTORY_CACHE_BYTES
+            | keys::WORKSPACE_DIRECTORY_BUILDS
+            | keys::WORKSPACE_DIRECTORY_PAGE_BYTES
+            | keys::WORKSPACE_DIRECTORY_ENTRIES
+            | keys::WORKSPACE_SEARCH_RESULTS
+            | keys::WORKSPACE_ARCHIVE_RESULTS
+            | keys::WORKSPACE_SEARCH_SLICE_SECS
+            | keys::WORKSPACE_GIT_DIFF_BYTES
+    )
+}
+
 impl Engine {
+    /// Tells the machine of every environment under `node` what its workspace leaves out and whether it
+    /// indexes, as they are now, without waiting for the environment to be attached again: a changed
+    /// list of ignored paths or index mode would otherwise reach a running environment only at its next
+    /// attach.
+    pub async fn workspace_scope_changed(&self, node: Id) -> Result<(), EngineError> {
+        let mut conn = self.db().acquire().await?;
+        let environments = if node == orch_db::queries::access::SYSTEM_ID {
+            sqlx::query_scalar("SELECT id FROM environments WHERE deleted_at IS NULL ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(orch_db::DbError::from)?
+        } else if orch_db::queries::environments::hosting::environment(&mut conn, node)
+            .await?
+            .is_some()
+        {
+            vec![node]
+        } else {
+            orch_db::queries::environments::hosting::environments_under(&mut conn, node).await?
+        };
+        drop(conn);
+        for environment in environments {
+            if let Err(error) = self.resend_workspace_settings(environment).await {
+                tracing::warn!(%error, %environment, "the machine was not told of the changed workspace settings; it learns them at its next attach");
+            }
+        }
+        Ok(())
+    }
+
+    /// The attach the machine was given last, with the ignored paths, the index mode and what its
+    /// commands find in their environment as they are now. False when there is nothing to tell: no
+    /// running environment on a machine that is here.
+    async fn resend_workspace_settings(&self, environment: Id) -> Result<bool, EngineError> {
+        let (machine, generation, body) = {
+            let mut conn = self.db().acquire().await?;
+            let Some(env) =
+                orch_db::queries::environments::hosting::environment(&mut conn, environment)
+                    .await?
+            else {
+                return Ok(false);
+            };
+            let Some(machine) = env.machine_id else {
+                return Ok(false);
+            };
+            if env.deleted_at.is_some()
+                || env.status != "running"
+                || orch_db::queries::resources::machine(&mut conn, machine)
+                    .await?
+                    .is_none_or(|machine| !machine.online || !machine.is_active())
+            {
+                return Ok(false);
+            }
+            let Some(last) =
+                orch_db::queries::resources::mounts::last_attach(&mut conn, environment, machine)
+                    .await?
+            else {
+                return Ok(false);
+            };
+            let with = attach_with(&mut conn, environment, self.inner.clock.now()).await?;
+            let mut body: EnvAttach = serde_json::from_value(last)?;
+            body.ignore = with.ignore;
+            body.index = with.index;
+            body.workspace = with.workspace;
+            body.variables = with.variables;
+            body.secrets = with.secrets;
+            (machine, env.generation, body)
+        };
+        let command = Outgoing::new(
+            orch_types::new_id(),
+            machine,
+            SerialKey::Environment(environment),
+            &body,
+        )?;
+        let Some(Outcome::Succeeded(facts)) = self.ask_bounded(command).await? else {
+            return Ok(false);
+        };
+        let mut conn = self.db().acquire().await?;
+        if orch_db::queries::environments::hosting::environment(&mut conn, environment)
+            .await?
+            .is_some_and(|env| env.machine_id == Some(machine) && env.generation == generation)
+        {
+            orch_db::queries::environments::hosting::record_facts(
+                &mut conn,
+                environment,
+                &facts,
+                None,
+                self.inner.clock.now(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Brings the status of the environments on people's machines in step with their machines, which
     /// the sweep does each time it comes round: one whose machine has a session that it has not been
     /// attached in is attached; one whose machine has none is `offline`.
@@ -1564,12 +2134,9 @@ impl Engine {
 
     async fn follow_machines(&self) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
-        let pause =
-            chrono::Duration::from_std(self.inner.config.hosting.attach_retry).unwrap_or_default();
         let due = {
             let mut conn = self.inner.db.acquire().await?;
-            rows::connected_out_of_step(&mut conn, now - pause, self.inner.config.sweep_batch)
-                .await?
+            rows::connected_out_of_step(&mut conn, now, self.inner.config.sweep_batch).await?
         };
         for item in due {
             if !item.here {
@@ -1584,9 +2151,7 @@ impl Engine {
                 )
                 .await?;
             } else if !item.serves {
-                let mut conn = self.inner.db.acquire().await?;
-                rows::connected_attach_failed(&mut conn, item.id, item.session, NOT_SERVED, now)
-                    .await?;
+                self.attach_refused(&item, NOT_SERVED).await?;
             } else {
                 self.attach_in_background(item);
             }
@@ -1617,6 +2182,8 @@ impl Engine {
     async fn attach_connected(&self, item: &Connected) -> Result<(), EngineError> {
         let mut with = {
             let mut conn = self.inner.db.acquire().await?;
+            rows::connected_attempting(&mut conn, item.id, item.session, self.inner.clock.now())
+                .await?;
             attach_with(&mut conn, item.id, self.inner.clock.now()).await?
         };
         let mut skipped = None;
@@ -1643,11 +2210,13 @@ impl Engine {
             }
         }
         // The identifier names the session, so that a process that asks again in the same session asks
-        // for the same command; a retry after a refusal names the moment of the refusal, so that it is
+        // for the same command; a retry after a refusal names its captured eligibility, so that it is
         // a command of its own.
         let session = item.session.map_or(0, |at| at.timestamp_micros());
         let attempt = if item.status == status::FAILED {
-            item.updated_at.timestamp_micros()
+            item.attach_retry_at
+                .unwrap_or(item.updated_at)
+                .timestamp_micros()
         } else {
             0
         };
@@ -1783,16 +2352,41 @@ impl Engine {
         &self,
         command: Outgoing,
     ) -> Result<Option<Outcome>, EngineError> {
+        let command = crate::mount_copies::location::preparation::observe(self, command).await?;
         let command = crate::jobs::environment_move::preparation::command(self, command).await?;
+        let input = matches!(
+            command.kind,
+            orch_link_contract::commands::CommandKind::NodeRuntimeCreate
+                | orch_link_contract::commands::CommandKind::NodeMountsApply
+        )
+        .then(|| command.clone());
         let id = command.id;
+        let attaching = command.kind == orch_link_contract::commands::CommandKind::EnvAttach;
+        let issued = command.clone();
         self.inner.commands.issue(command).await?;
+        if attaching && let Err(error) = self.record_environment_attach(&issued).await {
+            tracing::warn!(%error, command=%id, "the issued attach has no current preparation receipt");
+        }
         match tokio::time::timeout(
             self.inner.config.hosting.attach_wait,
             self.inner.commands.wait(id),
         )
         .await
         {
-            Ok(outcome) => Ok(Some(outcome?)),
+            Ok(outcome) => {
+                let outcome = outcome?;
+                if let (Some(command), Outcome::Succeeded(result)) = (&input, &outcome) {
+                    let mut conn = self.db().acquire().await?;
+                    crate::resource_facts::applications::inputs::record_command(
+                        &mut conn,
+                        command,
+                        result,
+                        self.inner.clock.now(),
+                    )
+                    .await?;
+                }
+                Ok(Some(outcome))
+            }
             Err(_) => {
                 self.inner.commands.cancel(id).await?;
                 Ok(None)
@@ -1808,12 +2402,20 @@ impl Engine {
             .await?
             .is_some_and(|standing| standing.here);
         if still_here {
+            let at = self.inner.clock.now();
+            let pause = chrono::Duration::from_std(self.inner.config.hosting.attach_retry)
+                .map_err(EngineError::unreadable)?;
+            let retry_at = at.checked_add_signed(pause).ok_or_else(|| {
+                EngineError::unreadable("the attach retry time is outside the supported range")
+            })?;
             rows::connected_attach_failed(
                 &mut conn,
                 item.id,
                 item.session,
                 why,
-                self.inner.clock.now(),
+                at,
+                retry_at,
+                item.revision,
             )
             .await?;
         }
@@ -1875,6 +2477,23 @@ impl Engine {
 
 // ---------------------------------------------------------------- what idle and unused mean
 
+/// Resolves a declared removal window by the same rule used when removal is accepted.
+pub fn bounded_removed_keep_days(
+    requested: i64,
+    is_default: bool,
+    maximum: i64,
+) -> Result<i64, EngineError> {
+    crate::retention::bounded_days(requested, is_default, maximum).map(i64::from)
+}
+
+/// Native work that holds the idle clock, fetched together for a resource projection.
+pub async fn environments_with_background_work(
+    conn: &mut orch_db::Conn,
+    environments: &[Id],
+) -> Result<Vec<Id>, EngineError> {
+    crate::background_wake::running_environments(conn, environments).await
+}
+
 /// When an environment will be stopped for being idle: its last activity and the minutes its
 /// `env.idle_stop_minutes` allows; none for a stopped one, or when the setting is zero (never).
 pub async fn idle_stop_at(
@@ -1920,6 +2539,17 @@ mod storage_tests {
         assert!(
             check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
         );
+    }
+
+    #[test]
+    fn attaching_carries_the_ignored_paths_of_the_workspace_to_the_machine() {
+        let id = orch_types::new_id();
+        let with = AttachWith {
+            ignore: vec!["bulk/".to_owned(), "target/".to_owned()],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(attach_body(id, None, &with)).unwrap();
+        assert_eq!(wire["ignore"], serde_json::json!(["bulk/", "target/"]));
     }
 
     #[test]

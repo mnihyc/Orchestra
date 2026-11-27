@@ -12,8 +12,8 @@ use orch_agent_contract::events::{
     AgentMessagePayload, AgentMessagePhase, SubagentState, ToolCallPayload, ToolPayload,
 };
 use orch_api_contract::threads::{
-    Delivery, ItemPayload, OutputRef, RawCall, ThreadItemList, ThreadItemListQuery, ThreadSyncGet,
-    ThreadSyncGetQuery,
+    Delivery, ItemPayload, OutputRef, RawCall, ThreadItemGet, ThreadItemList, ThreadItemListQuery,
+    ThreadItemRawGet, ThreadSyncGet, ThreadSyncGetQuery,
 };
 use orch_link_contract::events::{EmittedItemKind, Event, ItemStarted};
 use orch_link_contract::foreign::ItemPayload as NativePayload;
@@ -232,4 +232,133 @@ async fn a_busy_child_keeps_its_parent_visible_and_its_history_flags_ignore_the_
         .ok();
     assert!(main.items.iter().all(|item| item.stream == "main"));
     assert!(main.items.iter().any(|item| item.id == parent.id));
+}
+
+const NATIVE_RESULT: &str = "the exact native result, as the harness reported it";
+
+#[tokio::test]
+async fn a_tool_call_in_a_threads_items_leaves_out_its_raw_form_which_is_read_apart() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    assert!(
+        s.say(
+            &s.ada,
+            thread,
+            "Run the checks",
+            Delivery::Queue,
+            "raw-apart"
+        )
+        .await
+        .status
+        .is_success()
+    );
+    let start = s.rig.turn_start(thread, 0).await;
+    s.rig.say(thread, rig::turn_began(start.turn_id)).await;
+    s.rig
+        .say(
+            thread,
+            Event::ItemStarted(ItemStarted {
+                turn_id: start.turn_id,
+                native_ref: "checks".to_owned(),
+                stream: "main".to_owned(),
+                parent_native_ref: None,
+                kind: EmittedItemKind::ToolCall,
+                payload: NativePayload::ToolCall(ToolCallPayload {
+                    tool: ToolPayload::Command {
+                        command: "cargo test".to_owned(),
+                        cwd: "/workspace".to_owned(),
+                        exit_code: Some(0),
+                        output: OutputRef::of("ok"),
+                        process_id: None,
+                        background: false,
+                        actions: Vec::new(),
+                    },
+                    title: "Run the checks".to_owned(),
+                    started_at: s.rig.world.now().into(),
+                    duration_ms: Some(1),
+                    raw: RawCall {
+                        name: "Bash".to_owned(),
+                        input: OutputRef::of("{\"command\":\"cargo test\"}"),
+                        output: Some(OutputRef::of(NATIVE_RESULT)),
+                        is_error: false,
+                    },
+                }),
+            }),
+        )
+        .await;
+    rig::eventually("the tool call is ingested", || async {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM items WHERE thread_id=$1 AND kind='tool_call'",
+        )
+        .bind(thread)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+        count == 1
+    })
+    .await;
+
+    let sync = s
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&thread])
+        .token(&s.ada.token)
+        .query(&ThreadSyncGetQuery::default())
+        .send()
+        .await
+        .ok();
+    let (id, call) = sync
+        .items
+        .iter()
+        .find_map(|item| match &item.payload {
+            ItemPayload::ToolCall(call) => Some((item.id, call)),
+            _ => None,
+        })
+        .expect("the thread's items hold the tool call");
+    assert!(call.raw.is_none(), "the sync leaves out the raw form");
+    assert!(
+        !serde_json::to_string(&sync)
+            .unwrap()
+            .contains(NATIVE_RESULT),
+        "what the harness reported is not on the wire a second time"
+    );
+    let item = s
+        .rig
+        .world
+        .app
+        .call(ThreadItemGet, &[&thread, &id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(matches!(&item.payload, ItemPayload::ToolCall(call) if call.raw.is_none()));
+
+    let raw = s
+        .rig
+        .world
+        .app
+        .call(ThreadItemRawGet, &[&thread, &id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(raw.name, "Bash");
+    assert_eq!(raw.input.inline, "{\"command\":\"cargo test\"}");
+    assert_eq!(
+        raw.output.as_ref().map(|output| output.inline.as_str()),
+        Some(NATIVE_RESULT)
+    );
+    let stranger = s
+        .rig
+        .world
+        .app
+        .call(ThreadItemRawGet, &[&thread, &id])
+        .token(&s.bea.token)
+        .send()
+        .await;
+    assert!(
+        !stranger.status.is_success(),
+        "whoever may not view the thread reads none of its calls"
+    );
 }

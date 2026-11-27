@@ -127,6 +127,7 @@ pub(crate) fn requested(
             | "ThreadSyncGet"
             | "ThreadItemList"
             | "ThreadItemGet"
+            | "ThreadItemRawGet"
             | "ThreadItemOutputGet"
             | "ThreadOutlineGet"
             | "ThreadSegmentList"
@@ -248,14 +249,11 @@ pub(crate) async fn document_entry(
     if life.as_ref().is_some_and(|life| life.purged_at.is_some()) {
         return Err(ApiError::not_found());
     }
-    let until = domain::restore_deadline_in(
-        conn,
-        &entry.entry,
-        crate::routes::document_tree::options(ctx),
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .ok_or_else(ApiError::not_found)?;
+    let settings = crate::routes::document_tree::options(ctx, conn).await?;
+    let until = domain::restore_deadline_in(conn, &entry.entry, settings)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::not_found)?;
     let by = match item {
         domain::Item::Document(id) => documents::get(conn, id)
             .await?
@@ -276,6 +274,7 @@ pub(crate) async fn document_entry(
         deletion: row.deleted_in,
         reads,
         banner: DeletedInspection {
+            cleanup_hold: None,
             deleted_at: Time::new(deleted),
             deleted_by: person,
             purge_at: Time::new(until),
@@ -388,12 +387,13 @@ pub async fn prepare(ctx: &Ctx, conn: &mut Conn, principal: &Principal) -> ApiRe
     if life.as_ref().is_some_and(|l| l.purged_at.is_some()) {
         return Err(ApiError::new(ErrorCode::Gone, "this thing was purged"));
     }
-    let days =
-        i64::try_from(ctx.app.config.retention.soft_delete_days).map_err(ApiError::internal)?;
-    let until = life
-        .as_ref()
-        .and_then(|l| l.purge_at)
-        .unwrap_or(deleted + chrono::Duration::days(days));
+    let until = match life.as_ref().and_then(|l| l.purge_at) {
+        Some(promised) => promised,
+        None => orch_settings::retention::purge_at(
+            deleted,
+            orch_settings::retention::deleted_keep_days(conn).await?,
+        ),
+    };
     let person = match by {
         Some(id) => authorization::refusals::user_refs(conn, &[id])
             .await?
@@ -405,6 +405,16 @@ pub async fn prepare(ctx: &Ctx, conn: &mut Conn, principal: &Principal) -> ApiRe
         id,
         deletion: life.as_ref().and_then(|l| l.deletion_id),
         banner: DeletedInspection {
+            cleanup_hold: if canonical == "node" {
+                orch_db::queries::notifications::upkeep::node_cleanup_hold(conn, id, ctx.now)
+                    .await?
+                    .map(|held| orch_api_contract::nodes::NodeCleanupHold {
+                        held,
+                        measured_at: Time::new(ctx.now),
+                    })
+            } else {
+                None
+            },
             deleted_at: Time::new(deleted),
             deleted_by: person,
             purge_at: Time::new(until),
@@ -549,7 +559,10 @@ pub async fn children_in(
         .transpose()?;
     let mut entries = Vec::new();
     loop {
-        let ids:Vec<Id>=sqlx::query_scalar("SELECT id FROM nodes WHERE parent_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(parent).bind(after).bind(i64::from(MAX_LIMIT)).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+        let matching = orch_db::queries::search::matching_sql("name", "$4");
+        let ids: Vec<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT id FROM nodes WHERE parent_id=$1 AND ($2::uuid IS NULL OR id>$2) AND {matching} ORDER BY id LIMIT $3")))
+            .bind(parent).bind(after).bind(i64::from(MAX_LIMIT)).bind(orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or("")).like_patterns())
+            .fetch_all(&mut *conn).await.map_err(DbError::from)?;
         if ids.is_empty() {
             break;
         }
@@ -740,6 +753,7 @@ pub mod snapshot_tests {
             deletion: Some(Id::from_u128(2)),
             reads: vec![Id::from_u128(1), Id::from_u128(3)],
             banner: DeletedInspection {
+                cleanup_hold: None,
                 deleted_at: Time::new(chrono::DateTime::UNIX_EPOCH),
                 deleted_by: None,
                 purge_at: Time::new(chrono::DateTime::UNIX_EPOCH),
