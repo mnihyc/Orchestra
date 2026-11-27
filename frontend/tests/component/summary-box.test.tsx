@@ -345,19 +345,40 @@ it.each(['en', 'zh-CN'] as const)('folds a place summary that has nothing yet in
   await setLocale(locale);
   const page: SummaryTarget = { kind: 'topic', reference: '/topic/login' };
   const empty = snapshot({ state: 'empty', text: null, producer: null });
-  const view = show(<SummaryBox readerKey="fold-reader" target={page} summary={empty} onRefresh={vi.fn<() => Promise<void>>().mockResolvedValue(undefined)} onAsk={vi.fn()} foldWhenEmpty />);
-  // One row, closed: its title and that it has nothing yet; its acts and its empty line wait inside.
-  const fold = view.container.querySelector('details[data-summary-fold]');
-  if (!(fold instanceof HTMLDetailsElement)) throw new Error('The empty summary is not folded');
-  expect(fold.open).toBe(false);
-  expect(fold.querySelector('summary')).toHaveTextContent(i18n.t('summaryBox.title'));
-  expect(fold.querySelector('summary')).toHaveTextContent(i18n.t('summaryBox.empty'));
-  expect(screen.queryByRole('button', { name: i18n.t('summaryBox.ask') })).not.toBeVisible();
-  await userEvent.click(fold.querySelector('summary')!);
-  expect(fold.open).toBe(true);
+  const props = { readerKey: 'fold-reader', target: page, onRefresh: vi.fn<() => Promise<void>>().mockResolvedValue(undefined), onAsk: vi.fn() };
+  const view = show(<SummaryBox {...props} summary={empty} foldWhenEmpty />);
+  // One row, closed: its title and that it has nothing yet; its acts and its empty line wait until it is opened.
+  const row = screen.getByRole('button', { name: new RegExp(i18n.t('summaryBox.title'), 'u') });
+  expect(row).toHaveAttribute('aria-expanded', 'false');
+  expect(row).toHaveTextContent(i18n.t('summaryBox.empty'));
+  expect(screen.queryByRole('button', { name: i18n.t('summaryBox.ask') })).not.toBeInTheDocument();
+  await userEvent.click(row);
   expect(screen.getByRole('button', { name: i18n.t('summaryBox.ask') })).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('summaryBox.title') })).toHaveAttribute('aria-expanded', 'true');
   // A summary with words is shown as it always was, open.
-  view.rerender(<SummaryBox readerKey="fold-reader" target={page} summary={snapshot({ revision: '2' })} onRefresh={vi.fn<() => Promise<void>>().mockResolvedValue(undefined)} onAsk={vi.fn()} foldWhenEmpty />);
-  expect(view.container.querySelector('details[data-summary-fold]')).toBeNull();
+  view.rerender(<SummaryBox {...props} summary={snapshot({ revision: '2' })} foldWhenEmpty />);
+  expect(view.container.querySelector('[data-summary-fold]')).toBeNull();
   expect(screen.getByText('The review is ready')).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps an empty thread summary closed whatever the person chose for one with words, and their choice for one with words (%s)', async (locale) => {
+  await setLocale(locale);
+  const thread: SummaryTarget = { kind: 'thread', reference: '/thread/t1' };
+  const onOpenChange = vi.fn<(open: boolean) => void>();
+  const props = { readerKey: 'thread-fold-reader', target: thread, onRefresh: vi.fn<() => Promise<void>>().mockResolvedValue(undefined), onAsk: vi.fn(), foldWhenEmpty: true };
+  // The person keeps summaries shown, but this one has nothing yet: one closed row.
+  const view = show(<SummaryBox {...props} summary={snapshot({ state: 'empty', text: null, producer: null })} fold={{ open: true, onOpenChange }} />);
+  expect(screen.getByRole('button', { name: new RegExp(i18n.t('summaryBox.title'), 'u') })).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByRole('button', { name: i18n.t('summaryBox.ask') })).not.toBeInTheDocument();
+  // With words it is shown, and its title puts it away, as the person's own choice.
+  view.rerender(<SummaryBox {...props} summary={snapshot({ revision: '2' })} fold={{ open: true, onOpenChange }} />);
+  expect(screen.getByText('The review is ready')).toBeVisible();
+  const title = screen.getByRole('button', { name: i18n.t('summaryBox.title') });
+  expect(title).toHaveAttribute('aria-expanded', 'true');
+  await userEvent.click(title);
+  expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  // Put away, its row says its first line.
+  view.rerender(<SummaryBox {...props} summary={snapshot({ revision: '3', text: 'The review is ready\nSecond line' })} fold={{ open: false, onOpenChange }} />);
+  expect(screen.getByRole('button', { name: new RegExp(i18n.t('summaryBox.title'), 'u') })).toHaveTextContent('The review is ready');
+  expect(screen.queryByText('Second line')).not.toBeInTheDocument();
 });

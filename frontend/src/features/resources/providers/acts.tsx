@@ -30,6 +30,8 @@ import type { Provider as FullProvider, ProviderListRow } from '@/generated/api-
 import { useAppearance } from '@/lib/appearance';
 import { holds } from '@/lib/permissions';
 import { useNow } from '@/lib/time';
+import { useErrorText } from '@/ui/errorText';
+import { toast } from '@/ui/Toast';
 
 type ProviderTarget = FullProvider | ProviderListRow;
 
@@ -69,6 +71,22 @@ export function useProviderActs(options: { onTab?: (provider: ProviderTarget, ta
   };
   const enableResource = (provider: ProviderTarget): EnableResource => ({target:{object:{kind:'provider',id:provider.id},model_id:null},name:provider.name,admin:adminSpec(provider,'provider.manage'),enable:(runWaiting)=>enableProvider(provider.id,runWaiting)});
   const turnOff = (provider: ProviderTarget): Promise<unknown> => disableProvider(provider.id);
+  const describe = useErrorText();
+  /** Switches it off at once: one line says the running threads that stopped, Show uses opens the threads bound to it,
+   * and Undo switches it on again. A note or a notice to the people it stops goes with Disable… on its page. */
+  const disableNow = (provider: ProviderTarget) => void disableProvider(provider.id).then(() => {
+    toast({
+      tone: 'success',
+      title: t('providers.danger.disabled', { name: provider.name }),
+      ...(provider.running_threads > 0 ? { description: t('trash.stopped', { count: provider.running_threads }) } : {}),
+      action: [
+        { label: t('resourceImpact.showUses'), keep: true, run: () => toTab(provider, 'threads') },
+        { label: t('places.toast.undo'), run: () => void enableProvider(provider.id).then(
+          () => toast({ tone: 'success', title: t('providers.danger.enabledAgain', { name: provider.name }) }),
+          (error: unknown) => toast({ tone: 'danger', title: t('providers.danger.notEnabled', { name: provider.name }), description: describe(error).message })) },
+      ],
+    });
+  }, (error: unknown) => toast({ tone: 'danger', title: t('providers.danger.notDisabled', { name: provider.name }), description: describe(error).message }));
   const drop = (provider: ProviderTarget): Promise<void> => deleteProvider(provider.id);
 
   const actsOf = (provider: ProviderTarget, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
@@ -87,7 +105,7 @@ export function useProviderActs(options: { onTab?: (provider: ProviderTarget, ta
             run: () => toTab(provider, step.tab),
           } : null);
     const enable: Act | null = guarded(provider.status === 'disabled' ? { id: 'enable', label: t('resources.act.enable'), icon: <CirclePlay aria-hidden />, run: () => enablePlan.ask(enableResource(provider)) } : null);
-    const disable: Act | null = guarded(provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', provider }) } : null);
+    const disable: Act | null = guarded(provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disableNow'), icon: <Ban aria-hidden />, run: () => disableNow(provider) } : null);
     const rename: Act | null = guarded({ id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', provider }) });
     const share = shareAct(t, { kind: 'provider', id: provider.id, name: provider.name }, provider.access);
     const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'provider', id: provider.id }) };
@@ -113,15 +131,10 @@ export function useProviderActs(options: { onTab?: (provider: ProviderTarget, ta
     },
     {
       id: 'disable',
-      label: t('resources.act.disable'),
+      label: t('resources.act.disableNow'),
       icon: <Ban aria-hidden />,
       can: (provider) => holds(provider.access, 'provider.manage') && provider.status !== 'disabled',
       run: turnOff,
-      confirm: (rows) => ({
-        title: t('providers.bulk.disableTitle', { count: rows.length }),
-        body: <BulkNames names={rows.map((row) => row.name)} lead={t('providers.bulk.disableBody')} />,
-        label: t('providers.bulk.disableConfirm', { count: rows.length }),
-      }),
       done: (count) => t('providers.bulk.disabled', { count }),
     },
     {

@@ -1,18 +1,20 @@
-/** The one list that the composer's choices share (model, effort, speed, access program, provider, agent): single-line rows with a muted second line only where there is something to say, the current row checked, groups under small headers that are shown only when they hold rows, a search field once more than eight rows are listed, and its own scroll.
+/** The one list that the composer's choices share (model, effort, speed, access program, provider, agent): single-line rows (the name, then its facts in muted words on the same line), the current row checked, groups under small headers that are shown only when they hold rows, a search field once more than eight rows are listed, and its own scroll.
  *
- * A control of the box shows its current value alone. Its list opens above it: nothing in it is chosen by
- * moving through it, a row is chosen by pressing it, and a row that cannot be chosen stays in its place,
- * greyed, with the reason in its second line. The same list stands in the dialogs that choose a provider,
- * an agent, a model or an effort, so a person meets one way of choosing.
+ * A control of the box shows its current value alone. Its list opens below it where the screen has room for it (a
+ * dialog) and above it where it does not (the box at the foot of the screen): nothing in it is chosen by moving through
+ * it, a row is chosen by pressing it, and in each group the rows that can be chosen come first; one that cannot follows
+ * them, greyed, with its reason under its name. Facts about the current choice wait, closed, under one line at the foot.
+ * The same list stands in the dialogs that choose a provider, an agent, a model or an effort, so a person meets one way
+ * of choosing.
  */
-import { Check, ChevronDown } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight } from 'lucide-react';
 import { Fragment, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useCompactControls } from '@/features/workbench/Narrow';
 import { isComposing } from '@/lib/shortcuts';
 import { Button } from '@/ui/Button';
-import { Choice } from '@/ui/Choice';
+import { Choice, factLine, hasChoiceDescription } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
 import { Input } from '@/ui/Input';
 import { Popover } from '@/ui/Popover';
@@ -26,7 +28,7 @@ export interface PickRow {
   name: string;
   /** Muted words after the name, on the same line: where two rows share a name, the place of each. */
   place?: string | undefined;
-  /** The muted second line. */
+  /** The row's fact, after its place on the same line; under the name, as the reason, where the row cannot be chosen. */
   detail?: ReactNode;
   /** A recovery act beside a disabled choice. */
   action?: ReactNode;
@@ -69,10 +71,11 @@ function Row({ row, tabStop, onFocused, onChoose }: { row: PickRow; tabStop: boo
   const disabled = row.disabled === true;
   const name = <span className="flex min-w-0 items-center gap-2">
     <span className="min-w-0 truncate">{row.name}</span>
-    {row.place !== undefined && row.place !== '' && <span className="min-w-0 truncate text-xs font-normal text-text-muted">{t('startFlow.separator')}{row.place}</span>}
     {row.mark}
   </span>;
-  return <Choice presentation="picker" compact name={name} description={row.detail} className={cx('w-full', disabled ? 'text-text-disabled' : 'text-text')}>
+  // One line: the name, then its place and its fact; a reason why a row cannot be chosen is read whole, under the name.
+  const inline = !disabled || !hasChoiceDescription(row.detail);
+  return <Choice presentation="picker" compact inline={inline} reason={!inline} name={name} description={factLine([row.place, row.detail], t('resourceFacts.separator'))} className={cx('w-full', disabled ? 'text-text-disabled' : 'text-text')}>
     {(content, control) => <button {...control} type="button" role="menuitemradio" aria-checked={row.checked === true} disabled={disabled}
       tabIndex={!disabled && tabStop ? 0 : -1} data-highlighted={!disabled && (hovered || focused) ? '' : undefined}
       onFocus={() => { setFocused(true); onFocused(); }} onBlur={() => setFocused(false)}
@@ -95,13 +98,15 @@ export interface PickListProps {
   above?: ReactNode;
   /** What stands under the rows. */
   below?: ReactNode;
+  /** Facts about the current choice: closed under one line at the foot until asked for, so the rows keep the room. */
+  facts?: ReactNode;
   /** Said where the list has no row at all. */
   empty?: ReactNode;
   className?: string;
 }
 
 /** The rows of a choice, grouped, searchable and with their own scroll. */
-export function PickList({ label, searchLabel, groups, onChoose, above, below, empty, className }: PickListProps) {
+export function PickList({ label, searchLabel, groups, onChoose, above, below, facts, empty, className }: PickListProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [focusKey, setFocusKey] = useState<string | null>(null);
@@ -111,8 +116,13 @@ export function PickList({ label, searchLabel, groups, onChoose, above, below, e
   const menu = useRef<HTMLUListElement>(null);
   const total = groups.reduce((sum, group) => sum + group.rows.length, 0);
   const needle = fold(query.trim());
+  const matching = (row: PickRow) => needle === '' || fold(`${row.name} ${row.place ?? ''} ${typeof row.detail === 'string' ? row.detail : ''} ${row.keywords ?? ''}`).includes(needle);
+  // In each group the rows that can be chosen come first; the others keep their order after them.
   const shown = groups
-    .map((group) => ({ ...group, rows: needle === '' ? group.rows : group.rows.filter((row) => fold(`${row.name} ${row.place ?? ''} ${row.keywords ?? ''}`).includes(needle)) }))
+    .map((group) => {
+      const rows = group.rows.filter(matching);
+      return { ...group, rows: [...rows.filter((row) => row.disabled !== true), ...rows.filter((row) => row.disabled === true)] };
+    })
     .filter((group) => group.rows.length > 0);
   const rows = shown.flatMap((group) => group.rows);
   // One tab stop: the row that is chosen now, or the first that can be chosen.
@@ -148,6 +158,12 @@ export function PickList({ label, searchLabel, groups, onChoose, above, below, e
         </Fragment>)}
       </ul>}
     {below}
+    {hasChoiceDescription(facts) && <details className="group min-w-0 shrink-0" data-pick-facts>
+      <summary className="focus-inset flex cursor-default list-none items-center gap-1 rounded-sm px-2 py-1 text-sm text-text-muted select-none hover:text-text [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden size={14} className="shrink-0 text-text-subtle transition-transform group-open:rotate-90" />{t('common.details')}
+      </summary>
+      <div className="min-w-0 pt-1">{facts}</div>
+    </details>}
   </div>;
 }
 
@@ -167,6 +183,7 @@ export interface ChoiceChipProps extends Omit<PickListProps, 'label' | 'classNam
   disabled?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** The side the list prefers: below, as a field's list opens; it opens above where the room below cannot show its rows (the box at the foot of the screen). */
   side?: 'top' | 'bottom';
   /** The name of the button where it is not "what: value". */
   ariaLabel?: string;
@@ -176,7 +193,7 @@ export interface ChoiceChipProps extends Omit<PickListProps, 'label' | 'classNam
 }
 
 /** A control that shows its current choice and opens its list. */
-export function ChoiceChip({ what, value, showSubject = false, title, reason, disabled = false, open, onOpenChange, side = 'top', ariaLabel, control, className, onChoose, ...list }: ChoiceChipProps) {
+export function ChoiceChip({ what, value, showSubject = false, title, reason, disabled = false, open, onOpenChange, side = 'bottom', ariaLabel, control, className, onChoose, ...list }: ChoiceChipProps) {
   const { t } = useTranslation();
   const compact = useCompactControls();
   const [own, setOwn] = useState(false);

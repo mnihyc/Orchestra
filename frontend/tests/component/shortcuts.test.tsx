@@ -65,6 +65,23 @@ it.each(['en', 'zh-CN'] as const)('says nothing of a target that does not open, 
   expect(screen.queryByRole('link')).not.toBeInTheDocument();
 });
 
+it.each(['en', 'zh-CN'] as const)('names a deleted target by its last name, marked deleted, where its reader may know it, in %s', async (locale) => {
+  // The server gives the name a deleted target had only to a reader who would find it by that name in its trash; the
+  // row says it with the mark, and still opens nothing.
+  await setLocale(locale);
+  show(<ShortcutLink shortcut={shortcut({ state: 'deleted', item: null, last_name: 'Launch plan' })} className="row" />);
+  const row = document.querySelector('[data-shortcut="kept"]');
+  expect(screen.getByText('Launch plan')).toBeVisible();
+  expect(row?.querySelector('[data-shortcut-mark]')).toHaveTextContent(i18n.t('shortcuts.state.deleted'));
+  expect(row).toHaveAttribute('title', i18n.t('shortcuts.state.deletedNamed', { name: 'Launch plan' }));
+  expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  // A name is never told for a target that is only unavailable to its reader, whatever is held.
+  cleanup();
+  show(<ShortcutLink shortcut={shortcut({ state: 'unavailable', item: null, last_name: 'Launch plan' })} className="row" />);
+  expect(document.body.textContent).not.toContain('Launch plan');
+  expect(screen.getByText(i18n.t('shortcuts.state.unavailable'))).toBeVisible();
+});
+
 it('moves or removes the shortcut and never its target; one of the person\'s own is unstarred', async () => {
   const user = userEvent.setup();
   const { unmount } = show(<ShortcutMenuButton shortcut={shortcut()} />);

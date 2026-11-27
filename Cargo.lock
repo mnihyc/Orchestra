@@ -5338,6 +5338,7 @@ dependencies = [
  "orch-config",
  "orch-link-contract",
  "orch-pki",
+ "orch-telemetry",
  "orch-testkit",
  "orch-types",
  "rand 0.10.3",
@@ -5943,6 +5944,7 @@ dependencies = [
 name = "orch-telemetry"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "metrics",
  "metrics-exporter-prometheus",
  "orch-types",

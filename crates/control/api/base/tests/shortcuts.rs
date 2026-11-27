@@ -352,6 +352,99 @@ async fn a_deleted_target_shows_as_deleted_and_comes_back_with_its_restore() {
     assert_eq!(gone.state, ShortcutTargetState::Deleted);
 }
 
+/// A shortcut whose target was deleted says what it pointed to, by the name the target had, to whoever would find it
+/// by that name in the trash where it lies: the place's manager, or for a document whoever could read it as it was.
+/// Anybody else is told it is deleted and nothing more; it opens nothing for anybody.
+#[tokio::test]
+async fn a_deleted_target_keeps_its_last_name_for_whoever_finds_it_in_its_trash() {
+    let desk = Desk::new().await;
+    let bea = desk.member("bea", "viewer").await;
+    let elsewhere = desk.another_topic("Elsewhere").await;
+    let plan = desk.make(&desk.ada, "Plan").await;
+    let secret = desk
+        .make_body(
+            &desk.ada,
+            NodeDocumentCreateBody {
+                access: Some(NewDocumentAccess::Private),
+                ..body("Salaries")
+            },
+        )
+        .await
+        .ok();
+    let topic = make_topic(&desk.world, &desk.ada, desk.project, "Gone soon")
+        .await
+        .base
+        .id;
+    for what in [
+        target(NameKind::Document, plan.base.id),
+        target(NameKind::Document, secret.base.id),
+        target(NameKind::Topic, topic),
+    ] {
+        keep(&desk, &desk.ada, elsewhere, what).await;
+    }
+    // Before: Bea reads the plan through its shortcut; the private document is not hers to know of.
+    let before = kept_in(&desk, &bea, elsewhere).await;
+    let open = before
+        .iter()
+        .find(|one| one.target.id == plan.base.id)
+        .unwrap();
+    assert_eq!(
+        (open.state, name(open)),
+        (ShortcutTargetState::Open, Some("Plan"))
+    );
+    for document in [plan.base.id, secret.base.id] {
+        let deleted = desk
+            .world
+            .app
+            .call(DocumentDelete, &[&document])
+            .token(&desk.ada.token)
+            .send()
+            .await;
+        assert_eq!(deleted.status, 204);
+    }
+    sqlx::query("UPDATE nodes SET deleted_at = now() WHERE id = $1")
+        .bind(topic)
+        .execute(&desk.world.db.pool)
+        .await
+        .unwrap();
+    let last = |list: &[Shortcut], id: Id| {
+        let one = list.iter().find(|one| one.target.id == id).unwrap();
+        assert_eq!(one.state, ShortcutTargetState::Deleted);
+        assert!(one.item.is_none());
+        one.last_name.clone()
+    };
+    // Ada manages the project the topic lay in and could read both documents: each is named.
+    let ada = kept_in(&desk, &desk.ada, elsewhere).await;
+    assert_eq!(last(&ada, plan.base.id).as_deref(), Some("Plan"));
+    assert_eq!(last(&ada, secret.base.id).as_deref(), Some("Salaries"));
+    assert_eq!(last(&ada, topic).as_deref(), Some("Gone soon"));
+    // Bea could read the plan as it was, and finds it in the topic's trash; the private document and the topic she
+    // could never find there are not named to her at all.
+    let seen = kept_in(&desk, &bea, elsewhere).await;
+    assert_eq!(last(&seen, plan.base.id).as_deref(), Some("Plan"));
+    assert_eq!(last(&seen, secret.base.id), None);
+    assert_eq!(last(&seen, topic), None);
+    let words = serde_json::to_string(&seen).unwrap();
+    assert!(!words.contains("Salaries") && !words.contains("Gone soon"));
+    // Restored, the plan opens again and is named as an open target is.
+    desk.world
+        .app
+        .call(DocumentRestore, &[&plan.base.id])
+        .token(&desk.ada.token)
+        .raw_body(&serde_json::json!({}))
+        .send()
+        .await
+        .ok();
+    let back = kept_in(&desk, &desk.ada, elsewhere).await;
+    let plan_back = back
+        .iter()
+        .find(|one| one.target.id == plan.base.id)
+        .unwrap();
+    assert_eq!(plan_back.state, ShortcutTargetState::Open);
+    assert_eq!(name(plan_back), Some("Plan"));
+    assert_eq!(plan_back.last_name, None);
+}
+
 #[tokio::test]
 async fn removing_or_moving_a_shortcut_never_touches_its_target() {
     let desk = Desk::new().await;
