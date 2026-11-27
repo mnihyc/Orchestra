@@ -1,6 +1,6 @@
 /** A choice shows the description its caller supplies; compact toolbar choices opt out explicitly. */
 import { CircleQuestionMark } from 'lucide-react';
-import { createContext, type ReactNode, useContext, useId } from 'react';
+import { createContext, Fragment, type ReactNode, useContext, useId } from 'react';
 
 import { useGuideEntry } from '@/lib/guideEntries';
 import { cx } from '@/ui/cx';
@@ -66,6 +66,10 @@ export interface ChoiceProps {
   /** Makes the words a real label for an adjacent checkbox, without putting help inside the label. */
   htmlFor?: string;
   compact?: boolean;
+  /** A picker row: the description is the row's one fact, on the name's line (under it only where the name leaves too little room), shortened to that line. */
+  inline?: boolean;
+  /** A picker row that cannot be chosen: the description is its reason, under the name, at most two lines (whole on hover and to a screen reader). */
+  reason?: boolean;
   className?: string;
   nameClassName?: string;
   /** Selectable controls receive the same words and explicit name/description associations. */
@@ -82,7 +86,17 @@ export function hasChoiceDescription(description: ReactNode): boolean {
   return description !== undefined && description !== null && description !== false && description !== '';
 }
 
-export function Choice({ name, description, accessory, presentation, help, id, htmlFor, compact = false, className, nameClassName, children, renderHelp }: ChoiceProps) {
+/** A row's facts as the one line of its description: the parts that are present, in order, between the facts' separator
+ * (`resourceFacts.separator`); nothing where no part is. */
+export function factLine(parts: readonly ReactNode[], separator: string): ReactNode {
+  const present = parts.filter(hasChoiceDescription);
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  // Each fact keeps an element of its own, as it had before it joined the line.
+  return <>{present.map((part, at) => <Fragment key={at}>{at > 0 && separator}<span>{part}</span></Fragment>)}</>;
+}
+
+export function Choice({ name, description, accessory, presentation, help, id, htmlFor, compact = false, inline = false, reason = false, className, nameClassName, children, renderHelp }: ChoiceProps) {
   const generated = useId();
   const inPicker = useContext(PickerContext);
   const mode = presentation ?? (inPicker ? 'picker' : 'form');
@@ -98,13 +112,19 @@ export function Choice({ name, description, accessory, presentation, help, id, h
   const base = id ?? generated;
   const hasDescription = hasChoiceDescription(description) && explains;
   const control: ChoiceControl = { 'aria-labelledby': `${base}-name`, 'aria-describedby': hasDescription ? `${base}-description` : undefined };
+  const oneLine = inline && hasDescription;
   const words = <>
-    <span data-choice-name id={control['aria-labelledby']} className={cx('break-words', nameClassName)}>{name}</span>
-    {hasDescription && <span data-choice-description id={control['aria-describedby']} className={cx('font-normal whitespace-normal break-words text-text-muted', compact ? 'text-xs' : 'text-sm')}>{description}</span>}
+    <span data-choice-name id={control['aria-labelledby']} className={cx(oneLine ? 'min-w-0 max-w-full truncate' : 'break-words', nameClassName)}>{name}</span>
+    {hasDescription && <span data-choice-description id={control['aria-describedby']} className={cx('font-normal text-text-muted', compact ? 'text-xs' : 'text-sm',
+      // Beside the name while at least 6rem remain for it, else on the line under it; one line either way, whole on hover.
+      // A resource's own hint, a block elsewhere, reads inline here so that the facts after it stay on the line.
+      oneLine ? 'line-clamp-1 min-w-0 flex-1 basis-24 break-words [&_[data-resource-hint]]:inline'
+        : reason ? 'line-clamp-2 whitespace-normal break-words [&_[data-resource-hint]]:inline' : 'whitespace-normal break-words')}>{description}</span>}
   </>;
+  const layout = oneLine ? 'flex min-w-0 flex-auto flex-wrap items-baseline gap-x-2 text-left' : 'flex min-w-0 flex-auto flex-col gap-0.5 text-left';
   const content = htmlFor === undefined
-    ? <span className="flex min-w-0 flex-auto flex-col gap-0.5 text-left">{words}</span>
-    : <label htmlFor={htmlFor} className="flex min-w-0 flex-auto flex-col gap-0.5 text-left">{words}</label>;
+    ? <span className={layout} {...(oneLine ? { 'data-choice-inline': true } : {})}>{words}</span>
+    : <label htmlFor={htmlFor} className={layout} {...(oneLine ? { 'data-choice-inline': true } : {})}>{words}</label>;
   const mark = <CircleQuestionMark size={14} aria-hidden />;
   const helpContent = !explains ? null : guide(help) ? hidden ? null : renderHelp === undefined
     ? <button type="button" {...attributes} aria-label={help.label} title={help.label} onClick={help.onOpen}

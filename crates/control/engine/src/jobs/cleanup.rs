@@ -620,6 +620,9 @@ impl Cleaning {
     }
 
     async fn finish_history(&self, job: &Job) -> Result<(), Stop> {
+        if !job.plan().await?["mount_delete"].is_null() {
+            return Ok(());
+        }
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_log WHERE action='storage.cleaned' AND details->>'job'=$1)")

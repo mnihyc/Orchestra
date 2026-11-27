@@ -121,3 +121,57 @@ it('follows a dialog scrolled under the field', async () => {
   await waitFor(() => expect(side(frame)).toBe('top'));
   expect(room(frame)).toBe('768px');
 });
+
+/** A field low in a dialog's body on a phone: the body's view starts 96 px down an 860 px screen, is 700 px tall, and scrolls `scroll` px further. */
+async function openInBody(count: number, bottom: number, scroll: number) {
+  screenHeight = 860; vi.stubGlobal('innerHeight', screenHeight);
+  const view = show(<div data-dialog-body style={{ overflowY: 'auto' }}><Example count={count} /></div>);
+  const body = document.querySelector<HTMLElement>('[data-dialog-body]')!;
+  let top = 0;
+  Object.defineProperty(body, 'scrollTop', { configurable: true, get: () => top, set: (value: number) => { top = Math.max(0, Math.min(scroll, value)); } });
+  Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 700 });
+  Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 700 + scroll });
+  vi.spyOn(body, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 96, 400, 700));
+  const input = screen.getByRole('combobox', { name: 'Org' });
+  // The field moves with the body's scrolling.
+  vi.spyOn(input.parentElement!, 'getBoundingClientRect').mockImplementation(() => new DOMRect(16, bottom - top - 36, 300, 36));
+  await userEvent.setup().click(input);
+  const frame = await waitFor(() => {
+    const popup = document.querySelector('[data-radix-popper-content-wrapper]')?.firstElementChild;
+    if (!(popup instanceof HTMLElement)) throw new Error('The popup has not opened');
+    return popup;
+  });
+  frame.style.overflowY = 'auto';
+  return { body, frame, grow: (next: number) => view.rerender(<div data-dialog-body style={{ overflowY: 'auto' }}><Example count={next} /></div>) };
+}
+
+it('rises in the dialog body that scrolls it, to list below it, rather than over the dialog title', async () => {
+  // 148 px below the field; thirteen rows promise four of theirs, 170 px: the body scrolls the 22 px they lack.
+  const { body, frame } = await openInBody(13, 700, 300);
+  expect(body.scrollTop).toBe(22);
+  await waitFor(() => expect(side(frame)).toBe('bottom'));
+  expect(room(frame)).toBe('170px');
+  // The person scrolls the body back: the list follows the room as before, and the body is not scrolled against them.
+  act(() => { body.scrollTop = 0; fireEvent.scroll(body); });
+  await waitFor(() => expect(side(frame)).toBe('top'));
+  expect(body.scrollTop).toBe(0);
+});
+
+it('rises when its rows arrive after it opened below, instead of moving over its field', async () => {
+  // One row fits below the field whole, and nothing moves; then thirteen arrive.
+  const { body, frame, grow } = await openInBody(1, 700, 300);
+  await waitFor(() => expect(side(frame)).toBe('bottom'));
+  expect(body.scrollTop).toBe(0);
+  act(() => grow(13));
+  await waitFor(() => expect(body.scrollTop).toBe(22));
+  await waitFor(() => expect(room(frame)).toBe('170px'));
+  expect(side(frame)).toBe('bottom');
+});
+
+it('stays where the person put it when its body cannot scroll far enough to give the rows below', async () => {
+  // The body scrolls 10 px further, the rows lack 22: the field is not moved, and the list stands above it as before.
+  const { body, frame } = await openInBody(13, 700, 10);
+  await waitFor(() => expect(side(frame)).toBe('top'));
+  expect(body.scrollTop).toBe(0);
+  expect(room(frame)).toBe(`${700 - 36 - 12}px`);
+});

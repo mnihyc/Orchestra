@@ -1,0 +1,1 @@
+web test -- tests/component/home-picker-requests.test.tsx tests/component/time-zone-picker.test.tsx tests/component/picker-conventions.test.tsx tests/component/combobox-room.test.tsx tests/unit/layer-room.test.ts

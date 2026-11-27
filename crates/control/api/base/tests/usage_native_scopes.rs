@@ -17,7 +17,7 @@ use orch_api_contract::usage::{
     CapInput, CapMeter, CapPeriod, CapSplit, CapSubjectInput, UsageCapCreate, UsageCapDelete,
     UsageHealthGet, UsageHealthGetQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Id, Json, new_id};
@@ -30,11 +30,12 @@ async fn key(world: &World, user: Id, kind: &str, id: Id, operation: &str, actio
 async fn key_with_scope(world: &World, user: Id, value: Json) -> String {
     let scope: KeyScope = serde_json::from_value(value).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Usage native scope",
             token_hash: &token_hash(&secret),

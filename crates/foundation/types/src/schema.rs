@@ -5,7 +5,9 @@ use jsonschema::{PatternOptions, Retrieve, Uri, Validator};
 use std::sync::OnceLock;
 
 mod cache;
-pub use cache::{CacheLimits, ValidatorCache};
+#[cfg(feature = "test-observers")]
+pub mod testing;
+pub use cache::{CacheLimits, PreparedSchema, ValidatorCache};
 
 fn default_cache() -> &'static ValidatorCache {
     static CACHE: OnceLock<ValidatorCache> = OnceLock::new();
@@ -55,6 +57,8 @@ impl Retrieve for LocalOnly {
 }
 
 fn compile(schema: &Json, pointer: Option<&str>) -> Result<Validator, Error> {
+    #[cfg(feature = "test-observers")]
+    testing::record_compilation(schema);
     let options = jsonschema::options()
         .with_retriever(LocalOnly)
         // Linear matching gives a supplied pattern no unbounded backtracking work.
@@ -75,6 +79,11 @@ fn compile(schema: &Json, pointer: Option<&str>) -> Result<Validator, Error> {
     compiled.map_err(|error| Error::Schema {
         path: error.instance_path.to_string(),
     })
+}
+
+/// Share a local schema validator across resolutions and hold it while the declaration is registered.
+pub fn prepare(schema: &Json) -> Result<PreparedSchema, Error> {
+    default_cache().prepare(schema)
 }
 
 /// Checks a declaration before accepting an extension or saving a configuration that uses it.

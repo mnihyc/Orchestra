@@ -36,6 +36,37 @@ pub struct RepositorySource {
     pub secret_name: Option<String>,
 }
 
+/// A file change staged for a workspace that creation has not prepared yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceFileEdit {
+    /// A file path relative to the thread's selected directory.
+    pub path: String,
+    /// The exact text the person saved in the creation plan.
+    pub text: String,
+    /// The source version the person read. Absent means create only if the file is missing;
+    /// a file brought by an unknown source is never silently overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<Hash>,
+}
+
+/// Pending workspace file edits, readable only with the bound thread and file authorities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceFileEdits {
+    /// The current start-plan revision, required when replacing its edits.
+    pub revision: Hash,
+    /// Edits still waiting to be applied; empty after successful creation writes.
+    pub edits: Vec<WorkspaceFileEdit>,
+}
+
+/// Selects the actual thread bound to the environment whose pending files are read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentSourceEditsQuery {
+    /// The thread whose start plan holds these files.
+    pub thread_id: Id,
+}
+
 /// The kind of directory a thread uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -421,6 +452,13 @@ pub struct EnvironmentSourcePrepareBody {
     /// Supplied only to accept the exact current resolved source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RepositorySource>,
+    /// Replace pending file edits after reviewing the source's current file. An empty list
+    /// accepts the source's files; omission retains the saved edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_edits: Option<Vec<WorkspaceFileEdit>>,
+    /// Required with workspace_edits; a newer saved plan is never overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_edit_revision: Option<Hash>,
 }
 
 /// Commits exactly the reviewed paths with the caller's server-provided identity.
@@ -498,6 +536,12 @@ pub struct GitCommitResult {
 }
 
 crate::endpoints! {
+    /// Reads the saved file edits without exposing them through conversation metadata.
+    EnvironmentSourceEditsGet: GET "/environments/{id}/source/edits", Rule("files.view and the bound thread's View"), query EnvironmentSourceEditsQuery, none, json WorkspaceFileEdits, 200,
+        operation Op::facets(&[
+            Facet::required(Read,&[Object(K::Environment)],Target::Path("id")),
+            Facet::required(Read,&[Object(K::Thread)],Target::Resolved("bound_thread")),
+        ]);
     /// Prepares or retries the frozen repository source before the retained first input.
     EnvironmentSourcePrepare: POST "/environments/{id}/source/prepare", Rule("environment.manage, thread.view, remote-write and local policy"), none, json EnvironmentSourcePrepareBody, json Job, 202,
         operation Op::receipt(&Op::variants(&[
