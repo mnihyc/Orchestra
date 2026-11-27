@@ -142,37 +142,15 @@ pub async fn resolve_for(
             _ => None,
         }
     };
-    let def = registry::get(keys::ENV_MOUNTS)
-        .ok_or_else(|| EngineError::unreadable("the mount setting is not registered"))?;
-    let snapshot = Snapshot::load(conn, Place::Node(target.home), Wanted::Keys(&[def])).await?;
-    let inherited = snapshot.resolve(def);
-    let chain: Vec<Id> = snapshot.chain().iter().map(|link| link.id).collect();
-    let written = rows::settings(conn, &chain).await?;
+    let mut enabled = requested(
+        conn,
+        target.environment,
+        target.home,
+        target.owner,
+        target.own,
+    )
+    .await?;
     let nodes = orch_db::queries::hierarchy::with_ancestors(conn, &[target.home]).await?;
-    // Parts already exclude values below a lock. Keep the nearest source of each map member.
-    let mut enabled: HashMap<Id, EnabledMountValue> = HashMap::new();
-    for (depth, part) in inherited.parts.iter().enumerate() {
-        let writer = part.source.node.and_then(|node| {
-            written
-                .iter()
-                .find(|(id, _, _)| *id == node)
-                .and_then(|(_, _, by)| *by)
-        });
-        add_values(&mut enabled, &part.value, part.source.node, writer, depth);
-    }
-    if inherited.locked_by.is_none()
-        && let Some(own) = target.own.get(keys::ENV_MOUNTS)
-    {
-        let writer = rows::configuration_writer(conn, target.environment)
-            .await?
-            .unwrap_or(target.owner);
-        add_values(&mut enabled, own, None, Some(writer), inherited.parts.len());
-    }
-    let mut enabled: Vec<_> = enabled
-        .into_iter()
-        .filter(|(_, (value, _, _, _))| *value != Json::Bool(false))
-        .collect();
-    enabled.sort_by(|(a, (_, _, _, da)), (b, (_, _, _, db))| db.cmp(da).then(a.cmp(b)));
     enabled.retain(|(id, _)| !target.detached.contains(id));
     let ids: Vec<Id> = enabled.iter().map(|(id, _)| *id).collect();
     let mounts = rows::mounts(conn, &ids).await?;
@@ -294,6 +272,7 @@ pub async fn resolve_for(
             .filter(|_| reason.is_none() && target.driver.is_some())
             .map(|location| {
                 json!({
+                    "resource_id": row.id,
                     "name": row.name, "kind": location.kind, "source": location.source,
                     "target": row.target, "mode": asked, "layer": layer,
                 })
@@ -431,6 +410,70 @@ pub async fn prepare_views(
         resolved: resolve(conn, environment, at).await?,
         facts: environment_row.facts.get("mounts").cloned(),
     })
+}
+
+/// Environments whose resolved, lock-aware configuration selects this mount, even while it is off.
+pub async fn requesting(conn: &mut Conn, mount: Id) -> Result<Vec<Id>, EngineError> {
+    let mut selected = Vec::new();
+    for id in rows::candidates(conn, mount).await? {
+        let Some(environment) = environments::environment(conn, id).await? else {
+            continue;
+        };
+        if requested(
+            conn,
+            id,
+            environment.home_node_id,
+            environment.owner_id,
+            &environment.config,
+        )
+        .await?
+        .iter()
+        .any(|(id, _)| *id == mount)
+        {
+            selected.push(id);
+        }
+    }
+    Ok(selected)
+}
+
+async fn requested(
+    conn: &mut Conn,
+    environment: Id,
+    home: Id,
+    owner: Id,
+    own: &Json,
+) -> Result<Vec<(Id, EnabledMountValue)>, EngineError> {
+    let def = registry::get(keys::ENV_MOUNTS)
+        .ok_or_else(|| EngineError::unreadable("the mount setting is not registered"))?;
+    let snapshot = Snapshot::load(conn, Place::Node(home), Wanted::Keys(&[def])).await?;
+    let inherited = snapshot.resolve(def);
+    let chain: Vec<Id> = snapshot.chain().iter().map(|link| link.id).collect();
+    let written = rows::settings(conn, &chain).await?;
+    // Parts already exclude values below a lock. Keep the nearest source of each map member.
+    let mut enabled: HashMap<Id, EnabledMountValue> = HashMap::new();
+    for (depth, part) in inherited.parts.iter().enumerate() {
+        let writer = part.source.node.and_then(|node| {
+            written
+                .iter()
+                .find(|(id, _, _)| *id == node)
+                .and_then(|(_, _, by)| *by)
+        });
+        add_values(&mut enabled, &part.value, part.source.node, writer, depth);
+    }
+    if inherited.locked_by.is_none()
+        && let Some(own) = own.get(keys::ENV_MOUNTS)
+    {
+        let writer = rows::configuration_writer(conn, environment)
+            .await?
+            .unwrap_or(owner);
+        add_values(&mut enabled, own, None, Some(writer), inherited.parts.len());
+    }
+    let mut enabled: Vec<_> = enabled
+        .into_iter()
+        .filter(|(_, (value, _, _, _))| *value != Json::Bool(false))
+        .collect();
+    enabled.sort_by(|(a, (_, _, _, da)), (b, (_, _, _, db))| db.cmp(da).then(a.cmp(b)));
+    Ok(enabled)
 }
 
 fn add_values(

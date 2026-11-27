@@ -16,6 +16,30 @@ function notice(kind: Notification['kind'], parameters: Record<string, unknown> 
 }
 
 describe('notification action text', () => {
+  it.each(['en', 'zh-CN'] as const)('names the same Copy operation as it runs, finishes or leaves cleanup incomplete (%s)', async (locale) => {
+    await setLocale(locale);
+    try {
+      const states = locale === 'en'
+        ? [['running', 'Copying Shared data'], ['done', 'Shared data copied'], ['failed', 'Copy incomplete · Shared data']]
+        : [['running', '正在复制 Shared data'], ['done', 'Shared data 已复制'], ['failed', '复制未完成 · Shared data']];
+      for (const [state, title] of states) {
+        const row = notice('environment.attention', { operation_kind: 'mount_copy', name: 'Shared data', state, resource_ids: [['mount', 'mount']] });
+        expect(notificationText(row, i18n.t, locale).title).toBe(title);
+      }
+    } finally { await setLocale('en'); }
+  });
+
+  it.each(['en', 'zh-CN'] as const)('names the saved mount availability in the reader’s language (%s)', async (locale) => {
+    await setLocale(locale);
+    try {
+      for (const enabled of [false, true]) {
+        const row = notice('environment.attention', { operation_kind: enabled ? 'mount_enable' : 'mount_disable', name: 'Shared data', state: 'done', resource_ids: [['mount', 'mount']] });
+        const title = locale === 'en' ? `Mount Shared data ${enabled ? 'enabled' : 'disabled'}` : `挂载 Shared data 已${enabled ? '启用' : '停用'}`;
+        expect(notificationText(row, i18n.t, locale).title).toBe(title);
+      }
+    } finally { await setLocale('en'); }
+  });
+
   it.each(['en', 'zh-CN'] as const)('localizes an explicit person notice and preserves its authored note (%s)', async (locale) => {
     await setLocale(locale);
     try {
@@ -33,7 +57,7 @@ describe('notification action text', () => {
       const row=notice('environment.update',{reason:'requested',affected_threads:2});
       const text=notificationText(row,i18n.t,locale,'Current readable thread');
       expect(text.title).toBe(locale==='en'?'Update requested':'已请求更新');
-      expect(text.body).toBe(locale==='en'?'2 affected threads · running work may stop':'2 个线程受影响 · 运行中的工作可能停止');
+      expect(text.body).toBe(locale==='en'?'2 affected threads · running work may stop':'2 个会话受影响 · 运行中的工作可能停止');
       expect(text.body).not.toContain('Stored English');
       row.details={v:2,action:row.kind,parameters:row.data};
       expect(notificationText(row,i18n.t,locale,'Current readable thread')).toEqual({title:row.title,body:row.body});
@@ -55,7 +79,7 @@ describe('notification action text', () => {
       const row = notice('environment.attention', { operation_kind: 'lost', name: 'host-2', thread_count: 1204, environment_ids: ['mine'], provider_ids: ['provider'], resource_ids: [['mount', 'mount'], ['mcp_server', 'server']], state: 'done' });
       const text = notificationText(row, i18n.t, locale);
       expect(text.title).toBe(i18n.t('loss.inboxTitle', { name: 'host-2' }));
-      expect(text.body).toBe(locale === 'en' ? '1 of your environments · 1,204 threads · 1 provider runtime · 1 mount location · 1 MCP server' : '您有 1 个环境受影响 · 1,204 个会话 · 1 个提供方运行时 · 1 个挂载位置 · 1 个 MCP 服务器');
+      expect(text.body).toBe(locale === 'en' ? '1 of your environments affected · 1,204 threads · 1 managed provider · 1 mount location · 1 MCP server' : '你有 1 个环境受影响 · 1,204 个会话 · 1 个托管提供方 · 1 个挂载位置 · 1 个 MCP 服务器');
       expect(text.body).not.toContain('{{');
     } finally { await setLocale('en'); }
   });
@@ -199,5 +223,15 @@ for (const locale of ['en','zh-CN'] as const) it(`names a stopped recovery with 
     expect(text.body).toContain(locale==='en'?'5 min':'5分钟');
     expect(text.body).not.toContain(row.body);
     expect(text.title).toBe(i18n.t('inbox.actions.threadBlocked'));
+  } finally {await setLocale('en');}
+});
+
+it.each(['en','zh-CN'] as const)('uses human words for chosen resource stops and deletions (%s)',async(locale)=>{
+  await setLocale(locale);
+  try {
+    for(const operation of ['provider_disable','provider_delete','mcp_delete','mount_delete']) {
+      const row=notice('environment.attention',{operation_kind:operation,name:'Team resource',state:'done',thread_count:10});
+      expect(notificationText(row,i18n.t,locale).title).toBe(locale==='en'?`Team resource ${operation==='provider_disable'?'paused':'removed'}`:`Team resource ${operation==='provider_disable'?'已停用':'已移除'}`);
+    }
   } finally {await setLocale('en');}
 });
