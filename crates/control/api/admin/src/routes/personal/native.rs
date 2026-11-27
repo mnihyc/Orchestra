@@ -155,7 +155,7 @@ impl native::Selected for Subscriptions {
 pub(crate) struct Favorites;
 
 pub(crate) struct FavoriteRows {
-    rows: Vec<hierarchy::FavoriteRow>,
+    rows: Vec<hierarchy::ShortcutRow>,
     names: BTreeSet<Id>,
     limited: bool,
     paths: BTreeMap<Id, Vec<Id>>,
@@ -184,7 +184,7 @@ impl native::Selected for Favorites {
     type Source = Source;
     type Query = ();
     type Value = FavoriteRows;
-    type Reply = Vec<Favorite>;
+    type Reply = Vec<Shortcut>;
     const DECLARATION: &'static Declaration<Source> = &sources::FAVORITES;
 
     fn select<'a>(
@@ -226,44 +226,14 @@ impl native::Selected for Favorites {
         conn: &'a mut Conn,
         principal: &'a Principal,
         value: &'a FavoriteRows,
-    ) -> BoxFuture<'a, ApiResult<Vec<Favorite>>> {
-        Box::pin(async move {
-            let ids = value.rows.iter().map(|row| row.node_id).collect::<Vec<_>>();
-            let visible = view::visible(
-                conn,
-                principal,
-                &ids,
-                principal.now().get(),
-                Policy::default(),
-            )
-            .await?
-            .iter()
-            .map(crate::routes::nodes::node_id)
-            .collect::<BTreeSet<_>>();
-            let ways = if value.limited {
-                view::ways_with_name_sources(conn, principal, &ids, Policy::default(), &value.names)
-                    .await?
-            } else {
-                view::ways(conn, principal, &ids, Policy::default()).await?
-            };
-            Ok(value
-                .rows
-                .iter()
-                .filter(|row| visible.contains(&row.node_id))
-                .filter_map(|row| {
-                    let mut path = ways.get(&row.node_id)?.clone();
-                    Some(Favorite {
-                        node: path.pop()?,
-                        path,
-                        position: row.position.clone(),
-                        view: row
-                            .view
-                            .clone()
-                            .and_then(|view| serde_json::from_value(view).ok()),
-                    })
-                })
-                .collect())
-        })
+    ) -> BoxFuture<'a, ApiResult<Vec<Shortcut>>> {
+        // A scoped reader keeps today's list: only what is open to them, named as its own operation may.
+        Box::pin(super::shortcuts::render(
+            conn,
+            principal,
+            &value.rows,
+            value.limited.then_some(&value.names),
+        ))
     }
 }
 
@@ -378,7 +348,14 @@ impl Favorites {
         _query: &(),
         declaration: &'static Declaration<Source>,
     ) -> ApiResult<(FavoriteRows, Vec<native::Facts<Source>>)> {
-        let rows = hierarchy::favorites_of(conn, ctx.user()?.id()).await?;
+        // A scoped reader's operation names places and threads alone, as before; documents and chats are listed to
+        // ordinary readers.
+        let kinds: &[&str] = if native::modern(caller) {
+            &["org", "project", "topic", "thread"]
+        } else {
+            super::shortcuts::OWN_KINDS
+        };
+        let rows = hierarchy::own_shortcuts(conn, ctx.user()?.id(), kinds).await?;
         if !native::modern(caller) {
             return Ok((
                 FavoriteRows {
@@ -391,7 +368,7 @@ impl Favorites {
             ));
         }
         let own = account(ctx, conn).await?;
-        let ids = rows.iter().map(|row| row.node_id).collect::<Vec<_>>();
+        let ids = rows.iter().map(|row| row.target_id).collect::<Vec<_>>();
         let graph = orch_authz::engine::Graph::load(conn, &ids)
             .await
             .map_err(authorization::restoration_error)?;
@@ -401,7 +378,7 @@ impl Favorites {
         let mut groups = Vec::new();
         for row in rows {
             let Some(target) =
-                orch_engine::operation_scope::targets::from_node_identity(&graph, row.node_id)
+                orch_engine::operation_scope::targets::from_node_identity(&graph, row.target_id)
             else {
                 continue;
             };
@@ -423,7 +400,10 @@ impl Favorites {
         let mut known_facts = vec![own, native::Facts::collection(Source::Favorites, groups)];
         let known = native::bind_known(ctx, declaration, &known_facts)?;
         let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
-        let ids = candidates.iter().map(|row| row.node_id).collect::<Vec<_>>();
+        let ids = candidates
+            .iter()
+            .map(|row| row.target_id)
+            .collect::<Vec<_>>();
         // Preserve the existing ordinary native visibility supplier. Its DTO is
         // used only as a visibility result; identities remain the stored rows.
         let visible = view::visible(
@@ -437,15 +417,15 @@ impl Favorites {
         .iter()
         .map(crate::routes::nodes::node_id)
         .collect::<BTreeSet<_>>();
-        candidates.retain(|row| visible.contains(&row.node_id));
+        candidates.retain(|row| visible.contains(&row.target_id));
         let mut actual = Vec::new();
         let mut name_ids = BTreeSet::new();
         for row in &candidates {
             let target =
-                orch_engine::operation_scope::targets::from_node_identity(&graph, row.node_id)
+                orch_engine::operation_scope::targets::from_node_identity(&graph, row.target_id)
                     .ok_or_else(ApiError::not_found)?;
             group(&mut actual, target);
-            if let Some(node) = graph.get(row.node_id) {
+            if let Some(node) = graph.get(row.target_id) {
                 name_ids.extend(node.path.iter().copied());
             }
         }
@@ -463,8 +443,8 @@ impl Favorites {
             .iter()
             .filter_map(|row| {
                 graph
-                    .get(row.node_id)
-                    .map(|node| (row.node_id, node.path.clone()))
+                    .get(row.target_id)
+                    .map(|node| (row.target_id, node.path.clone()))
             })
             .collect();
         Ok((

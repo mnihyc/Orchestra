@@ -33,7 +33,7 @@ import { sectionLabel } from '@/features/settings/sectionLabels';
 import { settingsNavigation } from '@/features/settings/navigation';
 import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { orgPageTitle } from '@/features/org/title';
-import { useUsageBoardParams, useWeeklyUsageParams } from '@/features/usage/Board';
+import { useUsageBoardParams, useWeeklyUsageParams } from '@/features/usage/useBoardParams';
 
 function ThreadContext({ id, continuation }: { id: string; continuation: string | null }) {
   const { t } = useTranslation();

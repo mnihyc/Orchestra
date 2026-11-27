@@ -6,6 +6,7 @@
  * of the browser and mark it all the same. Its menu, which a right click opens as well, marks read one row or all
  * that came from one place.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { linkTo } from '@/lib/links';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import { useNavigate } from '@tanstack/react-router';
@@ -157,7 +158,7 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
   return (
     <ContextMenu label={t('inbox.row.menu')} entries={entries}>
       <li data-notification-id={row.id} data-unread={unread} data-kind={row.kind} className="group relative flex items-start gap-1 px-3 py-3 text-base leading-6 transition-colors hover:bg-bg-subtle">
-        <div className="flex min-w-0 flex-1 flex-col gap-2"><div className="relative flex min-w-0 flex-1 items-start gap-3 rounded-md"><a
+        <div className="flex min-w-0 flex-1 flex-col gap-2"><div className="relative flex min-w-0 flex-1 items-start gap-3 rounded-md"><PathLink
           href={row.url}
           onClick={onClick}
           onAuxClick={onAuxClick}
@@ -193,7 +194,7 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
           {temporary !== null && !kept && <><KeepEnvironmentButton id={temporary} onKept={() => setKept(true)} /><EnvironmentExportButton id={temporary} name={exportName} /></>}
           {exported !== null && <SnapshotDownloadButton id={exported} name={exportName} />}
         </div>}</div>
-        {catchup !== null && <Button size="sm" variant="ghost" asChild><a href={catchup}><History aria-hidden />{t('away.inbox.catchup')}</a></Button>}
+        {catchup !== null && <Button size="sm" variant="ghost" asChild><PathLink href={catchup}><History aria-hidden />{t('away.inbox.catchup')}</PathLink></Button>}
         {row.kind === 'thread.blocked' && parameters.reason === 'repeat_limit' && <CallHelp section="guard" />}
         <span className="flex h-6 w-4 shrink-0 items-center justify-center" aria-hidden>
           {unread && <span data-testid="unread-dot" className="size-2 rounded-full bg-accent" />}

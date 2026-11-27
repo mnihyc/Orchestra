@@ -46,8 +46,6 @@ use orch_api_contract::common::ErrorCode;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
-
 use orch_api_contract::nodes::NodeRef;
 
 use orch_api_contract::notifications::Notification;
@@ -266,14 +264,7 @@ pub async fn list_by_place(
 ) -> ApiResult<Page<Notification>> {
     let kinds = super::inbox::kinds_asked(query.kind.as_deref())?;
     let since = query.since.map(Time::get);
-    let limit = usize::try_from(
-        PageQuery {
-            limit: query.limit,
-            cursor: query.cursor.clone(),
-        }
-        .limit(),
-    )
-    .unwrap_or(usize::MAX);
+    let limit = super::inbox::list_limit(query.limit)?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
     let me = principal.user();
@@ -360,6 +351,39 @@ pub async fn list_by_place(
             flat.push((row, group.clone(), mine));
         }
     }
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    if !words.terms().is_empty() {
+        let mut places = flat
+            .iter()
+            .flat_map(|(row, _, _)| [row.node_id, row.thread_id])
+            .flatten()
+            .collect::<Vec<_>>();
+        places.sort_unstable();
+        places.dedup();
+        let nodes = view::ways(&mut conn, &principal, &places, Policy::default()).await?;
+        let actors = crate::realtime::user::notification_context(
+            &mut conn,
+            &mut flat.iter_mut().map(|(row, _, _)| row).collect::<Vec<_>>(),
+        )
+        .await?;
+        crate::realtime::user::notification_files(
+            &mut conn,
+            &principal,
+            &mut flat.iter_mut().map(|(row, _, _)| row).collect::<Vec<_>>(),
+        )
+        .await?;
+        flat.retain(|(row, group, _)| {
+            notification_view(row, &nodes, &actors).is_some_and(|shown| {
+                super::inbox::matches_search(&words, &shown)
+                    || group
+                        .place
+                        .as_ref()
+                        .filter(|place| !place.redacted)
+                        .and_then(|place| place.name.as_deref())
+                        .is_some_and(|name| words.matches(name))
+            })
+        });
+    }
     let total = flat.len();
     // A new row above the cut leaves this fingerprint alone. Changes to access, decisions,
     // grouping or existing rows invalidate offsets instead of silently skipping or repeating rows.
@@ -376,8 +400,11 @@ pub async fn list_by_place(
             )
         })
         .collect();
-    let state = orch_types::Hash::of(&serde_json::to_vec(&state_rows).map_err(ApiError::internal)?)
-        .to_string();
+    let state = orch_types::Hash::of(
+        &serde_json::to_vec(&(query.q.as_deref().unwrap_or(""), state_rows))
+            .map_err(ApiError::internal)?,
+    )
+    .to_string();
     if previous_state.is_some_and(|previous| previous != state) {
         return Err(ApiError::new(
             ErrorCode::ConflictStaleRevision,
@@ -471,6 +498,21 @@ pub async fn read_group(ctx: Ctx, body: NotificationReadBody) -> ApiResult<Notif
     let unread = inbox::counts(&mut tx, me)
         .await?
         .map_or(0, |counts| counts.unread);
+    let until = if changed > 0 {
+        let hours = orch_settings::get::<i64>(
+            &mut tx,
+            orch_settings::Place::System,
+            orch_settings_contract::registry::keys::API_IDEMPOTENCY_WINDOW,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("missing replay window"))?;
+        Duration::try_hours(hours)
+            .and_then(|span| ctx.now.checked_add_signed(span))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+    } else {
+        ctx.now
+    };
     tx.commit().await.map_err(orch_db::DbError::from)?;
     if changed == 0 {
         return Ok(NotificationReadReply {
@@ -480,8 +522,6 @@ pub async fn read_group(ctx: Ctx, body: NotificationReadBody) -> ApiResult<Notif
             undo_expires_at: None,
         });
     }
-    let hours = i64::try_from(ctx.app.config.api.idempotency_ttl_hours).unwrap_or(i64::MAX);
-    let until = ctx.now + Duration::hours(hours);
     let ticket = seal_ticket(
         me,
         &Ticket {

@@ -409,6 +409,7 @@ enum TrialError {
 
 fn empty_effects() -> api::PagePreview {
     api::PagePreview {
+        server_host_use: None,
         owner_reads: None,
         pages: 0,
         orgs: None,
@@ -697,12 +698,13 @@ async fn rules(
                 .capability_policy(conn, home, &definition)
                 .await
                 .map_err(ApiError::internal)?;
-            let source = match resolved
-                .parts
-                .iter()
-                .rev()
-                .find(|part| part.value.get(&definition.key).is_some())
-            {
+            let source = match resolved.parts.iter().rev().find(|part| {
+                part.value
+                    .get(&definition.key)
+                    .and_then(|member| member.get("decision"))
+                    .and_then(Json::as_str)
+                    == Some(policy.decision.as_str())
+            }) {
                 Some(part) => rule_source(conn, principal, &part.source, bounds).await?,
                 None => None,
             };
@@ -954,6 +956,12 @@ pub async fn create(
         Some(Thing::Node(id)) => Some(id),
         _ => None,
     };
+    let server_hosts = match (&body, thing) {
+        (api::SharePreviewBody::Page { change }, Some(Thing::Other(object))) => {
+            crate::server_host_use::Before::take(&mut tx, &principal, object, change).await?
+        }
+        _ => None,
+    };
     let disclosure = match &body {
         api::SharePreviewBody::Page { change } => {
             crate::thread_read_tools::sharing::Before::take(
@@ -1024,6 +1032,9 @@ pub async fn create(
             answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
             answer.allowed = true;
             answer.effects = effects(&mut tx, &principal, &before).await?;
+            if let Some(before) = server_hosts {
+                answer.effects.server_host_use = before.disclosure(&mut tx, &principal).await?;
+            }
             let already_view = worded(
                 &mut tx,
                 Preview {

@@ -23,7 +23,7 @@ use orch_connector_core::connector::{
     ConnectorBuilder, ConnectorParams, StartError, Supervision, run_until_with_updates,
 };
 use orch_connector_core::enrollment::{
-    DataDir, EnrollInputs, HttpsEnroll, ManagedInputs, default_data_dir, enroll, role_name,
+    Claim, DataDir, EnrollInputs, HttpsEnroll, ManagedInputs, default_data_dir, enroll, role_name,
 };
 use orch_connector_core::facts::Host;
 use orch_connector_core::forwarder::{ProtocolEntry, Protocols};
@@ -38,6 +38,7 @@ use orch_executor_orch::server::OrchExec;
 use orch_plugin::registration::{BuiltIn, Plugins};
 use orch_plugin_contract::registration::{PluginHost, PluginKind, PluginRegistration};
 use orch_protocol_anthropic_messages::AnthropicMessages;
+use orch_protocol_google_interactions::GoogleInteractions;
 use orch_protocol_openai_responses::{OpenAiChat, OpenAiEmbeddings, OpenAiResponses};
 use orch_telemetry::LogFormat;
 use orch_types::{Clock, SystemClock};
@@ -215,6 +216,7 @@ fn plugin_registrations(
 fn plugin_builtin() -> BuiltIn {
     let programs = Programs::builtin();
     BuiltIn::new()
+        .with(PluginKind::Translator, ["responses-messages"])
         .with(PluginKind::Adapter, programs.kinds())
         .with(
             PluginKind::Executor,
@@ -386,9 +388,16 @@ pub fn protocols() -> Protocols {
         .with(ProtocolEntry::new(OpenAiEmbeddings, "/v1", |names| {
             OpenAiEmbeddings.models_response(names)
         }))
+        .with(ProtocolEntry::new(GoogleInteractions, "/v1beta", |names| {
+            GoogleInteractions.models_response(names)
+        }))
         .with(ProtocolEntry::new(AnthropicMessages, "", |names| {
             AnthropicMessages.models_response(names)
         }))
+        .with_translators(vec![
+            Arc::new(orch_translator_responses_messages::ResponsesToMessages),
+            Arc::new(orch_translator_responses_messages::MessagesToResponses),
+        ])
 }
 
 /// The kinds of harness this program can host, in order.
@@ -465,6 +474,29 @@ pub async fn enroll_machine(
     ))
 }
 
+/// The verified harness builds of a machine a person connected, kept in `dir` where its platform can keep them.
+/// Elsewhere (Windows) the connector starts without them: it says that it cannot fetch named builds and uses the
+/// programs installed on the machine. A node's unit takes its builds from the node.
+fn open_build_cache(
+    dir: &Path,
+    managed: bool,
+) -> anyhow::Result<Option<Arc<dyn orch_connector_core::builds::BuildCache>>> {
+    if managed {
+        return Ok(None);
+    }
+    if !orch_node_core::tools::ToolCache::SUPPORTED {
+        tracing::info!(
+            "this platform keeps no verified harness builds: the programs installed here are used"
+        );
+        return Ok(None);
+    }
+    let cache = orch_node_core::tools::ToolCache::open(
+        &orch_node_core::settings::NodeSettings::in_dir(dir),
+    )
+    .context("opening the verified harness build cache")?;
+    Ok(Some(Arc::new(cache)))
+}
+
 /// `run`: starts the connector and keeps it running until the process is asked to stop.
 pub async fn run(dir: Option<PathBuf>, managed: bool, build: BuildInfo) -> anyhow::Result<()> {
     let named = dir.is_some();
@@ -510,6 +542,34 @@ pub async fn run(dir: Option<PathBuf>, managed: bool, build: BuildInfo) -> anyho
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let shutdown = stopped().context("registering process stop signals")?;
     let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    // The machine is the unit's own. A new unit made on the volume of an earlier one finds that unit's
+    // identity there, which the system revoked with its unit: it puts that aside and enrolls as a new
+    // machine, and a unit that is given the volume back finds its own again. What is put aside, brought
+    // back or dropped is said here, with the unit, in the log that stays with the unit.
+    if let Some(launch) = &launch {
+        let unit = launch.unit.as_str();
+        let claimed = data
+            .claim_machine_state(unit)
+            .context("taking the machine state of this unit")?;
+        match claimed {
+            Claim::Own => {}
+            Claim::Fresh { put_aside, dropped } => {
+                tracing::info!(%unit, put_aside = %put_aside, "the data directory held the machine of another unit: it is put aside, and this unit enrolls as a new machine");
+                for gone in &dropped {
+                    tracing::warn!(%unit, dropped = %gone, "the machine of an earlier unit that was put aside before is dropped: one earlier machine is kept");
+                }
+            }
+            Claim::Restored { put_aside, dropped } => {
+                tracing::info!(%unit, "the machine of this unit was put aside for another unit and is back");
+                if let Some(put_aside) = put_aside {
+                    tracing::info!(%unit, put_aside = %put_aside, "the machine that was here is put aside in its place");
+                }
+                for gone in &dropped {
+                    tracing::warn!(%unit, dropped = %gone, "the machine of an earlier unit that was put aside before is dropped: one earlier machine is kept");
+                }
+            }
+        }
+    }
     if !data.is_enrolled() {
         let Some(launch) = &launch else {
             anyhow::bail!(
@@ -528,6 +588,7 @@ pub async fn run(dir: Option<PathBuf>, managed: bool, build: BuildInfo) -> anyho
     }
 
     let tools_dir = launch.as_ref().map(|launch| launch.tools_dir.clone());
+    let build_cache = open_build_cache(&dir, managed)?;
     let plugin_config = data.config(var).context("reading connector plugins")?;
     crate::enrollment_options::connector_roles(&plugin_config.connector.roles.join(","))?;
     let registrations = plugin_registrations(&plugin_config, var("ORCH_PLUGINS").as_deref())?;
@@ -643,6 +704,11 @@ pub async fn run(dir: Option<PathBuf>, managed: bool, build: BuildInfo) -> anyho
             .programs(programs.clone())
             .installation(orch_connector_core::installation::connector(&data))
             .plugin_facts(plugin_facts.clone());
+            let builder = if let Some(cache) = &build_cache {
+                builder.build_cache(Arc::clone(cache))
+            } else {
+                builder
+            };
             Ok(plug_in(builder, &roles, provider))
         };
     let automatic = launch
@@ -706,6 +772,18 @@ mod tests {
 
     /// Thirty seconds allows a loaded machine to start the disposable scripted program without hanging a test.
     const PLUGIN_START_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+    #[test]
+    fn a_connected_machine_starts_with_a_build_cache_only_where_its_platform_keeps_one() {
+        let data = tempfile::tempdir().unwrap();
+        let connected = open_build_cache(data.path(), false)
+            .expect("a platform that keeps no verified builds still starts its connector");
+        assert_eq!(connected.is_some(), cfg!(unix));
+        assert!(
+            open_build_cache(data.path(), true).unwrap().is_none(),
+            "a node's unit takes its builds from the node"
+        );
+    }
 
     async fn configured_program(
         kind: PluginKind,
@@ -872,6 +950,9 @@ mod tests {
                         base_url: "https://test.invalid".into(),
                         options: json!({}),
                         credential: None,
+                        output_tokens: 4096,
+                        session: None,
+                        model: None,
                     },
                 )
                 .unwrap();
@@ -1049,12 +1130,11 @@ mod tests {
     }
 
     #[test]
-    fn the_program_hosts_the_scripted_harness_and_the_two_real_ones_and_knows_what_claude_code_runs()
-     {
+    fn the_connector_reports_the_shipped_harnesses_and_their_executable_names() {
         let registry = adapters().unwrap();
         assert_eq!(
             adapter_kinds().unwrap(),
-            ["claude-code", "codex", "dsh", "fake"],
+            ["antigravity", "claude-code", "codex", "dsh", "fake"],
             "the kinds a machine says it can host"
         );
         assert_eq!(
@@ -1085,6 +1165,7 @@ mod tests {
                 "openai-responses",
                 "openai-chat",
                 "openai-embeddings",
+                "google-interactions",
                 "anthropic-messages"
             ]
         );
@@ -1109,6 +1190,21 @@ mod tests {
             None
         );
         assert_eq!(chat.resolve(&Method::POST, "/v1/responses"), None);
+        let google = protocols.get("google-interactions").unwrap();
+        assert_eq!(
+            google
+                .resolve(&Method::POST, "/v1beta/interactions")
+                .as_deref(),
+            Some("/interactions")
+        );
+        assert_eq!(
+            google.resolve(&Method::GET, "/v1beta/models").as_deref(),
+            Some("/models")
+        );
+        assert_eq!(
+            google.resolve(&Method::DELETE, "/v1beta/interactions"),
+            None
+        );
         let messages = protocols.get("anthropic-messages").unwrap();
         assert_eq!(
             messages.resolve(&Method::POST, "/v1/messages").as_deref(),

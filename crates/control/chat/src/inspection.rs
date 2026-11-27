@@ -8,10 +8,27 @@
 
 use crate::chats::Loaded;
 use crate::{Acting, Error};
+use orch_access_contract::roles::PlaceRef;
 use orch_authz::chats::Reading;
 use orch_db::Conn;
 use orch_db::audit;
 use serde_json::json;
+
+/// Whether opening this chat needs the inspection audit in a writable transaction.
+pub fn requires_audit(loaded: &Loaded) -> bool {
+    inspection_place(loaded).is_some()
+}
+
+fn inspection_place(loaded: &Loaded) -> Option<PlaceRef> {
+    loaded
+        .standing
+        .admin_access
+        .map(|reach| reach.place)
+        .or(match loaded.standing.reading {
+            Some(Reading::Inspector { org }) => Some(PlaceRef::Node(org)),
+            _ => None,
+        })
+}
 
 /// Notes that the caller opened a chat they are not in, if they did: an audit
 /// row `chat.inspected`, once for this opening. Says
@@ -22,13 +39,10 @@ pub async fn note_opened(
     act: &Acting<'_>,
     loaded: &Loaded,
 ) -> Result<bool, Error> {
-    let place = match loaded.standing.admin_access.map(|reach| reach.place) {
-        Some(orch_access_contract::roles::PlaceRef::System) => json!("system"),
-        Some(orch_access_contract::roles::PlaceRef::Node(id)) => json!({"id":id}),
-        None => match loaded.standing.reading {
-            Some(Reading::Inspector { org }) => json!({"id":org}),
-            _ => return Ok(false),
-        },
+    let place = match inspection_place(loaded) {
+        Some(PlaceRef::System) => json!("system"),
+        Some(PlaceRef::Node(id)) => json!({"id":id}),
+        None => return Ok(false),
     };
     let (me, chat) = (act.user(), &loaded.row);
     let session = audit::opening_session().unwrap_or(me);

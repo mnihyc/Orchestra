@@ -216,6 +216,8 @@ async fn a_tool_ticket_cannot_reach_a_same_named_server_in_another_environment()
     })
     .await;
     rig.succeed(&EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: Some(first_generation + 1),
         storage: None,

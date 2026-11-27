@@ -7,7 +7,6 @@
  * done says so.
  */
 import { Ellipsis } from 'lucide-react';
-import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { EnvironmentDots } from '@/features/topic/Environments';
@@ -19,11 +18,11 @@ import { TopicMenu, TopicMenuEntries } from '@/features/topic/TopicMenu';
 import { TopicPath } from '@/features/project/TopicPath';
 import type { Topic } from '@/generated/api-types';
 import { cx } from '@/ui/cx';
-import { Checkbox } from '@/ui/Checkbox';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { StateIcon, type WorkState } from '@/ui/StateChip';
 import { NodeIcon } from '@/ui/NodeIcon';
 import { isThreadUrgency } from '@/ui/ThreadState';
+import { AllBox, type PickingClick, RowBox, type RowSelection } from '@/ui/RowSelection';
 import { type Column, Table } from '@/ui/Table';
 import { TagChip } from '@/ui/TagChip';
 
@@ -53,21 +52,12 @@ export function topicAttention(topic: Pick<Topic, 'attention'>) {
 /** When something last happened in a topic, as far as anything is known: its last activity, else when it was last changed. */
 export const lastActivityOf = (topic: Pick<Topic, 'last_activity_at' | 'updated_at'>): string => topic.last_activity_at ?? topic.updated_at;
 
-/** The header names its loaded page once and reports a partial selection as mixed. */
-function pageSelection(chosen: number, count: number): boolean | 'indeterminate' {
-  return chosen === 0 ? false : chosen === count ? true : 'indeterminate';
-}
-
-export function TopicList({ topics, showPaths = false, selection }: { topics: readonly Topic[]; showPaths?: boolean; selection?: { selected: ReadonlySet<string>; toggle: (id: string, on: boolean, shift: boolean) => void; onPage?: (on: boolean) => void } }) {
+export function TopicList({ topics, showPaths = false, selection }: { topics: readonly Topic[]; showPaths?: boolean; selection?: RowSelection<Topic> }) {
   const { t } = useTranslation();
-  const shift = useRef(false);
-  const selectedOnPage = selection === undefined ? 0 : topics.filter((topic) => selection.selected.has(topic.id)).length;
 
   const columns: Column<Topic>[] = [
-    ...(selection === undefined ? [] : [{ id: 'select', header: selection.onPage === undefined ? t('day100.batch.select')
-      : <Checkbox label={<span className="sr-only">{t('day100.batch.selectPage')}</span>}
-          checked={pageSelection(selectedOnPage, topics.length)}
-          onCheckedChange={selection.onPage} />, className: 'w-10', cell: (topic: Topic) => <span onClickCapture={(event) => { shift.current = event.shiftKey; }}><Checkbox label={<span className="sr-only">{t('day100.batch.selectRow', { name: topic.name })}</span>} checked={selection.selected.has(topic.id)} onCheckedChange={(on) => { selection.toggle(topic.id, on, shift.current); shift.current = false; }} /></span> }]),
+    ...(selection === undefined ? [] : [{ id: 'select', grow: false, header: <AllBox checked={selection.all} onChange={selection.toggleAll} />, className: 'w-10',
+      cell: (topic: Topic) => <RowBox name={topic.name} checked={selection.isTicked(topic)} onChange={(on, range) => selection.toggle(topic, on, range)} /> }]),
     {
       id: 'name',
       header: t('places.topics.name'),
@@ -127,7 +117,9 @@ export function TopicList({ topics, showPaths = false, selection }: { topics: re
     },
   ];
 
-  return <Table label={t('places.topics.title')} columns={columns} rows={topics} rowKey={(topic) => topic.id} rowClassName={(topic) => (topic.archived ? 'opacity-60' : undefined)} rowMenu={{ label: (topic) => t('places.menu.of', { name: topic.name }), content: (topic) => <TopicMenuEntries topic={topic} context /> }} />;
+  return <Table virtual label={t('places.topics.title')} columns={columns} rows={topics} rowKey={(topic) => topic.id} rowClassName={(topic) => (topic.archived ? 'opacity-60' : undefined)}
+    {...(selection === undefined ? {} : { onRowClick: (topic: Topic, event: PickingClick) => { selection.click(topic, event); } })}
+    rowMenu={{ label: (topic) => t('places.menu.of', { name: topic.name }), content: (topic) => <TopicMenuEntries topic={topic} context /> }} />;
 }
 
 function TopicRowMenu({ topic }: { topic: Topic }) {

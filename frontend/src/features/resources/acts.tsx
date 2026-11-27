@@ -1,14 +1,16 @@
 /** What a row of a list of resources can do, said once: its button, its menu, its right-click menu and the acts several ticked rows share.
  *
  * Every row has at its end the act most used as a visible button, and a menu with
- * the rest; the same entries open under the right mouse button, with the menu key and with `Shift+F10`.
+ * every act by name; the same entries open under the right mouse button, with the menu key and with `Shift+F10`.
  * An applicable act the reader may not do stays disabled with its reason. Rows that are ticked have the acts they all take
  * above the table, and an act that destroys names what it is about to destroy before it does it.
  */
+import { ResourceHeaderExpanded } from './headerContext';
+import { i18n } from '@/i18n';
 import { linkTo, type LinkObject } from '@/lib/links';
 import type { TFunction } from 'i18next';
 import { Copy, Ellipsis, LoaderCircle, Pencil, Share2 } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useContext, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { AccessTarget } from '@/api/access';
@@ -16,13 +18,14 @@ import { openAccess } from '@/features/access/AccessDialog';
 import { copyText } from '@/ui/clipboard';
 import type { ResourceAccess } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
-import { Checkbox } from '@/ui/Checkbox';
+import { SelectedBar } from '@/ui/RowSelection';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { useErrorText } from '@/ui/errorText';
 import { IconButton } from '@/ui/IconButton';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { toast } from '@/ui/Toast';
 import { Tooltip } from '@/ui/Tooltip';
+import { useNarrowTable } from '@/ui/Table';
 import { AdminActNotice, adminSpec, isAdminAct, type AdminActSpec } from '@/ui/AdminAct';
 
 /** One thing a person can do with a resource. */
@@ -77,6 +80,7 @@ export interface RowActs {
 /** An act as an entry of a menu. */
 export function entryOf(act: Act): MenuEntry {
   const admin = isAdminAct(act.admin) ? act.admin : undefined;
+  const disabled = typeof act.disabled === 'string' ? act.disabled : act.pending === true ? i18n.t('common.loading') : act.disabled;
   const description = admin === undefined ? act.description : <>{act.description}<AdminActNotice spec={admin} /></>;
   return {
     id: act.id,
@@ -85,7 +89,7 @@ export function entryOf(act: Act): MenuEntry {
     ...(description === undefined ? {} : { description }),
     ...(act.shortcut === undefined ? {} : { shortcut: act.shortcut }),
     ...(act.danger === true ? { danger: true } : {}),
-    ...(act.disabled === undefined ? {} : { disabled: act.disabled }),
+    ...(disabled === undefined ? {} : { disabled }),
     onSelect: act.run,
   };
 }
@@ -163,11 +167,15 @@ function Working({ name }: { name: string }) {
  */
 export function RowPrimaryCell({ name, acts }: { name: string; acts: RowActs }) {
   const { t } = useTranslation();
+  const narrow = useNarrowTable();
   const { primary } = acts;
   if (acts.busy) return <Working name={name} />;
   if (primary === null) return null;
+  // In a small room (a phone) an act with an icon is drawn by it alone, its name read and shown on hover, focus or a
+  // touch hold: the row keeps its room for the thing's name.
+  const iconOnly = narrow && primary.icon !== undefined;
   return (
-    <Tooltip content={typeof primary.disabled === 'string' ? primary.disabled : null}>
+    <Tooltip content={typeof primary.disabled === 'string' ? primary.disabled : iconOnly ? primary.label : null}>
       <Button
         admin={primary.admin}
         size="sm"
@@ -178,28 +186,44 @@ export function RowPrimaryCell({ name, acts }: { name: string; acts: RowActs }) 
         aria-label={t('resources.act.of', { act: primary.label, name })}
         onClick={primary.run}
       >
-        {primary.label}
+        <span className={iconOnly ? 'sr-only' : 'truncate'}>{primary.label}</span>
       </Button>
     </Tooltip>
   );
 }
 
-/** The primary button is always present; the row's menus contain the remaining acts once. */
-export function secondaryEntries(acts: RowActs): readonly MenuEntry[] {
-  const remaining: MenuEntry[] = [];
-  for (const entry of acts.entries) {
-    if ((entry.type === undefined || entry.type === 'item') && entry.id === acts.primary?.id) continue;
-    if (entry.type === 'separator' && (remaining.length === 0 || remaining.at(-1)?.type === 'separator')) continue;
-    remaining.push(entry);
+/** Visible acts stay in named menus once, with the same handler, authority and pending state. */
+function withVisibleActs(entries: readonly MenuEntry[], visible: readonly (Act | null)[]): readonly MenuEntry[] {
+  const acts = new Map(visible.filter((act): act is Act => act !== null).map((act) => [act.id, act]));
+  const seen = new Set<string>();
+  const rows: MenuEntry[] = [];
+  for (const entry of entries) {
+    const act = entry.type === undefined || entry.type === 'item' ? acts.get(entry.id) : undefined;
+    if (act !== undefined) {
+      if (seen.has(act.id)) continue;
+      seen.add(act.id); rows.push(entryOf(act));
+    } else rows.push(entry);
   }
-  if (remaining.at(-1)?.type === 'separator') remaining.pop();
-  return remaining;
+  const missing = [...acts.values()].filter((act) => !seen.has(act.id)).map(entryOf);
+  const combined: MenuEntry[] = [...missing, ...(missing.length > 0 && rows.length > 0 ? [{ type: 'separator' as const, id: 'visible-acts' }] : []), ...rows];
+  const result: MenuEntry[] = [];
+  for (const entry of combined) {
+    if (entry.type === 'separator' && (result.length === 0 || result.at(-1)?.type === 'separator')) continue;
+    result.push(entry);
+  }
+  if (result.at(-1)?.type === 'separator') result.pop();
+  return result;
+}
+
+export function rowMenuEntries(acts: RowActs): readonly MenuEntry[] {
+  const primary = acts.primary === null ? null : { ...acts.primary, pending: acts.busy || acts.primary.pending === true };
+  return withVisibleActs(acts.entries, [primary]);
 }
 
 /** The end of a row: the menu of every act of the row, and the sign that one is under way where there is no place for it beside the menu. */
 export function RowMenuCell({ name, acts, working }: { name: string; acts: RowActs; working: boolean }) {
   const { t } = useTranslation();
-  const entries = secondaryEntries(acts);
+  const entries = rowMenuEntries(acts);
   if (entries.length === 0) return working && acts.busy ? <Working name={name} /> : null;
   return (
     <div className="flex items-center justify-end gap-1">
@@ -214,7 +238,7 @@ export function RowMenuCell({ name, acts, working }: { name: string; acts: RowAc
   );
 }
 
-/** The acts in the heading of a resource's page, at the end of the line with its name: the act most used as a button, Edit, and the menu of the rest. */
+/** The acts in the heading of a resource's page, at the end of the line with its name: the act most used as a button, Edit, and a menu naming every act. */
 export function HeadingActs({
   name,
   primary,
@@ -232,31 +256,33 @@ export function HeadingActs({
   admin?: AdminActSpec;
 }) {
   const { t } = useTranslation();
-  return (
-    <>
-      {before}
-      {primary !== null && (
-        <Tooltip content={typeof primary.disabled === 'string' ? primary.disabled : null}>
-          <Button size="sm" admin={primary.admin ?? (MANAGEMENT_ACTS.has(primary.id) ? admin : undefined)} icon={primary.icon} pending={primary.pending === true} blocked={typeof primary.disabled === 'string'} onClick={primary.run}>
-            {primary.label}
-          </Button>
-        </Tooltip>
-      )}
-      {edit !== null && (
-        <Button size="sm" admin={admin} icon={<Pencil aria-hidden />} blocked={typeof edit.disabled === 'string'} reason={typeof edit.disabled === 'string' ? edit.disabled : undefined} onClick={edit.run}>
-          {t('resources.act.editButton')}
-        </Button>
-      )}
-      {menu.length > 0 && (
-        <Menu
-          label={t('resources.act.menuOf', { name })}
-          align="end"
-          entries={adminEntries(menu, admin)}
-          trigger={<IconButton size="sm" variant="secondary" label={t('resources.act.menuOf', { name })} icon={<Ellipsis aria-hidden />} />}
-        />
-      )}
-    </>
+  const expanded = useContext(ResourceHeaderExpanded);
+  const primaryAdmin = primary?.admin ?? (primary !== null && MANAGEMENT_ACTS.has(primary.id) ? admin : undefined);
+  const visiblePrimary = primary === null ? null : { ...primary, ...(primaryAdmin === undefined ? {} : { admin: primaryAdmin }) };
+  const visibleEdit = edit === null ? null : { ...edit, label: t('resources.act.editButton'), ...(admin === undefined ? {} : { admin }) };
+  const headingEntries = withVisibleActs(adminEntries(menu, admin), [visiblePrimary, visibleEdit]);
+  const primaryButton = primary === null ? null : (
+    <Tooltip content={typeof primary.disabled === 'string' ? primary.disabled : null}>
+      <Button size="sm" bounded className="min-w-0 max-w-full" admin={primaryAdmin} icon={primary.icon} pending={primary.pending === true} blocked={typeof primary.disabled === 'string'} onClick={primary.run}>
+        <span className="truncate">{primary.label}</span>
+      </Button>
+    </Tooltip>
   );
+  const editButton = edit === null ? null : (
+    <Button size="sm" admin={admin} icon={<Pencil aria-hidden />} blocked={typeof edit.disabled === 'string'} reason={typeof edit.disabled === 'string' ? edit.disabled : undefined} onClick={edit.run}>
+      {t('resources.act.editButton')}
+    </Button>
+  );
+  const menuButton = headingEntries.length === 0 ? null : (
+    <Menu
+      label={t('resources.act.menuOf', { name })}
+      align="end"
+      entries={headingEntries}
+      trigger={<IconButton size="sm" variant="secondary" label={t('resources.act.menuOf', { name })} icon={<Ellipsis aria-hidden />} />}
+    />
+  );
+  if (!expanded) return primaryButton ?? before ?? editButton ?? menuButton;
+  return <>{before}{primaryButton}{editButton}{menuButton}</>;
 }
 
 // ---------------------------------------------------------------- several rows at once
@@ -289,40 +315,6 @@ export interface ListActs<Row> {
   bulk?: readonly BulkAct<Row>[];
   /** What the acts open (their dialogs), drawn once for the list. */
   dialogs?: ReactNode;
-}
-
-/** The rows that are ticked, by the key of each; a row that is no longer in the list is no longer ticked. */
-export function useSelection<Row>(rows: readonly Row[], keyOf: (row: Row) => string) {
-  const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set());
-  const selected = rows.filter((row) => ticked.has(keyOf(row)));
-  return {
-    selected,
-    isTicked: (row: Row) => ticked.has(keyOf(row)),
-    toggle: (row: Row, on: boolean) =>
-      setTicked((before) => {
-        const after = new Set(before);
-        if (on) after.add(keyOf(row));
-        else after.delete(keyOf(row));
-        return after;
-      }),
-    all: selected.length === rows.length && rows.length > 0 ? (true as const) : selected.length === 0 ? (false as const) : ('indeterminate' as const),
-    toggleAll: (on: boolean) => setTicked(on ? new Set(rows.map(keyOf)) : new Set()),
-    clear: () => setTicked(new Set()),
-  };
-}
-
-const selectionFrame = 'inline-flex min-h-(--control-sm) items-center [&>div]:self-center [&_.choice-toggle]:mt-0';
-
-/** The box that ticks one row, named by the row. */
-export function RowBox({ name, checked, onChange }: { name: string; checked: boolean; onChange: (on: boolean) => void }) {
-  const { t } = useTranslation();
-  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} /></div>;
-}
-
-/** The box at the head of the column, which ticks every row there is. */
-export function AllBox({ checked, onChange }: { checked: boolean | 'indeterminate'; onChange: (on: boolean) => void }) {
-  const { t } = useTranslation();
-  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The acts the ticked rows share, above the table. */
@@ -376,8 +368,7 @@ export function BulkBar<Row>({
 
   const ask = asking === null ? null : asking.confirm?.(rows);
   return (
-    <div role="toolbar" aria-label={t('resources.bulk.label')} className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2">
-      <span className="text-sm font-medium text-text">{t('resources.bulk.count', { count: rows.length })}</span>
+    <SelectedBar count={rows.length} busy={working !== null} onClear={onClear}>
       {shared.map((act) => (
         <Button
           admin={admin}
@@ -392,9 +383,6 @@ export function BulkBar<Row>({
           {act.label}
         </Button>
       ))}
-      <Button size="sm" variant="ghost" disabled={working !== null} onClick={onClear}>
-        {t('resources.bulk.clear')}
-      </Button>
       {asking !== null && ask !== null && ask !== undefined && (
         <ConfirmDialog
           open
@@ -410,7 +398,7 @@ export function BulkBar<Row>({
           {permission !== undefined && rows.map((row, index) => <AdminActNotice key={index} spec={adminSpec(row, permission)} />)}
         </ConfirmDialog>
       )}
-    </div>
+    </SelectedBar>
   );
 }
 

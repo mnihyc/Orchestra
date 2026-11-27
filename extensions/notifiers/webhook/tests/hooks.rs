@@ -331,6 +331,11 @@ async fn a_webhook_is_looked_at_when_it_is_saved_without_posting_anything() {
         panic!("a private address must refuse the save");
     };
     assert_eq!(error.code, "address_not_allowed");
+    assert_eq!(
+        error.field.as_deref(),
+        Some("url"),
+        "the form says it at the address"
+    );
     for bad in ["ftp://x.example", "not an address", ""] {
         let Saved::Refused(error) = on_check(notifier.check(&config(bad, Value::Null)).await)
         else {
