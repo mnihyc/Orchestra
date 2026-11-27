@@ -243,7 +243,8 @@ test('several people make a group with a name; an admin who leaves reads on, rea
   await chatSurface(page).getByRole('button', { name: 'Actions', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Leave group' }).click();
   await page.getByRole('button', { name: 'Leave group' }).last().click();
-  await expect(chatSurface(page).getByRole('img', { name: 'You see this as an admin of Acme' })).toBeVisible();
+  await expect(page.locator('[data-screen-titlebar]:visible').getByRole('switch', { name: 'As admin: On' })).toBeChecked();
+  await expect(chatSurface(page).locator('[data-as-admin-mark]')).toHaveCount(0);
   await expect(page.getByText('Ada Lovelace left')).toBeVisible();
   await expect(page.getByText('Nobody has written here yet.')).toBeVisible();
   await expect(composer(page)).toHaveCount(0);
@@ -359,7 +360,7 @@ test('a timeline item quoted into a thread’s chat is a card that leads back to
   await expect(page.getByRole('heading', { name: 'Acme' })).toBeVisible();
   await page.goto(`/thread/${ACME.mainThread}`);
   await showWorkbenchView(page, 'Chat');
-  const quote = page.getByRole('link', { name: 'Go to the quoted item in the conversation' });
+  const quote = page.getByRole('link', { name: 'Go to the quoted item in the thread' });
   await expect(quote).toContainText('Agent message');
   await expect(quote).toContainText('The redirect loses the next parameter.');
   await quote.click();
@@ -380,7 +381,7 @@ test('an item of the conversation is brought to the thread’s chat from its men
   const item = page.locator('[data-item="u1"]');
   await expect(item).toContainText(question);
   await item.hover();
-  await item.getByRole('button', { name: 'More acts on this item' }).click();
+  await item.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Discuss in chat' }).click();
 
   // The thread's chat comes to the front with the item standing above its box; nothing has been sent.
@@ -396,7 +397,7 @@ test('an item of the conversation is brought to the thread’s chat from its men
   await box.press('Enter');
   const sent = messageSaying(page, 'Is this the line that matters?');
   await expect(sent).toBeVisible();
-  const quote = sent.getByRole('link', { name: 'Go to the quoted item in the conversation' });
+  const quote = sent.getByRole('link', { name: 'Go to the quoted item in the thread' });
   await expect(quote).toContainText(question);
   await quote.click();
   await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}\\?item=u1`));
@@ -414,7 +415,7 @@ test('items picked in the conversation are forwarded to the thread’s chat in o
   const first = page.locator('[data-item="u1"]');
   await expect(first).toContainText(question);
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   await page.locator('[data-item="a1"]').getByRole('checkbox', { name: 'Select this item' }).check();
 
@@ -462,7 +463,7 @@ test('a reader who may not read the timeline is told that an item was quoted, an
   await expect(bar.getByText('A secret step')).toHaveCount(0);
 });
 
-test('an admin reads a chat among others without being in it: read-only, with the sentence that says so, and unseen by the others', async ({ page, browser, baseURL }) => {
+test('an admin reads a chat among others without being in it: read-only, with the session mode in the title bar, and unseen by the others', async ({ page, browser, baseURL }) => {
   await signIn(page);
   const made = await chats('/chat', { org: ACME.org, members: ['dora', 'linus'], name: 'Secret plans' });
   await chats('/say', { chat: made.chat, as: 'dora', text: 'Do not tell Ada yet' });
@@ -475,7 +476,8 @@ test('an admin reads a chat among others without being in it: read-only, with th
   await page.getByRole('link', { name: 'Secret plans' }).click();
 
   await expect(messageSaying(page, 'Do not tell Ada yet')).toBeVisible();
-  await expect(chatSurface(page).getByRole('img', { name: /You see this as an admin of/ })).toBeVisible();
+  await expect(page.locator('[data-screen-titlebar]:visible').getByRole('switch', { name: 'As admin: On' })).toBeChecked();
+  await expect(chatSurface(page).locator('[data-as-admin-mark]')).toHaveCount(0);
   await expect(composer(page)).toHaveCount(0);
 
   // Dora has the chat open: she is told of nobody looking over it.

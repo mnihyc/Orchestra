@@ -34,7 +34,8 @@ import { usePlaceHeaderPanels } from '@/features/navigation/PlaceHeaderPanels';
 import { PlaceDetails, PlaceSettingsLink } from '@/features/navigation/PlaceDetails';
 import { placeOfNode, type PlaceRef } from '@/features/navigation/places';
 import { ProjectActivity } from '@/features/project/Activity';
-import { UsageSection, useWeeklyUsageParams } from '@/features/usage/Board';
+import { UsageSection } from '@/features/usage/Board';
+import { useWeeklyUsageParams } from '@/features/usage/useBoardParams';
 import { FolderCards } from '@/features/project/FolderCards';
 import { Topics } from '@/features/project/Topics';
 import { ProjectStar } from '@/features/project/ProjectStar';
@@ -341,7 +342,7 @@ function ProjectScreen({ projectId, search, onSearch: navigate }: ProjectProps) 
           />
         </>
       )}
-      {data.readme !== null && <PlaceReadme readme={data.readme} />}
+      {data.readme !== null && <PlaceReadme readme={data.readme} nodeId={data.id} />}
       {view !== 'activity' && <UsageSection nodeId={data.id} name={data.name} compact />}
       {data.access.administers && <OutsideOpenings placeId={data.id} />}
     </Page>
