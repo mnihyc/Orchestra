@@ -73,7 +73,7 @@ describe('a place’s label', () => {
     expect(labels.get('q')).toBe('web · Beta');
   });
 
-  it.each(['Main thread', '主线程'])('keeps same-name qualification work proportional to a large tree (%s)', (title) => {
+  it.each(['Main thread', '主会话'])('keeps same-name qualification work proportional to a large tree (%s)', (title) => {
     const run = (count: number) => {
       const places = Array.from({ length: count }, (_, index) => at(`thread-${index}`, title, 'Acme', `Topic ${index}`));
       const normalize = vi.spyOn(String.prototype, 'normalize');
