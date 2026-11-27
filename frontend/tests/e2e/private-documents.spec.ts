@@ -1,6 +1,6 @@
 /** Legacy administered placeholders never resurrect a retired admin step or become readable content. */
 import { expect, test } from '@playwright/test';
-import { ACME, scenario, signIn } from './support';
+import { ACME, openTopicTab, scenario, signIn } from './support';
 import { ADA } from '../doubles/thread-scenes';
 
 test.beforeEach(async () => { await scenario(); });
@@ -17,7 +17,7 @@ test('a document list does not render the retired administered-reference panel f
   });
   await signIn(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
-  await page.getByRole('tab', { name: 'Documents', exact: true }).first().click();
+  await openTopicTab(page, 'Documents');
   const list = page.getByRole('region', { name: 'Documents', exact: true }).first();
   await expect(list.getByRole('region', { name: 'Private', exact: true })).toHaveCount(0);
   await expect(list.locator('[data-document-row]')).toHaveCount(0);

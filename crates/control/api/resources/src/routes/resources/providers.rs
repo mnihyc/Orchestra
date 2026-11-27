@@ -776,6 +776,7 @@ fn normalized(facts: &Json) -> Json {
 pub(super) fn facts_shown(
     facts: &Json,
     overrides: &Json,
+    listed: Option<i32>,
 ) -> ApiResult<(ProviderFacts, Vec<String>)> {
     let mut shown = normalized(facts).as_object().cloned().unwrap_or_default();
     // Kept overrides from older readers remain internal inputs, and keep their precedence by item.
@@ -883,15 +884,10 @@ pub(super) fn facts_shown(
         shown.entry(name).or_insert(Json::Null);
     }
     // The upstream's list of models is no part of a provider's view: the view says how many it holds, and the
-    // list is read apart (`GET /providers/{id}/facts/models`).
-    let listed = facts.get("models");
+    // list is read apart (`GET /providers/{id}/facts/models`), from its own row.
     shown.insert(
         "models_count".to_owned(),
-        listed
-            .and_then(Json::as_array)
-            .map_or(Json::Null, |models| {
-                json!(i64::try_from(models.len()).unwrap_or(i64::MAX))
-            }),
+        listed.map_or(Json::Null, |count| json!(i64::from(count))),
     );
     let parsed = serde_json::from_value(Json::Object(shown)).map_err(|error| {
         ApiError::internal(format!("the facts of a provider do not read: {error}"))
@@ -1184,7 +1180,7 @@ pub(crate) async fn show_thread_prepared(
             .await
             .map_err(DbError::from)?;
     let addresses = addresses(conn, &ids).await?;
-    let (mut facts, overridden) = facts_shown(&row.facts, &row.facts_overrides)?;
+    let (mut facts, overridden) = facts_shown(&row.facts, &row.facts_overrides, row.listed_models)?;
     let sources =
         super::provider_sources::SourceViews::read(conn, std::slice::from_ref(row)).await?;
     let (_, facts_state) = super::provider_sources::view(
@@ -1451,7 +1447,8 @@ async fn provider_rows_with(
             continue;
         }
         let manages = standing.get(&row.id).is_some_and(Standing::manages);
-        let (mut facts, overridden) = facts_shown(&row.facts, &row.facts_overrides)?;
+        let (mut facts, overridden) =
+            facts_shown(&row.facts, &row.facts_overrides, row.listed_models)?;
         let (source, facts_state) = super::provider_sources::view(
             row,
             &facts,
@@ -1921,7 +1918,7 @@ async fn provider_views_with(
             None
         };
         let (facts, facts_overridden) = if can_view {
-            facts_shown(&row.facts, &row.facts_overrides)?
+            facts_shown(&row.facts, &row.facts_overrides, row.listed_models)?
         } else {
             (
                 ProviderFacts {
@@ -4085,7 +4082,7 @@ async fn facts_overrides_set(
     }
     validate_fact_overrides(&body)?;
     // What is written in must still read as the facts of a provider.
-    if let Err(error) = facts_shown(&row.facts, &overrides) {
+    if let Err(error) = facts_shown(&row.facts, &overrides, row.listed_models) {
         return Err(invalid("facts", &error.to_string()));
     }
     let change = ProviderChange {
@@ -4860,6 +4857,7 @@ pub mod tests {
         let (facts, overridden) = facts_shown(
             &known,
             &json!({"plan_credits":{"balance":"24.75","unit":"credits","unlimited":false}}),
+            None,
         )
         .unwrap();
         assert_eq!(

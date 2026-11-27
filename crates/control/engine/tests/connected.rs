@@ -871,6 +871,165 @@ async fn a_directory_without_a_template_runs_with_its_machines_full_access_ceili
     }
 }
 
+/// A directory on a machine whose policy allows Full access, whose one executor (Orch's own tools) confines nothing:
+/// a place that asks for Workspace blocks its separated threads before they start. The topic asks for Workspace here.
+async fn place_asks_more_than_its_tools_enforce(world: &mut World) {
+    use orch_settings_contract::registry::keys;
+    assert_eq!(
+        sqlx::query(
+            "UPDATE providers SET key_machine_id=machine_id WHERE id=$1 AND kind='subscription'"
+        )
+        .bind(world.provider)
+        .execute(world.pool.pool())
+        .await
+        .unwrap()
+        .rows_affected(),
+        1
+    );
+    let machine = primary(world);
+    hosting::physical::report(world, machine.id, true, Some(true), "open").await;
+    machine.added.machine.handler.on(K::EnvAttach, |command| {
+        let mut facts = hosting::facts();
+        facts["executors"][0]["sandbox_modes"] = json!(["open"]);
+        if let orch_link_contract::commands::Command::EnvAttach(attach) = command {
+            facts["workspace_root"] = json!(attach.workspace_root);
+            facts["generation"] = json!(attach.data_generation.unwrap_or(0));
+        }
+        Ok(orch_link_contract::commands::CommandResult::EnvAttach(
+            serde_json::from_value(facts).unwrap(),
+        ))
+    });
+    let environment = directory(world, machine.id, "Acme workspace", "/home/ada/work").await;
+    hosting::physical::existing_thread_directory(world, &machine, environment, "web");
+    world.environment = environment;
+    hosting::physical::attached(world, environment).await;
+    world
+        .set(world.topic, keys::SANDBOX_MODE, json!("workspace"))
+        .await;
+}
+
+/// A separated thread of the world's topic on its directory, through Orch's own tools.
+async fn separated_thread(world: &World, name: &str) -> Id {
+    use orch_agent_contract::descriptor::ArrangementType;
+    let created = world
+        .engine()
+        .create_thread(
+            &Caller::session(world.ada),
+            orch_engine::binding::NewThread {
+                topic: world.topic,
+                name: name.into(),
+                agent: world.agent,
+                provider: world.provider,
+                environment: world.environment,
+                directory: "web".into(),
+                arrangement: Some(ArrangementType::Separated),
+                model: Some(common::MODEL.into()),
+                effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.arrangement.executor.as_deref(), Some("orch-exec"));
+    created.thread
+}
+
+/// Sends a message and waits until the thread is blocked because its tools cannot enforce what its place asks.
+async fn blocked_by_its_tool_access(world: &World, thread: Id) {
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("hello"))
+        .await
+        .unwrap();
+    hosting::physical::wait(
+        world,
+        world.environment,
+        thread,
+        "the place's Workspace to block the thread",
+        || async { world.state(thread).await.0 == "blocked" },
+    )
+    .await;
+    let detail: Option<String> =
+        sqlx::query_scalar("SELECT blocked_detail FROM threads WHERE node_id=$1")
+            .bind(thread)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    let detail = detail.unwrap();
+    assert!(detail.contains("cannot confine commands"), "{detail}");
+    assert!(world.turn_starts(thread).is_empty());
+}
+
+#[tokio::test]
+async fn a_thread_blocked_by_its_places_tool_access_starts_as_soon_as_the_place_changes_it() {
+    use orch_settings_contract::registry::keys;
+    // The recheck that looks at blocked threads now and then is an hour away: only the change itself may free it.
+    let mut world =
+        World::tuned(|config| config.recheck_every = std::time::Duration::from_secs(3_600)).await;
+    place_asks_more_than_its_tools_enforce(&mut world).await;
+    let thread = separated_thread(&world, "work").await;
+    blocked_by_its_tool_access(&world, thread).await;
+    world
+        .set(world.topic, keys::SANDBOX_MODE, json!("open"))
+        .await;
+    world
+        .engine()
+        .admission_scope_changed(world.topic)
+        .await
+        .unwrap();
+    hosting::physical::wait(
+        &world,
+        world.environment,
+        thread,
+        "the thread to start once its place allows Full access",
+        || async { !world.turn_starts(thread).is_empty() },
+    )
+    .await;
+    assert_eq!(
+        world.turn_starts(thread)[0].sandbox_mode,
+        orch_link_contract::commands::SandboxMode::Open
+    );
+    world.run_turn(thread, 0, "Hello!").await;
+    world.wait_state(thread, "idle").await;
+    world.engine().stop();
+}
+
+#[tokio::test]
+async fn the_recheck_goes_round_every_blocked_thread_however_few_it_takes_at_a_time() {
+    use orch_settings_contract::registry::keys;
+    // One thread a pass: the first stays blocked by its own Read only, which nothing here can enforce; before, the
+    // recheck took that same first thread every time and never came to the second.
+    let mut world = World::tuned(|config| config.sweep_batch = 1).await;
+    place_asks_more_than_its_tools_enforce(&mut world).await;
+    // The recheck takes threads in the order of their ids: the one it meets first is the one kept blocked.
+    let (one, other) = (
+        separated_thread(&world, "one").await,
+        separated_thread(&world, "other").await,
+    );
+    let (first, second) = (one.min(other), one.max(other));
+    world
+        .set(first, keys::SANDBOX_MODE, json!("read_only"))
+        .await;
+    blocked_by_its_tool_access(&world, first).await;
+    blocked_by_its_tool_access(&world, second).await;
+    // Nothing tells the engine of this change: only its recheck finds it.
+    world
+        .set(world.topic, keys::SANDBOX_MODE, json!("open"))
+        .await;
+    hosting::physical::wait(
+        &world,
+        world.environment,
+        second,
+        "the second blocked thread to be looked at again and start",
+        || async { !world.turn_starts(second).is_empty() },
+    )
+    .await;
+    assert_eq!(world.state(first).await.0, "blocked");
+    assert!(world.turn_starts(first).is_empty());
+    world.run_turn(second, 0, "Hello!").await;
+    world.wait_state(second, "idle").await;
+    world.engine().stop();
+}
+
 #[tokio::test]
 async fn a_colocated_harness_uses_its_own_workspace_sandbox_below_the_machine_ceiling() {
     use orch_agent_contract::descriptor::ArrangementType;

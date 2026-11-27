@@ -1114,6 +1114,53 @@ async fn an_org_chat_opening_judges_its_summaries_model_once_and_publishes_witho
 }
 
 #[tokio::test]
+async fn an_org_chat_opening_reads_its_default_models_candidates_together_once() {
+    use orch_api_contract::chats::{NodeChatOpeningGet, NodeChatOpeningGetQuery};
+    use orch_api_contract::nodes::NodeKind;
+    let (world, reader, [org, ..]) = fixture(1, true).await;
+    let (reply, work) = Statements::queries(
+        world
+            .app
+            .call(NodeChatOpeningGet, &[&org])
+            .token(&reader.token)
+            .query(&NodeChatOpeningGetQuery {
+                scope: Some(NodeKind::Thread),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .send(),
+    )
+    .await;
+    let opening = reply.ok();
+    assert!(
+        !opening.summaries.is_empty(),
+        "the chat's summaries come with its opening"
+    );
+    let count = |fragment: &str| -> usize {
+        work.statements
+            .iter()
+            .filter(|(sql, _)| sql.contains(fragment))
+            .map(|(_, count)| count.statements)
+            .sum()
+    };
+    // The catch-up, the title and the place's summary each ask for a default model; every provider and model it
+    // judges is read with the others, once.
+    let endpoints = count("SELECT upstreams FROM providers WHERE id=$1");
+    let models = count("WHERE provider_id = $1 AND model_name = $2");
+    let batches = count("JOIN unnest($1::uuid[], $2::text[]) AS wanted(provider_id, model_name)");
+    eprintln!(
+        "org chat opening statements={} endpoint reads={endpoints} model reads={models} model batches={batches}",
+        work.totals.statements
+    );
+    assert_eq!(
+        endpoints, 0,
+        "endpoint defaults are read for every candidate together"
+    );
+    // The model reads by name that remain are the opening's other parts', which this case does not bound.
+    assert_eq!(batches, 1, "once for the opening's views");
+}
+
+#[tokio::test]
 async fn a_team_opening_reads_the_selected_model_and_environment_defaults_once() {
     let (world, reader, [_, _, _, thread, _]) = fixture(1, true).await;
     let (reply, work) = Statements::queries(

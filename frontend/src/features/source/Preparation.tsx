@@ -50,7 +50,8 @@ export function SourcePreparation({ thread }: { thread: Thread }) {
   const mayPrepare = thread.environment_permissions.includes(PREPARE_PERMISSION);
   const job = source.job;
   const details = job === null ? undefined : <Button action="show" size="sm" variant="ghost" onClick={() => setJobDetails(job.id)}>{t('source.prepare.details')}</Button>;
-  const panel = jobDetails !== null && job?.id === jobDetails && <PreparationJob id={jobDetails} onClose={() => setJobDetails(null)} />;
+  const failedWhy = source.state === 'failed' ? failureReason(t, source, mayPrepare, environment) : null;
+  const panel = jobDetails !== null && job?.id === jobDetails && <PreparationJob id={jobDetails} source={source} failedWhy={failedWhy} onClose={() => setJobDetails(null)} />;
   if (source.state === 'failed') {
     return (
       <>
@@ -99,11 +100,33 @@ export function SourcePreparation({ thread }: { thread: Thread }) {
   );
 }
 
-/** A short source reference grants no diagnostic body; opening it makes the current authorized job read. */
-function PreparationJob({ id, onClose }: { id: string; onClose: () => void }) {
+/** The steps a preparation goes through, by the names its job gives them. */
+const STEPS = ['validate', 'apply', 'verify', 'files', 'commit'] as const;
+
+/** The name of the step a preparation stopped at. */
+function stepName(t: TFunction, phase: string): string {
+  const step = STEPS.find((known) => known === phase);
+  return step === undefined ? t('source.step.other') : t(`source.step.${step}`);
+}
+
+/** Why a preparation failed, in the reader's words: whoever may not prepare it is told whom to ask, as the line above
+ * the conversation tells them; otherwise the sentence of the failure's code. */
+function failureReason(t: TFunction, source: SourceInfo, mayPrepare: boolean, environment: NonNullable<Thread['environment']>): string {
+  if (source.reason === 'access.denied' && !mayPrepare) return workspaceDenial(t, PREPARE_PERMISSION, environment);
+  return preparationFailure(t, source);
+}
+
+/**
+ * A short source reference grants no diagnostic body; opening it makes the current authorized job read. A failed one
+ * says the step it stopped at and why: from the job's error where the reader may read it, otherwise from what the
+ * thread's own source says (its code), which is what its line above the conversation says too.
+ */
+function PreparationJob({ id, source, failedWhy, onClose }: { id: string; source: SourceInfo; failedWhy: string | null; onClose: () => void }) {
   const { t } = useTranslation();
   const read = useQuery(jobQuery(id));
   const job = read.data;
+  const step = [job?.error?.phase, job?.progress.phase, source.job?.phase].find((phase) => phase !== undefined && phase !== '') ?? '';
+  const failed = job?.state === 'failed';
   return <Dialog open size="md" title={t('source.prepare.detailsTitle')} onOpenChange={(open) => { if (!open) onClose(); }}
     footer={<Button onClick={onClose}>{t('common.close')}</Button>}>
     {read.isError ? <ErrorState compact error={read.error} retrying={read.isRefetching} onRetry={() => void read.refetch()} /> : job === undefined
@@ -111,9 +134,11 @@ function PreparationJob({ id, onClose }: { id: string; onClose: () => void }) {
         <Meter look="progress" value={job.progress.percent} label={t(`source.job.${job.state}`)} />
         <JobActivityLine job={job} />
         {job.error !== null ? <>
-          <ErrorAlert error={job.error} message={sourceFailure(t, job.error.code)} />
+          <ErrorAlert error={job.error} message={t('source.step.line', { step: stepName(t, step), why: sourceFailure(t, job.error.code) })} />
           <p className="wrap-anywhere whitespace-pre-wrap text-sm" data-user-content>{job.error.message}</p>
-        </> : isOver(job.state) && <p role="status" className="text-sm">{t(`source.job.${job.state}`)}</p>}
+        </> : failed && failedWhy !== null ? <p role="status" className="wrap-anywhere text-sm" data-source-failed-step={step === '' ? undefined : step}>
+          {t('source.step.line', { step: stepName(t, step), why: failedWhy })}
+        </p> : isOver(job.state) && <p role="status" className="text-sm">{t(`source.job.${job.state}`)}</p>}
       </div>}
   </Dialog>;
 }

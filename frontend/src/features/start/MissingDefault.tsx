@@ -23,6 +23,7 @@ import { AccessRequest } from '@/features/access/AccessRequest';
 import { providerNamesCollide, providerPickerLabels } from '@/features/resources/providers/labels';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
 import { ResourceCreationActions } from '@/features/resources/ResourceCreation';
+import { NoHostLine } from '@/features/resources/hosts/NoHostLine';
 import type { PlaceRef } from '@/features/navigation/places';
 import type { Project, Topic } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
@@ -210,14 +211,14 @@ export function MissingDefault({ place, node, options, resolved, picks, onPick, 
       )}
 
       {(resolved.providers.every((row) => !row.choosable) || resolved.agents.every((row) => !row.startable)) && <ResourceCreationActions onReadChoices={onChange} />}
-      {first?.kind === 'environment' && (
+      {first?.kind === 'environment' && (!options.can_create.allowed && options.can_create.missing.length === 0 ? <NoHostLine kind="environment" hosts={options.hosts} quiet /> : (
         <details>
           <summary className="cursor-default rounded-md select-none hover:text-text-muted">{t('start.where.mayNotMake')}</summary>
           <div className="mt-2">
             <AccessRequest missing={options.can_create.missing} objectId={options.can_create.missing[0]?.object.id ?? place.id} fixed />
           </div>
         </details>
-      )}
+      ))}
 
       <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
         {keepRow}

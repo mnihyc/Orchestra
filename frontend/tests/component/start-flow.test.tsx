@@ -17,6 +17,7 @@ import { NO_PICKS } from '@/features/start/choices';
 import type { StartPlan } from '@/features/start/start';
 import type { Approval, CreateThread, Project, Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
+import { formatBytes } from '@/lib/format';
 
 import { agent, arrangement, environment as environmentRow, host, model, options, provider } from '../unit/start-fixtures';
 import { BEA, TOPIC } from '../unit/general-access-fixtures';
@@ -750,6 +751,8 @@ it.each(['en', 'zh-CN'] as const)('keeps an inherited approval replacement inspe
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
   const trigger = await screen.findByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}`) });
   await user.click(trigger);
+  // The agent's facts wait, closed, under one line at the foot of its list.
+  await user.click(await screen.findByText(i18n.t('common.details'), { selector: '[data-pick-facts] summary' }));
   expect(await screen.findByText(i18n.t('start.approvalFacts.preferred'))).toBeVisible();
   expect(screen.getByText(i18n.t('start.approvalFacts.notDeclared'))).toBeVisible();
   expect(screen.getByRole('menuitemradio', { name: /^Agent a1/ })).toBeDisabled();
@@ -763,8 +766,14 @@ it.each(['en', 'zh-CN'] as const)('offers a host by the free space of the storag
       room: { cpu_free_millis: 700, memory_free_bytes: 16_000_000_000, observed_at: '2026-11-21T20:50:00Z' },
       storages: [{ name: 'default', default: true, capacity_gb: 249, free_gb: 31, private_views: true }] });
     const view = renderWithProviders(<HostCapacityLine host={place} />);
-    expect(view.container).toHaveTextContent(i18n.t('resourceFacts.diskFree', { free: '31', total: '249' }));
-    expect(view.container).not.toHaveTextContent(i18n.t('resourceFacts.diskFree', { free: '489', total: '1,081' }));
+    const disk = (gigabytes: string) => i18n.t('resources.amount.disk', { size: gigabytes });
+    expect(view.container).toHaveTextContent(i18n.t('resourceFacts.diskFree', { free: disk('31'), total: disk('249') }));
+    expect(view.container).not.toHaveTextContent(/489|1,081/u);
+    // One line in the words of every host picker: memory free of what the host has, each figure apart by the same mark.
+    const line = view.container.querySelector('[data-place-capacity]');
+    const memory = i18n.t('resourceFacts.memoryFree', { free: formatBytes(16_000_000_000, locale), total: formatBytes(36_929 * 1024 * 1024, locale) });
+    const separator = i18n.t('resourceFacts.separator');
+    expect(line?.textContent).toContain(`${i18n.t('placeRoom.cpu', { count: 0.7, n: '0.7' })}${separator}${memory}${separator}${i18n.t('resourceFacts.diskFree', { free: disk('31'), total: disk('249') })}${separator}`);
     view.unmount();
     const unknown = renderWithProviders(<HostCapacityLine host={{ ...place, storages: [] }} />);
     expect(unknown.container).not.toHaveTextContent(/1,081|1081/u);

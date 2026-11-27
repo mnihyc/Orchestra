@@ -30,7 +30,8 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StatusDot } from '@/ui/StatusDot';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
-import { type ResourceSubject, DISK_BYTES_PER_GB, fullEnvironment, fullHost, fullProvider, MEMORY_BYTES_PER_MB, modelCaps, resourceAddress, resourceName } from './facts';
+import { diskWords } from '@/features/resources/amounts';
+import { type ResourceSubject, fullEnvironment, fullHost, fullProvider, MEMORY_BYTES_PER_MB, modelCaps, resourceAddress, resourceName } from './facts';
 import ExtraResourceCard from './ExtraResourceCard';
 import { ResourceHint, ResourceName } from './ResourceFacts';
 import { useResourceSample } from './live';
@@ -123,7 +124,7 @@ function HostDetails({ host, subject }: { host: Host; subject: Extract<ResourceS
       ...(host.usage?.memory_used_mb === undefined || host.usage.memory_used_mb === null ? [] : [{ name: t('resourceFacts.memoryNow'), value: formatBytes(host.usage.memory_used_mb * MEMORY_BYTES_PER_MB, format.locale) }]),
       ...(host.usage?.cpu_percent_milli === undefined || host.usage.cpu_percent_milli === null ? [] : [{ name: t('resourceFacts.cpu'), value: freeCpuWords(hostFreeCpuMillis(host), t, format.locale) }]),
       ...(host.usage === null || host.usage === undefined ? [] : [{ name: t('resourceFacts.observed'), value: <RelativeTime at={host.usage.observed_at} /> }]),
-      ...(place?.storages ?? host.storages).map((storage) => ({ name: storage.name, value: t('resourceFacts.free', { size: formatBytes(storage.free_gb * DISK_BYTES_PER_GB, format.locale) }) })),
+      ...(place?.storages ?? host.storages).map((storage) => ({ name: storage.name, value: t('resourceFacts.diskFree', { free: diskWords(Math.max(0, storage.free_gb), t, format.locale), total: diskWords(storage.capacity_gb, t, format.locale) }) })),
     ]} />
     {capacity.memory_mb > 0 && measured !== undefined && measured !== null && <Meter neutral showActual value={measured / capacity.memory_mb * 100}
       label={t('resourceFacts.memoryFree', { free: formatBytes(Math.max(0, capacity.memory_mb - measured) * MEMORY_BYTES_PER_MB, format.locale), total: formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, format.locale) })} />}

@@ -37,3 +37,65 @@ it('keeps externally owned navigation hidden and gives the panel its own region 
   show(<Example navigation={false} />); expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
   expect(screen.getByRole('region', { name: 'First' })).toHaveTextContent('First content');
 });
+
+function PageTabs() {
+  const [value, setValue] = useState('overview');
+  return <Tabs label="Topic sections" value={value} onValueChange={setValue} overflow="menu" tabs={[
+    { value: 'overview', label: 'Overview', panel: <p>Overview content</p> },
+    { value: 'threads', label: 'Threads', count: 3, panel: <p>Threads content</p> },
+    { value: 'environments', label: 'Environments', count: 1, panel: <p>Environments content</p> },
+    { value: 'documents', label: 'Documents', panel: <p>Documents content</p> },
+    { value: 'settings', label: 'Settings', panel: <p>Settings content</p> },
+  ]} />;
+}
+/** Nothing is laid out here: every tab and More is 100 px wide, and the row has 320 px (a phone's page, less its margins). */
+async function inNarrowRow(check: () => Promise<void>) {
+  const width = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+  const room = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth');
+  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get(this: HTMLElement) { return this.matches('[data-tab-value], [data-tabs-more]') ? 100 : 0; } });
+  Object.defineProperty(Element.prototype, 'clientWidth', { configurable: true, get(this: Element) { return this.matches('[data-navigation-strip]') ? 320 : 0; } });
+  try {
+    await check();
+  } finally {
+    if (width !== undefined) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', width);
+    if (room !== undefined) Object.defineProperty(Element.prototype, 'clientWidth', room);
+  }
+}
+/** A tab under More is out of the row, so it has no accessible name to be found by: it is found by its value. */
+const tabOf = (value: string) => screen.getAllByRole('tab', { hidden: true }).find((tab) => tab.dataset.tabValue === value);
+
+it('keeps a page\'s tabs on one row, those that do not fit under More, and the chosen one always in the row', async () => {
+  await inNarrowRow(async () => {
+    show(<PageTabs />); const user = userEvent.setup();
+    // The chosen tab and as many as fit before More; the rest wait under More, nothing on a second row.
+    expect(screen.getByRole('tab', { name: /^Overview/u })).toBeVisible();
+    expect(screen.getByRole('tab', { name: /^Threads/u })).toBeVisible();
+    for (const value of ['environments', 'documents', 'settings']) expect(tabOf(value)).not.toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'More' }));
+    expect(screen.getByRole('menuitemradio', { name: 'Environments (1)' })).toBeVisible();
+    await user.click(screen.getByRole('menuitemradio', { name: 'Settings' }));
+    // Chosen from More, it takes its place in the row with its panel; another leaves for More.
+    await waitFor(() => expect(screen.getByRole('tab', { name: /^Settings/u })).toBeVisible());
+    expect(screen.getByRole('tab', { name: /^Settings/u })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel', { name: /^Settings/u })).toHaveTextContent('Settings content');
+    expect(screen.getByRole('tab', { name: /^Overview/u })).toBeVisible();
+    expect(tabOf('threads')).not.toBeVisible();
+  });
+});
+it('reaches the tabs under More with the arrow keys and End, each joining the row with the focus', async () => {
+  await inNarrowRow(async () => {
+    show(<PageTabs />); const user = userEvent.setup();
+    expect(tabOf('environments')).not.toBeVisible();
+    await user.click(screen.getByRole('tab', { name: /^Threads/u })); await user.keyboard('{ArrowRight}');
+    // The next tab waits under More: the arrow chooses it all the same, and it comes into the row with the focus.
+    await waitFor(() => expect(screen.getByRole('tab', { name: /^Environments/u })).toHaveFocus());
+    expect(screen.getByRole('tab', { name: /^Environments/u })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel', { name: /^Environments/u })).toHaveTextContent('Environments content');
+    await user.keyboard('{End}'); await waitFor(() => expect(screen.getByRole('tab', { name: /^Settings/u })).toHaveFocus());
+    expect(screen.getByRole('tabpanel', { name: /^Settings/u })).toHaveTextContent('Settings content');
+    expect(tabOf('environments')).not.toBeVisible();
+    await user.keyboard('{Home}'); await waitFor(() => expect(screen.getByRole('tab', { name: /^Overview/u })).toHaveFocus());
+    await user.keyboard('{ArrowLeft}'); await waitFor(() => expect(screen.getByRole('tab', { name: /^Settings/u })).toHaveFocus());
+    expect(screen.getAllByRole('tab', { selected: true })).toHaveLength(1);
+  });
+});

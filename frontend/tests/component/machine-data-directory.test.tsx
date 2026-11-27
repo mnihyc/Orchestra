@@ -2,6 +2,7 @@
 import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
 import { MachineStorages } from '@/features/resources/machines/Storages';
+import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
 import { MachineDataDirectory } from '@/features/resources/machines/DataDirectory';
 import type { MachineDataInventory } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -15,9 +16,20 @@ const inventory = (patch: Partial<MachineDataInventory> = {}): MachineDataInvent
 ], ...patch });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`reads one disk with the same figure on the Overview and the Storage tab (${locale})`, async () => {
+    // A 267.9 GB disk: its storage report counts whole decimal gigabytes, and the Overview's data disk says the same.
+    await setLocale(locale);
+    const gigabytes = i18n.t('resources.amount.disk', { size: '267' });
+    show(<><MachineCapacityLine facts={{ cpus: 10, memory_bytes: 41_761_916 * 1024, data_volume_bytes: 267_900_809_216 }} />
+      <MachineStorages facts={{ storages: [{ name: 'default', default: true, capacity_gb: 267, free_gb: 44 }] }} /></>);
+    expect(screen.getByText(new RegExp(i18n.t('machines.capacity.disk', { size: gigabytes }).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))).toBeInTheDocument();
+    expect(screen.getByText(i18n.t('resourceFacts.diskFree', { free: i18n.t('resources.amount.disk', { size: '44' }), total: gigabytes }))).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/GiB data disk|250 GiB|249 GiB/u);
+  });
   it(`shows native parts and the observation age beside existing capacity (${locale})`, async () => {
     await setLocale(locale); show(<MachineStorages facts={{ storages: [{ name: 'fast', default: true, capacity_gb: 100, free_gb: 40 }] }} dataDirectory={inventory()} />);
     expect(screen.getByText(i18n.t('machineStorage.default', { name: 'fast' }))).toBeInTheDocument();
+    expect(screen.getByText(i18n.t('resourceFacts.diskFree', { free: i18n.t('resources.amount.disk', { size: '40' }), total: i18n.t('resources.amount.disk', { size: '100' }) }))).toBeInTheDocument();
     const parts = await screen.findByRole('table', { name: i18n.t('machineData.parts') }); expect(within(parts).getByText('environments')).toBeInTheDocument();
     expect(within(parts).getByText(formatBytes(1024, locale))).toBeInTheDocument(); expect(within(parts).getByText(formatBytes(0, locale))).toBeInTheDocument();
     expect(document.querySelector(`time[datetime="${observed}"]`)).not.toBeNull(); expect(screen.getByText(i18n.t('machineData.observed'))).toBeInTheDocument();

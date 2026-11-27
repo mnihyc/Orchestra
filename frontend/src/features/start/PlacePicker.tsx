@@ -1,18 +1,22 @@
 /** The one control for where a thread runs: a field that opens a short list, whatever the number of environments.
  *
- * "New environment…" is the first row and opens its own compact form beside the field; the environments follow, name first
- * with the location and other details on a secondary line, and those that need
- * a request for access or cannot be used at all follow in groups of their own, each with its reason. A search narrows the
- * list; the list scrolls inside its own frame, so twelve environments and two thousand take the same room on the screen.
+ * "New environment…" is the first row and opens its own compact form beside the field; the person's recent environments
+ * follow, then the rest, the default first. Each row is one line: the name, then its facts (its machine, Default, how it
+ * stands where it is not ready, its free room, the machine's size), shortened to that line and whole on hover, with the
+ * owner's chip where it is somebody else's; the current one is marked. Those that need a request for access or cannot be
+ * used at all follow in groups of their own, each with its reason. A search narrows the list; the list scrolls inside its
+ * own frame, so twelve environments and two thousand take the same room on the screen.
  * The dialog that starts a thread and the dialog that changes where one runs both stand on it.
  */
-import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
 import { Plus } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { machineCapacityWords } from '@/features/resources/machines/MachineCapacityLine';
 import type { EnvironmentStatus, MachineCapacity, PlaceRoom, UserRef } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
+import { recentChoiceRows, usePickerRecents } from '@/lib/pickerRecents';
+import { factLine } from '@/ui/Choice';
 import { Combobox, type ComboboxGroup, type ComboboxOption } from '@/ui/Combobox';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { PlaceCapacity } from './PlaceCapacity';
@@ -72,52 +76,70 @@ function normal(text: string | null | undefined, locale: string): string {
 
 export function PlacePicker({ label, hideLabel = true, value, rows, onPick, newRow, placeholder, disabled = false, fieldClassName, footer, onOpenChange, size, open }: PlacePickerProps) {
   const { t } = useTranslation();
-  const { locale } = useFormatContext();
+  const format = useFormatContext();
+  const { locale } = format;
   const [query, setQuery] = useState('');
+  const [listed, setListed] = useState(false);
+  const shown = open ?? listed;
+  // The person's recent environments, kept by the server with their other recent choices, are read once the pointer or the
+  // keyboard reaches the field. The list never waits for them: it opens in the order they had then; the first answer, where
+  // the list opened before it, takes its place at once, and a later one at the next opening, so rows do not move while used.
+  const [warm, setWarm] = useState(false);
+  const recent = usePickerRecents(warm || shown);
+  const recentNow = recent.choices?.environment;
+  const [opening, setOpening] = useState<{ shown: boolean; keys: readonly string[]; waiting: boolean }>({ shown: false, keys: [], waiting: false });
+  if (opening.shown !== shown) setOpening({ shown, keys: shown ? recentNow ?? [] : [], waiting: shown && recent.loading });
+  else if (opening.waiting && !recent.loading) setOpening({ shown, keys: recentNow ?? [], waiting: false });
   const wanted = normal(query.trim(), locale);
-  const shown = wanted === '' ? rows : rows.filter((row) => [row.name, row.on, ...(row.keywords ?? [])].some((word) => normal(word, locale).includes(wanted)));
+  const matching = wanted === '' ? rows : rows.filter((row) => [row.name, row.on, ...(row.keywords ?? [])].some((word) => normal(word, locale).includes(wanted)));
+  const separator = t('resourceFacts.separator');
   const optionOf = (row: PlaceRow): ComboboxOption<string> => {
     const unavailable = row.group === 'unavailable';
     const reason = unavailable ? row.reason ?? t('start.where.closed') : row.group === 'ask' ? row.reason ?? t('start.where.askAccess') : null;
-    const accessory = (
-      <span className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-x-1 text-sm text-text-muted" data-place-beside>
-        {row.on && <span className="min-w-0 truncate" title={row.on}>{row.on}</span>}
-        {row.owner && <UserChip user={row.owner} size={24} />}
-        {row.isDefault === true && <span>{t('start.where.default')}</span>}
-        <PlaceCapacity room={row.room} running={row.running} />
-        {row.state && <span className="text-warning-text">{row.state}</span>}
-        {reason && <span>{reason}</span>}
-      </span>
-    );
     return {
       value: row.id,
       label: row.name,
       text: row.name,
-      ...(row.capacity ? {description:<MachineCapacityLine facts={row.capacity} />} : {}),
       icon: <EnvironmentDot status={row.status} />,
-      accessory,
+      // One line of facts, the most telling first; what does not fit is whole on hover. A row that cannot be used says why
+      // first, under its name, and keeps the same figures to compare.
+      description: factLine([
+        ...(unavailable ? [reason] : []),
+        // The place it is on, drawn beside its name.
+        row.on ? <span data-place-beside>{row.on}</span> : null,
+        row.isDefault === true ? t('start.where.default') : null,
+        row.state === null ? null : <span className="text-warning-text">{row.state}</span>,
+        unavailable ? null : reason,
+        <PlaceCapacity room={row.room} running={row.running} />,
+        machineCapacityWords(row.capacity, t, format),
+      ], separator),
+      ...(row.owner ? { accessory: <UserChip user={row.owner} size={24} /> } : {}),
       disabled: unavailable,
     };
   };
-  const ready = shown.filter((row) => row.group === 'ready');
-  const ask = shown.filter((row) => row.group === 'ask');
-  const unavailable = shown.filter((row) => row.group === 'unavailable');
+  // A recent environment is one the person can start in now; a search shows every match in its own group.
+  const recents = wanted === '' ? recentChoiceRows(matching.filter((row) => row.group === 'ready'), opening.keys, (row) => row.id, () => true) : [];
+  const promoted = new Set(recents.map((row) => row.id));
+  const rest = matching.filter((row) => !promoted.has(row.id));
+  const ready = rest.filter((row) => row.group === 'ready');
+  const ask = rest.filter((row) => row.group === 'ask');
+  const unavailable = rest.filter((row) => row.group === 'unavailable');
   // The words over a group appear only where the list holds more than one kind.
-  const mixed = [ready, ask, unavailable].filter((group) => group.length > 0).length > 1;
+  const mixed = [recents, ready, ask, unavailable].filter((group) => group.length > 0).length > 1;
   const groups: ComboboxGroup<string>[] = [
     ...(newRow === undefined ? [] : [{
       id: 'new', label: '',
       options: [{ value: NEW_PLACE, label: t('start.where.newRow'), text: t('start.where.newRow'), icon: <Plus aria-hidden />,
         ...(typeof newRow.blocked === 'string' ? { disabled: newRow.blocked } : {}) }],
     }]),
+    { id: 'recent', label: t('ui.picker.recent'), options: recents.map(optionOf) },
     { id: 'ready', label: mixed ? t('start.where.canUse') : '', options: ready.map(optionOf) },
     { id: 'ask', label: mixed ? t('start.where.askAccess') : '', options: ask.map(optionOf) },
     { id: 'unavailable', label: mixed ? t('start.where.unavailable') : '', options: unavailable.map(optionOf) },
   ];
   const chosen = value === null || value === NEW_PLACE ? undefined : rows.find((row) => row.id === value);
-  return <Combobox<string>
+  return <div className="contents" onPointerEnter={() => setWarm(true)} onFocusCapture={() => setWarm(true)}><Combobox<string>
     label={label}
-    accessoryBelow
     hideLabel={hideLabel}
     placeholder={placeholder ?? t('start.where.chooseExisting')}
     disabled={disabled}
@@ -131,11 +153,12 @@ export function PlacePicker({ label, hideLabel = true, value, rows, onPick, newR
     {...(value === null ? {} : { initialActiveValue: value })}
     groups={groups}
     empty={t('start.where.noMatches')}
-    onOpenChange={(open) => { if (!open) setQuery(''); onOpenChange?.(open); }}
+    onOpenChange={(next) => { setListed(next); if (!next) setQuery(''); onOpenChange?.(next); }}
     onSelect={(option) => {
       setQuery('');
-      if (option.value === NEW_PLACE) newRow?.onNew();
-      else onPick(option.value);
+      if (option.value === NEW_PLACE) { newRow?.onNew(); return; }
+      if (rows.some((row) => row.id === option.value && row.group === 'ready')) recent.record({ kind: 'environment', key: option.value });
+      onPick(option.value);
     }}
-  />;
+  /></div>;
 }
