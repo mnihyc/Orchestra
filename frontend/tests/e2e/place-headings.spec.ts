@@ -19,7 +19,8 @@ const PLACES = [
 ] as const;
 
 /** The acts of a place's menu that open a dialog about the place itself. */
-const ACTS = ['Rename…', 'Move to…', 'Colour…', 'Archive…', 'Delete…', 'Recently deleted…'] as const;
+// Archive is made at once when it stops nothing, so it opens no dialog to name the place in.
+const ACTS = ['Rename…', 'Move to…', 'Colour…', 'Delete…', 'Recently deleted…'] as const;
 
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

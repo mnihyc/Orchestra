@@ -1,5 +1,6 @@
 /** The actual and requested network, its safe policy sources, and recovery through the existing change plan. */
 import { useTranslation } from 'react-i18next';
+import { Link } from '@tanstack/react-router';
 import { EmptyState } from '@/ui/EmptyState';
 
 import { openChange } from '@/features/change/target';
@@ -68,7 +69,7 @@ export function EnvironmentNetwork({ environment, manage, compact = false }: {
           </div>
           {network.last_denied !== null && <p className="flex flex-wrap gap-x-3 gap-y-1 break-words text-sm text-text-muted"><span>{t('egress.denied', { host: network.last_denied.host })}</span><span>{network.last_denied.reason}</span><RelativeTime at={network.last_denied.at} /></p>}
           {manage && <div className="flex flex-wrap items-center gap-3 text-sm">
-            <a href={`/resources/environments/${environment.id}?tab=settings`} className="text-accent-text underline">{t('egress.editHosts')}</a>
+            <Link to="/resources/environments/$id" params={{id:environment.id}} search={{tab:'settings'}} className="text-accent-text underline">{t('egress.editHosts')}</Link>
             {network.state !== 'ready' && <Button size="sm" disabled={environment.job !== null} onClick={() => openChange({ kind: 'environment', id: environment.id, name: environment.name }, { kind: 'update' })}>{t('egress.retry')}</Button>}
           </div>}
         </>

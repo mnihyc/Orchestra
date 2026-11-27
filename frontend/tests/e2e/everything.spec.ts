@@ -98,7 +98,8 @@ test('at 400 pixels filters fold away and complete rows use the page instead of 
   await page.getByRole('button', { name: 'Expand all', exact: true }).click();
   const card = tree.locator('[data-everything-row]').filter({ hasText: 'A long project name that stays readable on a narrow screen 1' }).first();
   await expect(card).toBeVisible();
-  await expect(card).toHaveCSS('display', 'grid');
+  // A narrow pane wraps a row's facts under its name instead of keeping a table's columns.
+  await expect(card).toHaveCSS('display', 'flex');
   await expect(card.getByText('Owner', { exact: true })).toBeVisible();
   await expect(card.getByText('Last activity', { exact: true })).toBeVisible();
   await expect.poll(() => tree.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -116,7 +117,9 @@ test('at 400 pixels filters fold away and complete rows use the page instead of 
   await expect(card.getByText('Created', { exact: true })).toBeVisible();
 });
 
-test('the admin column follows the session switch while Created remains the person’s choice', async ({ page }) => {
+test('administrator mode keeps the table columns chosen by the person', async ({ page }) => {
+  // Room for the chosen columns as a table beside both bars; a narrower pane shows them as facts under each name.
+  await page.setViewportSize({ width: 1920, height: 1080 });
   await signIn(page);
   await page.goto('/everything');
   const tree = page.getByRole('treegrid', { name: 'Everything I can see' });
@@ -126,13 +129,14 @@ test('the admin column follows the session switch while Created remains the pers
   await page.getByRole('menuitemcheckbox', { name: 'Created', exact: true }).click();
   await expect(tree.getByRole('columnheader', { name: 'Created', exact: true })).toBeVisible();
   await asAdmin(page, true);
-  await expect(tree.getByRole('columnheader', { name: 'As admin', exact: true })).toBeVisible();
+  await expect(tree.getByRole('columnheader', { name: 'As admin', exact: true })).toHaveCount(0);
   await asAdmin(page, false);
   await expect(tree.getByRole('columnheader', { name: 'As admin', exact: true })).toHaveCount(0);
   await expect(tree.getByRole('columnheader', { name: 'Created', exact: true })).toBeVisible();
 });
 
 test('a member finds Everything in the rail, opens levels, chooses columns, sorts and searches names at every level', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
   await signIn(page, PEOPLE.vera);
   await page.getByRole('navigation', { name: 'Orgs and your own places' }).getByRole('link', { name: 'Everything', exact: true }).click();
   await expect(page).toHaveURL(/\/everything/);
@@ -171,7 +175,7 @@ test('a shared leaf is reachable through minimal redacted path steps and a membe
   const tree = page.getByRole('treegrid', { name: 'Everything I can see' });
   await tree.getByRole('button', { name: 'Expand Shared with me', exact: true }).click();
   const root = tree.getByRole('row').filter({ hasText: 'Private place' });
-  await expect(root).toContainText('Path only');
+  await expect(root).toContainText('Navigation only');
   await expect(root.getByRole('link')).toHaveCount(0);
   await expect(root.getByRole('button', { name: /Actions for/ })).toHaveCount(0);
   await root.getByRole('button', { name: 'Expand Private place', exact: true }).click();
