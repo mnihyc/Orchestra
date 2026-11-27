@@ -40,10 +40,12 @@ while IFS= read -r line; do
       case "$line" in
         *KILLED*) printf '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}},"api_message_id":"m1"}\n'; kill -9 $$ ;;
         *IDLEEXIT*) printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"fine","usage":{"input_tokens":1,"output_tokens":1}}\n'; sleep 0.2; echo 'idle server final diagnostic' >&2; exit 7 ;;
+        *IDLEBARRIER*) printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"fine","usage":{"input_tokens":1,"output_tokens":1}}\n'; while [ ! -f "$0.release" ]; do sleep 0.01; done; exit 7 ;;
         *GONE*) printf '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I was saying"}]}}\n'; exit 0 ;;
         *HALFSILENT*) printf '{"type":"assistant","mess'; exec sleep 100000 ;;
         *HALF*) printf '{"type":"assistant","message":{"id":"m1","cont'; exit 3 ;;
         *SILENT*) exec sleep 100000 ;;
+        *STUBBORN*) printf '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Working on it"}]}}\n'; exec sleep 100000 ;;
         *TRYING*) n=0; while :; do n=$((n+1)); printf '{"type":"system","subtype":"api_retry","attempt":%d,"max_retries":99,"retry_delay_ms":250,"error_status":null,"error":"unknown"}\n' "$n"; sleep 0.25; done ;;
         *) printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"fine","usage":{"input_tokens":1,"output_tokens":1}}\n' ;;
       esac
@@ -73,8 +75,10 @@ fn programs() -> &'static (tempfile::TempDir, Vec<(&'static str, PathBuf)>) {
             "silent",
             "halfsilent",
             "trying",
+            "stubborn",
             "idle-unexpected",
             "idle-planned",
+            "physical-incarnation",
         ] {
             programs.push((name, write(&directory, name, STAND_IN)));
         }
@@ -111,6 +115,61 @@ async fn rig(name: &str, config: serde_json::Value) -> Rig {
     rig.start(config, std::collections::BTreeMap::new()).await;
     rig.open().await;
     rig
+}
+
+#[tokio::test]
+async fn an_idle_process_keeps_its_own_opening_when_a_new_session_spec_is_already_installed() {
+    use orch_agent_contract::session::SessionMode;
+    let mut rig = Rig::standing_in(&program("physical-incarnation")).await;
+    rig.start(json!({}), std::collections::BTreeMap::new())
+        .await;
+    let first = rig.spec(SessionMode::New, None);
+    let original = first.opening_id;
+    let opened = rig.open_with(first).await;
+    let first_turn = rig.turn("IDLEBARRIER");
+    rig.adapter.start_turn(first_turn).await.unwrap();
+    rig.until(|event| matches!(event, SessionEvent::TurnCompleted(_)), 30)
+        .await;
+    let next = rig.spec(SessionMode::Resume, Some(&opened.native_session_ref));
+    let replacement = next.opening_id;
+    assert_ne!(replacement, original);
+    rig.adapter.open_session(next).await.unwrap();
+    std::fs::write(
+        format!("{}.release", program("physical-incarnation").display()),
+        b"release",
+    )
+    .unwrap();
+    let events = rig
+        .until(|event| matches!(event, SessionEvent::SessionLost(_)), 30)
+        .await;
+    let lost = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::SessionLost(lost) => Some(lost),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        lost.opening_id, original,
+        "the old process never borrows the newly installed session spec's identity"
+    );
+    let next_turn = rig.turn("GONE");
+    rig.adapter.start_turn(next_turn).await.unwrap();
+    let events = rig
+        .until(|event| matches!(event, SessionEvent::SessionLost(_)), 30)
+        .await;
+    let lost = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::SessionLost(lost) => Some(lost),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        lost.opening_id, replacement,
+        "the next real process owns the replacement opening"
+    );
+    rig.adapter.stop().await.unwrap();
 }
 
 /// What the turn ended with: the events up to its end and its error.
@@ -247,6 +306,59 @@ async fn a_harness_that_says_nothing_past_its_deadline_has_its_turn_ended_and_is
     let (_, events) = rig.run("fine").await;
     assert_eq!(outcome(&events), TurnOutcome::Completed);
     assert_eq!(starts("silent"), 2);
+}
+
+#[tokio::test]
+async fn a_harness_that_goes_on_after_stop_is_ended_when_its_grace_is_out_and_its_turn_is_stopped()
+{
+    // The stand-in says it is working and then reads nothing more, as a harness that goes on running its tools.
+    let mut rig = rig(
+        "stubborn",
+        json!({ "stop_grace_secs": 1, "silence_secs": 0 }),
+    )
+    .await;
+    let turn = rig.turn("STUBBORN");
+    let id = turn.turn_id;
+    rig.adapter.start_turn(turn).await.unwrap();
+    rig.until(
+        |event| {
+            matches!(
+                event,
+                SessionEvent::ItemStarted(_)
+                    | SessionEvent::ItemDelta(_)
+                    | SessionEvent::ItemCompleted(_)
+            )
+        },
+        30,
+    )
+    .await;
+    let asked = Instant::now();
+    rig.adapter.interrupt(rig.thread, id).await.unwrap();
+    let events = rig.until_the_turn_ends().await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(10),
+        "the turn ends with the profile's grace, not the engine's half minute"
+    );
+    assert_eq!(outcome(&events), TurnOutcome::Interrupted);
+    let error = error_of(&events);
+    assert!(error.message.contains("did not stop"), "{error:?}");
+    assert!(
+        events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.payload["message"].as_str().is_some_and(|message| message.contains("did not stop")))),
+        "the conversation says why the turn ended so: {:?}",
+        kinds(&events)
+    );
+    assert!(
+        error
+            .said
+            .as_deref()
+            .is_some_and(|said| said.contains("asked to stop")),
+        "{error:?}"
+    );
+    // The process is gone, and the next turn is a fresh one that takes the session up.
+    let (_, events) = rig.run("fine").await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert_eq!(starts("stubborn"), 2);
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@
 //! orgs', the root org of the request's place, and of every node a decision reads)
 //! in the statement that locks the identity, before any permission fact; the
 //! commit checks them as its last statement and refuses, retryably
-//! (`conflict.stale_revision`), when a change of authority committed meanwhile.
+//! (`conflict.concurrent_change`), when a change of authority committed meanwhile.
 //! Roles, permission pages/defaults, memberships, groups, standing, moves and
 //! shared availability/policy move those epochs at their own commit: the request's
 //! root org for a change about one place, the system's otherwise. Ordinary content,
@@ -335,15 +335,21 @@ impl CurrentHttpIdentity {
 
 /// Read facts for a real transport origin. The id/hash must come from its actual authenticator;
 /// a native Session caller or another credential of the same account cannot substitute for it.
+/// `locked` waits for a change of the credential being made and holds its rows until the
+/// transaction ends; without it the rows are read in the statement's snapshot, which writes nothing.
 pub(crate) async fn current_read_identity(
     app: &App,
     conn: &mut Conn,
     user: orch_types::Id,
     credential: Credential<'_>,
+    locked: bool,
 ) -> ApiResult<CurrentHttpIdentity> {
-    let identity = rows::lock_identity(conn, user, credential, false)
-        .await?
-        .ok_or_else(invalid_token)?;
+    let identity = if locked {
+        rows::lock_identity(conn, user, credential, false).await?
+    } else {
+        rows::read_identity(conn, user, credential).await?
+    }
+    .ok_or_else(invalid_token)?;
     identity_facts(app, credential, identity)
 }
 
@@ -445,9 +451,11 @@ pub async fn current_http_identity(
             rows::lock_identity_for_write(conn, original.id(), credential, authority_change, place)
                 .await?
         }
-        HttpIdentityMode::Read => {
-            rows::lock_identity(conn, original.id(), credential, false).await?
-        }
+        // A read checks its credential in its own snapshot and locks no row, so it writes nothing and its commit
+        // waits for no disk: a sign-out or revocation committed before the check refuses it, and a read already past
+        // the check finishes and delivers, as any web server's would. Only a write (above) and a socket's sign-in or
+        // reauthentication wait for a change of the credential being made.
+        HttpIdentityMode::Read => rows::read_identity(conn, original.id(), credential).await?,
     }
     .ok_or_else(invalid_token)?;
     let current = identity_facts(&ctx.app, credential, identity)?;

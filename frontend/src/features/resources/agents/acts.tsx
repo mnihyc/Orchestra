@@ -1,3 +1,5 @@
+import { agentQuery } from '@/api/resources';
+import { currentResourceDetail, ResourceReadDialog, useCurrentResourceDetail } from '@/features/resources/ReadDialog';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with an agent profile, from its row in the list and from its own page: open, switch on or off, edit, rename, copy its link and delete, each only where the reader may.
@@ -8,7 +10,7 @@ import { resourceDuplicateEntries } from '@/features/duplicate/target';
  * threads retain their conversations and waiting inputs.
  */
 import { resourceImpactQuery } from '@/api/resource-impact';
-import { ImpactCounts } from '@/features/storage/Impact';
+import { ImpactCounts, StopTip } from '@/features/storage/Impact';
 import { useResourceEnable, type EnableResource } from '@/features/storage/Enable';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { ErrorState } from '@/ui/ErrorState';
@@ -23,7 +25,7 @@ import { openChange } from '@/features/change/target';
 import { deleteAgent, updateAgent } from '@/api/resources';
 import { type Act, type BulkAct, BulkNames, entriesOf, managedAct, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
 import { EditAgent } from '@/features/resources/agents/Edit';
-import type { Agent } from '@/generated/api-types';
+import type { AgentListRow as Agent } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Button } from '@/ui/Button';
@@ -52,7 +54,10 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
   const { busy } = useBusy();
   const enablePlan = useResourceEnable();
   const enableResource = (agent:Agent):EnableResource => ({target:{object:{kind:'agent',id:agent.id},model_id:null},name:agent.name,admin:adminSpec(agent,'agent.manage'),enable:(runWaiting)=>updateAgent(agent.id,{expected_revision:agent.revision,disabled:false},undefined,runWaiting)});
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...agentQuery(requested?.agent.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested?.agent) === undefined ? 0 : Infinity, enabled: requested !== null });
+  const fullDetail = useCurrentResourceDetail(detail, requested?.agent);
+  const asked = requested === null || fullDetail === undefined ? null : { ...requested, agent: fullDetail };
   const [typed,setTyped]=useState('');
   const [pauseDraft,setPauseDraft]=useState({id:'',text:''});
   const pauseNote=pauseDraft.id===asked?.agent.id?pauseDraft.text:'';
@@ -142,6 +147,7 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
 
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.agent.name} read={detail} onClose={() => setAsked(null)} />}
       {enablePlan.dialogs}
       {asked !== null && (asked.what === 'edit' || asked.what === 'rename') && (
         <EditAgent
@@ -157,7 +163,6 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
       )}
       <ConfirmDialog
         open={asked?.what === 'disable'}
-        disabled={impact.isPending||impact.isError}
         admin={adminSpec(asked?.agent, 'agent.manage')}
         onOpenChange={(next) => !next && setAsked(null)}
         title={t('agents.danger.disableTitle', { name: asked?.agent.name ?? '' })}
@@ -167,7 +172,7 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
         error={toggle.error ?? undefined}
         onConfirm={() => asked !== null && toggle.mutate({ agent: asked.agent, disabled: true })}
       >
-        <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={pauseNote} onChange={(event)=>setPauseNote(event.target.value)} /></div>
+        <div className="flex flex-col gap-3"><StopTip read={impact} kind="disable" /><Input label={t('resourceImpact.note')} optional value={pauseNote} onChange={(event)=>setPauseNote(event.target.value)} /></div>
       </ConfirmDialog>
       <ConfirmDialog
         open={asked?.what === 'delete'}

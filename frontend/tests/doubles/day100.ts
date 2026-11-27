@@ -1,7 +1,7 @@
 /** Own-part setting resolution and worker-controlled fixtures, sharing the existing places and settings of the fake world. */
 import type { Answer, Part, World } from './world.ts';
 import { Refusal, type Person } from './world.ts';
-import type { Favorite, ProjectView as PersonalProjectView } from '../../src/generated/api-types.ts';
+import type { Shortcut, ProjectView as PersonalProjectView } from '../../src/generated/api-types.ts';
 
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown, fallback = ''): string => typeof value === 'string' ? value : fallback;
@@ -41,7 +41,7 @@ export class Day100World implements Part {
     if (method === 'GET' && path === '/me/favorites') {
       const answer = this.world.places.handle(person, method, path, query, body);
       if (answer === null || !Array.isArray(answer.body)) return answer;
-      return { ...answer, body: (answer.body as Favorite[]).map((favorite) => ({ ...favorite, view: this.favoriteViews.get(person.me.username)?.get(favorite.node.id) ?? null })) };
+      return { ...answer, body: (answer.body as Shortcut[]).map((favorite) => ({ ...favorite, view: this.favoriteViews.get(person.me.username)?.get(favorite.target.id) ?? null })) };
     }
     return null;
   }

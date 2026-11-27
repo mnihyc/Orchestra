@@ -30,22 +30,15 @@ fn pattern(seed: u64, from: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn ticket(world: &World, opener: Id, destination: Id) -> String {
+async fn ticket(world: &World, opener: Id, destination: Id) -> String {
     world
-        .api
-        .link
-        .tickets()
-        .issue(&TicketRequest {
-            src: TicketSource::Machine(opener),
-            dst: destination,
-            service: Service::Exec {
-                executor: "codex-exec-server".to_owned(),
-            },
-            thread_id: None,
-            tool_set: None,
-            expires_at: Time::new(chrono::Utc::now() + chrono::Duration::hours(1)),
-        })
-        .unwrap()
+        .tool_ticket(
+            opener,
+            destination,
+            "codex-exec-server",
+            Time::new(world.clock.now() + chrono::Duration::hours(1)),
+        )
+        .await
 }
 
 async fn write_pattern(mut tunnel: tokio::io::WriteHalf<Tunnel>, seed: u64, total: u64) {
@@ -117,7 +110,7 @@ async fn a_tunnel_between_two_machines_carries_bytes_both_ways_and_survives_a_re
         panic!("the machine holds a session");
     };
     let mut incoming = far.link.incoming_tunnels();
-    let ticket = ticket(&world, near.id, far.id);
+    let ticket = ticket(&world, near.id, far.id).await;
     let (opened, accepted) = tokio::join!(near.link.open_tunnel(&ticket), async {
         let wanted = incoming.next().await.unwrap();
         assert_eq!(wanted.service, "exec/codex-exec-server");
@@ -205,13 +198,13 @@ async fn a_tunnel_needs_a_ticket_the_system_signed_for_the_one_who_opens_it_and_
         Ok(_) => panic!("a refusal was expected"),
     };
     // The destination has no session.
-    let to_nobody = ticket(&world, near.id, environment.identity.machine_id);
+    let to_nobody = ticket(&world, near.id, environment.identity.machine_id).await;
     assert_eq!(
         refused(near.link.open_tunnel(&to_nobody).await),
         OpenErrorCode::PeerOffline
     );
     // The ticket is another machine's.
-    let others = ticket(&world, environment.identity.machine_id, near.id);
+    let others = ticket(&world, environment.identity.machine_id, near.id).await;
     assert_eq!(
         refused(near.link.open_tunnel(&others).await),
         OpenErrorCode::BadTicket
@@ -327,5 +320,87 @@ async fn a_terminal_to_a_machine_with_no_session_is_refused_at_once() {
         started.elapsed() < Duration::from_secs(5),
         "not after the time an opening is waited for"
     );
+    world.stop().await;
+}
+
+#[tokio::test]
+async fn a_committed_native_close_ends_only_its_tool_channels_before_the_machine_acknowledges_it() {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    use orch_link_contract::tunnels::Ticket;
+    use orch_types::new_id;
+    use serde_json::json;
+    let mut world = World::start().await;
+    let (agent, environment) = (
+        world.enroll("tool-source").await,
+        world.enroll("tool-target").await,
+    );
+    let near = world.start_machine_as(&agent, agent.endpoints(Trust::Pinned), vec![Role::Agent]);
+    let far = world.start_machine_as(
+        &environment,
+        environment.endpoints(Trust::Pinned),
+        vec![Role::Environment],
+    );
+    tokio::time::timeout(PATIENCE, async {
+        near.link.connected().await;
+        far.link.connected().await;
+    })
+    .await
+    .unwrap();
+    let first = ticket(&world, near.id, far.id).await;
+    let other = ticket(&world, near.id, far.id).await;
+    let scope = Ticket::parse(&first)
+        .unwrap()
+        .claims()
+        .tool_session
+        .clone()
+        .unwrap();
+    let mut incoming = far.link.incoming_tunnels();
+    let (a, peer_a) = tokio::join!(near.link.open_tunnel(&first), async {
+        incoming.next().await.unwrap().accept()
+    });
+    let (b, peer_b) = tokio::join!(near.link.open_tunnel(&other), async {
+        incoming.next().await.unwrap().accept()
+    });
+    let (mut a, _peer_a, mut b, mut peer_b) =
+        (a.unwrap(), peer_a.unwrap(), b.unwrap(), peer_b.unwrap());
+    let body = json!({"thread_id":scope.thread_id,"segment_id":scope.segment_id});
+    insert_command(
+        &mut world.db.acquire().await.unwrap(),
+        &NewCommand {
+            content_transit: false,
+            native_target: None,
+            id: new_id(),
+            machine_id: near.id,
+            kind: "session.close.fenced",
+            body: &body,
+            serial_key: None,
+            deadline_at: world.clock.now() + chrono::Duration::minutes(2),
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(PATIENCE, a.read_u8())
+            .await
+            .unwrap()
+            .is_err(),
+        "the database change reaches the real backplane before any native close reply"
+    );
+    assert!(
+        tokio::time::timeout(PATIENCE, near.link.open_tunnel(&first))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    b.write_all(b"other session").await.unwrap();
+    let mut bytes = [0; 13];
+    tokio::time::timeout(PATIENCE, peer_b.read_exact(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes, b"other session");
+    near.link.shutdown().await;
+    far.link.shutdown().await;
     world.stop().await;
 }

@@ -8,11 +8,12 @@
  * with the menu key and `Shift+F10` for whatever of the row has the keyboard.
  */
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
-import { Fragment, type ReactNode, useCallback, useLayoutEffect, useState } from 'react';
+import { createContext, Fragment, type MouseEvent, type ReactNode, useCallback, useContext, useLayoutEffect, useMemo, useState } from 'react';
 
 import { ContextEntries, ContextMenu } from '@/ui/ContextMenu';
 import { cx } from '@/ui/cx';
 import type { MenuEntry } from '@/ui/Menu';
+import { onOwnControl } from '@/ui/RowSelection';
 import { ScrollRegion } from '@/ui/ScrollRegion';
 
 /** A shared first-line band matches small controls without changing chips outside the table. */
@@ -22,6 +23,13 @@ const cellFrame = 'flex min-h-(--control-sm) items-center leading-(--control-sm)
 const ROOM = { sm: 480, md: 640, lg: 800, xl: 1000 } as const;
 
 export type Room = keyof typeof ROOM;
+
+const TableRoom = createContext(Number.POSITIVE_INFINITY);
+
+/** Whether the table a cell stands in has only a small room (a phone, a side bar): its row acts are drawn by their icons. */
+export function useNarrowTable(): boolean {
+  return useContext(TableRoom) < ROOM.sm;
+}
 
 export interface Column<Row> {
   id: string;
@@ -58,8 +66,12 @@ export interface TableProps<Row> {
   boundedIdentity?: boolean;
   /** Keep the table bounded and draw only visible rows when a long, paged list has been loaded. */
   virtual?: boolean;
+  /** Open row work stays mounted even after its keyboard focus moves into a portal. */
+  retainKeys?: ReadonlySet<string>;
   /** Classes of a row, to say that it is archived or marked. */
   rowClassName?: (row: Row) => string | undefined;
+  /** A click on a row outside its own controls: lists that pick rows take `Shift` and `Ctrl`/`⌘` clicks here. */
+  onRowClick?: (row: Row, event: MouseEvent<HTMLTableRowElement>) => void;
   /**
    * The menu of a row: the same entries as the "⋯" at its end. They are made only for the row whose
    * menu is opened, so that a long table makes nothing for the rows nobody asked about.
@@ -78,13 +90,14 @@ function RowEntries<Row>({ row, entries }: { row: Row; entries: (row: Row) => re
 }
 
 /** Row measurement is attached by React when the native row commits. */
-function TableRowFrame<Row>({ row, rowClassName, rowMenu, index, measure, children }: Pick<TableProps<Row>, 'rowClassName' | 'rowMenu'> & {
+function TableRowFrame<Row>({ row, rowClassName, rowMenu, onRowClick, index, measure, children }: Pick<TableProps<Row>, 'rowClassName' | 'rowMenu' | 'onRowClick'> & {
   row: Row;
   index?: number | undefined;
   measure?: ((element: HTMLTableRowElement | null) => void) | undefined;
   children: ReactNode;
 }) {
   const content = <tr ref={measure} data-index={index} aria-rowindex={index === undefined ? undefined : index + 2}
+    onClick={onRowClick === undefined ? undefined : (event) => { if (!onOwnControl(event.target)) onRowClick(row, event); }}
     onKeyDown={rowMenu?.keys === undefined ? undefined : (event) => {
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
@@ -125,7 +138,7 @@ function useRoom(): [(element: HTMLDivElement | null) => void, number, HTMLDivEl
   return [attach, width, element];
 }
 
-export function Table<Row>({ label, columns, rows, sections, rowKey, rowClassName, rowMenu, className, boundedIdentity = false, virtual = false }: TableProps<Row>) {
+export function Table<Row>({ label, columns, rows, sections, rowKey, rowClassName, rowMenu, onRowClick, className, boundedIdentity = false, virtual = false, retainKeys }: TableProps<Row>) {
   const [ref, room, scroller] = useRoom();
   const shown = columns.filter((column) => column.from === undefined || room >= ROOM[column.from]);
   const shownIds = new Set(shown.map((column) => column.id));
@@ -155,12 +168,13 @@ export function Table<Row>({ label, columns, rows, sections, rowKey, rowClassNam
     : sections.flatMap((section): Item[] => [{kind:'heading',id:`heading:${section.id}`,heading:section.heading},
         ...section.rows.map((row): Item => ({kind:'row',id:`${section.id}:${rowKey(row)}`,row}))]);
   const draw = (item: Item, index?: number, measure?: (element: HTMLTableRowElement | null) => void) => item.kind === 'row'
-    ? <TableRowFrame row={item.row} rowClassName={rowClassName} rowMenu={rowMenu} index={index} measure={measure}>{cells(item.row)}</TableRowFrame>
+    ? <TableRowFrame row={item.row} rowClassName={rowClassName} rowMenu={rowMenu} onRowClick={onRowClick} index={index} measure={measure}>{cells(item.row)}</TableRowFrame>
     : <TableHeadingFrame heading={item.heading} index={index} measure={measure} columns={shown.length} />;
-  // One page of 50 remains a native table; additional pages need a separate scroll window.
-  const windowed = virtual && items.length > 50;
+  // A first server page can already overflow the viewport and carry expensive row controls.
+  const windowed = virtual && items.length > 10;
   return (
-    <ScrollRegion ref={ref} kind="table" label={label} className={cx('rounded-lg border border-border bg-surface', virtual && 'max-h-96 overflow-y-auto', className)}>
+    <TableRoom.Provider value={room}>
+    <ScrollRegion ref={ref} kind="table" label={label} className={cx('max-h-96 overflow-y-auto rounded-lg border border-border bg-surface', className)}>
       <table aria-label={label} aria-rowcount={windowed ? items.length + 1 : undefined} className="w-full table-auto border-collapse text-left text-base">
         <thead className="sticky top-0 z-(--layer-sticky)">
           <tr aria-rowindex={windowed ? 1 : undefined} className="border-b border-border bg-bg-subtle text-sm font-medium text-text-muted">
@@ -177,22 +191,25 @@ export function Table<Row>({ label, columns, rows, sections, rowKey, rowClassNam
             ))}
           </tr>
         </thead>
-        {windowed ? <VirtualBody rows={items} rowKey={(item) => item.id} scroller={scroller} columns={shown.length} line={draw} />
+        {windowed ? <VirtualBody rows={items} retain={retainKeys === undefined ? undefined : (item) => item.kind === 'row' && retainKeys.has(rowKey(item.row))} rowKey={(item) => item.id} scroller={scroller} columns={shown.length} line={draw} />
           : <tbody>{items.map((item) => <Fragment key={item.id}>{draw(item)}</Fragment>)}</tbody>}
       </table>
     </ScrollRegion>
+    </TableRoom.Provider>
   );
 }
 
 /** A virtual table retains native rows and measures them as their contents change. */
-function VirtualBody<Row>({ rows, rowKey, scroller, columns, line }: {
+function VirtualBody<Row>({ rows, rowKey, scroller, columns, line, retain }: {
   rows: readonly Row[];
   rowKey: (row: Row) => string;
+  retain?: ((row: Row) => boolean) | undefined;
   scroller: HTMLDivElement | null;
   columns: number;
   line: (row: Row, index: number, measure: (element: HTMLTableRowElement | null) => void) => ReactNode;
 }) {
-  const [focused, setFocused] = useState<number | null>(null);
+  const [focused, setFocused] = useState<string | null>(null);
+  const retained = useMemo(() => rows.flatMap((row, index) => retain?.(row) === true || rowKey(row) === focused ? [index] : []), [rows, rowKey, retain, focused]);
   // The virtualizer owns the measured positions of the rows.
   // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
@@ -208,9 +225,9 @@ function VirtualBody<Row>({ rows, rowKey, scroller, columns, line }: {
     initialRect: { width: 0, height: 384 },
     // Scrolling must not unmount a row while a keyboard user is acting in it.
     rangeExtractor: (range) => {
-      const visible = defaultRangeExtractor(range);
-      return focused === null || focused < 0 || focused >= rows.length || visible.includes(focused)
-        ? visible : [...visible, focused].sort((one, other) => one - other);
+      const visible = new Set(defaultRangeExtractor(range));
+      for (const index of retained) visible.add(index);
+      return [...visible].sort((one, other) => one - other);
     },
   });
   const items = virtualizer.getVirtualItems();
@@ -227,7 +244,8 @@ function VirtualBody<Row>({ rows, rowKey, scroller, columns, line }: {
   drawn.push(gap(virtualizer.getTotalSize() - end, 'after'));
   return <tbody onFocusCapture={(event) => {
     const row = event.target instanceof Element ? event.target.closest<HTMLTableRowElement>('tr[data-index]') : null;
-    if (row !== null) setFocused(Number(row.dataset.index));
+    const item = row === null ? undefined : rows[Number(row.dataset.index)];
+    if (item !== undefined) setFocused(rowKey(item));
   }} onBlurCapture={(event) => {
     if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setFocused(null);
   }}>

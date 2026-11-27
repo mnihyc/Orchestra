@@ -114,6 +114,7 @@ pub async fn may_make(
         ResourceKind::McpServer => Permission::McpManage,
         ResourceKind::Mount => Permission::MountManage,
         ResourceKind::Skill => Permission::SkillManage,
+        ResourceKind::Pool => Permission::PoolManage,
         ResourceKind::Environment => return Ok(Making::Refused(Why::NotMadeThisWay)),
     };
     let Some(home) = home else {
@@ -136,8 +137,10 @@ pub async fn may_make(
     let node = graph.get(home).ok_or(Error::NotFound(home))?.clone();
     let site = graph.site_of(home).ok_or(Error::NotFound(home))?;
     // Providers and skills can belong to the project whose work they serve.
-    let project_home = matches!(kind, ResourceKind::Skill | ResourceKind::Provider)
-        && node.kind == NodeKind::Project;
+    let project_home = matches!(
+        kind,
+        ResourceKind::Skill | ResourceKind::Provider | ResourceKind::Pool
+    ) && node.kind == NodeKind::Project;
     if node.kind != NodeKind::Org && !project_home {
         return Ok(Making::Refused(Why::HomeIsNoOrg));
     }
@@ -310,6 +313,7 @@ pub(crate) async fn first_for_new_page(
                 ResourceKind::McpServer => Permission::McpManage,
                 ResourceKind::Mount => Permission::MountManage,
                 ResourceKind::Skill => Permission::SkillManage,
+                ResourceKind::Pool => Permission::PoolManage,
             };
             (row.home_id, manage)
         }
@@ -339,7 +343,8 @@ pub enum NewAccess {
     #[default]
     Defaults,
     /// Its maker alone: the Use row (for an environment the Manage row) is cut loose, so that a
-    /// later change of its home's defaults does not open it.
+    /// later change of its home's defaults does not open it. A resource of the system has no root
+    /// org in which owning it counts, so there the row also names its maker.
     OnlyMe,
     /// Everyone in its home: the Viewers of its home are named in its Use row.
     Home,
@@ -384,6 +389,21 @@ pub async fn start_resource(
                     at.get(),
                 )
                 .await?;
+                // Owning counts only for a member of the root org, and a resource of the system lies
+                // in none: without its maker in the row nobody would use it but an administrator in
+                // administrator mode. The host installed with the server is one, which the first
+                // administrator uses from the first start.
+                if of_the_system(conn, object).await? {
+                    name_in_row(
+                        conn,
+                        &page,
+                        permission,
+                        Holder::User { id: maker },
+                        maker,
+                        at,
+                    )
+                    .await?;
+                }
             }
         }
         NewAccess::Home | NewAccess::Everyone => {
@@ -396,29 +416,51 @@ pub async fn start_resource(
                         at: None,
                     }
                 };
-                let (holder_kind, holder_id, holder_role) = holder.stored();
-                access::insert_entry(
-                    conn,
-                    &NewEntry {
-                        id: orch_types::new_id(),
-                        page: &page,
-                        profile: Profile::Any.as_str(),
-                        permission: permission.as_str(),
-                        holder_kind: holder_kind.as_str(),
-                        holder_id,
-                        holder_role: holder_role.map(Role::as_str),
-                        options: &Json::Object(serde_json::Map::new()),
-                        expires_at: None,
-                        note: "",
-                        source: EntrySource::Creation.as_str(),
-                        created_by: Some(maker),
-                        at: at.get(),
-                    },
-                )
-                .await?;
+                name_in_row(conn, &page, permission, holder, maker, at).await?;
             }
         }
     }
+    Ok(())
+}
+
+/// Whether the resource `object` is one of the system: it has no home.
+async fn of_the_system(conn: &mut Conn, object: ObjectRef) -> Result<bool, Error> {
+    let kind = StoredKind::from(object.kind);
+    Ok(resource_rows::resource_facts(conn, &[object.id])
+        .await?
+        .iter()
+        .any(|row| row.id == object.id && row.kind == kind.as_str() && row.home_id.is_none()))
+}
+
+/// Names `holder` in the `permission` row of a new resource's page, as its maker chose.
+async fn name_in_row(
+    conn: &mut Conn,
+    page: &PageKey,
+    permission: Permission,
+    holder: Holder,
+    maker: Id,
+    at: Time,
+) -> Result<(), Error> {
+    let (holder_kind, holder_id, holder_role) = holder.stored();
+    access::insert_entry(
+        conn,
+        &NewEntry {
+            id: orch_types::new_id(),
+            page,
+            profile: Profile::Any.as_str(),
+            permission: permission.as_str(),
+            holder_kind: holder_kind.as_str(),
+            holder_id,
+            holder_role: holder_role.map(Role::as_str),
+            options: &Json::Object(serde_json::Map::new()),
+            expires_at: None,
+            note: "",
+            source: EntrySource::Creation.as_str(),
+            created_by: Some(maker),
+            at: at.get(),
+        },
+    )
+    .await?;
     Ok(())
 }
 

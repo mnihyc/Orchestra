@@ -17,7 +17,7 @@ use orch_types::{Hash, Id, Json, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Page, PageQuery};
+use crate::common::{CollectionQuery, Page};
 use crate::exports::ExportParts;
 use crate::nodes::NodeRef;
 use crate::package::{PackageHeader, PackageKind};
@@ -178,6 +178,7 @@ pub struct ImportChoices {
 pub struct ImportRequest {
     /// A client-generated identity, one to two hundred characters: a repeated request of the same person
     /// names the same import again and makes nothing twice.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// What it is made from.
     pub source: ImportSource,
@@ -721,6 +722,7 @@ pub struct ImportUndoPlan {
 pub struct ImportUndoBody {
     /// A client-generated identity, one to two hundred characters: a repeated request names the same job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: Option<String>,
 }
 
@@ -765,13 +767,13 @@ crate::endpoints! {
     NodeImportCreate: POST "/nodes/{id}/imports", Permission("node.view"), none, json ImportRequest, json ImportCreationResponse, 202,
         operation Op::receipt(&Op::variants(&crate::import_creation_sources::VARIANTS));
     /// Lists the caller's own imports, newest first.
-    MeImportList: GET "/me/imports", User, query PageQuery, none, json Page<ImportLine>, 200,
+    MeImportList: GET "/me/imports", User, query CollectionQuery, none, json Page<ImportLine>, 200,
         operation Op::facets(&crate::artifact_sources::IMPORT_LIST_FACETS);
     /// Reads one of the caller's imports.
     ImportGet: GET "/imports/{id}", Rule("its person"), none, none, json Import, 200,
         operation Op::facets(&crate::artifact_sources::IMPORT_GET_FACETS);
     /// Lists the names of the files one of the caller's imports was made from, in the order they were given.
-    ImportFileList: GET "/imports/{id}/files", Rule("its person"), query PageQuery, none, json Page<String>, 200,
+    ImportFileList: GET "/imports/{id}/files", Rule("its person"), query CollectionQuery, none, json Page<String>, 200,
         operation Op::facets(&crate::artifact_sources::IMPORT_FILES_FACETS);
     /// Lists the report of an import: a row for each object and what became of it.
     ImportReportList: GET "/imports/{id}/report", Rule("its person"), query ImportReportListQuery, none, json Page<ImportReportRow>, 200,

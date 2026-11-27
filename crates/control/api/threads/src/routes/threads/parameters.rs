@@ -8,7 +8,9 @@
 //!
 //! **Only what exists for the thread is listed.** A parameter is shown when it is eligible for the thread's
 //! model, provider and place and its feature is on; a speed, an access program or a context that the
-//! thread's model does not have open is not there, whatever the harness supports. Each parameter carries its
+//! thread's model does not have open is not there, whatever the harness supports. A speed, an access
+//! program or a context that the model's managers did open and that the thread cannot use is not a
+//! parameter either: it is named in `withheld`, with the reason. Each parameter carries its
 //! definition, with the range of a number (the most of a context is what the model's managers opened) and
 //! where its options and its start come from. The value is what was chosen for the thread; what it runs with
 //! when nothing was chosen, or when the choice is no longer open, is what the model starts with, which the
@@ -38,8 +40,6 @@ use orch_api_contract::settings::ModelOption;
 
 use orch_api_contract::settings::ModelOptionReason;
 
-use orch_api_contract::settings::ModelParameters;
-
 use orch_api_contract::settings::ParameterApply;
 
 use orch_api_contract::settings::ParameterView;
@@ -52,11 +52,18 @@ use orch_api_contract::settings::SettingSource;
 
 use orch_api_contract::settings::ThreadEffortParameter;
 
+use orch_api_contract::settings::ThreadGone;
+
+use orch_api_contract::settings::ThreadGoneKind;
+
 use orch_api_contract::settings::ThreadModelParameter;
 
 use orch_api_contract::settings::ThreadParameterGet;
 
 use orch_api_contract::settings::ThreadParameters;
+
+use orch_api_contract::settings::ThreadProvider;
+use orch_api_contract::threads::{ThreadScreenFacts, ThreadScreenFactsGet};
 
 use orch_authz::Principal;
 
@@ -66,7 +73,7 @@ use orch_db::queries::resources::models_of_provider;
 
 use orch_engine::models::allowed_by;
 
-use orch_engine::views::thread_parts;
+use orch_engine::views::thread_binding_parts;
 
 use orch_settings_contract::registry::keys;
 
@@ -105,9 +112,340 @@ fn capability_options(
     }
 }
 
+/// A recorded option needs its key and meaning; profile help and unrelated controls stay out.
+fn recorded_parameter(def: &orch_agent_contract::parameters::ParameterDef) -> Option<Value> {
+    def.recorded_projection()
+}
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(ThreadParameterGet, parameters);
+    registry
+        .on(ThreadParameterGet, parameters)
+        .on(ThreadScreenFactsGet, screen_facts)
+        .on(orch_api_contract::settings::ThreadOrchToolsGet, orch_tools);
+}
+
+/// The comparison a turn is admitted by ([`orch_engine::sessions::confinement`]), where the thread's tool access
+/// cannot be enforced by its agent where it runs; nothing while it can, and while the environment has not reported
+/// the executor it runs on. The ceilings are read only where the reported modes already fall short.
+async fn sandbox_shortfall(
+    conn: &mut orch_db::Conn,
+    environment: orch_types::Id,
+    facts: &Value,
+    descriptor: &orch_agent_contract::descriptor::AgentDescriptor,
+    requested: orch_agent_contract::descriptor::SandboxMode,
+    executor: Option<&str>,
+) -> ApiResult<Option<orch_api_contract::environment::SandboxReadiness>> {
+    let reported = match executor {
+        None => descriptor.sandbox_modes.clone(),
+        Some(kind) => {
+            let Some(fact) = facts
+                .get("executors")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("kind").and_then(Value::as_str) == Some(kind))
+                })
+            else {
+                return Ok(None);
+            };
+            fact.get("sandbox_modes")
+                .cloned()
+                .and_then(|modes| serde_json::from_value(modes).ok())
+                .unwrap_or_default()
+        }
+    };
+    if reported.contains(&requested) && descriptor.sandbox_modes.contains(&requested) {
+        return Ok(None);
+    }
+    let Some(machine) = orch_db::queries::environment_facts::of(conn, environment).await? else {
+        return Ok(None);
+    };
+    let template =
+        orch_db::queries::environments::thread_engine::template_spec(conn, environment).await?;
+    let report = orch_engine::sessions::sandbox_readiness(
+        requested,
+        Some(&descriptor.sandbox_modes),
+        facts,
+        &machine,
+        template.as_ref(),
+        executor,
+        descriptor.sandbox_reason.as_deref(),
+    );
+    Ok((!report.ready).then_some(report))
+}
+
+/// Only the exact currently selected session's accepted offer supplies this observation.
+async fn accepted_tools(
+    conn: &mut Conn,
+    thread: orch_types::Id,
+) -> ApiResult<Option<orch_engine::tools::catalogue::AcceptedOrchTools>> {
+    let value = orch_db::queries::threads::accepted_tool_offer(conn, thread).await?;
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(ApiError::internal)
+}
+
+/// What the thread runs with that is gone, from the rows this read already holds. A provider's
+/// deletion names the provider alone: its models go with it. A machine counts once it is deleted,
+/// not while it is only switched off. The machine of a machine's agent profile and an environment
+/// the thread was taken out of are the only rows read for this.
+async fn gone_of(
+    conn: &mut Conn,
+    thread: &orch_db::queries::threads::ThreadRow,
+    binding: Option<&orch_engine::views::BindingParts>,
+    environment: Option<&orch_db::queries::environments::thread_engine::EnvironmentRow>,
+    model: Option<&str>,
+    offered: &[orch_db::queries::resources::ProviderModelRow],
+) -> ApiResult<Vec<ThreadGone>> {
+    let mut gone = Vec::new();
+    if let Some(binding) = binding {
+        if binding.rows.provider_deleted {
+            gone.push(ThreadGone {
+                kind: ThreadGoneKind::Provider,
+                id: binding.provider.id,
+                name: binding.provider.name.clone(),
+            });
+        } else if let Some(model) = model
+            && !offered.iter().any(|row| row.model_name == model)
+        {
+            gone.push(ThreadGone {
+                kind: ThreadGoneKind::Model,
+                id: binding.provider.id,
+                name: model.to_owned(),
+            });
+        }
+        if binding.rows.agent_deleted {
+            gone.push(ThreadGone {
+                kind: ThreadGoneKind::Agent,
+                id: binding.agent.id,
+                name: binding.agent.name.clone(),
+            });
+        } else if let Some(machine) = binding.rows.agent_machine
+            && orch_db::queries::resources::machine(conn, machine)
+                .await?
+                .is_none_or(|row| row.deleted_at.is_some())
+        {
+            gone.push(ThreadGone {
+                kind: ThreadGoneKind::Machine,
+                id: machine,
+                name: binding
+                    .agent
+                    .machine
+                    .as_ref()
+                    .map(|machine| machine.name.clone())
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    let removed = match (environment, thread.environment_id) {
+        (Some(row), _) => row.deleted_at.is_some().then(|| (row.id, row.name.clone())),
+        // Only a removal takes a thread out of its environment; its segment still names it.
+        (None, None) => match binding.and_then(|binding| binding.rows.segment_environment) {
+            Some(id) => Some((
+                id,
+                orch_db::queries::environments::thread_engine::environment(conn, id)
+                    .await?
+                    .map(|row| row.name)
+                    .unwrap_or_default(),
+            )),
+            None => None,
+        },
+        (None, Some(id)) => Some((id, String::new())),
+    };
+    if let Some((id, name)) = removed {
+        gone.push(ThreadGone {
+            kind: ThreadGoneKind::Environment,
+            id,
+            name,
+        });
+    }
+    Ok(gone)
+}
+
+async fn orch_tools(
+    ctx: Ctx,
+    query: orch_api_contract::settings::OrchToolsQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::settings::OrchToolsPage> {
+    use orch_api_contract::{common::Page, settings::OrchToolsPage};
+    let thread = ctx.id("id")?;
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    authorization::require_projected(
+        &mut conn,
+        &principal,
+        thread,
+        authorization::VIEW,
+        orch_authz::Act::Use,
+        orch_authz::Policy::default(),
+        ctx.key_receipt_required(),
+    )
+    .await?;
+    let Some(mut receipt) = accepted_tools(&mut conn, thread).await? else {
+        return Ok(OrchToolsPage {
+            summary: None,
+            tools: Page::last(Vec::new()),
+        });
+    };
+    if query
+        .session_revision
+        .as_ref()
+        .is_some_and(|revision| revision != &receipt.summary.session_revision)
+    {
+        return Err(ApiError::invalid(
+            "session_revision",
+            "the current native session offer changed",
+        ));
+    }
+    let search = query.search.unwrap_or_default().to_lowercase();
+    let start = match query.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => {
+            let (revision, offset) = cursor
+                .rsplit_once(':')
+                .ok_or_else(|| ApiError::invalid("cursor", "is not a cursor of this offer"))?;
+            if revision != receipt.summary.session_revision {
+                return Err(ApiError::invalid(
+                    "cursor",
+                    "belongs to another native session offer",
+                ));
+            }
+            offset
+                .parse::<usize>()
+                .map_err(|_| ApiError::invalid("cursor", "is not a cursor of this offer"))?
+        }
+    };
+    // Existing page size is the default; continuation retains every declared tool.
+    let limit = usize::try_from(orch_api_contract::common::DEFAULT_LIMIT).unwrap_or(usize::MAX);
+    receipt
+        .tools
+        .retain(|tool| tool.key.to_lowercase().contains(&search));
+    let source_allowed = matches!(
+        orch_authz::nodes::check_named(
+            &mut conn,
+            &principal,
+            thread,
+            authorization::exact(orch_access_contract::permissions::Permission::SettingsManage),
+            orch_authz::Act::Use,
+            orch_authz::Policy::default()
+        )
+        .await
+        .map_err(ApiError::internal)?,
+        orch_access_contract::decisions::Decision::Allowed { .. }
+    );
+    let source_ids = if source_allowed && !ctx.key_receipt_required() {
+        receipt
+            .tools
+            .iter()
+            .filter_map(|tool| tool.source.as_ref()?.node.as_ref().map(|node| node.id))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let names = crate::routes::nodes::view::refs(
+        &mut conn,
+        &principal,
+        &source_ids,
+        orch_authz::Policy::default(),
+    )
+    .await?;
+    let end = start.saturating_add(limit);
+    let more = receipt.tools.len() > end;
+    let items = receipt
+        .tools
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(|mut tool| {
+            if !source_allowed {
+                tool.source = None;
+            } else if let Some(source) = &mut tool.source
+                && let Some(node) = &mut source.node
+                && let Some(current) = names.get(&node.id)
+            {
+                *node = current.clone();
+            }
+            tool
+        })
+        .collect();
+    Ok(OrchToolsPage {
+        tools: Page {
+            items,
+            next_cursor: more.then(|| format!("{}:{end}", receipt.summary.session_revision)),
+        },
+        summary: Some(receipt.summary),
+    })
+}
+
+/// The same two policy values for a first opening and for a standalone activity or plan surface.
+pub(super) async fn screen_facts_in(
+    conn: &mut Conn,
+    thread: orch_types::Id,
+) -> ApiResult<ThreadScreenFacts> {
+    let defs = [
+        keys::THREAD_SILENT_AFTER_SECS,
+        keys::THREAD_PLAN_ANSWERED_BY,
+    ]
+    .into_iter()
+    .map(|key| {
+        orch_settings_contract::registry::get(key)
+            .ok_or_else(|| ApiError::internal("the thread screen key is not registered"))
+    })
+    .collect::<ApiResult<Vec<_>>>()?;
+    let snapshot = orch_settings::Snapshot::load(
+        conn,
+        orch_settings::Place::Node(thread),
+        orch_settings::Wanted::Keys(&defs),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let silent_after_secs = snapshot
+        .view(defs[0])
+        .value()
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 1)
+        .ok_or_else(|| ApiError::internal("the thread silence policy is invalid"))?;
+    let plan_answered_by = snapshot
+        .view(defs[1])
+        .value()
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "writers" | "managers"))
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::internal("the thread plan-answer policy is invalid"))?;
+    Ok(ThreadScreenFacts {
+        silent_after_secs,
+        plan_answered_by,
+    })
+}
+
+async fn screen_facts(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadScreenFacts> {
+    let thread = ctx.id("id")?;
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let (_, kind) = crate::routes::nodes::placed(&mut conn, thread).await?;
+    if kind != orch_api_contract::nodes::NodeKind::Thread {
+        return Err(ApiError::not_found());
+    }
+    let bounded = principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some());
+    authorization::require_projected(
+        &mut conn,
+        &principal,
+        thread,
+        authorization::VIEW,
+        orch_authz::Act::Use,
+        orch_authz::Policy::default(),
+        bounded,
+    )
+    .await?;
+    screen_facts_in(&mut conn, thread).await
 }
 
 /// A setting that is not there, as the view of one that nobody wrote.
@@ -120,6 +458,7 @@ fn unset(key: &str) -> ResolvedSetting {
             node: None,
         },
         own: None,
+        inherited: None,
         locked_by: None,
         writable: false,
         parts: Vec::new(),
@@ -127,6 +466,7 @@ fn unset(key: &str) -> ResolvedSetting {
         not_applicable_reason: None,
         not_applicable_program: None,
         available_values: None,
+        approval_choices: None,
     }
 }
 
@@ -165,6 +505,7 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
         &principal,
         &NameBounds::default(),
         ProviderView::Native,
+        ParameterProjection::Full,
     )
     .await
 }
@@ -175,6 +516,53 @@ pub(super) enum ProviderView<'a> {
     Selected(Option<&'a crate::routes::resources::providers::PreparedProjection>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ParameterProjection<'a> {
+    Full,
+    FirstScreen {
+        models: &'a [String],
+        /// The native thread rendered for this principal in the same opening.
+        thread: &'a orch_api_contract::threads::Thread,
+    },
+}
+
+impl ParameterProjection<'_> {
+    async fn shows_files(
+        self,
+        conn: &mut Conn,
+        principal: &Principal,
+        environment: orch_types::Id,
+    ) -> ApiResult<bool> {
+        let permissions = match self {
+            Self::FirstScreen { thread, .. }
+                if thread
+                    .environment
+                    .as_ref()
+                    .is_some_and(|row| row.id == environment)
+                    && !orch_db::queries::trace::retained_read(thread.base.id) =>
+            {
+                &thread.environment_permissions
+            }
+            _ => &super::view::held_on_environment(conn, principal, Some(environment)).await?,
+        };
+        Ok(permissions
+            .iter()
+            .any(|permission| permission == "files.view"))
+    }
+}
+
+pub(super) const FIRST_SCREEN_SETTINGS: &[&str] = &[
+    keys::AGENT_MODEL,
+    keys::AGENT_EFFORT,
+    keys::AGENT_PARAMS,
+    keys::COLLAB_DEFAULT_DELIVERY,
+    keys::COMPOSER_PASTE_INLINE_CONTEXT_SHARE,
+    keys::THREAD_PLAN_FIRST,
+    keys::ORCH_TOOLS_OWNER_READS,
+    keys::APPROVAL_MODE,
+    keys::SANDBOX_MODE,
+];
+
 /// The same native parameter reader, on the enclosing operation's admitted snapshot.
 pub(super) async fn parameters_in(
     ctx: &Ctx,
@@ -182,14 +570,17 @@ pub(super) async fn parameters_in(
     principal: &Principal,
     bounds: &NameBounds,
     provider_view: ProviderView<'_>,
+    projection: ParameterProjection<'_>,
 ) -> ApiResult<ThreadParameters> {
     let thread = ctx.id("id")?;
-    let mut setting_keys = vec![keys::AGENT_MODEL, keys::AGENT_EFFORT, keys::AGENT_PARAMS];
-    setting_keys.extend(
-        orch_engine::capability_routes::setting_definitions(&ctx.app.builtin_sources)
-            .iter()
-            .map(|definition| definition.key),
-    );
+    let mut setting_keys = FIRST_SCREEN_SETTINGS.to_vec();
+    if projection == ParameterProjection::Full {
+        setting_keys.extend(
+            orch_engine::capability_routes::setting_definitions(&ctx.app.builtin_sources)
+                .iter()
+                .map(|definition| definition.key),
+        );
+    }
     setting_keys.sort_unstable();
     setting_keys.dedup();
     let paired = crate::routes::settings::readers::resolved_views(
@@ -213,10 +604,17 @@ pub(super) async fn parameters_in(
         of(keys::AGENT_EFFORT),
         of(keys::AGENT_PARAMS),
     );
-    let parts = thread_parts(conn, thread, None, orch_types::Time::new(ctx.now))
-        .await
-        .map_err(ApiError::internal)?
+    let thread_row = orch_db::queries::threads::thread(conn, thread)
+        .await?
         .ok_or_else(ApiError::not_found)?;
+    let binding = thread_binding_parts(conn, &thread_row)
+        .await
+        .map_err(ApiError::internal)?;
+    let environment_row = match thread_row.environment_id {
+        Some(id) => orch_db::queries::environments::thread_engine::environment(conn, id).await?,
+        None => None,
+    };
+    let environment_id = environment_row.as_ref().map(|row| row.id);
     let settings = orch_engine::resolved::load(conn, thread)
         .await
         .map_err(ApiError::internal)?;
@@ -225,10 +623,28 @@ pub(super) async fn parameters_in(
         .as_ref()
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // A deleted provider is kept by identity for the thread's history; it offers no model and has no
+    // projection to read, and the composer says it is gone.
+    let offering = binding
+        .as_ref()
+        .filter(|binding| !binding.rows.provider_deleted);
     let mut options = Vec::new();
     let mut offering_rows = Vec::new();
-    if let Some(binding) = &parts.binding {
-        for row in models_of_provider(conn, binding.provider.id).await? {
+    if let Some(binding) = offering {
+        let rows = if let ParameterProjection::FirstScreen { models: shown, .. } = projection {
+            let mut names = current
+                .iter()
+                .cloned()
+                .chain(shown.iter().cloned())
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names.dedup();
+            orch_db::queries::resources::models_named_of_provider(conn, binding.provider.id, &names)
+                .await?
+        } else {
+            models_of_provider(conn, binding.provider.id).await?
+        };
+        for row in rows {
             offering_rows.push(row.clone());
             let left_out = settings
                 .models_allowed
@@ -241,15 +657,20 @@ pub(super) async fn parameters_in(
             } else {
                 None
             };
-            let parameters: ModelParameters =
-                orch_provider_contract::models::composed_model_parameters(
+            let (parameters, purpose) =
+                orch_provider_contract::models::composed_model_with_purpose(
+                    &row.model_name,
                     &row.parameters,
                     &row.groups,
                     &row.option_layers,
                     None,
                 )
                 .map_err(ApiError::internal)?;
+            if !purpose.supports_purpose(orch_provider_contract::models::ModelPurpose::Generation) {
+                continue;
+            }
             options.push(ModelOption {
+                purpose: Some(purpose),
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups,
                 display_name: if row.display_name.is_empty() {
@@ -258,9 +679,11 @@ pub(super) async fn parameters_in(
                     row.display_name.clone()
                 },
                 model_name: row.model_name,
-                option_constraints: orch_model_contract::parameters::constraint_catalogue(
-                    &parameters,
-                ),
+                option_constraints: if projection == ParameterProjection::Full {
+                    orch_model_contract::parameters::constraint_catalogue(&parameters)
+                } else {
+                    Default::default()
+                },
                 parameters,
                 allowed: reason.is_none(),
                 reason,
@@ -271,14 +694,14 @@ pub(super) async fn parameters_in(
         .iter()
         .find(|option| Some(&option.model_name) == current.as_ref())
         .and_then(|option| option.parameters.default_effort.clone());
-    let descriptor = parts
-        .binding
+    let descriptor = binding
         .as_ref()
         .and_then(|binding| binding.descriptor.as_ref());
     let supported =
         descriptor.is_some_and(|descriptor| descriptor.capabilities.effort != EffortSupport::None);
     let mut review_models = Vec::new();
-    if orch_agent_programs::Programs::builtin().auto_possible()
+    if projection == ParameterProjection::Full
+        && orch_agent_programs::Programs::builtin().auto_possible()
         && descriptor.is_some_and(|descriptor| {
             descriptor
                 .approval_modes
@@ -287,17 +710,14 @@ pub(super) async fn parameters_in(
         && settings
             .allowed_modes
             .contains(&orch_agent_contract::descriptor::ApprovalMode::Auto)
-        && let Some(binding) = parts.binding.as_ref()
+        && let Some(binding) = offering
     {
-        let row = orch_db::queries::threads::thread(conn, thread)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
         review_models = ctx
             .app
             .engine
             .review_models(
                 conn,
-                &row,
+                &thread_row,
                 binding.provider.id,
                 Some(principal.user()),
                 &settings,
@@ -305,7 +725,7 @@ pub(super) async fn parameters_in(
             .await
             .map_err(ApiError::internal)?;
     }
-    let review_binding = match (parts.binding.as_ref(), settings.model.as_deref()) {
+    let review_binding = match (binding.as_ref(), settings.model.as_deref()) {
         (Some(binding), Some(model)) => Some((
             again(&binding.credential_path)
                 .ok_or_else(|| ApiError::internal("the credential path cannot be represented"))?,
@@ -313,34 +733,28 @@ pub(super) async fn parameters_in(
         )),
         _ => None,
     };
-    let approval_modes = match descriptor {
-        Some(descriptor) => ctx
+    let approval_choices = match (projection, descriptor) {
+        (ParameterProjection::Full, Some(descriptor)) => ctx
             .app
             .engine
-            .offered_approval_modes_with_binding(
+            .approval_choices_with_binding(
                 conn,
-                parts
-                    .facts
-                    .environment
-                    .as_ref()
-                    .map(|environment| environment.id),
+                environment_id,
                 descriptor,
                 &settings.allowed_modes,
                 &review_models,
                 review_binding,
             )
             .await
-            .map_err(ApiError::internal)?
-            .into_iter()
-            .map(|mode| {
-                serde_json::to_value(mode)
-                    .map_err(ApiError::internal)
-                    .map(|mode| mode.as_str().unwrap_or_default().to_owned())
-            })
-            .collect::<ApiResult<Vec<_>>>()?,
-        None => Vec::new(),
+            .map_err(ApiError::internal)?,
+        _ => Vec::new(),
     };
-    let eligibility = parts.binding.as_ref().map(|binding| Eligibility {
+    let approval_modes = approval_choices
+        .iter()
+        .filter(|choice| choice.available)
+        .map(|choice| choice.mode.clone())
+        .collect();
+    let eligibility = binding.as_ref().map(|binding| Eligibility {
         credential_path: again(&binding.credential_path)
             .unwrap_or(orch_agent_contract::credentials::CredentialPath::Native),
         // This explicit parameter predicate is about the credential. The chosen access is
@@ -349,9 +763,7 @@ pub(super) async fn parameters_in(
             orch_api_contract::resources::ProviderKind::Api => ProviderKind::Api,
             orch_api_contract::resources::ProviderKind::Subscription => ProviderKind::Subscription,
         },
-        environment_placement: parts
-            .facts
-            .environment
+        environment_placement: environment_row
             .as_ref()
             .and_then(|environment| again(&environment.placement))
             .unwrap_or(Placement::Managed),
@@ -362,29 +774,52 @@ pub(super) async fn parameters_in(
             .unwrap_or_default(),
         harness_version: None,
     });
+    let features = descriptor
+        .map(|descriptor| descriptor.feature_values(&settings.features))
+        .unwrap_or_else(|| settings.features.clone());
     let declared: Vec<_> = descriptor
-        .map(|descriptor| descriptor.parameters.clone())
-        .unwrap_or_default()
         .into_iter()
+        .flat_map(|descriptor| descriptor.parameters.iter())
         .filter(|def| {
             eligibility
                 .as_ref()
-                .is_some_and(|eligibility| def.is_shown(eligibility, &settings.features))
+                .is_some_and(|eligibility| def.is_shown(eligibility, &features))
         })
         .collect();
+    // What the model's managers opened and this thread cannot use stays in the read, with why, so that a
+    // screen can show the choice off and say what stands in its way.
+    let mut withheld = match (descriptor, eligibility.as_ref()) {
+        (Some(descriptor), Some(eligibility)) => orch_agent_contract::parameters::withheld(
+            &descriptor.parameters,
+            eligibility,
+            &features,
+        ),
+        _ => Vec::new(),
+    };
     let values = params.value.clone().unwrap_or(Value::Null);
+    for entry in &mut withheld {
+        entry.inapplicable_selected_value = entry
+            .key
+            .as_ref()
+            .and_then(|key| values.get(key))
+            .map(|value| (!value.is_null()).then(|| value.clone()));
+    }
     let mut parameters: Vec<ParameterView> = declared
         .into_iter()
-        .map(|def| {
+        .filter_map(|def| {
             let model = eligibility.as_ref().map(|ctx| &ctx.model);
-            let projection = model.map_or_else(
-                || serde_json::to_value(&def).unwrap_or(Value::Null),
-                |model| def.projection(model),
-            );
-            let fixed = projection
+            let definition = if matches!(projection, ParameterProjection::FirstScreen { .. }) {
+                def.compact_projection(model?)?
+            } else {
+                model.map_or_else(
+                    || serde_json::to_value(def).unwrap_or(Value::Null),
+                    |model| def.projection(model),
+                )
+            };
+            let fixed = definition
                 .get("provider_constraint")
                 .and_then(|rule| rule.get("const"));
-            ParameterView {
+            Some(ParameterView {
                 value: fixed.cloned().or_else(|| values.get(&def.key).cloned()),
                 key: def.key.clone(),
                 apply: match def.apply {
@@ -400,14 +835,16 @@ pub(super) async fn parameters_in(
                 },
                 source: member_source(&params, &def.key),
                 writable: params.writable && fixed.is_none(),
-                def: projection,
+                def: definition,
                 locked_by: params.locked_by.clone(),
-            }
+            })
         })
         .collect::<Vec<_>>();
-    if eligibility.as_ref().is_some_and(|context| {
-        context.credential_path == orch_agent_contract::credentials::CredentialPath::Forwarded
-    }) && let Some(model) = eligibility.as_ref().map(|context| &context.model)
+    if projection == ParameterProjection::Full
+        && eligibility.as_ref().is_some_and(|context| {
+            context.credential_path == orch_agent_contract::credentials::CredentialPath::Forwarded
+        })
+        && let Some(model) = eligibility.as_ref().map(|context| &context.model)
     {
         for (interface, schema) in orch_model_contract::parameters::thread::forms(model) {
             let key = format!(
@@ -443,7 +880,21 @@ pub(super) async fn parameters_in(
             });
         }
     }
+    let mut first_provider = None;
     let provider = match provider_view {
+        ProviderView::Selected(Some(prepared))
+            if matches!(projection, ParameterProjection::FirstScreen { .. }) =>
+        {
+            if prepared.standing.views() {
+                first_provider = Some(
+                    crate::routes::resources::providers::show_thread_prepared(
+                        ctx, conn, principal, prepared,
+                    )
+                    .await?,
+                );
+            }
+            None
+        }
         ProviderView::Selected(Some(prepared)) => Some(
             crate::routes::resources::providers::show_prepared(
                 ctx,
@@ -454,7 +905,7 @@ pub(super) async fn parameters_in(
             .await?,
         ),
         ProviderView::Selected(None) => None,
-        ProviderView::Native => match &parts.binding {
+        ProviderView::Native => match offering {
             Some(binding) => {
                 let holding = orch_authz::resources::effective(
                     conn,
@@ -470,15 +921,33 @@ pub(super) async fn parameters_in(
                 if holding.held.iter().any(|held| {
                     held.permission == orch_access_contract::permissions::Permission::ProviderView
                 }) {
-                    Some(
-                        crate::routes::resources::providers::show(
-                            ctx,
-                            conn,
-                            principal,
-                            binding.provider.id,
+                    if matches!(projection, ParameterProjection::FirstScreen { .. }) {
+                        let prepared =
+                            crate::routes::resources::providers::prepare_readable_projection(
+                                ctx,
+                                conn,
+                                principal,
+                                binding.provider.id,
+                            )
+                            .await?;
+                        first_provider = Some(
+                            crate::routes::resources::providers::show_thread_prepared(
+                                ctx, conn, principal, &prepared,
+                            )
+                            .await?,
+                        );
+                        None
+                    } else {
+                        Some(
+                            crate::routes::resources::providers::show(
+                                ctx,
+                                conn,
+                                principal,
+                                binding.provider.id,
+                            )
+                            .await?,
                         )
-                        .await?,
-                    )
+                    }
                 } else {
                     None
                 }
@@ -486,7 +955,9 @@ pub(super) async fn parameters_in(
             None => None,
         },
     };
-    let capabilities = if let Some(binding) = &parts.binding
+    // Backend/form planning is the opened parameter panel's own work.
+    let capabilities = if projection == ParameterProjection::Full
+        && let Some(binding) = offering
         && let Some(descriptor) = descriptor
     {
         let caller_allows = principal
@@ -499,18 +970,14 @@ pub(super) async fn parameters_in(
                 .capability_use_preview(
                     conn,
                     &orch_engine::access::ProviderUse {
+                        pool: None,
+                        purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                         person: principal.user(),
                         node: thread,
                         provider: binding.provider.id,
                         model: current.as_deref(),
                         effort: settings.effort.as_deref(),
-                        runs_in: orch_engine::access::RunsIn::of(
-                            parts
-                                .facts
-                                .environment
-                                .as_ref()
-                                .map(|environment| environment.id),
-                        ),
+                        runs_in: orch_engine::access::RunsIn::of(environment_id),
                     },
                 )
                 .await
@@ -570,15 +1037,127 @@ pub(super) async fn parameters_in(
     } else {
         Vec::new()
     };
-    capability_options(&mut parameters, &capabilities);
+    if projection == ParameterProjection::Full {
+        capability_options(&mut parameters, &capabilities);
+    }
+    let agent = binding
+        .as_ref()
+        .map(|binding| orch_api_contract::settings::ThreadAgent {
+            agent: binding.agent.clone(),
+            parameters: binding
+                .descriptor
+                .as_ref()
+                .map(|descriptor| {
+                    descriptor
+                        .parameters
+                        .iter()
+                        .filter_map(recorded_parameter)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    let sandbox_shortfall = match (environment_row.as_ref(), descriptor) {
+        (Some(environment), Some(descriptor)) => {
+            sandbox_shortfall(
+                conn,
+                environment.id,
+                &environment.facts,
+                descriptor,
+                settings.sandbox_mode,
+                thread_row.executor.as_deref(),
+            )
+            .await?
+        }
+        _ => None,
+    };
+    let gone = gone_of(
+        conn,
+        &thread_row,
+        binding.as_ref(),
+        environment_row.as_ref(),
+        current.as_deref(),
+        &offering_rows,
+    )
+    .await?;
+    let mut environment = None;
+    if let Some(row) = environment_row
+        && projection.shows_files(conn, principal, row.id).await?
+    {
+        let reported = row
+            .facts
+            .get("workspace_root")
+            .and_then(Value::as_str)
+            .filter(|_| {
+                row.facts.get("generation").and_then(Value::as_i64)
+                    == Some(i64::from(row.generation))
+            })
+            .map(|root| root.replace('\\', "/"))
+            .filter(|root| {
+                let bytes = root.as_bytes();
+                root.starts_with('/')
+                    || (bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && bytes[2] == b'/')
+            });
+        environment = Some(orch_api_contract::settings::ThreadEnvironment {
+            id: row.id,
+            workspace_root: reported.unwrap_or_else(|| row.workspace_root.clone()),
+            registered_root: row.workspace_root,
+            generation: row.generation,
+        });
+    }
+    let orch_tools = accepted_tools(conn, thread)
+        .await?
+        .map(|receipt| receipt.summary);
     Ok(ThreadParameters {
+        gone,
+        orch_tools,
+        composer: Some(orch_api_contract::settings::ThreadComposer {
+            default_delivery: of(keys::COLLAB_DEFAULT_DELIVERY)
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or("queue")
+                .to_owned(),
+            paste_inline_context_share: of(keys::COMPOSER_PASTE_INLINE_CONTEXT_SHARE)
+                .value
+                .as_ref()
+                .and_then(Value::as_i64)
+                .unwrap_or(25),
+            plan_first: of(keys::THREAD_PLAN_FIRST)
+                .value
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            owner_reads: of(keys::ORCH_TOOLS_OWNER_READS)
+                .value
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            auto_unavailable: settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto
+                && (!settings.allowed_modes.contains(&settings.approval_mode)
+                    || !descriptor.is_some_and(|d| d.approval_modes.contains(&settings.approval_mode)
+                       && d.approval_auto.as_ref().is_some_and(|p| p.state == orch_agent_contract::descriptor::AutoApprovalState::Passed))),
+            approval_default: of(keys::APPROVAL_MODE).source.scope != SettingScope::Thread,
+            sandbox_mode: of(keys::SANDBOX_MODE)
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            sandbox_default: of(keys::SANDBOX_MODE).source.scope != SettingScope::Thread,
+            sandbox_shortfall,
+        }),
+        agent,
+        environment,
         capabilities,
-        provider,
+        provider: first_provider.or_else(|| provider.map(ThreadProvider::of)),
         model: ThreadModelParameter {
             value: current,
             source: model.source,
             writable: model.writable,
             options,
+            options_partial: false,
         },
         effort: ThreadEffortParameter {
             value: effort
@@ -592,51 +1171,54 @@ pub(super) async fn parameters_in(
             supported,
         },
         parameters,
+        withheld,
         approval_mode: serde_json::to_value(settings.approval_mode)
             .map_err(ApiError::internal)?
             .as_str()
             .unwrap_or("on_request")
             .to_owned(),
-        approval_modes: Some(approval_modes),
-        approval_reviewer: orch_engine::approval_review::session_reviewer(conn, thread)
-            .await
-            .map_err(ApiError::internal)?,
-        subagent_limits: Some(orch_api_contract::settings::ThreadSubagentLimits {
-            limits: settings.subagent_limits,
-            supported: descriptor
-                .filter(|descriptor| descriptor.capabilities.subagents)
-                .map(|descriptor| {
-                    descriptor
-                        .capabilities
-                        .subagent_limits
-                        .iter()
-                        .filter_map(|control| {
-                            serde_json::to_value(control)
-                                .ok()
-                                .and_then(|value| value.as_str().map(str::to_owned))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }),
-        port_tools: match descriptor {
-            Some(descriptor) => {
-                let row = orch_db::queries::threads::thread(conn, thread)
-                    .await?
-                    .ok_or_else(ApiError::not_found)?;
-                Some(
-                    orch_engine::tools::port_tools_for_session(
-                        conn,
-                        &row,
-                        descriptor.capabilities.orch_tools
-                            == orch_agent_contract::descriptor::OrchToolsSupport::Mcp,
-                        ctx.app.clock.time(),
-                    )
-                    .await
-                    .map_err(ApiError::internal)?,
-                )
+        approval_modes: (projection == ParameterProjection::Full).then_some(approval_modes),
+        approval_choices: (projection == ParameterProjection::Full).then_some(approval_choices),
+        approval_reviewer: if projection == ParameterProjection::Full {
+            orch_engine::approval_review::session_reviewer(conn, thread)
+                .await
+                .map_err(ApiError::internal)?
+        } else {
+            None
+        },
+        subagent_limits: (projection == ParameterProjection::Full).then(|| {
+            orch_api_contract::settings::ThreadSubagentLimits {
+                limits: settings.subagent_limits,
+                supported: descriptor
+                    .filter(|descriptor| descriptor.capabilities.subagents)
+                    .map(|descriptor| {
+                        descriptor
+                            .capabilities
+                            .subagent_limits
+                            .iter()
+                            .filter_map(|control| {
+                                serde_json::to_value(control)
+                                    .ok()
+                                    .and_then(|value| value.as_str().map(str::to_owned))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
-            None => None,
+        }),
+        port_tools: match (projection, descriptor) {
+            (ParameterProjection::Full, Some(descriptor)) => Some(
+                orch_engine::tools::port_tools_for_session(
+                    conn,
+                    &thread_row,
+                    descriptor.capabilities.orch_tools
+                        == orch_agent_contract::descriptor::OrchToolsSupport::Mcp,
+                    ctx.app.clock.time(),
+                )
+                .await
+                .map_err(ApiError::internal)?,
+            ),
+            _ => None,
         },
     })
 }
