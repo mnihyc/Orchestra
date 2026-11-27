@@ -65,6 +65,7 @@ fn refusal(error: CallError) -> DeliverError {
             retryable: remote.retryable,
             retry_after_secs: remote.retry_after_secs,
             gone: remote.gone,
+            field: None,
         },
         CallError::Unavailable { .. } | CallError::Lost { .. } | CallError::Timeout { .. } => {
             DeliverError::temporary(error.code(), &error.to_string())

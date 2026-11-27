@@ -19,7 +19,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { environmentMovePlacesQuery, planEnvironmentMove, planEnvironmentUpdate, startEnvironmentMove, startEnvironmentUpdate } from '@/api/changes';
 import { ApiError } from '@/api/client';
 import { environmentQuery } from '@/api/environments';
-import { isTechnicalChange, runtimeChangeText, programChangeText } from '@/features/resources/TechnicalValue';
+import { changeText, isTechnicalChange } from '@/features/resources/TechnicalValue';
 import { moveRemovesSoftware } from '@/features/resources/isolation/runtimes';
 import { TargetBuilds } from '@/features/change/TargetBuilds';
 import { UpdateNotify } from '@/features/change/UpdateNotify';
@@ -78,6 +78,11 @@ const WHAT_KEYS = {
   executor: 'change.env.what.executor',
   harness: 'change.env.what.harness',
 } as const satisfies Record<PendingUpdate['what'], string>;
+
+/** A provisioning job makes an environment that has no unit yet, or starts the unit of one that is stopped: its phases say which. */
+export function provisionKind(job: Pick<Job, 'progress'>): 'make' | 'start' {
+  return job.progress.phases.some((phase) => phase.name === 'start') ? 'start' : 'make';
+}
 
 function optionsBody(options: RunOptions): ApiOptions | null {
   const body: ApiOptions = { ...(options.activeTurn === null ? {} : { active_turn: options.activeTurn }), ...(options.waitMinutes === null ? {} : { wait_minutes: options.waitMinutes }) };
@@ -176,14 +181,19 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
     },
   });
 
-  // A job that was opened by its number says what it is itself: a move or an update.
+  // A job that was opened by its number says what it is itself: a move or an update, or the making or start of the
+  // environment, which is not an update of one that was there.
   const shown: Kind = running?.kind === 'environment_move' ? 'move' : kind;
+  const making = running?.kind === 'environment_provision' ? provisionKind(running) : null;
   const hasJobContext = running === undefined || running.environment_id === environmentId;
   const transfer = hasJobContext ? reviewedTransfer : transferFacts(undefined);
   const words = transferWords(transfer, name, hasJobContext ? reviewedDestination : null, t);
-  const title = shown === 'move' ? hasJobContext ? words.title : t('envTransfer.operation') : t(`change.env.title.${shown}`, { name });
-  const about = shown === 'move' ? undefined : t(`change.env.about.${shown}`);
-  const heading = shown === 'move' ? hasJobContext ? words.heading : t('envTransfer.operation') : t(`change.env.heading.${shown}`, { name, host: '' });
+  const title = making !== null ? t(making === 'make' ? 'change.env.title.make' : 'change.env.title.start', { name })
+    : shown === 'move' ? hasJobContext ? words.title : t('envTransfer.operation') : t(`change.env.title.${shown}`, { name });
+  const about = making !== null || shown === 'move' ? undefined : t(`change.env.about.${shown}`);
+  const heading = making !== null ? t(making === 'make' ? 'change.env.heading.make' : 'change.env.heading.start', { name })
+    : shown === 'move' ? hasJobContext ? words.heading : t('envTransfer.operation') : t(`change.env.heading.${shown}`, { name, host: '' });
+  const doneWords = making !== null ? t(making === 'make' ? 'change.env.doneMake' : 'change.env.doneStart', { name }) : t('change.env.doneUpdate', { name });
   const blockers = confirm.error instanceof ApiError && confirm.error.is('plan.blocked') ? blockersOf(confirm.error) : (current?.blockers ?? []);
   const held = heldBy(confirm.error);
   const canConfirm = current !== undefined && !stale && blockers.length === 0 && !confirm.isPending;
@@ -207,7 +217,7 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
         footer={
           over ? (
             <>
-              {(running.state === 'failed' || running.state === 'cancelled') && (
+              {(running.state === 'failed' || running.state === 'cancelled') && making === null && (
                 <Button
                   onClick={() => {
                     setJobId(null);
@@ -225,22 +235,22 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
           ) : (
             <>
               <Button onClick={onClose}>{t('change.progress.hide')}</Button>
-              <Button variant="danger" disabled={committed(running) || running.progress.activity?.stopping === true || cancel.isPending} onClick={() => setCancelling(true)}>
-                {t(running.progress.activity?.stopping === true ? 'liveWork.stopping' : 'change.progress.cancel')}
+              <Button variant={making === null ? 'danger' : 'secondary'} disabled={committed(running) || running.progress.activity?.stopping === true || cancel.isPending} onClick={() => setCancelling(true)}>
+                {t(running.progress.activity?.stopping === true ? 'liveWork.stopping' : making === null ? 'change.progress.cancel' : 'change.progress.stopMaking')}
               </Button>
             </>
           )
         }
       >
         {over ? (
-          <Result job={running} done={shown === 'move' ? hasJobContext ? ran?.done ?? words.done : t('envTransfer.finishedGeneric') : ran?.done ?? t('change.env.doneUpdate', { name })} stoppedTurn={false} waited={minutes} subject={name}>
+          <Result job={running} done={making !== null ? doneWords : shown === 'move' ? hasJobContext ? ran?.done ?? words.done : t('envTransfer.finishedGeneric') : ran?.done ?? doneWords} stoppedTurn={false} waited={minutes} subject={name}>
             {hasJobContext && running.state === 'succeeded' && ran !== null && ran.threads > 0 && <p className="text-sm text-text-muted">{t('change.env.threadsOpen', { count: ran.threads })}</p>}
           </Result>
         ) : (
           <JobProgress job={running} heading={heading} transfer={transfer} reconnecting={jobAnswer.failureCount > 0} />
         )}
         {cancel.error !== null && <ErrorAlert error={cancel.error} />}
-        <ConfirmDialog open={cancelling} onOpenChange={setCancelling} title={t('change.cancel.title')} confirmLabel={t('change.progress.cancel')} danger pending={cancel.isPending} error={cancel.error ?? undefined} onConfirm={() => cancel.mutate()}>
+        <ConfirmDialog open={cancelling} onOpenChange={setCancelling} title={t('change.cancel.title')} confirmLabel={t(making === null ? 'change.progress.cancel' : 'change.progress.stopMaking')} danger pending={cancel.isPending} error={cancel.error ?? undefined} onConfirm={() => cancel.mutate()}>
           {t('change.cancel.body', { subject: name })}
         </ConfirmDialog>
       </Frame>
@@ -377,7 +387,7 @@ function updateLists(plan: EnvironmentUpdatePlan, t: TFunction): { changes: Line
   const changes: Line[] =
     plan.updates.length === 0
       ? [{ id: 'recreate', tone: 'plain', text: t('change.env.plan.recreate') }]
-      : plan.updates.map((update) => ({ id: `update-${update.name}`, tone: 'plain', text: update.what === 'harness' ? programChangeText(update, t) : isTechnicalChange(update) ? runtimeChangeText(update, t) : t('change.env.plan.update', { name: update.name, from: update.from ?? '', to: update.to ?? '' }), ...(isTechnicalChange(update) ? { technical: update } : {}) }));
+      : plan.updates.map((update) => ({ id: `update-${update.name}`, tone: 'plain', text: changeText(update, t), ...(isTechnicalChange(update) ? { technical: update } : {}) }));
   const stays: Line[] = [
     { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }), people: [plan.environment.owner] },
     ...plan.kept.map((entry, index): Line => ({ id: `kept-${index}`, tone: 'plain', text: entry })),

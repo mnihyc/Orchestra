@@ -357,6 +357,74 @@ async fn an_environment_loss_keeps_its_shared_physical_machine_registered() {
 }
 
 #[tokio::test]
+async fn a_lost_environment_is_deleted_at_once_and_asks_nothing_of_its_host() {
+    let world = World::new().await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let who = principal(&world, &mut tx).await;
+    sqlx::query("UPDATE machines SET online=false WHERE id=$1")
+        .bind(world.machine_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let plan = world
+        .engine()
+        .plan_loss(
+            &mut tx,
+            &who,
+            LossTarget::Environment {
+                id: world.environment,
+            },
+        )
+        .await
+        .unwrap();
+    world
+        .engine()
+        .declare_loss(
+            &mut tx,
+            &who,
+            &LossDeclareBody {
+                notify: false,
+                preflight_id: plan.preflight_id,
+                confirm: plan.name,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    // Delete of the lost record: nothing is left on a host to wait for.
+    let mut tx = world.pool.begin().await.unwrap();
+    assert!(
+        world
+            .engine()
+            .remove_lost_environment_in(&mut tx, world.environment, world.ada, world.clock.now())
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let (status, deleted, phase): (
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    ) = sqlx::query_as("SELECT status, deleted_at, removal_phase FROM environments WHERE id = $1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(status, "removed");
+    assert!(deleted.is_some());
+    assert_eq!(phase.as_deref(), Some("lost"));
+    let asked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE environment_id = $1 AND kind = 'environment_remove'",
+    )
+    .bind(world.environment)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(asked, 0, "nothing is asked of a lost environment's host");
+    world.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_environment_loss_keeps_reachable_retired_copies_on_other_hosts() {
     let world = World::new().await;
     hosting::serve(&world);
@@ -987,6 +1055,105 @@ async fn owned_restored_volumes_preserve_the_local_native_session_and_wrong_owne
 }
 
 #[tokio::test]
+async fn a_lost_provider_can_preview_its_host_pool_without_reserving_or_falling_outside_it() {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_authz::ownership::{self, NewAccess};
+    use orch_provider_contract::pools::{Kind, Target};
+    let world = World::on_a_key("a-test-key").await;
+    hosting::serve(&world);
+    let target = hosting::ScriptedHost::on(&world, "Recovery pool host", 16_384).await;
+    let template = hosting::template(&world).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    sqlx::query("UPDATE env_templates SET kind='provider' WHERE id=$1")
+        .bind(template)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut tx,
+        "pool",
+        Some(world.ada),
+        Some(world.root),
+        "Recovery hosts",
+    )
+    .await
+    .unwrap();
+    ownership::start_resource(
+        &mut tx,
+        ObjectRef {
+            kind: ObjectKind::Pool,
+            id: pool,
+        },
+        world.ada,
+        NewAccess::OnlyMe,
+        world.clock.time(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool)
+        .bind(json!({"kind":"host","enabled":true,"policy":{"type":"ordered"},"lend_members":false,"members":[],"config":{}}))
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(new_id())
+    .bind(json!({"type":"single","resource":{"kind":"host","id":target.id}}))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let intent = Target::Pool {
+        kind: Kind::Host,
+        id: pool,
+    };
+    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime was declared lost',status='offline',runtime_config=runtime_config||jsonb_build_object('runtime.template_id',$2::uuid::text,'runtime.host_id',$3::jsonb) WHERE id=$1")
+        .bind(world.provider).bind(template).bind(json!(intent)).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = world.pool.begin().await.unwrap();
+    let caller = principal(&world, &mut tx).await;
+    let draft = world
+        .engine()
+        .draft_provider_recovery(&mut tx, &caller, world.provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&draft.recipe.host).unwrap(),
+        json!(intent),
+        "review retains pool intent; only accepted native scheduling reserves a physical host"
+    );
+    let choices: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pool_choices WHERE source->>'node'=$1::uuid::text",
+    )
+    .bind(world.provider)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        choices, 0,
+        "reviewing a recovery cannot reserve a member or advance its policy"
+    );
+    tx.rollback().await.unwrap();
+    let mut tx = world.pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE pools SET definition=jsonb_set(definition,'{enabled}','false') WHERE id=$1",
+    )
+    .bind(pool)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let caller = principal(&world, &mut tx).await;
+    assert!(
+        world
+            .engine()
+            .draft_provider_recovery(&mut tx, &caller, world.provider)
+            .await
+            .is_err(),
+        "direct owner Host Use cannot turn an explicitly chosen disabled pool into Most room"
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn re_creating_a_lost_provider_checks_the_callers_own_host_use_instead_of_borrowing_its_owners()
  {
     use orch_db::queries::access::{PageKey, testing::add_entry};
@@ -1002,7 +1169,7 @@ async fn re_creating_a_lost_provider_checks_the_callers_own_host_use_instead_of_
         .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime was declared lost',status='offline',runtime_config=runtime_config||jsonb_build_object('runtime.template_id',$2::uuid::text,'runtime.host_id',$3::uuid::text) WHERE id=$1").bind(world.provider).bind(template).bind(target.id).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime was declared lost',status='offline',runtime_config=runtime_config||jsonb_build_object('runtime.template_id',$2::uuid::text,'runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$3::uuid::text))) WHERE id=$1").bind(world.provider).bind(template).bind(target.id).execute(&mut *tx).await.unwrap();
     for (kind, id, permission) in [
         ("provider", world.provider, "provider.manage"),
         ("template", template, "template.use"),
@@ -1055,7 +1222,10 @@ async fn re_creating_a_lost_provider_checks_the_callers_own_host_use_instead_of_
         .draft_provider_recovery(&mut tx, &principal, world.provider)
         .await
         .unwrap();
-    assert_eq!(draft.recipe.host, target.id);
+    assert_eq!(
+        draft.recipe.host,
+        orch_provider_contract::pools::Target::host(target.id)
+    );
     assert_eq!(draft.recipe.by, caller);
     assert!(draft.grants.is_empty());
     let job = orch_engine::provider_recovery::queue(
@@ -2019,7 +2189,10 @@ async fn a_host_data_move_keeps_its_childs_copy_and_never_erases_the_source_befo
         .machine
         .handler
         .hold(CommandKind::NodeMountImport);
+    let source_membership_id = new_id();
     let copy = CopyDecision {
+        source_membership_id,
+        target_membership_id: None,
         mount_id: mount,
         source_machine: source.machine,
         source_driver: "docker".into(),
@@ -2119,7 +2292,10 @@ async fn a_host_data_move_keeps_its_childs_copy_and_never_erases_the_source_befo
     )
     .await
     .unwrap();
-    mounts::set_location(&mut tx, &from).await.unwrap();
+    sqlx::query("INSERT INTO mount_locations(membership_id,mount_id,machine_id,kind,source,storage,data_kind,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(source_membership_id).bind(from.mount_id).bind(from.machine_id).bind(&from.kind).bind(&from.source)
+        .bind(&from.storage).bind(&from.data_kind).bind(from.created_by).bind(from.created_at)
+        .execute(&mut *tx).await.unwrap();
     mounts::set_location(&mut tx, &location(target.machine, child_name.clone()))
         .await
         .unwrap();
