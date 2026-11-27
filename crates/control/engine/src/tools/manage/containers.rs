@@ -398,7 +398,7 @@ impl Engine {
         let actor = domain::Actor::Agent {
             thread: thread.node_id,
         };
-        let options = domain::Options::for_engine(self);
+        let options = domain::Options::for_engine(&mut tx).await?;
         let mut deletion = None;
         if asked.command == Command::Delete {
             let plan = match domain_result(
@@ -562,7 +562,8 @@ impl Engine {
                 entry_path(entry, &located.parents, &all, &mut Vec::new()).ok_or_else(|| {
                     EngineError::unreadable("an authorized document tree has no parent path")
                 })?;
-            let until = domain::restore_deadline_in(conn, entry, domain::Options::for_engine(self))
+            let options = domain::Options::for_engine(conn).await?;
+            let until = domain::restore_deadline_in(conn, entry, options)
                 .await
                 .map_err(EngineError::unreadable)?
                 .unwrap_or(plan.restore_until);
@@ -699,6 +700,7 @@ impl Engine {
                 "from must name one current readable document; use manage_shared copy for a folder tree.",
             )));
         }
+        let options = domain::Options::for_engine(&mut tx).await?;
         let receipt = match domain_result(
             domain::execute_in(
                 &mut tx,
@@ -708,7 +710,7 @@ impl Engine {
                 &located.request,
                 None,
                 Time::new(self.inner.clock.now()),
-                domain::Options::for_engine(self),
+                options,
             )
             .await,
             domain::Command::Copy,
@@ -786,6 +788,7 @@ impl Engine {
             request_ref: call.call_ref.clone(),
             version: None,
         };
+        let options = domain::Options::for_engine(&mut tx).await?;
         let receipt = match domain_result(
             domain::execute_in(
                 &mut tx,
@@ -795,7 +798,7 @@ impl Engine {
                 &request,
                 None,
                 Time::new(self.inner.clock.now()),
-                domain::Options::for_engine(self),
+                options,
             )
             .await,
             domain::Command::Rename,

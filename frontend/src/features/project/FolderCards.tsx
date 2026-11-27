@@ -3,9 +3,11 @@
  * A folder is a project that lies in a project: a part of the work with its own topics, people and
  * settings, and folders of its own. Rows follow the topics and carry the complete name, counts,
  * attention and the place menu. The authorized live tree already holds these facts; opening this
- * collection reads no detail for each folder. A description is available on the folder's screen.
+ * collection reads no detail for each folder. A description is available on the folder's screen. Rows are picked (a
+ * box, Shift for a range, Ctrl or ⌘ to add one) to delete them together.
  */
-import { useMemo } from 'react';
+import { type MouseEvent, type ReactNode, useMemo, useState } from 'react';
+import { Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
@@ -22,6 +24,9 @@ import { NodeIcon } from '@/ui/NodeIcon';
 import { ContainedThreadStateIcon } from '@/ui/ThreadState';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Skeleton } from '@/ui/Skeleton';
+import { Button } from '@/ui/Button';
+import { onOwnControl, RowBox, SelectedBar, useRowSelection } from '@/ui/RowSelection';
+import { usePlaceTrash } from '@/features/trash/usePlaceTrash';
 
 /** What narrows the folders a project shows, from the address of its screen. */
 export interface FolderFilters {
@@ -69,13 +74,14 @@ export function holdings(rows: ReadonlyMap<string, TreeNode>, id: string): { top
 const CARD =
   'group relative flex min-w-0 items-start gap-3 px-3 py-2 transition-colors hover:bg-bg-subtle';
 
-function FolderCard({ row, tree }: { row: TreeNode; tree: OrgTree }) {
+function FolderCard({ row, tree, select, onPick }: { row: TreeNode; tree: OrgTree; select: ReactNode; onPick: (event: MouseEvent<HTMLLIElement>) => void }) {
   const { t } = useTranslation();
   const stats = useMemo(() => placeStats(tree.nodes, row.id), [tree.nodes, row.id]);
   const held = useMemo(() => holdings(tree.nodes, row.id), [tree.nodes, row.id]);
   // Names/counts are already held in the authorized tree. A row menu reads details only when opened.
   return (
-    <li className={CARD}>
+    <li className={CARD} onClick={(event) => { if (!onOwnControl(event.target)) onPick(event); }}>
+        {select}
         <span className="flex h-(--control-sm) w-5 shrink-0 items-center justify-center text-text-muted">
           <NodeIcon kind="folder" color={row.color} own={row.custom_color} />
         </span>
@@ -117,6 +123,16 @@ export function FolderCards({ projectId, orgId, expected, filters }: FolderCards
     () => folders.filter((row) => folderStays(row, placeStats(tree.nodes, row.id), filters)),
     [folders, tree.nodes, filters],
   );
+  const selection = useRowSelection(shown, (row) => row.id);
+  const trash = usePlaceTrash();
+  const [trashing, setTrashing] = useState(false);
+  const trashSelected = async () => {
+    setTrashing(true);
+    try {
+      const result = await trash(selection.selected.map((row) => placeOfRow(row, true)));
+      if (result.done.length > 0) selection.clear();
+    } finally { setTrashing(false); }
+  };
 
   // Nothing to say about folders where there are none, and the tree has said so.
   if ((tree.loaded || expected === 0) && folders.length === 0) return null;
@@ -137,11 +153,18 @@ export function FolderCards({ projectId, orgId, expected, filters }: FolderCards
       ) : shown.length === 0 ? (
         <EmptyState compact title={t('folders.noneMatch')} />
       ) : (
-        <ul data-places-list className="divide-y divide-border rounded-lg border border-border bg-surface">
-          {shown.map((row) => (
-            <FolderCard key={row.id} row={row} tree={tree} />
-          ))}
-        </ul>
+        <div className="flex flex-col gap-2">
+          {selection.selected.length > 0 && <SelectedBar count={selection.selected.length} total={shown.length} onSelectAll={() => selection.toggleAll(true)} busy={trashing} onClear={selection.clear}>
+            <Button size="sm" variant="danger-ghost" icon={<Trash2 aria-hidden />} pending={trashing} onClick={() => void trashSelected()}>{t('trash.delete')}</Button>
+          </SelectedBar>}
+          <ul data-places-list className="divide-y divide-border rounded-lg border border-border bg-surface">
+            {shown.map((row) => (
+              <FolderCard key={row.id} row={row} tree={tree}
+                select={<RowBox name={row.name} checked={selection.isTicked(row)} onChange={(on, range) => selection.toggle(row, on, range)} />}
+                onPick={(event) => { selection.click(row, event); }} />
+            ))}
+          </ul>
+        </div>
       )}
     </Section>
   );

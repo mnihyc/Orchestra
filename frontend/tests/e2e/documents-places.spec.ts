@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test';
 import { showWorkbenchView } from './workbench-support.ts';
 import { readFile } from 'node:fs/promises';
 
-import { ACME, PEOPLE, scenario, signIn, mainArea } from './support.ts';
+import { ACME, PEOPLE, scenario, signIn, mainArea, openTopicTab } from './support.ts';
 import { installImportFixture } from './import-support.ts';
 import { actAs, block, caretAtEndOf, cutVersion, DOCS, editorOf, held, lineOf, openDocument, saveState, waitUntilSaved, wordsOf } from './documents-support.ts';
 
@@ -238,8 +238,9 @@ test('a document is moved beside another place, and each list shows it where it 
   await page.locator('[data-screen="document"]').getByRole('button', { name: /^Actions for / }).click();
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Move to…', exact: true });
-  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Upgrade');
-  await page.getByRole('option', { name: 'Acme / Research / Web / Upgrade deps', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Upgrade');
+  await page.getByRole('treeitem', { name: 'Acme / Research / Web / Upgrade deps', exact: true }).click();
   // The shared form also supports cross-org moves; this chosen native place and unchanged name retain identity here.
   await expect(dialog.getByRole('button', { name: 'Take away Acme / Research / Web / Upgrade deps', exact: true })).toBeVisible();
   await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Rollout plan.md');
@@ -261,7 +262,7 @@ test('Documents has one page tab on a topic, a side view on a project, and follo
 
   // UA-30: a topic keeps the same list in its page tab, without a second side view or chooser entry.
   await page.goto(`/topic/${ACME.fixLogin}`);
-  await page.getByRole('tab', { name: 'Documents', exact: true }).click();
+  await openTopicTab(page, 'Documents');
   const topicList = page.getByRole('tabpanel', { name: 'Documents', exact: true }).getByRole('region', { name: 'Documents', exact: true });
   await expect(topicList.getByRole('link', { name: 'Rollout plan' })).toBeVisible();
   await expect(topicList.getByRole('link', { name: 'Notes from the canary' })).toBeVisible();
@@ -398,21 +399,19 @@ test('a reader who may not write sees the page with no caret and no bars, and is
   await expect(editorOf(page).locator('video')).toHaveCount(0);
 });
 
-test('a document is deleted, and brought back from the list of its place', async ({ page }) => {
+test('a document goes to the Trash at once, and is brought back from the list of its place', async ({ page }) => {
   await signIn(page);
   await openDocument(page, DOCS.plan);
   await page.locator('[data-screen="document"]').getByRole('button', { name: /^Actions for / }).click();
   await page.getByRole('menuitem', { name: 'Delete' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Delete', exact: true });
-  await expect(dialog.getByText('Rollout plan.md', { exact: true }).last()).toBeVisible();
-  await expect(dialog.getByText(/Recoverable until/)).toBeVisible();
-  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
-  await expect(page.getByText('Documents updated', { exact: true })).toBeVisible();
+  // Nothing is asked: the line after it says where it went, with Undo.
+  await expect(page.getByRole('dialog', { name: 'Delete', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Moved “Rollout plan” to Trash', { exact: true })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/inspect/document/${DOCS.plan}`));
   await expect(page.getByRole('heading', { name: 'Rollout plan', exact: true }).first()).toBeVisible();
   await page.goto(`/topic/${ACME.fixLogin}?tab=documents`);
   await expect(mainArea(page).getByRole('link', { name: 'Rollout plan', exact: true })).toHaveCount(0);
-  const deleted = page.getByRole('button', { name: /^Recently deleted \(\d+\+?\)$/ });
+  const deleted = page.getByRole('button', { name: /^Trash \(\d+\+?\)$/ });
   await expect(deleted).toHaveAttribute('aria-expanded', 'false');
   await deleted.click();
   await expect(deleted).toHaveAttribute('aria-expanded', 'true');

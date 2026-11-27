@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError } from '@/api/client';
-import { confirmedInverses, selectRange, statusBatch, statusBlockers, type StatusResult } from '@/features/project/selection';
+import { confirmedInverses, statusBatch, statusBlockers, type StatusResult } from '@/features/project/selection';
+import { selectRange } from '@/ui/RowSelection';
 import type { Topic } from '@/generated/api-types';
 
 const row = (id: string, permissions = ['topic.interact']): Topic => ({ id, name: id, status: 'open', revision: 4, archived: false, access: { permissions } } as Topic);

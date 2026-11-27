@@ -20,6 +20,7 @@ import { openExport, requestExportAccess } from '@/features/export/ExportHost';
 import { exportEntries, type ExportCheckFailure } from '@/features/export/menu';
 import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { type DocPlace, documentPath } from '@/features/navigation/places';
+import { useShortcutActs } from '@/features/navigation/shortcuts';
 import { holds } from '@/lib/permissions';
 import { useErrorText } from '@/ui/errorText';
 import { copyText } from '@/ui/clipboard';
@@ -40,6 +41,8 @@ export interface DocMenuActions {
   copyReference: () => void;
   remove: () => void;
   readme?: MenuEntry;
+  /** Star it, and keep a shortcut to it in a place: the person's own acts on it; left out, the menu has neither. */
+  shortcuts?: MenuEntry[];
 }
 
 /**
@@ -59,6 +62,7 @@ export function docMenuEntries(doc: Pick<DocPlace, 'archived' | 'owner'>, held: 
     { id: 'open', label: t('places.menu.open'), onSelect: act.open },
     { id: 'open-tab', label: t('places.menu.openInTab'), icon: <ExternalLink aria-hidden />, shortcut: 'Mod+Enter', onSelect: act.openInTab },
   );
+  group(...(act.shortcuts ?? []));
   group(
     // A document beside an archived place is read and not written: its title is part of what is written.
     ...(holds(access, 'doc.edit') && !doc.archived ? [{ id: 'rename', label: t('places.menu.rename'), icon: <Pencil aria-hidden />, onSelect: act.rename }] : []),
@@ -88,6 +92,7 @@ function useDocMenu(doc: DocPlace): MenuEntry[] {
   const place = useQuery({ ...nodeQuery(held?.node.id ?? ''), enabled: held !== undefined }).data;
   const readme = useReadmeEntry(doc, place);
   const target = { kind: 'document' as const, id: doc.id, name: doc.title };
+  const shortcuts = useShortcutActs(target);
   const copy = () => copyText(linkTo({ kind: 'document', id: doc.id }), t('common.linkCopied'));
   return docMenuEntries(
     doc,
@@ -103,6 +108,7 @@ function useDocMenu(doc: DocPlace): MenuEntry[] {
       copyLink: () => void copy(),
       copyReference: () => void copyText(referenceTo({ kind: 'document', id: doc.id, title: doc.title }), t('people.reference.copied')),
       remove: () => openNodeDialog({ type: 'delete-document', doc }),
+      shortcuts,
       ...(readme === null ? {} : { readme }),
     },
     t,

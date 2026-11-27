@@ -21,7 +21,6 @@ use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::environments::Awaited;
 use crate::error::EngineError;
-use crate::ids;
 use crate::jobs::provider_provision::{self, Mode};
 use crate::preflight::Blocked;
 use crate::turns::{InputAfter, TurnEnd, error_json};
@@ -51,6 +50,33 @@ const STOP_LOOK_EVERY: Duration = Duration::from_millis(100);
 /// How long a stop that interrupts turns waits for them to end, beyond the engine's own wait for an
 /// interrupt to be answered.
 const INTERRUPT_MARGIN: Duration = Duration::from_secs(5);
+
+/// What a job about a provider's runtime is doing, as a word the screen says in the reader's language, and the
+/// step it has come to: `make`, `start`, `renew`, `update` or `remove`; `None` for a job that is about something else.
+pub(crate) fn work_of(job: &JobRow) -> (Option<&'static str>, String) {
+    let step = crate::jobs::runner::read_progress(job).0.phase;
+    let work = match (
+        job.kind.as_str(),
+        job.plan.get("mode").and_then(Json::as_str),
+    ) {
+        (provider_jobs::REMOVE, _) => Some("remove"),
+        (provider_jobs::PROVISION, Some("start")) => Some("start"),
+        (provider_jobs::PROVISION, Some("renew")) => Some("renew"),
+        (provider_jobs::PROVISION, _) => Some("make"),
+        (orch_db::queries::jobs::kind::PROVIDER_RECREATE, _) => Some("update"),
+        _ => None,
+    };
+    (work, step)
+}
+
+/// What a job that holds a provider's unit back from a stop or a removal is, for the person who is refused: the
+/// provider's own work on its unit, which forcing the act ends, or work of something else, which it does not.
+pub(crate) fn hold_of(job: &JobRow) -> Hold {
+    match work_of(job) {
+        (Some(work), step) => Hold::own_work(work, step),
+        (None, _) => Hold::of(HoldWhy::OtherWork),
+    }
+}
 
 /// Resolves the environment of a provider's unit, retaining only sealed secret references in plans.
 pub(crate) async fn definition(
@@ -171,6 +197,8 @@ pub(crate) async fn harness_variables(
     }
     let home = home_for_harness(conn, provider, agent, machine).await?;
     Ok(Some(orch_link_contract::commands::AgentRuntime {
+        build: None,
+        environment_home: false,
         resources: None,
         variables: Default::default(),
         home,
@@ -226,7 +254,17 @@ pub(crate) async fn harness_values(
         orch_settings_contract::registry::keys::RUNTIME_RESOURCES,
     )
     .await?;
+    let environment_home: bool = sqlx::query_scalar(
+        "SELECT connection_environment_id IS NOT NULL AND machine_id=$2 FROM providers WHERE id=$1",
+    )
+    .bind(provider)
+    .bind(machine)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
     Ok(orch_link_contract::commands::AgentRuntime {
+        build: None,
+        environment_home,
         resources,
         variables,
         home,
@@ -261,14 +299,475 @@ pub enum RuntimeError {
     /// The host could not stop the unit.
     #[error("the host could not stop it: {0}")]
     Host(String),
+    /// Something stands in the way that a person can see and answer: work under way on the unit, or a host
+    /// that has not said that it stopped it.
+    #[error("{}", .0.sentence())]
+    Held(Hold),
     /// The system failed.
     #[error(transparent)]
     Internal(#[from] EngineError),
 }
 
+/// Why an act on a provider's unit is held back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldWhy {
+    /// Work of the provider's own is under way on the unit: making, starting, renewing, updating or taking it away.
+    /// Forcing the act ends that work.
+    OwnWork,
+    /// Something else the provider takes part in is under way: a move, an update of an environment, a copy of a
+    /// thread. Forcing does not end that; it is waited for.
+    OtherWork,
+    /// The work is at its last step and can no longer be ended.
+    PastCommit,
+    /// The host has not said that the unit stopped. Stopping by force settles it without the host.
+    HostSilent,
+    /// The unit reads as being made and no work makes it. Stopping by force settles it.
+    NothingMakesIt,
+    /// The unit was replaced by an update and waits to be taken away.
+    Replaced,
+}
+
+impl HoldWhy {
+    /// The word of the reason, which the screen has its sentence for.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::OwnWork => "own_work",
+            Self::OtherWork => "other_work",
+            Self::PastCommit => "past_commit",
+            Self::HostSilent => "host_silent",
+            Self::NothingMakesIt => "nothing_makes_it",
+            Self::Replaced => "replaced",
+        }
+    }
+
+    /// Whether forcing the act changes what holds it back.
+    #[must_use]
+    pub const fn can_force(self) -> bool {
+        matches!(
+            self,
+            Self::OwnWork | Self::HostSilent | Self::NothingMakesIt
+        )
+    }
+}
+
+/// What holds an act on a provider's unit back, as the screen says it in the reader's language: a word, and the
+/// work under way and the step it has come to when there is such work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    /// Why.
+    pub why: HoldWhy,
+    /// What the work under way is: `make`, `start`, `renew`, `update` or `remove`.
+    pub work: Option<&'static str>,
+    /// The step of that work.
+    pub step: Option<String>,
+}
+
+impl Hold {
+    /// A reason that names no work.
+    #[must_use]
+    pub const fn of(why: HoldWhy) -> Self {
+        Self {
+            why,
+            work: None,
+            step: None,
+        }
+    }
+
+    /// Work of the provider's own under way on the unit.
+    #[must_use]
+    pub fn own_work(work: &'static str, step: String) -> Self {
+        Self {
+            why: HoldWhy::OwnWork,
+            work: Some(work),
+            step: Some(step),
+        }
+    }
+
+    /// The reason in an English sentence, for the log and for a client that reads the answer's `detail`; the
+    /// screen says it from its catalogue, in the reader's language.
+    #[must_use]
+    pub fn sentence(&self) -> String {
+        let work = match self.work {
+            Some("make") => "being made",
+            Some("start") => "being started",
+            Some("renew") => "being started to renew its sign-in",
+            Some("update") => "being replaced by an update",
+            Some("remove") => "being taken away",
+            _ => "being worked on",
+        };
+        let step = self
+            .step
+            .as_deref()
+            .map(|step| format!(" (step: {step})"))
+            .unwrap_or_default();
+        match self.why {
+            HoldWhy::OwnWork => format!("the runtime is {work}{step}"),
+            HoldWhy::OtherWork => {
+                "something else the provider takes part in is under way: wait for it to end"
+                    .to_owned()
+            }
+            HoldWhy::PastCommit => {
+                format!(
+                    "the work on the runtime is at its last step{step} and can no longer be ended"
+                )
+            }
+            HoldWhy::HostSilent => "the host has not said that the runtime stopped".to_owned(),
+            HoldWhy::NothingMakesIt => {
+                "the runtime shows as being made and nothing makes it".to_owned()
+            }
+            HoldWhy::Replaced => {
+                "the runtime was replaced by an update and waits to be taken away".to_owned()
+            }
+        }
+    }
+}
+
 impl From<DbError> for RuntimeError {
     fn from(error: DbError) -> Self {
         Self::Internal(error.into())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct StopRegistration {
+    owner: Id,
+    home: Id,
+    org: Id,
+    machine: Option<Id>,
+    agent: Option<Id>,
+    harness: Option<String>,
+}
+impl StopRegistration {
+    fn of(state: &State) -> Self {
+        Self {
+            owner: state.owner_id,
+            home: state.home_id,
+            org: state.org_id,
+            machine: state.machine_id,
+            agent: state.agent_id,
+            harness: state.harness_kind.clone(),
+        }
+    }
+    fn matches(&self, state: &State) -> bool {
+        *self == Self::of(state) && state.deleted_at.is_none()
+    }
+}
+pub(crate) struct SelectedProviderUnit {
+    registration: orch_db::queries::runtime_incarnations::Registration,
+    runtime: Id,
+    host: Id,
+    control: orch_db::queries::runtime_controls::Intent,
+}
+enum ProviderStopTarget {
+    Unit(Box<SelectedProviderUnit>),
+    Directory {
+        registration: StopRegistration,
+        harnesses: Vec<(Id, Id)>,
+    },
+    Empty(StopRegistration),
+}
+/// One committed Stop decision, carrying original native operands rather than a reusable grant.
+pub struct AcceptedProviderStop {
+    provider: Id,
+    interrupt: bool,
+    by: Id,
+    target: ProviderStopTarget,
+    force: bool,
+}
+
+impl Engine {
+    pub(crate) async fn prepare_provider_stop(
+        &self,
+        conn: &mut orch_db::Conn,
+        provider: Id,
+        interrupt: bool,
+        by: Id,
+    ) -> Result<AcceptedProviderStop, RuntimeError> {
+        self.prepare_provider_stop_with(conn, provider, interrupt, by, false)
+            .await
+    }
+
+    pub(crate) async fn prepare_provider_stop_with(
+        &self,
+        conn: &mut orch_db::Conn,
+        provider: Id,
+        interrupt: bool,
+        by: Id,
+        force: bool,
+    ) -> Result<AcceptedProviderStop, RuntimeError> {
+        let state = rows::lock(conn, provider)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(RuntimeError::NotFound)?;
+        if force
+            && orch_db::queries::jobs::changes::provider_hold_besides_own(conn, provider)
+                .await?
+                .is_some()
+        {
+            return Err(RuntimeError::Held(Hold::of(HoldWhy::OtherWork)));
+        }
+        if !interrupt {
+            let running = rows::busy(conn, provider).await?.turns;
+            if running > 0 {
+                return Err(RuntimeError::Busy(running));
+            }
+        }
+        let registration = StopRegistration::of(&state);
+        let directory = orch_db::queries::environment_facts::of_provider(conn, provider)
+            .await?
+            .is_some_and(|facts| facts.attaches());
+        let target = if directory {
+            let harnesses:Vec<(Id,Id)>=sqlx::query_as("SELECT DISTINCT agent_id,machine_id FROM harnesses WHERE provider_id=$1 AND machine_id=$2 AND status='online' ORDER BY agent_id,machine_id")
+                .bind(provider).bind(state.machine_id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+            ProviderStopTarget::Directory {
+                registration,
+                harnesses,
+            }
+        } else if let Some(runtime) = rows::live_runtime(conn, provider).await? {
+            if !matches!(
+                runtime.state.as_str(),
+                runtime_state::RUNNING
+                    | runtime_state::CREATING
+                    | runtime_state::STOPPING
+                    | runtime_state::STOPPED
+                    | runtime_state::FAILED
+            ) {
+                return Err(RuntimeError::Unavailable(format!(
+                    "its runtime is {}",
+                    runtime.state
+                )));
+            }
+            orch_db::queries::runtime_incarnations::current(conn, runtime.id)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
+            let pending = orch_db::queries::runtime_incarnations::stop(conn, runtime.id).await?;
+            let control = if !force
+                && let Some(pending) = pending
+                && orch_db::queries::runtime_controls::owns_current_source(conn, &pending.control)
+                    .await?
+                && pending.registration.matches(conn, &pending.control).await?
+                && (pending.forced && pending.ready
+                    || crate::commands::provider_unit::reusable(
+                        conn,
+                        self.inner.clock.as_ref(),
+                        provider,
+                        &pending,
+                    )
+                    .await?)
+            {
+                pending.control
+            } else {
+                orch_db::queries::runtime_controls::accept(conn, runtime.id, orch_types::new_id())
+                    .await?
+            };
+            if force {
+                if !orch_db::queries::runtime_incarnations::prepare_forced_stop(
+                    conn,
+                    runtime.id,
+                    &control,
+                    self.inner.clock.now(),
+                )
+                .await?
+                {
+                    return Err(RuntimeError::Unavailable(
+                        "the unit changed before its forced Stop".into(),
+                    ));
+                }
+                self.retain_forced_command(conn, provider, runtime.id, None)
+                    .await?;
+            } else if !self
+                .admit_provider_unit_stop(conn, provider, runtime.id, &control, Some(by))
+                .await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider Start is not owned by this Stop".into(),
+                ));
+            }
+            let registration =
+                match orch_db::queries::runtime_incarnations::stop(conn, runtime.id).await? {
+                    Some(stop) if stop.control == control => stop.registration,
+                    None => orch_db::queries::runtime_incarnations::Registration::capture(
+                        conn, runtime.id,
+                    )
+                    .await?
+                    .ok_or(RuntimeError::NotFound)?,
+                    _ => {
+                        return Err(RuntimeError::Unavailable(
+                            "the original Stop registration changed".into(),
+                        ));
+                    }
+                };
+            ProviderStopTarget::Unit(Box::new(SelectedProviderUnit {
+                registration,
+                runtime: runtime.id,
+                host: runtime.host_id,
+                control,
+            }))
+        } else {
+            ProviderStopTarget::Empty(registration)
+        };
+        Ok(AcceptedProviderStop {
+            provider,
+            interrupt,
+            by,
+            force,
+            target,
+        })
+    }
+
+    async fn admit_provider_unit_stop(
+        &self,
+        conn: &mut orch_db::Conn,
+        provider: Id,
+        runtime: Id,
+        control: &orch_db::queries::runtime_controls::Intent,
+        by: Option<Id>,
+    ) -> Result<bool, RuntimeError> {
+        let row = env_rows::runtime(conn, runtime)
+            .await?
+            .ok_or(RuntimeError::NotFound)?;
+        if row.state == runtime_state::CREATING && control.pending().is_empty() {
+            let open = provider_jobs::open_of_provider(conn, provider).await?;
+            return Err(RuntimeError::Held(match open.first() {
+                Some(job) => hold_of(job),
+                None => Hold::of(HoldWhy::NothingMakesIt),
+            }));
+        }
+        if matches!(
+            row.state.as_str(),
+            runtime_state::STOPPED | runtime_state::FAILED
+        ) && control.pending().is_empty()
+        {
+            orch_db::queries::runtime_controls::withdraw_previous_job(
+                conn,
+                control,
+                by,
+                self.inner.clock.now(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        if !orch_db::queries::runtime_incarnations::prepare_stop(
+            conn,
+            runtime,
+            control,
+            self.inner.clock.now(),
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        let stop = orch_db::queries::runtime_incarnations::stop(conn, runtime)
+            .await?
+            .ok_or_else(|| {
+                RuntimeError::Unavailable("the original pending Stop disappeared".into())
+            })?;
+        if let Some(command) = crate::commands::provider_unit::pending(
+            conn,
+            self.inner.clock.as_ref(),
+            provider,
+            &stop,
+        )
+        .await?
+        {
+            let command = serde_json::to_value(command).map_err(EngineError::from)?;
+            if !orch_db::queries::runtime_incarnations::bind_provider_command(conn, &stop, &command)
+                .await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original Stop changed before its producer was retained".into(),
+                ));
+            }
+        }
+        orch_db::queries::runtime_controls::withdraw_previous_job(
+            conn,
+            control,
+            by,
+            self.inner.clock.now(),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn check_provider_stop_directory(
+        &self,
+        provider: Id,
+        registration: &StopRegistration,
+    ) -> Result<(), RuntimeError> {
+        let mut tx = self.inner.db.begin().await?;
+        let state = rows::lock(&mut tx, provider)
+            .await?
+            .ok_or(RuntimeError::NotFound)?;
+        if !registration.matches(&state)
+            || !orch_db::queries::environment_facts::of_provider(&mut tx, provider)
+                .await?
+                .is_some_and(|facts| facts.attaches())
+        {
+            return Err(RuntimeError::Unavailable(
+                "the original provider directory registration changed".into(),
+            ));
+        }
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(())
+    }
+    /// Finish only the selected native branch; a later unit or directory cannot inherit the decision.
+    pub async fn finish_accepted_provider_stop(
+        &self,
+        accepted: AcceptedProviderStop,
+    ) -> Result<(), RuntimeError> {
+        let AcceptedProviderStop {
+            provider,
+            interrupt,
+            by,
+            force,
+            target,
+        } = accepted;
+        match target {
+            ProviderStopTarget::Unit(unit) => {
+                self.stop_provider_unit_selected(
+                    provider,
+                    unit.runtime,
+                    interrupt,
+                    StopWhy::Person(by),
+                    force,
+                    Some(&unit),
+                )
+                .await
+            }
+            ProviderStopTarget::Empty(registration) => {
+                let mut tx = self.inner.db.begin().await?;
+                let state = rows::lock(&mut tx, provider)
+                    .await?
+                    .ok_or(RuntimeError::NotFound)?;
+                if !registration.matches(&state)
+                    || rows::live_runtime(&mut tx, provider).await?.is_some()
+                {
+                    return Err(RuntimeError::Unavailable(
+                        "the provider selected by the Stop acquired another native unit".into(),
+                    ));
+                }
+                tx.commit().await.map_err(DbError::from)?;
+                Ok(())
+            }
+            ProviderStopTarget::Directory {
+                registration,
+                harnesses,
+            } => {
+                self.check_provider_stop_directory(provider, &registration)
+                    .await?;
+                self.clear_provider_turns(provider, interrupt, StopWhy::Person(by))
+                    .await?;
+                self.check_provider_stop_directory(provider, &registration)
+                    .await?;
+                for (agent, machine) in harnesses {
+                    self.stop_harness_at(provider, agent, Some(machine))
+                        .await
+                        .map_err(|error| RuntimeError::Host(error.to_string()))?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -293,6 +792,32 @@ impl StopWhy {
 /// The words a provider that waits for its runtime says.
 pub const STARTING_SENTENCE: &str = "its runtime is being started";
 
+/// Writes down that a host manager asked to remove a provider's unit, on the host's page.
+async fn append_removal_audit(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    origin: &orch_db::audit::Origin,
+    host: Id,
+    details: Json,
+) -> Result<(), RuntimeError> {
+    let home = host_rows::host(conn, host)
+        .await?
+        .ok_or(RuntimeError::NotFound)?;
+    let mut entry = orch_db::audit::Entry::new(
+        orch_db::audit::Actor::User(principal.user()),
+        orch_access_contract::audit::AuditAction::HostUpdated.as_str(),
+        "host",
+        Some(host),
+        "A host manager asked to remove a provider unit",
+    );
+    entry.history = true;
+    entry.node_id = home.home_id;
+    entry.org_id = home.org_id;
+    entry.details = details;
+    orch_db::audit::append(conn, &entry, origin, principal.now().get()).await?;
+    Ok(())
+}
+
 impl Engine {
     /// Starts or attaches the selected runtime from its declared lifecycle. An existing unit is reused;
     /// a new unit is made only when its unit runtime has none or failed.
@@ -301,7 +826,18 @@ impl Engine {
         provider: Id,
         by: Option<Id>,
     ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, by, false, None, false)
+        self.queue_provider_runtime(provider, by, false, None, false, None)
+            .await
+    }
+
+    /// A public call starts only its already admitted dedicated runtime under the same source.
+    pub async fn start_provider_runtime_for_relay(
+        &self,
+        provider: Id,
+        by: Id,
+        admission: &crate::provider_relay::RuntimeAdmission,
+    ) -> Result<RuntimeStart, RuntimeError> {
+        self.queue_provider_runtime(provider, Some(by), false, None, false, Some(admission))
             .await
     }
 
@@ -311,7 +847,7 @@ impl Engine {
         provider: Id,
         scheduled: bool,
     ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, None, false, None, scheduled)
+        self.queue_provider_runtime(provider, None, false, None, scheduled, None)
             .await
     }
 
@@ -321,13 +857,13 @@ impl Engine {
         by: Option<Id>,
         authority: Option<&crate::credentials::handover_authority::HandoverAuthority>,
     ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, by, false, authority, false)
+        self.queue_provider_runtime(provider, by, false, authority, false, None)
             .await
     }
 
     /// Renews the native sign-in in its running runtime, or starts the same stopped runtime first.
     pub async fn renew_provider_runtime(&self, provider: Id) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, None, true, None, false)
+        self.queue_provider_runtime(provider, None, true, None, false, None)
             .await
     }
 
@@ -338,9 +874,15 @@ impl Engine {
         renew: bool,
         authority: Option<&'a crate::credentials::handover_authority::HandoverAuthority>,
         scheduled: bool,
+        relay: Option<&'a crate::provider_relay::RuntimeAdmission>,
     ) -> BoxFuture<'a, Result<RuntimeStart, RuntimeError>> {
         Box::pin(async move {
             let mut tx = self.inner.db.begin().await?;
+            if let Some(relay) = relay {
+                relay
+                    .require(&mut tx, self.inner.clock.as_ref(), provider)
+                    .await?;
+            }
             if let Some(authority) = authority {
                 orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
                 authority
@@ -372,11 +914,29 @@ impl Engine {
                         ),
                     })?;
             }
+            if let Some(relay) = relay {
+                relay
+                    .require(&mut tx, self.inner.clock.as_ref(), provider)
+                    .await?;
+            }
             if state.deleted_at.is_some() {
                 return Err(RuntimeError::Unavailable("deleted".to_owned()));
             }
             if state.status == "disabled" {
                 return Err(RuntimeError::Unavailable("switched off".to_owned()));
+            }
+            if orch_db::queries::provider_connections::available(&mut tx, provider).await?
+                == Some(false)
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the environment keeping this connection is unavailable".into(),
+                ));
+            }
+            if orch_db::queries::runtime_incarnations::provider_withdrawn(&mut tx, provider).await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "its original runtime is being stopped".into(),
+                ));
             }
             if scheduled
                 && rows::live_runtime(&mut tx, provider)
@@ -480,7 +1040,9 @@ impl Engine {
                             }
                         }
                     }
-                } else if let Err(reason) = Box::pin(self.ensure_provider_up(provider)).await? {
+                } else if relay.is_none()
+                    && let Err(reason) = Box::pin(self.ensure_provider_up(provider)).await?
+                {
                     return Err(RuntimeError::Host(reason));
                 }
                 if renew
@@ -505,10 +1067,13 @@ impl Engine {
             let live = rows::live_runtime(&mut tx, provider).await?;
             if renew
                 && live.as_ref().is_none_or(|runtime| {
-                    !matches!(
-                        runtime.state.as_str(),
-                        runtime_state::RUNNING | runtime_state::STOPPED | runtime_state::CREATING
-                    )
+                    runtime.loss_missing
+                        || !matches!(
+                            runtime.state.as_str(),
+                            runtime_state::RUNNING
+                                | runtime_state::STOPPED
+                                | runtime_state::CREATING
+                        )
                 })
             {
                 return Err(RuntimeError::Unavailable(
@@ -531,38 +1096,46 @@ impl Engine {
                     }
                 }
                 Some(runtime_state::STOPPED) => {
-                    if renew {
+                    if live.as_ref().is_some_and(|runtime| runtime.loss_missing) {
+                        tracing::info!(%provider, "the next start remakes the missing unit");
+                        Mode::Make
+                    } else if renew {
                         Mode::Renew
                     } else {
                         Mode::Start
                     }
                 }
                 Some(runtime_state::CREATING) => {
-                    return Ok(
-                        match provider_jobs::open_of_provider(&mut tx, provider)
-                            .await?
-                            .into_iter()
-                            .next()
-                        {
-                            Some(job) => RuntimeStart::Job(Box::new(job)),
-                            None => RuntimeStart::Up,
-                        },
-                    );
+                    match provider_jobs::open_of_provider(&mut tx, provider)
+                        .await?
+                        .into_iter()
+                        .next()
+                    {
+                        Some(job) => return Ok(RuntimeStart::Job(Box::new(job))),
+                        // Nothing is making it any more: a unit left half made is replaced, like one that
+                        // failed.
+                        None => {
+                            tracing::warn!(%provider, runtime = ?live.as_ref().map(|runtime| runtime.id), "a unit is shown as being made and no job makes it: a start makes a new one");
+                            Mode::Make
+                        }
+                    }
                 }
                 Some(runtime_state::STOPPING) => {
-                    return Err(RuntimeError::Unavailable(
-                        "its runtime is being stopped".to_owned(),
-                    ));
+                    return Err(RuntimeError::Held(Hold::of(HoldWhy::HostSilent)));
                 }
                 None | Some(_) => Mode::Make,
             };
             match provider_provision::queue(&mut tx, now, provider, mode, by).await? {
                 provider_jobs::Queued::Made(job) => {
                     tx.commit().await.map_err(DbError::from)?;
+                    tracing::info!(%provider, job = %job.id, mode = mode.word(), runtime = ?live.as_ref().map(|runtime| runtime.id), "provider runtime: a job was queued");
                     self.kick();
                     Ok(RuntimeStart::Job(job))
                 }
-                provider_jobs::Queued::Running(job) => Ok(RuntimeStart::Job(job)),
+                provider_jobs::Queued::Running(job) => {
+                    tracing::info!(%provider, job = %job.id, "provider runtime: a job is under way already");
+                    Ok(RuntimeStart::Job(job))
+                }
                 provider_jobs::Queued::NoProvider => Err(RuntimeError::NotFound),
             }
         })
@@ -595,20 +1168,28 @@ impl Engine {
             }
             (turn.id, provider)
         };
-        let (state, runtime, machine_online) = {
-            let mut conn = self.inner.db.acquire().await?;
+        let (state, runtime, machine_online, withdrawn) = {
+            let mut conn = self.inner.db.begin_snapshot().await?;
             let Some(state) = rows::state(&mut conn, provider_id).await? else {
                 return Ok(Awaited::Ready);
             };
             let runtime = rows::live_runtime(&mut conn, provider_id).await?;
+            let withdrawn =
+                orch_db::queries::runtime_incarnations::provider_withdrawn(&mut conn, provider_id)
+                    .await?;
             let online = match state.machine_id {
                 Some(machine) => machine_rows::machine_place(&mut conn, machine)
                     .await?
                     .is_some_and(|place| place.online && place.status == "active"),
                 None => false,
             };
-            (state, runtime, online)
+            (state, runtime, online, withdrawn)
         };
+        if withdrawn {
+            self.fail_turn_for_provider(thread, turn, "its original runtime is being stopped")
+                .await?;
+            return Ok(Awaited::Failed);
+        }
         if (runtime.is_none() && state.machine_id.is_some())
             || state.deleted_at.is_some()
             || state.status == "disabled"
@@ -661,7 +1242,14 @@ impl Engine {
             return Ok(None);
         }
         let ended = job.finished_at.unwrap_or(job.updated_at);
-        let wait = chrono::Duration::from_std(RETRY_AFTER).unwrap_or_default();
+        let seconds: i64 = setting(
+            &mut conn,
+            SettingsPlace::Provider(provider),
+            keys::RUNTIME_RETRY_AFTER_SECS,
+        )
+        .await?
+        .unwrap_or(300);
+        let wait = chrono::Duration::try_seconds(seconds).unwrap_or(chrono::Duration::MAX);
         if self.inner.clock.now() - ended >= wait {
             return Ok(None);
         }
@@ -731,6 +1319,14 @@ impl Engine {
 
     /// Accepts removal of the exact provider unit selected by a host manager. The durable job
     /// owns all machine calls; no transaction is held while its stop or removal is awaited.
+    ///
+    /// With `force`, the work of the provider's own that is in the way (making or starting its unit, an update, the
+    /// removal of another unit) is ended first, an update by its own undo so that the earlier unit is put back
+    /// and no second unit is left on its volume. Everything that can refuse is looked at before anything is ended.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the request names the host and the unit and carries each choice the manager made"
+    )]
     pub async fn remove_host_provider_unit_in(
         &self,
         mut tx: orch_db::Tx,
@@ -739,8 +1335,9 @@ impl Engine {
         host: Id,
         runtime: Id,
         volumes: bool,
+        force: bool,
     ) -> Result<(), RuntimeError> {
-        let row = env_rows::runtime(&mut tx, runtime)
+        let mut row = env_rows::runtime(&mut tx, runtime)
             .await?
             .filter(|row| row.host_id == host && row.kind == "provider")
             .ok_or(RuntimeError::NotFound)?;
@@ -750,6 +1347,59 @@ impl Engine {
             return Ok(());
         }
         let now = principal.now().get();
+        tracing::info!(%provider, %runtime, %host, volumes, force, state = %row.state, "a host manager asked to remove a provider's unit");
+        let mut audited = false;
+        if force {
+            if orch_db::queries::jobs::changes::provider_hold_besides_own(&mut tx, provider)
+                .await?
+                .is_some()
+            {
+                return Err(RuntimeError::Held(Hold::of(HoldWhy::OtherWork)));
+            }
+            let current = rows::live_runtime(&mut tx, provider)
+                .await?
+                .is_some_and(|current| current.id == runtime);
+            if current {
+                let busy = rows::busy(&mut tx, provider).await?.turns;
+                if busy > 0 {
+                    return Err(RuntimeError::Busy(busy));
+                }
+            }
+            // The decision is written down, with the work that stands in the way, before any of it is ended; the
+            // transaction is not held while the host is waited for.
+            let in_the_way: Vec<Id> = provider_jobs::open_of_provider(&mut tx, provider)
+                .await?
+                .into_iter()
+                .map(|job| job.id)
+                .collect();
+            append_removal_audit(
+                &mut tx,
+                principal,
+                origin,
+                host,
+                serde_json::json!({"host":host,"runtime":runtime,"provider":provider,"volumes":volumes,"force":true,"jobs_in_the_way":in_the_way,"decision":"accepted"}),
+            )
+            .await?;
+            audited = true;
+            tx.commit().await.map_err(DbError::from)?;
+            let ended = self
+                .end_provider_work(
+                    provider,
+                    principal.user(),
+                    crate::provider_force::Forcing::Removal { runtime, volumes },
+                )
+                .await?;
+            tracing::warn!(%provider, %runtime, %host, ended_jobs = ?ended, "work in the way of a forced removal of a provider's unit was ended");
+            tx = self.inner.db.begin().await?;
+            // An update that was put back may have taken this unit away with it.
+            row = env_rows::runtime(&mut tx, runtime)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
+            if row.state == runtime_state::REMOVED {
+                tx.commit().await.map_err(DbError::from)?;
+                return Ok(());
+            }
+        }
         // queue locks the provider, serializing this acceptance with provisioning/recreation.
         match provider_provision::queue_removal_with_options(
             &mut tx,
@@ -781,20 +1431,14 @@ impl Engine {
                 self.kick();
                 return Ok(());
             }
-            provider_jobs::Queued::Running(_) => {
-                return Err(RuntimeError::Unavailable(
-                    "a job works on its provider runtime".to_owned(),
-                ));
+            provider_jobs::Queued::Running(job) => {
+                return Err(RuntimeError::Held(hold_of(&job)));
             }
             provider_jobs::Queued::NoProvider => return Err(RuntimeError::NotFound),
         }
-        if orch_db::queries::jobs::changes::provider_hold(&mut tx, provider)
-            .await?
-            .is_some()
+        if let Some(job) = orch_db::queries::jobs::changes::provider_hold(&mut tx, provider).await?
         {
-            return Err(RuntimeError::Unavailable(
-                "a job uses its provider runtime".to_owned(),
-            ));
+            return Err(RuntimeError::Held(hold_of(&job)));
         }
         let current = rows::live_runtime(&mut tx, provider)
             .await?
@@ -811,22 +1455,18 @@ impl Engine {
         }
         env_rows::retire_runtime(&mut tx, runtime, Some("removed by the host's manager"), now)
             .await?;
-        let home = host_rows::host(&mut tx, host)
-            .await?
-            .ok_or(RuntimeError::NotFound)?;
-        let mut entry = orch_db::audit::Entry::new(
-            orch_db::audit::Actor::User(principal.user()),
-            orch_access_contract::audit::AuditAction::HostUpdated.as_str(),
-            "host",
-            Some(host),
-            "A host manager asked to remove a provider unit",
-        );
-        entry.history = true;
-        entry.node_id = home.home_id;
-        entry.org_id = home.org_id;
-        entry.details = serde_json::json!({"host":host,"runtime":runtime,"provider":provider,"volumes":volumes,"decision":"accepted"});
-        orch_db::audit::append(&mut tx, &entry, origin, now).await?;
+        if !audited {
+            append_removal_audit(
+                &mut tx,
+                principal,
+                origin,
+                host,
+                serde_json::json!({"host":host,"runtime":runtime,"provider":provider,"volumes":volumes,"force":false,"decision":"accepted"}),
+            )
+            .await?;
+        }
         tx.commit().await.map_err(DbError::from)?;
+        tracing::info!(%provider, %runtime, %host, volumes, force, "the removal of a provider's unit was accepted");
         self.kick();
         Ok(())
     }
@@ -839,6 +1479,33 @@ impl Engine {
         interrupt: bool,
         why: StopWhy,
     ) -> Result<(), RuntimeError> {
+        self.stop_provider_runtime_with(provider, interrupt, why, false)
+            .await
+    }
+
+    /// As [`Engine::stop_provider_runtime`]. With `force`, a unit whose host does not confirm its stop is
+    /// settled as stopped all the same, the job that works on it is ended, and the host is told to stop
+    /// the unit as soon as it can be told.
+    pub async fn stop_provider_runtime_with(
+        &self,
+        provider: Id,
+        interrupt: bool,
+        why: StopWhy,
+        force: bool,
+    ) -> Result<(), RuntimeError> {
+        if force {
+            let StopWhy::Person(by) = why else {
+                return Err(RuntimeError::Unavailable(
+                    "only a person stops a unit by force".into(),
+                ));
+            };
+            let mut tx = self.inner.db.begin().await?;
+            let accepted = self
+                .prepare_provider_stop_with(&mut tx, provider, interrupt, by, true)
+                .await?;
+            tx.commit().await.map_err(DbError::from)?;
+            return self.finish_accepted_provider_stop(accepted).await;
+        }
         let state = {
             let mut conn = self.inner.db.acquire().await?;
             rows::state(&mut conn, provider)
@@ -874,7 +1541,7 @@ impl Engine {
         let Some(runtime) = runtime else {
             return Ok(());
         };
-        self.stop_provider_unit(provider, runtime.id, interrupt, why)
+        self.stop_provider_unit(provider, runtime.id, interrupt, why, force)
             .await
     }
 
@@ -885,65 +1552,172 @@ impl Engine {
         runtime: Id,
         interrupt: bool,
         why: StopWhy,
+        force: bool,
+    ) -> Result<(), RuntimeError> {
+        self.stop_provider_unit_selected(provider, runtime, interrupt, why, force, None)
+            .await
+    }
+
+    async fn stop_provider_unit_selected(
+        &self,
+        provider: Id,
+        runtime: Id,
+        interrupt: bool,
+        why: StopWhy,
+        force: bool,
+        accepted: Option<&SelectedProviderUnit>,
     ) -> Result<(), RuntimeError> {
         let mut conn = self.inner.db.acquire().await?;
         let runtime = env_rows::runtime(&mut conn, runtime)
             .await?
             .filter(|runtime| runtime.provider_id == Some(provider))
             .ok_or(RuntimeError::NotFound)?;
-        if runtime.state == runtime_state::RETIRED {
-            let host = host_rows::host(&mut conn, runtime.host_id)
+        let original_source =
+            orch_db::queries::runtime_incarnations::current(&mut conn, runtime.id)
                 .await?
-                .ok_or_else(|| RuntimeError::Host("the host is gone".to_owned()))?;
-            drop(conn);
-            let command = Outgoing::new(
-                ids::derived(
-                    "node.runtime.stop.kept",
-                    &[runtime.id.as_bytes(), orch_types::new_id().as_bytes()],
-                ),
-                host.machine_id,
-                SerialKey::Runtime(runtime.id),
-                &NodeRuntimeStop {
-                    runtime_id: runtime.id,
-                    reason: None,
-                },
-            )
-            .map_err(EngineError::from)?;
-            return match tokio::time::timeout(
-                self.inner.config.hosting.stop_wait,
-                crate::commands::run(self.inner.commands.as_ref(), command),
-            )
-            .await
-            {
-                Ok(Ok(Outcome::Succeeded(_))) => Ok(()),
-                Ok(Ok(Outcome::Failed(error))) => Err(RuntimeError::Host(format!(
-                    "{}: {}",
-                    error.code, error.detail
-                ))),
-                _ => Err(RuntimeError::Host(
-                    "the host did not acknowledge the kept unit's stop".to_owned(),
-                )),
-            };
+                .ok_or(RuntimeError::NotFound)?;
+        if accepted.is_some_and(|accepted| {
+            accepted.runtime != runtime.id
+                || accepted.host != runtime.host_id
+                || (accepted.control.source() != original_source
+                    && !original_source
+                        .incarnation
+                        .is_some_and(|id| accepted.control.pending().contains(&id)))
+        }) {
+            return Err(RuntimeError::Unavailable(
+                "the provider native start selected by the decision changed".into(),
+            ));
+        }
+        if runtime.state == runtime_state::RETIRED && force {
+            return Err(RuntimeError::Held(Hold::of(HoldWhy::Replaced)));
+        }
+        if runtime.state == runtime_state::RETIRED {
+            return Err(RuntimeError::Unavailable("the Provider unit selected by this Stop was replaced; its kept Host action is separate".into()));
         }
         let state = rows::state(&mut conn, provider)
             .await?
             .ok_or(RuntimeError::NotFound)?;
-        let current = rows::live_runtime(&mut conn, provider).await?;
-        if current.is_none_or(|current| current.id != runtime.id) {
+        if let Some(accepted) = accepted
+            && (!accepted
+                .registration
+                .matches(&mut conn, &accepted.control)
+                .await?
+                || !orch_db::queries::runtime_controls::is_current(&mut conn, &accepted.control)
+                    .await?)
+        {
             return Err(RuntimeError::Unavailable(
-                "a job owns this candidate unit".to_owned(),
+                "the original provider registration or control changed".into(),
             ));
         }
+        let current = rows::live_runtime(&mut conn, provider).await?;
+        if current.is_none_or(|current| current.id != runtime.id) {
+            // A unit that an update under way made to replace the provider's: stopping it by force ends the update.
+            let open = provider_jobs::open_of_provider(&mut conn, provider).await?;
+            drop(conn);
+            if force && let StopWhy::Person(by) = why {
+                self.end_provider_work(
+                    provider,
+                    by,
+                    crate::provider_force::Forcing::Stop {
+                        runtime: runtime.id,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            return Err(RuntimeError::Held(match open.first() {
+                Some(job) => hold_of(job),
+                None => Hold::of(HoldWhy::OtherWork),
+            }));
+        }
         drop(conn);
+        tracing::info!(%provider, runtime = %runtime.id, state = %runtime.state, force, "a stop of a provider's unit was asked");
+        if force {
+            return self
+                .stop_by_force(
+                    provider,
+                    &runtime,
+                    interrupt,
+                    why,
+                    accepted.map(|unit| &unit.control),
+                )
+                .await;
+        }
         match runtime.state.as_str() {
             runtime_state::STOPPED | runtime_state::FAILED => {
+                // A stop a person forced keeps its word until the host has said that it stopped the unit.
+                if runtime.state_detail.as_deref() == Some(rows::STOPPED_FORCED) {
+                    return Ok(());
+                }
                 let mut tx = self.inner.db.begin().await?;
-                rows::lock(&mut tx, provider).await?;
+                rows::lock(&mut tx, provider)
+                    .await?
+                    .ok_or(RuntimeError::NotFound)?;
+                let current = rows::live_runtime(&mut tx, provider).await?;
+                if current
+                    .as_ref()
+                    .is_none_or(|current| current.id != runtime.id)
+                    || orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+                        != Some(original_source)
+                {
+                    return Err(RuntimeError::Unavailable("the original stopped Provider unit changed before its outcome was recorded".into()));
+                }
+                let terminal = orch_db::queries::runtime_incarnations::terminal(
+                    &mut tx,
+                    runtime.id,
+                    original_source,
+                )
+                .await?;
+                if let Some(accepted) = accepted
+                    && (!accepted
+                        .registration
+                        .matches(&mut tx, &accepted.control)
+                        .await?
+                        || !orch_db::queries::runtime_controls::is_current(
+                            &mut tx,
+                            &accepted.control,
+                        )
+                        .await?)
+                {
+                    return Err(RuntimeError::Unavailable("the original accepted Provider Stop changed before its outcome was recorded".into()));
+                }
+                let original = match accepted {
+                    Some(accepted) => accepted.control.clone(),
+                    None => {
+                        orch_db::queries::runtime_controls::accept(
+                            &mut tx,
+                            runtime.id,
+                            orch_types::new_id(),
+                        )
+                        .await?
+                    }
+                };
+                let by = match why {
+                    StopWhy::Person(by) => Some(by),
+                    StopWhy::Idle => None,
+                };
+                if !self
+                    .admit_provider_unit_stop(&mut tx, provider, runtime.id, &original, by)
+                    .await?
+                {
+                    return Err(RuntimeError::Unavailable(
+                        "the original pending unit changed before Stop admission".into(),
+                    ));
+                }
+                if !original.pending().is_empty() {
+                    tx.commit().await.map_err(DbError::from)?;
+                    return self.finish_provider_stop(provider, runtime.id).await;
+                }
+                let target = if accepted.is_some() && terminal {
+                    runtime_state::STOPPED
+                } else {
+                    runtime.state.as_str()
+                };
                 env_rows::set_runtime_state(
                     &mut tx,
                     runtime.id,
                     &[runtime.state.as_str()],
-                    &runtime.state,
+                    target,
                     Some(why.detail()),
                     self.inner.clock.now(),
                 )
@@ -951,7 +1725,7 @@ impl Engine {
                 tx.commit().await.map_err(DbError::from)?;
                 return Ok(());
             }
-            runtime_state::RUNNING | runtime_state::STOPPING => {}
+            runtime_state::RUNNING | runtime_state::CREATING | runtime_state::STOPPING => {}
             other => {
                 return Err(RuntimeError::Unavailable(format!("its runtime is {other}")));
             }
@@ -959,19 +1733,178 @@ impl Engine {
         if why == StopWhy::Idle && !self.runtime_is_idle(&state, &runtime).await? {
             return Ok(());
         }
+        let control = {
+            let mut tx = self.inner.db.begin().await?;
+            let registered = rows::lock(&mut tx, provider)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
+            let observed =
+                orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?;
+            let same_original = observed == Some(original_source)
+                || if let Some(accepted) = accepted {
+                    orch_db::queries::runtime_controls::owns_current_source(
+                        &mut tx,
+                        &accepted.control,
+                    )
+                    .await?
+                } else {
+                    false
+                };
+            let registration_changed = if let Some(accepted) = accepted {
+                !accepted
+                    .registration
+                    .matches(&mut tx, &accepted.control)
+                    .await?
+            } else {
+                registered.owner_id != state.owner_id
+                    || registered.home_id != state.home_id
+                    || registered.org_id != state.org_id
+                    || registered.machine_id != state.machine_id
+                    || registered.agent_id != state.agent_id
+                    || registered.harness_kind != state.harness_kind
+            };
+            if registration_changed
+                || rows::live_runtime(&mut tx, provider)
+                    .await?
+                    .is_none_or(|current| current.id != runtime.id)
+                || !same_original
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider registration or native start changed".into(),
+                ));
+            }
+            if !interrupt {
+                let running = rows::busy(&mut tx, provider).await?.turns;
+                if running > 0 {
+                    return Err(RuntimeError::Busy(running));
+                }
+            }
+            let pending = orch_db::queries::runtime_incarnations::stop(&mut tx, runtime.id).await?;
+            let control = if let Some(accepted) = accepted {
+                if !accepted
+                    .registration
+                    .matches(&mut tx, &accepted.control)
+                    .await?
+                    || !orch_db::queries::runtime_controls::is_current(&mut tx, &accepted.control)
+                        .await?
+                {
+                    return Err(RuntimeError::Unavailable(
+                        "a newer provider control superseded the accepted Stop".into(),
+                    ));
+                }
+                accepted.control.clone()
+            } else if let Some(pending) = pending
+                && pending.source == original_source
+                && orch_db::queries::runtime_controls::is_current(&mut tx, &pending.control).await?
+                && pending
+                    .registration
+                    .matches(&mut tx, &pending.control)
+                    .await?
+                && crate::commands::provider_unit::reusable(
+                    &mut tx,
+                    self.inner.clock.as_ref(),
+                    provider,
+                    &pending,
+                )
+                .await?
+            {
+                pending.control
+            } else {
+                orch_db::queries::runtime_controls::accept(
+                    &mut tx,
+                    runtime.id,
+                    orch_types::new_id(),
+                )
+                .await?
+            };
+            let by = match why {
+                StopWhy::Person(by) => Some(by),
+                StopWhy::Idle => None,
+            };
+            if !self
+                .admit_provider_unit_stop(&mut tx, provider, runtime.id, &control, by)
+                .await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original creating unit could not be stopped".into(),
+                ));
+            }
+            tx.commit().await.map_err(DbError::from)?;
+            control
+        };
         self.clear_provider_turns(provider, interrupt, why).await?;
         let began = {
             let mut tx = self.inner.db.begin().await?;
-            rows::lock(&mut tx, provider).await?;
-            let changed = env_rows::set_runtime_state(
+            let registered = rows::lock(&mut tx, provider)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
+            let registration_changed = if let Some(accepted) = accepted {
+                !accepted
+                    .registration
+                    .matches(&mut tx, &accepted.control)
+                    .await?
+            } else {
+                registered.owner_id != state.owner_id
+                    || registered.home_id != state.home_id
+                    || registered.org_id != state.org_id
+                    || registered.machine_id != state.machine_id
+                    || registered.agent_id != state.agent_id
+                    || registered.harness_kind != state.harness_kind
+            };
+            if registration_changed
+                || rows::live_runtime(&mut tx, provider)
+                    .await?
+                    .is_none_or(|current| current.id != runtime.id)
+                || !orch_db::queries::runtime_controls::owns_current_source(&mut tx, &control)
+                    .await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider registration or native start changed during stop preparation".into(),
+                ));
+            }
+            let changed = orch_db::queries::runtime_incarnations::begin_stop(
                 &mut tx,
                 runtime.id,
-                &[runtime_state::RUNNING, runtime_state::STOPPING],
-                runtime_state::STOPPING,
-                Some(why.detail()),
+                &control,
                 self.inner.clock.now(),
             )
             .await?;
+            if changed {
+                let pending = orch_db::queries::runtime_incarnations::stop(&mut tx, runtime.id)
+                    .await?
+                    .ok_or_else(|| {
+                        RuntimeError::Unavailable("the original pending Stop disappeared".into())
+                    })?;
+                if let Some(command) = crate::commands::provider_unit::pending(
+                    &mut tx,
+                    self.inner.clock.as_ref(),
+                    provider,
+                    &pending,
+                )
+                .await?
+                {
+                    let command = serde_json::to_value(command).map_err(EngineError::from)?;
+                    if !orch_db::queries::runtime_incarnations::bind_provider_command(
+                        &mut tx, &pending, &command,
+                    )
+                    .await?
+                    {
+                        return Err(RuntimeError::Unavailable(
+                            "the original pending Stop changed before its command was retained"
+                                .into(),
+                        ));
+                    }
+                }
+                env_rows::set_runtime_state(
+                    &mut tx,
+                    runtime.id,
+                    &[runtime_state::STOPPING],
+                    runtime_state::STOPPING,
+                    Some(why.detail()),
+                    self.inner.clock.now(),
+                )
+                .await?;
+            }
             tx.commit().await.map_err(DbError::from)?;
             changed
         };
@@ -999,29 +1932,115 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
-        let Some(host) = host else {
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
+        if host.is_none() {
             return Err(RuntimeError::Host("the host is gone".to_owned()));
+        }
+        let stop = {
+            let mut conn = self.inner.db.begin().await?;
+            rows::lock(&mut conn, provider).await?;
+            let stop = orch_db::queries::runtime_incarnations::stop(&mut conn, runtime)
+                .await?
+                .ok_or_else(|| {
+                    RuntimeError::Unavailable(
+                        "the provider stop has no original native source".into(),
+                    )
+                })?;
+            if !stop.ready {
+                return Ok(());
+            }
+            if !orch_db::queries::runtime_controls::owns_current_source(&mut conn, &stop.control)
+                .await?
+                || !stop.registration.matches(&mut conn, &stop.control).await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider native start or control changed".into(),
+                ));
+            }
+            let stop =
+                if stop.producer == orch_db::queries::runtime_incarnations::StopProducer::Unbound {
+                    orch_db::queries::runtime_incarnations::retry_stop(&mut conn, &stop)
+                        .await?
+                        .unwrap_or(stop)
+                } else {
+                    stop
+                };
+            conn.commit().await.map_err(DbError::from)?;
+            stop
         };
-        let stamp = row.updated_at.timestamp_micros().to_le_bytes();
-        let command = Outgoing::new(
-            ids::derived(
-                "node.runtime.stop",
-                &[runtime.as_bytes().as_slice(), &stamp],
-            ),
-            host.machine_id,
-            SerialKey::Runtime(runtime),
-            &NodeRuntimeStop {
-                runtime_id: runtime,
-                reason: None,
-            },
-        )
-        .map_err(EngineError::from)?;
+        let mut command =
+            if stop.producer != orch_db::queries::runtime_incarnations::StopProducer::Unbound {
+                crate::commands::provider_unit::restore(provider, &stop)?
+            } else {
+                Outgoing::new(
+                    stop.id,
+                    stop.control.machine(),
+                    SerialKey::Runtime(runtime),
+                    &NodeRuntimeStop {
+                        runtime_id: runtime,
+                        reason: None,
+                    },
+                )
+                .map_err(EngineError::from)?
+            };
+        command = command.with_native_target(crate::commands::provider_unit::target(&stop));
         let id = command.id;
-        self.inner
-            .commands
-            .issue(command)
-            .await
-            .map_err(EngineError::from)?;
+        tracing::info!(%provider, %runtime, host = %row.host_id, command = %id, "the host is asked to stop the unit of a provider's runtime");
+        let already_finished = stop.producer
+            != orch_db::queries::runtime_incarnations::StopProducer::Unbound
+            && self
+                .inner
+                .commands
+                .status(id)
+                .await
+                .map_err(EngineError::from)?
+                .is_some_and(|info| info.stage == crate::commands::Stage::Over);
+        if already_finished {
+            let original = self
+                .inner
+                .commands
+                .retained_command(id)
+                .await
+                .map_err(EngineError::from)?
+                .ok_or_else(|| {
+                    RuntimeError::Unavailable(
+                        "the completed Stop lost its original native command".into(),
+                    )
+                })?;
+            if original.machine != command.machine
+                || original.kind != command.kind.as_str()
+                || original.key.as_deref() != command.key.wire().as_deref()
+                || original.body != command.body
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the completed command does not confirm this original Stop".into(),
+                ));
+            }
+        }
+        if !already_finished {
+            if stop.producer
+                == orch_db::queries::runtime_incarnations::StopProducer::ProviderStopRefused
+            {
+                return Ok(());
+            }
+            if let Err(error) = self.inner.commands.issue(command).await {
+                if stop.producer
+                    == orch_db::queries::runtime_incarnations::StopProducer::ProviderStop
+                {
+                    let mut refused = self.inner.db.begin().await?;
+                    rows::lock(&mut refused, provider).await?;
+                    orch_db::queries::runtime_incarnations::refuse_provider_command(
+                        &mut refused,
+                        &stop,
+                    )
+                    .await?;
+                    refused.commit().await.map_err(DbError::from)?;
+                }
+                return Err(EngineError::from(error).into());
+            }
+        }
         let waited = tokio::time::timeout(
             self.inner.config.hosting.stop_wait,
             self.inner.commands.wait(id),
@@ -1030,8 +2049,70 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
         rows::lock(&mut tx, provider).await?;
+        if let Ok(Ok(Outcome::Succeeded(result))) = &waited
+            && orch_db::queries::runtime_controls::bind_stopped(
+                &mut tx,
+                &stop.control,
+                id,
+                result,
+                Some(&stop.registration),
+            )
+            .await?
+            .is_none()
+        {
+            tx.commit().await.map_err(DbError::from)?;
+            return Err(RuntimeError::Unavailable(
+                "the canonical Stop belongs to an older original; its data was kept".into(),
+            ));
+        }
+
+        let current = env_rows::runtime(&mut tx, runtime).await?;
+        if current.is_some()
+            && (!orch_db::queries::runtime_controls::owns_current_source(&mut tx, &stop.control)
+                .await?
+                || !stop.registration.matches(&mut tx, &stop.control).await?)
+        {
+            return Err(RuntimeError::Unavailable(
+                "the old stop reply does not confirm the current provider native start or control"
+                    .into(),
+            ));
+        }
+        if current
+            .as_ref()
+            .is_none_or(|current| current.state != runtime_state::STOPPING)
+        {
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(());
+        }
+        if orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+            .await?
+            .as_ref()
+            != Some(&stop)
+        {
+            return Err(RuntimeError::Unavailable(
+                "the old reply does not confirm the current provider stop".into(),
+            ));
+        }
+        // A host that has no such unit has nothing left to stop: the unit is stopped, and the host's word
+        // that it has none is written down, so that the next start makes a unit and does not start one.
+        let missing = matches!(
+            &waited,
+            Ok(Ok(Outcome::Failed(error)))
+                if error.code == orch_link_contract::commands::ErrorCode::NotFound.as_str()
+        );
+        let missing = missing
+            && stop.command_row(&mut tx).await?.is_some_and(|row| {
+                row.state == "failed"
+                    && row
+                        .error
+                        .as_ref()
+                        .and_then(|value| value.get("code"))
+                        .and_then(Json::as_str)
+                        == Some(orch_link_contract::commands::ErrorCode::NotFound.as_str())
+            });
+        let stopped = missing || matches!(&waited, Ok(Ok(Outcome::Succeeded(_))));
         match waited {
-            Ok(Ok(Outcome::Succeeded(_))) => {
+            _ if stopped => {
                 let detail = env_rows::runtime(&mut tx, runtime)
                     .await?
                     .and_then(|runtime| runtime.state_detail);
@@ -1044,6 +2125,9 @@ impl Engine {
                     now,
                 )
                 .await?;
+                if moved && missing {
+                    env_rows::set_unit_missing(&mut tx, runtime, true).await?;
+                }
                 if moved
                     && rows::live_runtime(&mut tx, provider)
                         .await?
@@ -1053,6 +2137,7 @@ impl Engine {
                         .await?;
                 }
                 tx.commit().await.map_err(DbError::from)?;
+                tracing::info!(%provider, %runtime, host = %row.host_id, missing, "the unit of a provider's runtime is stopped");
                 Ok(())
             }
             Ok(Ok(Outcome::Failed(error))) => {
@@ -1060,29 +2145,42 @@ impl Engine {
                     &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
-                    runtime_state::RUNNING,
-                    None,
+                    runtime_state::STOPPING,
+                    Some(&format!(
+                        "Stop unconfirmed: {}: {}",
+                        error.code, error.detail
+                    )),
                     now,
                 )
                 .await?;
                 tx.commit().await.map_err(DbError::from)?;
+                tracing::warn!(%provider, %runtime, host = %row.host_id, code = %error.code, reason = %error.detail, "the host refused to stop the unit of a provider's runtime; its stop is unconfirmed");
                 Err(RuntimeError::Host(format!(
                     "{}: {}",
                     error.code, error.detail
                 )))
             }
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
-                // The host has not said: the unit stands `stopping` and the schedule asks again.
-                Err(RuntimeError::Host(
-                    "the host did not answer in time; the stop is tried again".to_owned(),
-                ))
+                // The schedule rejoins this phase, rotating only a durably expired unbound command.
+                env_rows::set_runtime_state(
+                    &mut tx,
+                    runtime,
+                    &[runtime_state::STOPPING],
+                    runtime_state::STOPPING,
+                    row.state_detail.as_deref(),
+                    now,
+                )
+                .await?;
+                tx.commit().await.map_err(DbError::from)?;
+                tracing::warn!(%provider, %runtime, host = %row.host_id, reason = "the host did not answer in time", "the unit of a provider's runtime stands as being stopped; the stop is asked again");
+                Err(RuntimeError::Held(Hold::of(HoldWhy::HostSilent)))
             }
         }
     }
 
     /// Detaches a gone current unit and clears its connector's harnesses and sessions.
     /// A noncurrent candidate cannot detach or invalidate another unit's connector.
-    async fn unit_is_gone(
+    pub(crate) async fn unit_is_gone(
         &self,
         conn: &mut orch_db::Conn,
         provider: Id,
@@ -1119,7 +2217,7 @@ impl Engine {
 
     /// Makes sure no turn runs on a provider: it fails when there is one and the request did not say to
     /// interrupt; otherwise the turns are asked to stop, and waited for.
-    async fn clear_provider_turns(
+    pub(crate) async fn clear_provider_turns(
         &self,
         provider: Id,
         interrupt: bool,
@@ -1231,11 +2329,13 @@ impl Engine {
     // ------------------------------------------------------------ with the provider
 
     /// Says that the unit of a provider's runtime failed, in a sentence: the provider says why it is not
-    /// ready, and a sign-in that waited for the unit is forgotten with its secrets.
+    /// ready, and a sign-in that waited for the unit is forgotten with its secrets. Without a `detail` the
+    /// provider keeps its status and what it says (a person ended the work that made the unit), and only the
+    /// sign-in is forgotten.
     pub(crate) async fn runtime_failed(
         &self,
         provider: Id,
-        detail: &str,
+        detail: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<(), EngineError> {
         let mut tx = self.inner.db.begin().await?;
@@ -1252,7 +2352,9 @@ impl Engine {
                 .map(|pending| pending.method);
             rows::delete_login_secrets(&mut tx, provider, rows::LOGIN_SECRET_PREFIX).await?;
             rows::clear_pending(&mut tx, provider).await?;
-            if matches!(state.status.as_str(), "needs_setup" | "ready" | "exhausted") {
+            if let Some(detail) = detail
+                && matches!(state.status.as_str(), "needs_setup" | "ready" | "exhausted")
+            {
                 orch_db::queries::resources::keeper::move_status(
                     &mut tx,
                     provider,
@@ -1272,7 +2374,10 @@ impl Engine {
                 &serde_json::json!({
                     "state": "failed", "method": method, "shows": [], "asks": null,
                     "expires_at": null,
-                    "error": format!("the provider's runtime could not be made ready: {detail}"),
+                    "error": match detail {
+                        Some(detail) => format!("the provider's runtime could not be made ready: {detail}"),
+                        None => "the work that was making the provider's runtime was ended by a person".to_owned(),
+                    },
                 }),
             )
             .await?;
@@ -1407,6 +2512,12 @@ pub(crate) async fn waits_for_runtime(
     if provider.deleted_at.is_some() || provider.status == "disabled" {
         return Ok(false);
     }
+    if orch_db::queries::provider_connections::environment(conn, provider.id)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
     if orch_db::queries::environment_facts::of_provider(conn, provider.id)
         .await?
         .is_some_and(|facts| facts.attaches())
@@ -1475,7 +2586,7 @@ impl Engine {
             // Renewal has already performed the immediate read in its refresh phase.
             if ended.plan.get("mode").and_then(orch_types::Json::as_str)
                 != Some(crate::jobs::provider_provision::Mode::Renew.word())
-                && let Err(error) = self.refresh_provider_now(provider).await
+                && let Err(error) = self.refresh_provider_after_job(provider).await
             {
                 tracing::debug!(%error,%provider,"provider facts were not available after its runtime started");
             }
@@ -1491,7 +2602,9 @@ impl Engine {
                     }),
                 Err(_) => false,
             };
-            if selected && let Err(error) = self.discover_provider_models(provider).await {
+            if selected
+                && let Err(error) = self.discover_provider_models_for_read(provider, true).await
+            {
                 tracing::debug!(%error,%provider,"provider models were not available after its runtime started");
             }
         } else {
@@ -1502,12 +2615,19 @@ impl Engine {
                 .and_then(orch_types::Json::as_str)
                 .unwrap_or("it was cancelled")
                 .to_owned();
+            // Work that a person ended by forcing a stop or a removal is not a failure of the runtime: the provider
+            // keeps what it says, and only a sign-in that waited for the unit is forgotten.
+            let ended_by_person = ended
+                .error
+                .as_ref()
+                .and_then(|error| error.get("code"))
+                .and_then(orch_types::Json::as_str)
+                == Some("overruled");
+            tracing::warn!(%provider, job = %row.id, state = %ended.state, reason = %said, ended_by_person, "provider runtime: its job ended without a runtime that is ready");
+            let detail =
+                (!ended_by_person).then(|| format!("its runtime could not be made: {said}"));
             if let Err(error) = self
-                .runtime_failed(
-                    provider,
-                    &format!("its runtime could not be made: {said}"),
-                    self.inner.clock.now(),
-                )
+                .runtime_failed(provider, detail.as_deref(), self.inner.clock.now())
                 .await
             {
                 tracing::warn!(%error, %provider, "a sign-in that waited for a unit that did not come up could not be forgotten");
