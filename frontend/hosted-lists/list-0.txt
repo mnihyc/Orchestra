@@ -1,0 +1,79 @@
+[chromium] › tests/e2e/model.spec.ts › Parameters uses the same speed, access and context choices and reports what a change of model drops
+[chromium] › tests/e2e/model.spec.ts › a model's groups are chips: put in by typing, taken from the provider's others, taken out, and counted above the list
+[chromium] › tests/e2e/model.spec.ts › a suggestion that lists a faster speed, a program and a larger context is added with all of it switched on
+[chromium] › tests/e2e/model.spec.ts › model and effort options fill the list without pill borders at 1440px
+[chromium] › tests/e2e/model.spec.ts › a model picker without effort choices has one Model question and no absent control’s help
+[chromium] › tests/e2e/model.spec.ts › a model switch reaches another open page within a second after a turn
+[chromium] › tests/e2e/model.spec.ts › a model switch reaches another open page within a second before the first turn
+[chromium] › tests/e2e/model.spec.ts › Speed, Access and Context are absent for a model whose provider enabled none of them, and there once a manager has
+[chromium] › tests/e2e/model.spec.ts › the control opens on what the model starts with, and says where each comes from
+[chromium] › tests/e2e/model.spec.ts › a speed, an access program and a context are chosen for the thread, each saying who chose it, and the control shows what the thread runs with
+[chromium] › tests/e2e/model.spec.ts › a context that crosses a step of the rate says so
+[chromium] › tests/e2e/model.spec.ts › Access is absent where the place has not switched access programs on
+[chromium] › tests/e2e/model.spec.ts › a change of model drops a choice that the new model does not have, with a line saying so, and keeps one that fits
+[chromium] › tests/e2e/model.spec.ts › a choice is credited to whoever made it, as the history of the thread says
+[chromium] › tests/e2e/model.spec.ts › somebody who only drives the thread reads the control and is told who can change it, and a place that fixes a choice says so
+[chromium] › tests/e2e/model.spec.ts › a place that decides the choices of its threads says so, and the choices stay as they are
+[chromium] › tests/e2e/model.spec.ts › the model control is worked by the keyboard alone
+[chromium] › tests/e2e/model.spec.ts › /speed, /access and /context are in the box where the model has them, open the control on the choice they name, and make a choice written out
+[chromium] › tests/e2e/model.spec.ts › the commands of a model that has none of the three leave them out, and a reader who may not manage the thread sees them disabled with the reason
+[chromium] › tests/accessibility/change.spec.ts › a switch: the plan with its provider opened, what stands in the way of it, the job under way, and an end that failed
+[chromium] › tests/accessibility/change.spec.ts › a switch that is cancelled: the question first, then the end that says so
+[chromium] › tests/accessibility/change.spec.ts › a switch that is done: the thread held while it is under way, and the thread on its new side
+[chromium] › tests/accessibility/change.spec.ts › a fork: the plan with each of its choices opened, the options, the job, and the end
+[chromium] › tests/accessibility/change.spec.ts › an environment: the update, the move that is cancelled, and what is idle on a host
+[chromium] › tests/accessibility/change.spec.ts › several threads at once: the plans with one that is blocked, the batch under way, and its end
+[chromium] › tests/accessibility/change.spec.ts › in Chinese: the plan of a switch and of a fork, each with its choices opened, and the end of a job
+[chromium] › tests/e2e/human-check-admin.spec.ts › the card with hcaptcha chosen at 1440px in en/light
+[chromium] › tests/e2e/human-check-admin.spec.ts › the card with off chosen at 1440px in en/light
+[chromium] › tests/e2e/human-check-admin.spec.ts › the card with recaptcha chosen at 1440px in en/light
+[chromium] › tests/e2e/human-check-admin.spec.ts › the secret is set, kept without being shown, tested and taken away
+[chromium] › tests/e2e/human-check-admin.spec.ts › the service cannot be chosen while the web edge has no room for it, and can once it has
+[chromium] › tests/e2e/human-check-admin.spec.ts › the card names the hosts the web edge leaves out at 1440px in en/light
+[chromium] › tests/e2e/workbench-status.spec.ts › environment, branch and changed lines, isolation and shell count live in the status bar
+[chromium] › tests/e2e/workbench-status.spec.ts › Git status stays out of the bar when repository status is git_missing
+[chromium] › tests/e2e/workbench-status.spec.ts › Git status stays out of the bar when repository status is not_a_repository
+[chromium] › tests/e2e/workbench-status.spec.ts › Git status stays out of the bar when repository status is offline
+[chromium] › tests/e2e/workbench-status.spec.ts › Git status stays out of the bar when repository status is unknown
+[chromium] › tests/e2e/paste-drop.spec.ts › an image for a text-only model stays attached through Send at 1440px in light/en
+[chromium] › tests/e2e/paste-drop.spec.ts › pasted drafts stay editable and private at 1440px in light/en
+[chromium] › tests/e2e/paste-drop.spec.ts › folder drops name their count and viewers reject files at 1440px in light/en
+[chromium] › tests/e2e/paste-drop.spec.ts › a dispatched Files copy waits for its stopped receipt at 1440px in light/en
+[chromium] › tests/e2e/change-controls.spec.ts › ordinary wizard controls at 1440px in light › a switch, its pickers, pending confirmation, progress and done
+[chromium] › tests/e2e/change-controls.spec.ts › ordinary wizard controls at 1440px in light › fork history, runtime, environment, options and the resulting thread action
+[chromium] › tests/e2e/change-controls.spec.ts › ordinary wizard controls at 1440px in light › environment update/recreate steps and a blocked move retry do not stretch controls
+[chromium] › tests/e2e/native-provider-plans.spec.ts › a provider refresh retains its declared account plan en/light/1440
+[chromium] › tests/e2e/native-provider-plans.spec.ts › unavailable provider facts keep their source and usage entrance visible en/light/1440
+[chromium] › tests/e2e/native-provider-plans.spec.ts › provider overview groups the keeper's missing facts and names its turn counts en/light/1440
+[chromium] › tests/e2e/tabs-overflow.spec.ts › all topic tabs stay on one row and are reachable by pointer and keyboard at 400px
+[chromium] › tests/e2e/tabs-overflow.spec.ts › all settings and resource destinations remain reachable at 400px
+[chromium] › tests/e2e/tabs-overflow.spec.ts › all settings and resource destinations remain reachable at 768px
+[chromium] › tests/accessibility/folders.spec.ts › the dialogs of folders, open: a new folder, the list of where to move, a plan with people and a lock, and a move that is stopped
+[chromium] › tests/accessibility/folders.spec.ts › folders on a small screen, and in Chinese at the compact density
+[chromium] › tests/e2e/admin-org-choice.spec.ts › admin org locator pages the real inventory, selects a department and writes only after Save (1440/light)
+[chromium] › tests/e2e/admin-org-choice.spec.ts › admin org current lookup survives pending/failure, retry and clear without an implicit save (400/dark)
+[chromium] › tests/e2e/document-tree.spec.ts › document folders create, copy and delete directly, and restore at 1440/light
+[chromium] › tests/e2e/document-tree.spec.ts › selected-folder rename uses its parent and Move keeps its root scope while Copy can choose another org
+[chromium] › tests/e2e/implicit-runs-on.spec.ts › switch keeps refusals and explains retained choices en/1440/light
+[chromium] › tests/e2e/implicit-runs-on.spec.ts › fork names keeper and replacement origins en/1440/light
+[chromium] › tests/e2e/navigation-recent.spec.ts › Recent and the wide table keep the same beginning at 1440/light
+[chromium] › tests/e2e/navigation-recent.spec.ts › Recent reports cold and warm frame reads against the shared opening goals without per-row reads
+[chromium] › tests/e2e/workbench-comment-recovery.spec.ts › unsent comments survive detach, close/reopen and refresh in light
+[chromium] › tests/e2e/workbench-comment-recovery.spec.ts › a failed local write keeps the actual pane and draft reachable until Save succeeds
+[chromium] › tests/accessibility/usage.spec.ts › one's own usage with a table narrowing it, the chart as a table, and the card that picks a span
+[chromium] › tests/e2e/ask-panel.spec.ts › Ask: page → send → stop → history → citation → keep (en, 1440, light)
+[chromium] › tests/e2e/capability-routes.spec.ts › capability route click path en/light/400
+[chromium] › tests/e2e/codex-tolerance-history.spec.ts › Codex compatibility facts and cancellation survive the thread click path (en, light)
+[chromium] › tests/e2e/directory-pages.spec.ts › a dirty late-page file follows a wide invalidation, and search opens its parent directly
+[chromium] › tests/e2e/environment-deletion.spec.ts › deletes a managed unit and a directory registration with the right promise (en/light/1440)
+[chromium] › tests/e2e/find-in-views.spec.ts › another conversation opens at the hit beside this one and returns to the same question
+[chromium] › tests/e2e/help-summary-ask.spec.ts › written public summary and visible results seed Ask (en/light/400)
+[chromium] › tests/e2e/layout-pane-resize.spec.ts › pane borders preserve the full thread title and selected topic tab light/en
+[chromium] › tests/e2e/meta-admission.spec.ts › cold thread admission holds its shared bootstrap through the frame handoff in light
+[chromium] › tests/e2e/orch-links.spec.ts › declared links open here and copy publicly (en, 1440, light)
+[chromium] › tests/e2e/profile-role-availability.spec.ts › membership role retry en/light
+[chromium] › tests/e2e/resource-details.spec.ts › resource details are bounded, reachable and lazy (en/light/1440)
+[chromium] › tests/e2e/shared-search-budgets.spec.ts › shared search budgets save larger values en/light/1440
+[chromium] › tests/e2e/template-newcomer.spec.ts › the provider kind offers complete examples and its own fields without an environment workspace
+[chromium] › tests/e2e/thread-stop.spec.ts › 1440 › the frame that ends the turn comes before the answer to Stop, and the answer, late, does not undo it (1440)
+[chromium] › tests/e2e/viewed-image-results.spec.ts › a viewed image and its original result survive the thread click path en/light/1440

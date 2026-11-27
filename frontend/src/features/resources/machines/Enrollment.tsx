@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { createHostToken, createMachineToken, hostKey, machineEnrollmentInfoQuery, machineKey } from '@/api/resources';
-import { enrollmentProgressQuery } from '@/api/enrollment';
+import { ENROLLMENT_READ_AGAIN_MS, enrollmentProgressQuery } from '@/api/enrollment';
 import { InstallationGateway } from '@/features/gateways/InstallationGateway';
 import { applyRow } from '@/api/cache';
 import { onUserEvent } from '@/realtime/stores/user';
@@ -168,6 +168,14 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const registering=purpose==='subscription' && machine?.online===true?machine.id:null;
   const minutesLeft = expiresAt === null || expiresAt <= now ? 0 : Math.max(1, Math.floor((expiresAt - now) / MINUTE_MS));
   const failure = make.isError && JSON.stringify(make.variables) === stamp ? make.error : undefined;
+  // Until its machine is online the dialog reads its progress again a few seconds apart, on a clock of its own: the one
+  // live notice can be lost (see ENROLLMENT_READ_AGAIN_MS), and a query's own interval starts over at every change of the
+  // progress, each row of the machine it follows included, so it could put the read off for as long as they keep coming.
+  useEffect(() => {
+    if (receipt === undefined || connected || expired) return;
+    const timer = setInterval(() => { void refetchProgress({ cancelRefetch: false }); }, ENROLLMENT_READ_AGAIN_MS);
+    return () => clearInterval(timer);
+  }, [receipt, connected, expired, refetchProgress]);
 
   useEffect(() => {
     if (arrived === undefined || !connected || opened.current) return;

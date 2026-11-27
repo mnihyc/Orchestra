@@ -3,6 +3,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
+import { workspaceDenial } from '@/features/files/door';
 import { waitingWords } from '@/features/timeline/waiting';
 import { SourcePreparation } from '@/features/source/Preparation';
 import { RepositoryChoice } from '@/features/source/RepositoryChoice';
@@ -73,8 +74,8 @@ it.each(['en', 'zh-CN'] as const)('opens the source job on demand and shows its 
       id: 'preparation-job', kind: 'workspace_prepare', node_id: 'source-failure', environment_id: 'workspace', provider_id: null,
       batch_id: null, created_by: null, created_at: '2026-11-01T10:00:00Z', started_at: '2026-11-01T10:00:00Z', finished_at: '2026-11-01T10:05:00Z',
       state: 'failed', result: null, log: null,
-      error: { code: 'not_found', phase: 'prepare', message: 'Git could not find the release branch in the source repository.', undone: true },
-      progress: { phase: 'prepare', percent: 28, message: null, phases: [], bytes_done: 0, bytes_total: null,
+      error: { code: 'not_found', phase: 'apply', message: 'Git could not find the release branch in the source repository.', undone: true },
+      progress: { phase: 'apply', percent: 28, message: null, phases: [], bytes_done: 0, bytes_total: null,
         files_done: 0, files_total: null, rate_bps: null, eta_seconds: null },
     };
     const fetch = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockImplementation((input, init) => {
@@ -86,18 +87,51 @@ it.each(['en', 'zh-CN'] as const)('opens the source job on demand and shows its 
     const thread = {
       id: 'source-failure', directory:'web', state: 'idle', environment: { id: 'workspace', name: 'Workspace' }, environment_permissions: [],
       source: { kind: 'repository', directory: 'web', repository_url: 'https://example.test/team/repo.git', branch: 'release',
-        head: null, state: 'failed', reason: 'not_found', job: { id: job.id, kind: job.kind, phase: 'prepare', percent: 28, state: 'failed' } },
+        head: null, state: 'failed', reason: 'not_found', job: { id: job.id, kind: job.kind, phase: 'apply', percent: 28, state: 'failed' } },
     } as unknown as Thread;
     show(<SourcePreparation thread={thread} />);
     expect(fetch).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: i18n.t('source.prepare.details') }));
     const dialog = await screen.findByRole('dialog', { name: i18n.t('source.prepare.detailsTitle') });
     expect(await within(dialog).findByText(job.error!.message)).toBeVisible();
-    expect(within(dialog).getByText(i18n.t('source.prepare.reasons.notFound'))).toBeVisible();
+    // The step it stopped at, and why, in one line.
+    expect(within(dialog).getByText(i18n.t('source.step.line', { step: i18n.t('source.step.apply'), why: i18n.t('source.prepare.reasons.notFound') }))).toBeVisible();
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: i18n.t('source.prepare.again') })).not.toBeInTheDocument();
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  } finally {
+    await setLocale(previous);
+  }
+});
+
+it.each(['en', 'zh-CN'] as const)('says the step a preparation stopped at and why to a reader who may not read its job, in %s', async (locale) => {
+  // A reader who may not prepare the source reads only the job's progress: no error, no steps, no times. The dialog
+  // still says where it stopped and why, from what the thread's own source says, as its line above the conversation does.
+  const previous = currentLocale();
+  await setLocale(locale);
+  try {
+    const job: Job = {
+      id: 'refused-job', kind: 'workspace_prepare', node_id: null, environment_id: 'lab', provider_id: null,
+      batch_id: null, created_by: null, created_at: '2026-11-27T04:07:04Z', started_at: null, finished_at: null,
+      state: 'failed', result: null, log: null, error: null,
+      progress: { phase: 'validate', percent: 0, message: null, phases: [], bytes_done: 0, bytes_total: null,
+        files_done: 0, files_total: null, rate_bps: null, eta_seconds: null },
+    };
+    vi.stubGlobal('fetch', vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockImplementation(() => Promise.resolve(Response.json(job))));
+    const environment = { id: 'lab', name: 'Lab workspace', owner: { display_name: 'Ada' } };
+    const thread = {
+      id: 'refused-source', directory: '', state: 'blocked', blocked: { reason: 'source_failed' }, environment, environment_permissions: [],
+      source: { kind: 'directory', directory: '', repository_url: null, branch: null, head: null, state: 'failed', reason: 'access.denied',
+        job: { id: job.id, kind: job.kind, phase: 'validate', percent: 0, state: 'running' } },
+    } as unknown as Thread;
+    show(<SourcePreparation thread={thread} />);
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('source.prepare.details') }));
+    const dialog = await screen.findByRole('dialog', { name: i18n.t('source.prepare.detailsTitle') });
+    const why = workspaceDenial(i18n.t, 'environment.manage', environment as unknown as NonNullable<Thread['environment']>);
+    expect(await within(dialog).findByText(i18n.t('source.step.line', { step: i18n.t('source.step.validate'), why }))).toBeVisible();
+    // Nothing is said of a length it does not know.
+    expect(dialog.querySelector('[data-job-elapsed]')).toBeNull();
   } finally {
     await setLocale(previous);
   }

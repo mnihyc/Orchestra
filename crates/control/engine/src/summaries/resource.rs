@@ -31,6 +31,7 @@ mod run;
 mod tests;
 pub use route::{preview_route, resolve_backend_choice, resolve_route};
 mod defaults;
+pub(crate) use defaults::Candidates;
 pub use defaults::{ManualDefault, manual_default};
 
 fn refused() -> EngineError {
@@ -423,7 +424,9 @@ async fn judge_model_now(
 ) -> Result<Result<Option<Id>, Reason>, EngineError> {
     let offering = config.offering().map_err(EngineError::unreadable)?;
     let program = config.backend.route == "summary.delegation";
-    let Some(provider) = resources::provider(conn, offering.provider).await? else {
+    // Each read below is read once in a read that is deciding once: a place's default judges every model of every
+    // provider, for each view that asks for it, and these depend on the provider and the place, not on the model.
+    let Some(provider) = super::once::provider_row(conn, offering.provider).await? else {
         return Ok(Err(Reason::ProviderGone));
     };
     if provider.deleted_at.is_some() {
@@ -447,7 +450,7 @@ async fn judge_model_now(
     } else if provider.protocols.is_empty() || completion_protocol(&provider.protocols)?.is_none() {
         return Ok(Err(Reason::NoInterface));
     }
-    let Some(model) = resources::model(conn, offering.provider, &offering.offering)
+    let Some(model) = super::once::model_row(conn, offering.provider, &offering.offering)
         .await?
         .filter(|model| model.enabled)
     else {
@@ -464,28 +467,23 @@ async fn judge_model_now(
         return Ok(Err(Reason::NoInterface));
     }
     if let Some(place) = place {
-        let allowed = crate::resolved::models_allowed(conn, place).await?;
+        let allowed = super::once::models_allowed(conn, place).await?;
         if allowed.as_ref().is_some_and(|patterns| {
             !crate::models::allowed_by(patterns, &offering.offering, &model.groups)
         }) {
             return Ok(Err(Reason::ModelNotAllowed));
         }
-        if crate::provider_policy::forbidden(conn, place, provider.id)
-            .await?
-            .is_some()
-        {
+        if super::once::forbidden(conn, place, provider.id).await? {
             return Ok(Err(Reason::ProviderForbidden));
         }
     }
-    let policies = crate::access::resource_policies(conn, provider.id).await?;
-    let usable =
-        match orch_authz::usable::usable(conn, principal, provider.id, place, &policies).await? {
-            orch_authz::usable::Usable::Yes(usable) => usable,
-            orch_authz::usable::Usable::Unavailable(_) => return Ok(Err(Reason::ProviderNotReady)),
-            orch_authz::usable::Usable::KeptToItsOwner | orch_authz::usable::Usable::No => {
-                return Ok(Err(Reason::NotAllowed));
-            }
-        };
+    let usable = match super::once::usable(conn, principal, provider.id, place).await? {
+        orch_authz::usable::Usable::Yes(usable) => usable,
+        orch_authz::usable::Usable::Unavailable(_) => return Ok(Err(Reason::ProviderNotReady)),
+        orch_authz::usable::Usable::KeptToItsOwner | orch_authz::usable::Usable::No => {
+            return Ok(Err(Reason::NotAllowed));
+        }
+    };
     let Ok(effort) = orch_provider_contract::calls::requested_effort(&config.params) else {
         return Ok(Err(Reason::EffortNotOffered));
     };
@@ -510,10 +508,7 @@ async fn judge_model_now(
         let Some(machine) = provider.key_machine_id else {
             return Ok(Err(Reason::NoKeeper));
         };
-        if !orch_db::queries::resources::machine(conn, machine)
-            .await?
-            .is_some_and(|machine| machine.online)
-        {
+        if !super::once::keeper_online(conn, machine).await? {
             return Ok(Err(Reason::KeeperOffline));
         }
     }

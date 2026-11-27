@@ -6,7 +6,9 @@
  * instead, and offers the act that lifts it. A directory of one of their connected machines becomes an environment when it is
  * registered. Where nothing may be made, the step says so and how to ask.
  */
-import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
+import { machineCapacityWords } from '@/features/resources/machines/MachineCapacityLine';
+import { factLine } from '@/ui/Choice';
+import { useFormatContext } from '@/lib/appearance';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { FolderPlus, Laptop, Plus } from 'lucide-react';
@@ -22,6 +24,7 @@ import { startOptionsQuery } from '@/api/start';
 import { AccessRequest } from '@/features/access/AccessRequest';
 import type { PlaceRef } from '@/features/navigation/places';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
+import { NoHostLine } from '@/features/resources/hosts/NoHostLine';
 import { BindingPickerScope } from '@/features/resources/PickerContext';
 import { ResourcePicker } from '@/ui/ResourcePicker';
 import type { BindingEnvironment, Machine } from '@/generated/api-types';
@@ -87,6 +90,7 @@ function defaultDirectoryMachine(online: readonly Machine[], userId: string | nu
 
 function DirectoryRegistration({ machines, loading = false, homeId, onRegistered, reader }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void; reader: string }) {
   const { t } = useTranslation();
+  const format = useFormatContext();
   const userId = useStore(client.session, (state) => state.userId);
   const actKey = useActKey();
   const online = machines.filter((machine) => machine.online);
@@ -124,7 +128,8 @@ function DirectoryRegistration({ machines, loading = false, homeId, onRegistered
       {online.length === 0 ? <InlineAlert tone="warning">{t('start.where.allOffline')}</InlineAlert> : <>
         <ResourcePicker pickerKey="thread-directory-machine" label={t('start.where.machine')} placeholder={t('start.where.chooseMachine')} value={chosen} disabled={register.isPending}
           onValueChange={(id) => { setMachineId(id); setRoot(''); setName(''); setReady(false); register.reset(); }}
-          options={online.map((machine) => ({ value: machine.id, label: machine.name, resource: { kind: 'machine', id: machine.id, data: machine }, description: <span className="flex flex-col gap-1"><MachineCapacityLine facts={machine.facts} />{machine.owner !== null && <UserChip user={machine.owner} />}</span> }))} />
+          options={online.map((machine) => ({ value: machine.id, label: machine.name, resource: { kind: 'machine', id: machine.id, data: machine },
+            description: factLine([machine.owner !== null && <UserChip user={machine.owner} size={24} />, machineCapacityWords(machine.facts, t, format)], t('resourceFacts.separator')) }))} />
         {machine !== undefined && <DirectoryControl key={machine.id} ref={directory} target={{ kind: 'machine', machine }} value={root}
           onChange={(value) => { setRoot(value); if (register.error !== null) register.reset(); }} onReady={setReady} disabled={register.isPending}
           error={fieldFailure ? directoryProblem(register.error) : undefined} />}
@@ -167,6 +172,9 @@ export function Where({ compact = false, place, options, value, onChange, machin
   const [requestedAt, setRequestedAt] = useState<{ context: string; id: string } | null>(() => requesting === null ? null : { context, id: requesting.environment.id });
   const [granted, setGranted] = useState<{ context: string; id: string } | null>(null);
   const mayMake = options.can_create.allowed;
+  // Refused with nothing missing in the place: the person may start work here, and what they lack is a host to make the
+  // environment on (the shipped Default template is everyone's). The line names what fixes that, not the place's managers.
+  const noHost = !mayMake && options.can_create.missing.length === 0;
   const canMakeNew = canCreateEnvironment(options);
   const currentRequest = requesting === null ? null : options.environments.find((row) => row.environment.id === requesting.environment.id) ?? requesting;
   // A refusal identifies who can actually give Use; a visible resource does not imply it is requestable.
@@ -211,7 +219,7 @@ export function Where({ compact = false, place, options, value, onChange, machin
       {listed.length === 0 && (!mayMake || !canMakeNew) && <p className="text-sm text-text-muted">{t('start.where.noExisting')}</p>}
       {/* With the new environment's form open, its host field says it beside the host. */}
       {mayMake && !canMakeNew && !(fresh && onNewEnvironmentChange !== undefined) && <p role="status" className="text-sm text-text-muted">{t('start.where.noHost')}</p>}
-      {!mayMake && <p className="text-sm text-text-muted">{t('start.where.mayNotMake')}</p>}
+      {!mayMake && (noHost ? <NoHostLine kind="environment" hosts={options.hosts} quiet={listed.some(canUseEnvironment)} /> : <p className="text-sm text-text-muted">{t('start.where.mayNotMake')}</p>)}
       {note !== null && <EnvironmentNoteLine note={note} standing={standing} fresh={fresh} />}
       {agentHere !== null && <AgentHereLine here={agentHere} environment={fresh ? null : selected} onChanged={() => onRefresh?.()} />}
       {fresh && mayMake && onNewEnvironmentChange !== undefined && <NewEnvironmentForm assessed={assessed} place={place} hosts={options.hosts} value={newEnvironment} onChange={onNewEnvironmentChange} />}
@@ -243,7 +251,7 @@ export function WhereOptions({ place, options, onChange, machines, machinesLoadi
         <Button size="sm" icon={<Plus aria-hidden />} onClick={() => setMaking(true)} className="self-start">
           {t('start.where.makeOne')}
         </Button>
-      ) : (
+      ) : options.can_create.missing.length === 0 ? null : (
         <details className="text-sm text-text-muted">
           <summary className="cursor-default rounded-md select-none hover:text-text">{t('start.where.mayNotMake')}</summary>
           <div className="mt-2">

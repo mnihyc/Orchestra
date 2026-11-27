@@ -1,4 +1,4 @@
-/** Tabs scroll on one row; section links keep their own complete navigation. */
+/** A topic's tabs stay on one row with the rest under More; section links keep their own complete navigation. */
 import { expect, type Locator, test } from '@playwright/test';
 
 import { ACME, scenario, signIn } from './support.ts';
@@ -30,19 +30,21 @@ for (const width of [400, 768]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`/topic/${ACME.fixLogin}`);
     const strip = page.locator('[data-navigation-strip="tabs"]').first();
-    const tabs = strip.getByRole('tab');
-    await expect(tabs).toHaveCount(7);
+    const tabs = strip.getByRole('tab'), every = strip.getByRole('tab', { includeHidden: true });
+    await expect(every).toHaveCount(7);
     const list = strip.getByRole('tablist');
+    // One row that fits its strip: the tabs in view share a line, those that do not fit wait under More at its end.
     const positions = await tabs.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().top));
     expect(Math.max(...positions) - Math.min(...positions)).toBeLessThan(1);
-    const overflow = await list.evaluate((element) => element.scrollWidth - element.clientWidth);
-    if (overflow > 0) { await list.hover(); await page.mouse.wheel(overflow, 0); }
-    for (const tab of (await tabs.all()).slice(0, -1)) {
-      await tab.click();
-      await expect(tab).toHaveAttribute('aria-selected', 'true');
+    expect(await list.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    // Every tab but Settings by pointer, from the row or from More; the chosen one joins the row.
+    for (const [value, name] of [['overview', 'Overview'], ['threads', 'Threads'], ['environments', 'Environments'], ['documents', 'Documents'], ['agents', 'Agents'], ['activity', 'Activity']] as const) {
+      const tab = strip.locator(`[role="tab"][data-tab-value="${value}"]`);
+      if (await tab.isVisible()) await tab.click();
+      else { await strip.getByRole('button', { name: 'More', exact: true }).click(); await page.getByRole('menuitemradio', { name: new RegExp(`^${name}`, 'u') }).click(); }
+      await expect(tab).toHaveAttribute('aria-selected', 'true'); await expect(tab).toBeVisible();
     }
-    await tabs.first().focus();
-    await tabs.nth(5).press('Home');
+    await strip.locator('[role="tab"][data-tab-value="activity"]').press('Home');
     await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
     await expect(tabs.first()).toBeFocused();
     const visible = await tabs.first().boundingBox(), viewport = await list.boundingBox();
@@ -56,7 +58,10 @@ for (const width of [400, 768]) {
     await expect.poll(() => new URL(page.url()).searchParams.get('tab')).toBe('settings');
     await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible();
     await page.goto(`/topic/${ACME.fixLogin}?tab=overview`);
-    await tabs.last().scrollIntoViewIfNeeded(); await tabs.last().click();
+    await expect(every).toHaveCount(7);
+    const settings = strip.locator('[role="tab"][data-tab-value="settings"]');
+    if (await settings.isVisible()) await settings.click();
+    else { await strip.getByRole('button', { name: 'More', exact: true }).click(); await page.getByRole('menuitemradio', { name: 'Settings', exact: true }).click(); }
     await expect.poll(() => new URL(page.url()).searchParams.get('tab')).toBe('settings');
     await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible();
   });

@@ -13,3 +13,22 @@ format 1
 generation 1
 minimum 1
 set main compose.yml compose.frontend-https.yml nginx.conf frontend.sh frontend-csp.sh postgres/Dockerfile hosts/runtimes/common.sh hosts/runtimes/gvisor.sh hosts/runtimes/kata.sh
+file v0.1.3 1 dbd05bde882a0de7b11416f595b957e13bbe2e04e79d39ee3c71e23c8c8f7bf2 .env.example
+file v0.1.3 1 a9c42d388ed9ed324123a1cb7bc4c9c10cf5fedd03f20a661d6798f752279ef9 README.md
+file v0.1.3 1 987d30f4c345963a9c54d1499ffa85d907373d0f3ec9a9a90fce537e9ca6b806 compose.frontend-https.yml
+file v0.1.3 1 7a65e1ee27c5dab4fa92507f4d6e9ff776e9229d12f39be4be3e0df23624275e compose.yml
+file v0.1.3 1 c615b425f93560a720fea5749ba98a46ee52afee387aa7a7a4ceb7f9837a47f7 frontend-csp.sh
+file v0.1.3 1 c93c4552c21c1ab41b36ece4cc9fa59b5291c3d89148b23e1e38fd6c3c302c77 frontend.sh
+file v0.1.3 1 22c34f3db905ec24e124b9503384b0174ce4b31ec50494173441a60489dd5dd1 harness-builds.json
+file v0.1.3 1 9a36c5a94ed8d5bbff89d983ab29f2a408d6748f6dcce7e1d593e93085625e44 hosts/runtimes/common.sh
+file v0.1.3 1 7ec4114aad9f1777dfc25f4234953183d088dfe5662f3ed3885e615495158aec hosts/runtimes/gvisor.sh
+file v0.1.3 1 b6e47b966b15ab4279f09ddd4038152922e5757aeb9bf866e041afeef76b7cf0 hosts/runtimes/kata.sh
+file v0.1.3 1 649c6167223cc69e0022e65dd7b969839ac1de0da8976c93318a3e8cda64847f install/install-node.sh
+file v0.1.3 1 4c22a6f7a8690ebcef830d450b5c6ec84ff52cda7077cae65c0c4fed15bd86d8 install/install.ps1
+file v0.1.3 1 3ce42407ceaa84fb7cd77e7b5b8da3dbb6d6bdd4a7b855310b75dde1292c5ab9 install/install.sh
+file v0.1.3 1 afeb889f58962f6f05cdf4959ffc301181c74fa77fcc61cd74abc1a33c358582 model-rates.json
+file v0.1.3 1 0a825df063ecdb3067b8df634de7543ad6f4023645b16019b2d5173a50a4185b nginx.conf
+file v0.1.3 1 e19e50012b4d5afed87990f95628df8016c75613546ca4bc9f7ed7995899bb48 postgres/Dockerfile
+file v0.1.3 1 51da319974bc6eea7edac415dfa448ccc0c2afdfd94e1595a8aff28853ba57c7 postgres/README.md
+file v0.1.3 1 9f4d157fdd23ded4c236fbc56c42271a07408f86c1e6177d2b99cf2cac910cb6 update.sh
+file v0.1.3 1 46182c78ddc704f91d05ec6c53856dee5b49f5d5076f42deee2da5b5d62db470 FILE_SETS

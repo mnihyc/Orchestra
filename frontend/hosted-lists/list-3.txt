@@ -1,0 +1,79 @@
+[chromium] › tests/e2e/left-bar.spec.ts › documents stand under the org, the project, the folder, the topic and the thread they are written beside, are read when the place is opened, opened and renamed from the tree, and gone with the switch off
+[chromium] › tests/e2e/left-bar.spec.ts › a document made beside a place arrives in the tree, and one deleted from its menu leaves it, with the way back
+[chromium] › tests/e2e/left-bar.spec.ts › the tree is walked by keyboard alone with documents in it: into a place, onto a document, into its menu and to its page
+[chromium] › tests/e2e/left-bar.spec.ts › a thread is unread from what its reader has really read, on its own row and as a dot on the nearest closed row above it, on every device of theirs, and a thread they may not see says nothing
+[chromium] › tests/e2e/left-bar.spec.ts › a closed row says the most urgent thing that goes on in it, and the keys go from thread to thread
+[chromium] › tests/e2e/left-bar.spec.ts › somebody let into a thread below places they may not see reads the way to it past them: a private place is named by its kind, is no link, and the way goes on
+[chromium] › tests/e2e/left-bar.spec.ts › the bar begins with the org’s own rows, its head is the org’s name with the org’s menu, and Inbox, Approvals and what was shared are not in it; a small screen keeps the way to another org at its head
+[chromium] › tests/e2e/left-bar.spec.ts › the rail’s Resources brings the kinds of resource to the front of the left bar, each with how many its reader may see and opening to its things; the main area shows the one chosen, and the view stays in front from screen to screen
+[chromium] › tests/e2e/left-bar.spec.ts › the tree is narrowed to one place from the place’s menu and stays there: after a reload on this device, not in the person’s other browser, never in the address; its heading is the way back, one place at a time
+[chromium] › tests/e2e/left-bar.spec.ts › “Show only where I am” narrows the tree to the place in view, a thread’s topic; while the reader looks at something outside it, the first row says where that lies and shows it there
+[chromium] › tests/e2e/left-bar.spec.ts › the tree shows threads, documents and chats as its reader ticks them, kept with the person: after a reload, and in their other browser without one
+[chromium] › tests/e2e/left-bar.spec.ts › a chat that is unread makes the closed row above it bold with a dot and no number, a mention is a number, and the glyph of a place speaks for its chat only while the chat has no row on screen
+[chromium] › tests/e2e/left-bar.spec.ts › with chats in the tree, a message arrives on the chat’s row as it is written, the keys that go to what is unread take chats in, and “Mark as read” on a place reads the threads and chats under it
+[chromium] › tests/e2e/combobox-room.spec.ts › the Change dialog's provider picker keeps its room (1440x600)
+[chromium] › tests/e2e/combobox-room.spec.ts › the Change dialog's provider picker keeps its room (1440x900)
+[chromium] › tests/e2e/combobox-room.spec.ts › the Change dialog's provider picker keeps its room (400x600)
+[chromium] › tests/e2e/combobox-room.spec.ts › the Change dialog's provider picker keeps its room (400x900)
+[chromium] › tests/e2e/combobox-room.spec.ts › the admin default-org picker keeps its room (1440x600)
+[chromium] › tests/e2e/combobox-room.spec.ts › the admin default-org picker keeps its room (1440x900)
+[chromium] › tests/e2e/combobox-room.spec.ts › the admin default-org picker keeps its room (400x600)
+[chromium] › tests/e2e/combobox-room.spec.ts › the admin default-org picker keeps its room (400x900)
+[chromium] › tests/e2e/places.spec.ts › a deleted topic goes to the Trash at once, Show finds it there, and it comes back archived
+[chromium] › tests/e2e/places.spec.ts › an invitation is made as a link for one address and as a link to share, and the ones still good can be taken back
+[chromium] › tests/e2e/places.spec.ts › a personal link is said to be sent where the org can send mail
+[chromium] › tests/e2e/places.spec.ts › an invitation made here is one a stranger can open, and what it asks of the org’s rules is refused where it goes beyond them
+[chromium] › tests/e2e/places.spec.ts › a member’s role is changed from the member’s menu, and what the list says follows
+[chromium] › tests/e2e/places.spec.ts › members are searched by name and narrowed to those whose home is the org itself
+[chromium] › tests/e2e/places.spec.ts › a topic’s screen has its overview, its threads from the live tree and its environments, and no tab for a part that is not built
+[chromium] › tests/e2e/frame-review.spec.ts › thread startup preloads every critical script in two reserved HTTP/1.1 exchanges
+[chromium] › tests/e2e/frame-review.spec.ts › thread startup finishes its scripts within two actual 700 ms HTTP/1.1 exchanges
+[chromium] › tests/e2e/frame-review.spec.ts › unseen machine views subscribe only on reveal and unsubscribe on collapse at 1440px
+[chromium] › tests/e2e/frame-review.spec.ts › unseen machine views subscribe only on reveal and unsubscribe on collapse at 1100px
+[chromium] › tests/e2e/frame-review.spec.ts › terminal creation and scope help share the tab row, and all-tabs centres on the first text line
+[chromium] › tests/e2e/duplicate.spec.ts › copy setup is visible before quick copy and on the native result (en/light/1440)
+[chromium] › tests/e2e/duplicate.spec.ts › Duplicate to chooses a native place, cancels and keeps a refusal (en/light/1440)
+[chromium] › tests/e2e/duplicate.spec.ts › Move retains its resource identity inside one root (en/light/1440)
+[chromium] › tests/e2e/duplicate.spec.ts › Environment Duplicate to reviews placement (en/light/1440)
+[chromium] › tests/accessibility/export.spec.ts › the dialog of a place past what it allows, and one that allows nothing
+[chromium] › tests/accessibility/export.spec.ts › the dialog of a place with a row greyed and its things counted
+[chromium] › tests/accessibility/export.spec.ts › the notice of a job that ended, and the part of the status bar that says so
+[chromium] › tests/accessibility/screens.spec.ts › the workbench round an org, a thread, usage and an unknown address
+[chromium] › tests/accessibility/screens.spec.ts › the workbench is worked by keyboard alone: from area to area, into the tree, to a thread, and a view moved
+[chromium] › tests/accessibility/screens.spec.ts › a kept environment card is keyboard scrollable and returns focus to its trigger
+[chromium] › tests/e2e/export.spec.ts › one archive of a place › on a phone the names of the places in the tree are read whole, and it is what lies in them that gives way
+[chromium] › tests/e2e/export.spec.ts › the job and the download › a job is followed in the status bar until it ends, and then its archive is downloaded
+[chromium] › tests/e2e/export.spec.ts › what may be read and not taken away › in the dialog of its place such a thread is greyed and unticked, and counted in the line of the plan
+[chromium] › tests/e2e/resource-summaries.spec.ts › co-mounted thread and catch-up actions name their subjects (en/light/1440)
+[chromium] › tests/e2e/resource-summaries.spec.ts › a personal default refresh needs no automatic configuration and explains unavailable models (en/light/1440)
+[chromium] › tests/e2e/resource-summaries.spec.ts › native summary headers and Ask on four pages (en/light/1440)
+[chromium] › tests/accessibility/access.spec.ts › the full form with its advanced rows, Administration and the history open
+[chromium] › tests/accessibility/access.spec.ts › what one person holds, and an invitation to one place
+[chromium] › tests/accessibility/screen-gate.spec.ts › screen gate 1440px light en › /admin/gateways [gateways-catalogue]
+[chromium] › tests/accessibility/screen-gate.spec.ts › screen gate 1440px light en › /resources/providers/00000000-0000-4000-8022-000000000001?tab=models [provider-search-editor]
+[chromium] › tests/e2e/background-header.spec.ts › native End explains its model boundary before confirmation at 1440px en/light
+[chromium] › tests/e2e/background-header.spec.ts › native background work stays visible beside Idle at 1440px en/light
+[chromium] › tests/e2e/finder.spec.ts › the finder opens by its key from anywhere, and gives the keyboard back to where it was
+[chromium] › tests/e2e/finder.spec.ts › a chat found from another org opens the chat in its own org by its served address
+[chromium] › tests/e2e/mount-fates.spec.ts › a move names each mount's fate and its plan follows a copy or a detach (1280px)
+[chromium] › tests/e2e/mount-fates.spec.ts › a move names each mount's fate and its plan follows a copy or a detach (390px)
+[chromium] › tests/e2e/people-place-locators.spec.ts › History finds an older actor before paging and preserves privacy (en/light)
+[chromium] › tests/e2e/people-place-locators.spec.ts › Holder source is one native locator with Current and exact retry recovery (en/light)
+[chromium] › tests/accessibility/day100.spec.ts › en own controls have no serious barriers in either theme at their intended width
+[chromium] › tests/e2e/admin-mode-double.spec.ts › a mode change retires only that session’s live subscriptions while its peer keeps the same connection
+[chromium] › tests/e2e/builtin-creation-model.spec.ts › native New thread starts a built-in question without workspace choices (en)
+[chromium] › tests/e2e/claude-upgrade-tolerance.spec.ts › Claude protocol additions remain visible and decidable (en, light)
+[chromium] › tests/e2e/copy-control-alignment.spec.ts › copy controls retain first-line alignment and feedback en/light/1440
+[chromium] › tests/e2e/document-availability.spec.ts › off document links en/light
+[chromium] › tests/e2e/export-request-duration.spec.ts › an export request carries a duration at 1440px in light
+[chromium] › tests/e2e/floating-layers.spec.ts › a host inspection stays inside the viewport while its native sharing read resolves (en)
+[chromium] › tests/e2e/inbox.spec.ts › opening a thread reads what the person was told about it, and what arrives while it is open
+[chromium] › tests/e2e/machine-programs.spec.ts › explicit enrollment opens one Programs workflow for agent adapters and provider sources
+[chromium] › tests/e2e/native-web-proof.spec.ts › web proof failures preserve a completed text turn en/light/1440
+[chromium] › tests/e2e/personal-read-tools.spec.ts › personal reads are off by default and keep the inherited lock en
+[chromium] › tests/e2e/reconnect.spec.ts › 1440 › a composer keeps its text, its attachment, its open picker and the keyboard when the connection is dropped and restored (1440)
+[chromium] › tests/e2e/screen-review2.spec.ts › a marked machine keeps its whole short name at 1440 and 400 pixels
+[chromium] › tests/e2e/source-action-availability.spec.ts › source link availability en/light
+[chromium] › tests/e2e/thread-display-recent.spec.ts › Recent shows reader states at 1440/light
+[chromium] › tests/e2e/usage.spec.ts › a cap is made on a place, is reached by what was used, is raised in its row and is shown reached no more
+[chromium] › tests/e2e/workbench-rail.spec.ts › rail clicks dock, shortcuts toggle and only the edge peeks at 1440/light

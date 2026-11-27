@@ -1,7 +1,9 @@
 /** Environment creation names its home, respects entry-point presets and exposes the server's field errors. */
 import { screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { adminModeKey } from '@/api/adminMode';
 import { ApiError, client } from '@/api/client';
 import type * as EverythingApi from '@/api/everything';
 import type * as PoolsApi from '@/api/pools';
@@ -21,6 +23,7 @@ const server = vi.hoisted(() => ({
   create: vi.fn<(body: Record<string, unknown>, key: string) => Promise<{ id: string; name: string }>>(),
   navigate: vi.fn(), close: vi.fn(),
   withoutHosts: vi.fn<() => boolean | Promise<boolean>>(),
+  onlyClosed: vi.fn<() => boolean>(),
   poolChoices: vi.fn<() => Promise<EverythingRowPage>>(),
   pool: vi.fn<(id: string) => Promise<Pool>>(),
 }));
@@ -62,13 +65,14 @@ vi.mock('@/api/resources', async (original) => ({ ...await original<object>(),
     { ...detailHost, id: 'host-one', name: 'Docker one', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-one' }, address: 'one', access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } },
     { ...detailHost, id: 'host-two', name: 'Docker two', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-two' }, address: 'two', access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } },
     { ...detailHost, id: 'read-only-host', name: 'Read-only host', access: { ...detailHost.access, permissions: ['host.view'] } },
-  ] }),
+  ].filter((row) => !server.onlyClosed() || row.id === 'read-only-host') }),
 }));
 
 beforeEach(async () => {
   await setLocale('en');
   vi.clearAllMocks();
   server.withoutHosts.mockReturnValue(false);
+  server.onlyClosed.mockReturnValue(false);
   server.poolChoices.mockResolvedValue({ items: [], next_cursor: null });
   server.create.mockReset().mockResolvedValue({ id: 'made', name: 'New work' });
   useSelectedOrg.setState({ orgId: 'beta' });
@@ -255,24 +259,49 @@ it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup
   expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });
 
-for (const locale of ['en', 'zh-CN'] as const) it(`says that no host is shared and who can make it, in the field and in the refusal (${locale})`, async () => {
+const noHostRefusal = () => new ApiError({ type: 'orch:error:plan.blocked', code: 'plan.blocked', status: 409, title: 'The plan cannot be carried out',
+  detail: 'This plan cannot be carried out as it stands. Look at what blocks it.', request_id: 'no-host', reason: 'no_host', host_blockers: [] }, null);
+
+for (const locale of ['en', 'zh-CN'] as const) it(`says in one line under Host whom to ask when no host is shared, and the same in the refusal (${locale})`, async () => {
   await setLocale(locale); server.withoutHosts.mockReturnValue(true);
   // The server's answer when its creator may use no host: nothing is listed to look at.
-  server.create.mockRejectedValue(new ApiError({ type: 'orch:error:plan.blocked', code: 'plan.blocked', status: 409, title: 'The plan cannot be carried out',
-    detail: 'This plan cannot be carried out as it stands. Look at what blocks it.', request_id: 'no-host', reason: 'no_host', host_blockers: [] }, null));
+  server.create.mockRejectedValue(noHostRefusal());
   const user = userEvent.setup();
   show(<MakeEnvironmentDialog home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
-  const shared = i18n.t('environments.make.noHostShared');
-  // Before anything is sent, under Host: no host is shared, hosts are their owners', and the two ways on.
-  expect(await screen.findByText(shared)).toBeVisible();
+  const ask = i18n.t('hosts.noneFor.environment.ask');
+  // Before anything is sent, under Host: no host may be used, and who gives one.
+  expect(await screen.findByText(ask)).toBeVisible();
   expect(screen.queryByText(i18n.t('environments.make.noHost'))).toBeNull();
+  expect(screen.queryByRole('button', { name: i18n.t('adminReach.mode.enable') })).toBeNull();
   await user.click(screen.getByRole('button', { name: i18n.t('environments.make.submit') }));
   await waitFor(() => expect(server.create).toHaveBeenCalledTimes(1));
   // The refusal says the same in the dialog, instead of asking the person to look at blockers that are not there.
   const refusal = await screen.findByRole('alert');
-  expect(refusal).toHaveTextContent(shared);
+  expect(refusal).toHaveTextContent(ask);
   expect(refusal).not.toHaveTextContent(i18n.t('errors.plan.blocked'));
-  // Said once: the refusal takes the words the field held.
-  expect(screen.getAllByText(shared)).toHaveLength(1);
+  // Said once: the refusal takes the place of the line.
+  expect(screen.getAllByText(ask)).toHaveLength(1);
   expect(server.close).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`names the owner of a host the person sees and may not use (${locale})`, async () => {
+  await setLocale(locale); server.onlyClosed.mockReturnValue(true);
+  show(<MakeEnvironmentDialog home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
+  await waitFor(() => expect(document.querySelector('[data-no-host="member"]')).not.toBeNull());
+  const line = document.querySelector<HTMLElement>('[data-no-host="member"]');
+  if (line === null || detailHost.owner === null) throw new Error('the line and the host owner are drawn');
+  // The host they see is somebody else's and gives them no Use: that person, by name, is whom to ask.
+  expect(line).toHaveTextContent('Read-only host');
+  expect(within(line).getByText(detailHost.owner.display_name)).toBeVisible();
+  expect(line).not.toHaveTextContent(i18n.t('hosts.noneFor.environment.ask'));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`tells an administrator with no host the As admin switch and a host's Access, with the switch beside it (${locale})`, async () => {
+  await setLocale(locale); server.withoutHosts.mockReturnValue(true);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  cache.setQueryData(adminModeKey, { available: true, as_admin: false });
+  show(<MakeEnvironmentDialog home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />, cache);
+  expect(await screen.findByText(i18n.t('hosts.noneFor.environment.admin'))).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('adminReach.mode.enable') })).toBeVisible();
+  expect(screen.queryByText(i18n.t('hosts.noneFor.environment.ask'))).toBeNull();
 });

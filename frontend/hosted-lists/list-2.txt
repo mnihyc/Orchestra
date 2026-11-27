@@ -1,0 +1,79 @@
+[chromium] › tests/e2e/inspector.spec.ts › a difference opens as a tab from the menu of a change, and can be added to the message
+[chromium] › tests/e2e/inspector.spec.ts › somebody who may look at the processes and not send signals sees the menu entries off, with what they take
+[chromium] › tests/e2e/inspector.spec.ts › a shell is opened, typed in, left and found again with what it printed, and closed
+[chromium] › tests/e2e/inspector.spec.ts › a shell this window has attached stays this window's when the list of shells is read again, and is not offered to be taken
+[chromium] › tests/e2e/inspector.spec.ts › a shell that is open on another screen says so and can be taken, and the screen that had it is told
+[chromium] › tests/e2e/inspector.spec.ts › opening a fifth shell asks which of the four to close, with the oldest ticked, and does it in the same step
+[chromium] › tests/e2e/inspector.spec.ts › where the environment's own limit is reached by other people's shells there is nothing to tick, and it says how many people have them
+[chromium] › tests/e2e/inspector.spec.ts › opening is refused with the reason in words: the environment's switch, the machine's owner, and an environment that is away
+[chromium] › tests/e2e/inspector.spec.ts › a shell that exited says it did and with what, and one that was closed for being left says so and shows what it last printed
+[chromium] › tests/e2e/inspector.spec.ts › the tab shows the round trip above 150 ms and says nothing below it
+[chromium] › tests/e2e/inspector.spec.ts › a long shell recording expands in the view without its own pre scroller
+[chromium] › tests/e2e/inspector.spec.ts › shell access explains its full reach on request and stays closed after leaving and reloading
+[chromium] › tests/e2e/inspector.spec.ts › the parameters show the model with where it comes from, change one that is declared, and are read only for somebody who may not manage the thread
+[chromium] › tests/e2e/admin.spec.ts › Sign-in › chooses who may register among three cards, and the choice is what the system then says of itself
+[chromium] › tests/e2e/admin.spec.ts › Sign-in › chooses who may make a team org; an invitation to make one is given and taken back in Users, and somebody who may not make one is offered to join
+[chromium] › tests/e2e/admin.spec.ts › Sign-in › keeps the other settings where they are shown: confirming addresses, passwords, and what a code by mail may be for with the lock
+[chromium] › tests/e2e/admin.spec.ts › Sign-in › says that nobody but a system admin could sign in when passwords are switched off and no provider is on
+[chromium] › tests/e2e/admin.spec.ts › Sign-in › adds an identity provider with its callback address to copy, and removes it after saying what happens
+[chromium] › tests/e2e/admin.spec.ts › Hosts and runtimes › marks a host that is full and says what being full does there, as warning and as refusal, from the settings shown above
+[chromium] › tests/e2e/admin.spec.ts › Hosts and runtimes › lists both pools of units, narrowed from the address, with what each is behind in
+[chromium] › tests/e2e/admin.spec.ts › the rest of Management › lists storage, the authority and its download, the plugins and the system’s own agent profiles
+[chromium] › tests/e2e/browser.spec.ts › the list has the open browsers and the profiles none runs on; a new profile is opened and one in use is joined
+[chromium] › tests/e2e/browser.spec.ts › watching reaches nothing; driving reaches the page at the right place at two sizes, and Ctrl+Alt+Esc gives the keys back
+[chromium] › tests/e2e/browser.spec.ts › a tab the page opened, a dialog and a file asked for reach whoever drives
+[chromium] › tests/e2e/browser.spec.ts › the picture says when it is reduced, and two people are shown under it
+[chromium] › tests/e2e/browser.spec.ts › nothing found says what was looked for, and each way of being off says by whom
+[chromium] › tests/e2e/browser.spec.ts › a profile is renamed and deleted, with its name typed
+[chromium] › tests/e2e/browser.spec.ts › the view by keyboard, and with axe in both themes
+[chromium] › tests/e2e/fnotify-away.spec.ts › the scoped bell is checked, retains stale facts, and subscription changes opt in to no outside way
+[chromium] › tests/e2e/fnotify-away.spec.ts › the scoped bell names configured ways, pause and attention, and opens the single editor
+[chromium] › tests/e2e/fnotify-away.spec.ts › place groups use supplied actionability, filtered counts and no answer excerpts, and retain the chosen view
+[chromium] › tests/e2e/fnotify-away.spec.ts › a manager sees only enabled-route counts and removal reaches each member’s retained card
+[chromium] › tests/e2e/fnotify-away.spec.ts › paged groups merge one heading/count and explicit Catch up uses the existing card
+[chromium] › tests/accessibility/model.spec.ts › the row editor of a model: switches off, then on with what a thread starts with, a refused largest context, groups and limits
+[chromium] › tests/accessibility/model.spec.ts › the dialog that adds a model
+[chromium] › tests/accessibility/model.spec.ts › a thread's model control: the models, and Speed, Access and Context with where each comes from
+[chromium] › tests/accessibility/model.spec.ts › the model control read by somebody who may only drive the thread, and the list of commands in the box
+[chromium] › tests/e2e/walk-settings.spec.ts › thread opening supplies pending continuation and cancellation en/1440/light
+[chromium] › tests/e2e/walk-settings.spec.ts › MCP destination choices read when opened en/1440/light
+[chromium] › tests/e2e/walk-settings.spec.ts › topic binding reads once and keeps its first paint en/1440/light
+[chromium] › tests/e2e/walk-settings.spec.ts › new thread selects a reported agent in its existing environment en/1440/light
+[chromium] › tests/e2e/documents-places.spec.ts › a document named as its place README is shown there and can be cleared from the document menu
+[chromium] › tests/e2e/documents-places.spec.ts › a document is moved beside another place, and each list shows it where it now is
+[chromium] › tests/e2e/documents-places.spec.ts › a Markdown file is imported as a document whose blocks are what it says
+[chromium] › tests/e2e/release-web.spec.ts › the environment picker groups access and keeps its list accessible at 1280px in light
+[chromium] › tests/e2e/release-web.spec.ts › the environment picker groups access and keeps its list accessible at 400px in light
+[chromium] › tests/e2e/release-web.spec.ts › a thread and the usage log name access programs while retaining the program id
+[chromium] › tests/e2e/workbench-settings-chrome.spec.ts › each place keeps global navigation and one current settings list in its page at 400/en/light
+[chromium] › tests/e2e/workbench-settings-chrome.spec.ts › each place keeps global navigation and one current settings list in its page at 1100/en/light
+[chromium] › tests/e2e/workbench-settings-chrome.spec.ts › the shown page offers Close and no Show, and layout toggles have short names
+[chromium] › tests/accessibility/places.spec.ts › an org’s home: its overview, its members with their invitations, and its Activity
+[chromium] › tests/accessibility/places.spec.ts › the dialogs that make and change places, open
+[chromium] › tests/e2e/arrangement-availability.spec.ts › switch arrangement reasons en/light
+[chromium] › tests/e2e/arrangement-availability.spec.ts › creation arrangement reasons en/light
+[chromium] › tests/e2e/finder-loading.spec.ts › Ctrl+K opens during Loading and retains its query through readiness at 1440/en/light
+[chromium] › tests/e2e/finder-loading.spec.ts › a failed bootstrap keeps navigation and retries only on request at 1440/light
+[chromium] › tests/e2e/mcp-group-move.spec.ts › MCP Move follows one native source-delete plan (en/light/1440)
+[chromium] › tests/e2e/mcp-group-move.spec.ts › group Move confirms history ending and native member notices (en/light/1440)
+[chromium] › tests/e2e/notifications.spec.ts › the three levels are explained, and every way out begins off
+[chromium] › tests/e2e/notifications.spec.ts › a webhook of one’s own is added, said wrong at its fields, changed, tested and removed
+[chromium] › tests/e2e/workbench-grid.spec.ts › duplicate full thread views share the draft, retain independent reading positions and keep copyable focused URLs
+[chromium] › tests/e2e/workbench-grid.spec.ts › a full chat keeps its address and composer as an ordinary closable main tab
+[chromium] › tests/e2e/admin-marks.spec.ts › only the top bar holds the switch; native-only rows carry one mark and every owner fits a phone
+[chromium] › tests/e2e/browser-ticket-creation.spec.ts › browser ticket retry and a new control act in en/1440/light
+[chromium] › tests/e2e/chat-layout.spec.ts › chat controls leave conversation space at 400px in en, light
+[chromium] › tests/e2e/composer-layout.spec.ts › composer guidance and covered Parameters controls 1440/light/zh-CN
+[chromium] › tests/e2e/display-ticket-creation.spec.ts › display ticket retry and a new control act in en/1440/light
+[chromium] › tests/e2e/environment-switch.spec.ts › moves a thread into its named environment from the existing menu (en/light/1440)
+[chromium] › tests/e2e/finder-targets.spec.ts › a permission result discloses its real row and receives focus after the finder leaves
+[chromium] › tests/e2e/implicit-availability.spec.ts › model restrictions and missing context stay explicit en/1440/light
+[chromium] › tests/e2e/machine-native-tools.spec.ts › machine programs and current tool consent 1440px en/light
+[chromium] › tests/e2e/native-image-eligibility.spec.ts › native image eligibility stays a supplied fact en/light/400
+[chromium] › tests/e2e/pane-peek.spec.ts › with hidden panes shown on hover, a pane peeks after the pointer has rested at its edge, not from a crossing, a drag or a window leave, and goes when the pointer leaves it
+[chromium] › tests/e2e/program-versions.spec.ts › operator version workflows (light/1440)
+[chromium] › tests/e2e/resource-table-fit.spec.ts › mount and provider names keep their actions inside the table (en/light/1440)
+[chromium] › tests/e2e/shipped-help-references.spec.ts › shipped help references zh-CN/light/400
+[chromium] › tests/e2e/thread-audience-banner.spec.ts › thread audience sharing path en/1440/light
+[chromium] › tests/e2e/usage-reported-cost.spec.ts › reported cost comparison en/light/1440
+[chromium] › tests/e2e/workbench-navigation.spec.ts › org and department settings accept identifier addresses at 1440/en/light

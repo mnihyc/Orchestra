@@ -3,8 +3,12 @@
  * One thing picked out of a list that follows what is typed: a person, a group, a role. The list is the
  * caller's (it may come from the server as the field is typed in), is drawn in groups under their
  * names, and stays in reach of the arrow keys even for what cannot be chosen, with the reason under
- * it. Enter chooses the one in front, Escape puts the list away, and the field keeps the keyboard
- * throughout.
+ * it. Enter chooses the one in front, Escape puts the list away, Page Up and Page Down move a page,
+ * and the field keeps the keyboard throughout.
+ *
+ * As a quick pick does: a field that holds a choice (`initialActiveValue`) opens on it and marks it, and
+ * keeps its own placeholder (what to type) in the open field; a row that can be chosen is one line, its
+ * name with its one fact beside it; an inspection card opens when the person moves to a row, not by itself.
  */
 import { Check, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -34,7 +38,7 @@ export interface ComboboxOption<Value extends string> {
   text: string;
   /** The original complete name when the caller supplies a shortened label. */
   fullLabel?: string;
-  /** One quiet line under the name. */
+  /** The row's one quiet fact, beside the name; under it, as the reason, where the row cannot be chosen. */
   description?: ReactNode;
   /** Related chips remain outside the row's selectable control. */
   accessory?: ReactNode;
@@ -77,7 +81,7 @@ export interface ComboboxProps<Value extends string> extends FieldSlots {
   displayContent?: ReactNode;
   /** Full text behind an explicitly shortened committed label, for the existing overflow tooltip. */
   displayFullValue?: string;
-  /** Complete-choice fields start on the committed choice; typing still starts at the first match. */
+  /** Complete-choice fields start on the committed choice, which their list marks; typing still starts at the first match. */
   initialActiveValue?: Value;
   groups: readonly ComboboxGroup<Value>[];
   onSelect: (option: ComboboxOption<Value>) => void;
@@ -110,6 +114,9 @@ export interface ComboboxProps<Value extends string> extends FieldSlots {
 
 /** The gap between the field and its popup. */
 const POPUP_GAP = 4;
+/** The rows Page Up and Page Down move where the list's own height cannot be measured. */
+const PAGE_ROWS = 10;
+const BROWSE_KEYS = ['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp'];
 
 /** Change only the measured popup viewport; no ancestor scrolling or React state mutation. */
 function revealOption(viewport: HTMLElement, option: HTMLElement, secondary: HTMLElement | null) {
@@ -127,8 +134,8 @@ export function Combobox<Value extends string>({ inheritance, ...props }: Combob
   if (inheritance === undefined) return <ComboboxField {...props} />;
   // Encode only popup identities; neither this choice nor these identities reach a value writer.
   const options = new Map<string, ComboboxOption<Value>>(props.groups.flatMap((group) => group.options.map((option) => [`value:${option.value}`, option] as const)));
-  const inherited: ComboboxOption<string> = { value: 'inherit', text: inheritance.label, label: <InheritedChoiceLabel choice={inheritance} />,
-    icon: <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{inheritance.selected && <Check aria-hidden />}</span> };
+  // The field marks the inherited row as it marks any current choice.
+  const inherited: ComboboxOption<string> = { value: 'inherit', text: inheritance.label, label: <InheritedChoiceLabel choice={inheritance} /> };
   return <ComboboxField<string> {...props}
     knownChoice={inherited}
     displayValue={inheritance.selected ? inheritance.label : props.displayValue}
@@ -187,6 +194,8 @@ function ComboboxField<Value extends string>({
   const [dismissed, setDismissed] = useState(false);
   const [active, setActive] = useState<number | null>(null);
   const [touchPreview, setTouchPreview] = useState(false);
+  // The highlighted row's inspection card follows the keyboard once the person moves through the list; opening shows the rows alone.
+  const [browsing, setBrowsing] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const anchor = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -226,7 +235,17 @@ function ComboboxField<Value extends string>({
   const requestOpen = (next: boolean) => {
     setDismissed(!next);
     if (!next && initialActiveValue !== undefined) setActive(null);
+    if (!next) setBrowsing(false);
     if (requestedOpen !== undefined) onOpenChange?.(next);
+  };
+  /** The rows one page of the list holds, as it is drawn now. */
+  const pageRows = () => {
+    const popup = content.current;
+    const list = popup === null ? null : hasControls ? popup.querySelector<HTMLElement>('[data-combobox-options]') : popup;
+    const row = list?.querySelector<HTMLElement>('[role="option"]');
+    const viewport = hasFooter ? list : popup;
+    const height = row?.offsetHeight ?? 0, room = viewport?.clientHeight ?? 0;
+    return height > 0 && room > 0 ? Math.max(1, Math.floor(room / height) - 1) : PAGE_ROWS;
   };
 
   // Existing lazy readers observe focus-owned visibility. Controlled callers
@@ -282,8 +301,9 @@ function ComboboxField<Value extends string>({
     footerFocus.current=false;
   },[open,covered,footer,contentVersion]);
 
-  // The side and the height follow the room for the content the popup has now, not the content it opened with.
-  const { place, attach: attachRoom } = useLayerRoom({ shown: open && !covered, anchor, watch: groups, gap: POPUP_GAP, rows: minRows });
+  // The side and the height follow the room for the content the popup has now, not the content it opened with; a field low in a
+  // dialog rises in the dialog's body to list below it rather than over the dialog's title.
+  const { place, attach: attachRoom } = useLayerRoom({ shown: open && !covered, anchor, watch: groups, gap: POPUP_GAP, rows: minRows, rise: true });
   const attachPopup = useCallback((node: HTMLDivElement | null) => { attachContent(node); attachRoom(node); }, [attachContent, attachRoom]);
 
   const choose = (option: ComboboxOption<Value>) => {
@@ -327,8 +347,9 @@ function ComboboxField<Value extends string>({
     if (complete && option !== undefined && option.disabled !== true && typeof option.disabled !== 'string') {
       event.preventDefault(); event.stopPropagation(); onComplete(option); setActive(0); requestOpen(true); return;
     }
-    if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'ArrowRight'].includes(event.key)) setTouchPreview(false);
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'ArrowRight', 'PageDown', 'PageUp'].includes(event.key)) setTouchPreview(false);
     if (guideKey(event)) return;
+    if (BROWSE_KEYS.includes(event.key) && (open || event.key === 'ArrowDown' || event.key === 'ArrowUp')) setBrowsing(true);
     switch (event.key) {
       case 'ArrowRight':
         if (open && query === '' && flat[current]?.preview !== undefined) { event.preventDefault(); previewCard.current?.keep(); }
@@ -357,6 +378,14 @@ function ComboboxField<Value extends string>({
         if (open) {
           event.preventDefault();
           setActive(event.key === 'Home' ? 0 : Math.max(0, flat.length - 1));
+        }
+        break;
+      case 'PageDown':
+      case 'PageUp':
+        if (open && flat.length > 0) {
+          event.preventDefault();
+          const step = pageRows();
+          setActive(event.key === 'PageDown' ? Math.min(flat.length - 1, current + step) : Math.max(0, current - step));
         }
         break;
       case 'Escape':
@@ -504,20 +533,24 @@ function ComboboxField<Value extends string>({
                     <div className={rowActions ? cx('grid', stacked ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_auto] gap-x-1.5') : undefined}
                       style={rowActions ? { gridTemplateRows: `repeat(${options.length * tracks}, auto)` } : undefined}>
                       <div {...(list ? { role: 'listbox', 'aria-label': typeof label !== 'string' ? group.label : offered.length === 1 || group.label === '' ? label : `${label} · ${group.label}`, 'aria-busy': loading || undefined } : {})}
-                        className={rowActions ? cx('grid min-w-0 grid-cols-subgrid grid-rows-subgrid', stacked ? 'col-start-1' : 'col-span-2') : undefined}
-                        /* A definite column: auto-placed, the list would skip the accessories' cells and start after them. */
+                        className={rowActions ? 'grid min-w-0 grid-cols-subgrid grid-rows-subgrid' : undefined}
+                        // Placed as explicitly as the actions beside it: an auto-placed list would step aside from the first action's cell.
                         style={rowActions ? { gridRow: `1 / span ${options.length * tracks}`, gridColumn: stacked ? '1' : '1 / span 2' } : undefined}>
                         {options.map((option, position) => {
                           const mine = (starts[at] ?? 0) + position;
-                          const off = loading || option.disabled === true || typeof option.disabled === 'string';
-                          const row = <Choice presentation="picker" key={option.value} name={option.preview?.renderName === undefined ? option.fullLabel === undefined ? option.label : <span data-overflow-text={option.fullLabel}>{option.label}</span> : option.preview.renderName(option.label)} description={typeof option.disabled === 'string' ? option.disabled : option.description} compact>
-                            {(content, words) => <ChoiceCard preview={option.preview} active={mine === current && open && !touchPreview} controller={mine === current ? previewCard : undefined} owner={listId} returnFocus={() => { restoringInput.current = true; input.current?.focus(); restoringInput.current = false; }}><div
+                          const refused = option.disabled === true || typeof option.disabled === 'string';
+                          const off = loading || refused;
+                          const now = initialActiveValue !== undefined && option.value === initialActiveValue;
+                          const row = <Choice presentation="picker" key={option.value} name={option.preview?.renderName === undefined ? option.fullLabel === undefined ? option.label : <span data-overflow-text={option.fullLabel}>{option.label}</span> : option.preview.renderName(option.label)} description={typeof option.disabled === 'string' ? option.disabled : option.description} compact inline={!refused} reason={refused}>
+                            {(content, words) => <ChoiceCard preview={option.preview} active={mine === current && open && !touchPreview && browsing} controller={mine === current ? previewCard : undefined} owner={listId} returnFocus={() => { restoringInput.current = true; input.current?.focus(); restoringInput.current = false; }}><div
                               {...words}
-                              aria-describedby={stacked && option.accessory !== undefined
-                                ? [`${optionId(mine)}-secondary`, words['aria-describedby']].filter(Boolean).join(' ') : words['aria-describedby']}
+                              // A related chip beside or under the row (its owner, say) is read with it, after its facts.
+                              aria-describedby={option.accessory !== undefined
+                                ? [words['aria-describedby'], `${optionId(mine)}-secondary`].filter(Boolean).join(' ') : words['aria-describedby']}
                               id={optionId(mine)}
                               role="option"
                               aria-selected={mine === current}
+                              aria-current={now || undefined}
                               aria-disabled={off || undefined}
                               onMouseDown={(event) => { if (!(event.target instanceof Element && event.target.closest('a[href],button,[data-choice-inspection]'))) event.preventDefault(); }}
                               onClick={(event) => { if (!(event.target instanceof Element && event.target.closest('a[href],button,[data-choice-inspection]'))) choose(option); }}
@@ -529,6 +562,8 @@ function ComboboxField<Value extends string>({
                                 off ? 'text-text-muted' : 'text-text',
                               )}
                             >
+                              {/* A field that holds a choice marks it, in the column a select marks its own. */}
+                              {initialActiveValue !== undefined && <span aria-hidden className="flex size-4 shrink-0 items-center justify-center text-accent-text">{now && <Check />}</span>}
                               {option.icon !== undefined && <span className="flex shrink-0 items-center text-text-muted">{option.icon}</span>}
                               {content}
                             </div></ChoiceCard>}
@@ -537,7 +572,7 @@ function ComboboxField<Value extends string>({
                         })}
                       </div>
                       {rowActions && options.map((option, position) => option.accessory === undefined ? null : <span key={option.value} data-choice-accessory
-                        id={stacked ? `${optionId((starts[at] ?? 0) + position)}-secondary` : undefined}
+                        id={`${optionId((starts[at] ?? 0) + position)}-secondary`}
                         className={cx('inline-flex min-w-0 self-center', stacked ? 'ps-8 pe-2 pb-1' : 'max-w-32')}
                         style={{ gridColumn: stacked ? 1 : 2, gridRow: nameRow(position) + (stacked ? 1 : 0) }}>{option.accessory}</span>)}
                     </div>

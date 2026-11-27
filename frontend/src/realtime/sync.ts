@@ -8,14 +8,17 @@
  * - takes a frame whose "before" is where the page stands, drops one that brings nothing new, and
  *   on any other asks HTTP for what changed since where it stands, before going on;
  * - loads everything again when the server says that the gap is too large to fill;
- * - after a reconnect, subscribes again from where it stands.
+ * - after a reconnect, subscribes again from where it stands;
+ * - after a load that failed for what passes by itself (the line, the server's own trouble), loads again with the shared
+ *   read pauses for as long as it is followed, and at once when the socket is back: what is held stays meanwhile, under
+ *   the view's failure line. A refusal waits for the reader.
  *
  * What the rows are, and where they are kept, is the feed's own business: this module is given the
  * request that loads them and the store that takes them.
  */
-import { retryPause, retryRead } from '@/lib/requests';
+import { NetworkError, retryPause, retryRead } from '@/lib/requests';
 import { isReadCancelled } from '@/api/reads';
-import { client } from '@/api/client';
+import { ApiError, client } from '@/api/client';
 import { beginReadAttempt, failReadAttempt, noteReadError, requestReader, retireReadAttempt,
   scheduleReadRetry, waitForReadRetry, watchReadAbort } from '@/lib/readAttempts';
 import type { FeedFrame, RealtimeSocket, Subscription } from '@/realtime/socket';
@@ -76,6 +79,12 @@ export function isCancellation(error: unknown): boolean {
   return isReadCancelled(error);
 }
 
+/** Whether a load's failure passes by itself: no answer came, or the server answered that it could not serve it now. */
+function passes(error: unknown): boolean {
+  if (error instanceof NetworkError) return error.transient;
+  return error instanceof ApiError && (error.status >= 500 || error.status === 408 || error.status === 429);
+}
+
 export interface FeedFollower {
   /** The sequence the page has come to; `null` before the first load. */
   lastSeq: () => number | null;
@@ -107,6 +116,9 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
   /** How many reads in a row were cancelled while this follower still stood: they are asked for again, not reported. */
   let cancelled = 0;
   let cancellationRetry: ReturnType<typeof setTimeout> | undefined;
+  /** How many loads in a row failed for what passes by itself, and the next attempt that waits out its pause. */
+  let failures = 0;
+  let recovery: ReturnType<typeof setTimeout> | undefined;
   const run = (work: (version: number) => Promise<void>): void => {
     const version = generation;
     busy = busy.then(async () => {
@@ -139,14 +151,50 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
           return;
         }
         feed.failed?.(error);
+        // Nothing else would ask again: a reload that failed has no subscription, and a quiet feed sends no frame.
+        if (passes(error)) recoverLater();
       }
     });
   };
+
+  function recoverLater(): void {
+    clearTimeout(recovery);
+    const version = generation;
+    const pause = retryPause(failures);
+    failures += 1;
+    recovery = setTimeout(() => { recover(version); }, pause);
+  }
+
+  /** Loads what the feed lacks now: the whole state where it holds none, else what changed since where it stands. */
+  function recover(version: number): void {
+    clearTimeout(recovery);
+    recovery = undefined;
+    if (!current(version)) return;
+    run(async (version) => {
+      await repair(version);
+      if (current(version) && subscription === null) subscribe();
+    });
+  }
+
+  /** A load that came through ends the wait for the next attempt. */
+  function recovered(): void {
+    failures = 0;
+    clearTimeout(recovery);
+    recovery = undefined;
+  }
+
+  // The socket back is the moment to try, not the end of the pause. A transport made for a test may have no status.
+  const unwatchSocket = (socket as Partial<Pick<RealtimeSocket, 'status'>>).status?.subscribe((now, before) => {
+    if (now.phase === 'ready' && before.phase !== 'ready' && recovery !== undefined) recover(generation);
+  });
 
   /** A former authority's work cannot publish rows, errors or cursors into its replacement. */
   function retireLoads(cursor: 'clear' | 'keep' = 'clear'): void {
     clearTimeout(cancellationRetry);
     cancellationRetry = undefined;
+    failures = 0;
+    clearTimeout(recovery);
+    recovery = undefined;
     generation += 1;
     queuedRepair = null;
     catchingUp = null;
@@ -163,6 +211,7 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
     if (!loaded.complete) throw new Error('The full feed opening was incomplete');
     feed.reset(loaded.data, loaded.seq);
     lastSeq = loaded.seq;
+    recovered();
   }
 
   async function repair(version: number): Promise<void> {
@@ -185,6 +234,7 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
       if (current(version) && feed.scope !== undefined) subscribe();
       return;
     }
+    recovered();
     // Frames that continued the page while this read was on its way may have brought it further than the answer: an
     // older answer is let go. One as new as the page is taken, as always (it ends a failure the page shows).
     if (loaded.seq < lastSeq) return;
@@ -309,6 +359,7 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
       stoppedNow = true;
       socketGeneration += 1;
       retireLoads();
+      unwatchSocket?.();
       subscription?.unsubscribe(); subscription = null;
     },
   };

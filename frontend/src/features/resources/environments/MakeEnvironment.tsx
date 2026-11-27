@@ -17,6 +17,7 @@ import { HOST_POOL_PREFIX, hostChoiceTarget } from '@/features/resources/pools/h
 import { borrowsData, DataSourcesEditor, madeDataSources } from '@/features/resources/environments/DataSources';
 import { NewAccess } from '@/features/resources/NewAccess';
 import { HomePicker } from '@/features/resources/HomePicker';
+import { NoHostLine } from '@/features/resources/hosts/NoHostLine';
 import { Hint } from '@/features/help/Hint';
 import type { NodeKind, Environment, NewEnvironmentAccess, NewResourceAccess } from '@/generated/api-types';
 import { useActKey, useForm } from '@/lib/forms';
@@ -25,7 +26,7 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { hostChoice, hostUnavailable, templateChoice, templateUnavailable } from '@/features/resources/choiceAvailability';
+import { hostChoice, hostUnavailable, mayUseAnyHost, templateChoice, templateUnavailable } from '@/features/resources/choiceAvailability';
 import { RuntimeChoice, defaultRuntime, runtimeOffer } from '@/features/resources/isolation/RuntimeChoice';
 import { classNamed, useIsolationWords } from '@/features/resources/isolation/runtimes';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -115,12 +116,12 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
     element?.focus();
   }, [make.error, placed]);
   const unplaced = make.error instanceof ApiError && make.error.faults().some((fault) => !Object.hasOwn(form.values, fault.path));
-  // The person may use no host: none is listed to them (a host is its owner's, the system's own host included), or the server
-  // names none that blocked it. Said in the dialog with the two ways on, not as blockers to look at that are not there; once
-  // refused, the refusal says it in the field's place.
-  const noneShared = hosts.isSuccess && individualHosts.length === 0 && poolId === undefined;
+  // The person may use no host: none is listed to them (a host is its owner's, the system's own host included), or none of
+  // those listed gives them Use, and the server names none that blocked it. Said in one line under Host with what fixes it,
+  // not as blockers to look at that are not there; once refused, the refusal says it in that line's place.
+  const noneToUse = hosts.isSuccess && poolId === undefined && !mayUseAnyHost(individualHosts, 'environment');
   const noHostRefused = make.error instanceof ApiError && make.error.is('plan.blocked') && make.error.problem.reason === 'no_host' && planHostBlockers(make.error).length === 0;
-  const noneWords = t(noneShared ? 'environments.make.noHostShared' : 'environments.make.noHost');
+  const noHostLine = <NoHostLine kind="environment" hosts={individualHosts} />;
 
   const waitingForHost = hosts.isPending && poolId === undefined && form.values.host_id !== MOST_ROOM;
 
@@ -143,7 +144,10 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
     >
       <form ref={formElement} id="make-environment" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => templateAvailable && hostAvailable && make.mutate(values.name))}>
         <Input label={t('environments.make.name')} {...form.field('name')} autoComplete="off" />
-        {make.error !== null && (!placed || unplaced) && <div ref={errorElement} tabIndex={-1}><ErrorAlert error={make.error} {...(noHostRefused ? { message: t('environments.make.noHostShared') } : {})} /></div>}
+        {make.error !== null && (!placed || unplaced) && <div ref={errorElement} tabIndex={-1}>
+          {noHostRefused && noneToUse ? <div role="alert">{noHostLine}</div>
+            : <ErrorAlert error={make.error} {...(noHostRefused ? { message: t('environments.make.noHostShared') } : {})} />}
+        </div>}
         {templates.isPending ? (
           <SkeletonRows read={templates} rows={3} />
         ) : templates.isError ? (
@@ -183,15 +187,16 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
               initialActiveValue={form.values.host_id}
               displayValue={form.values.host_id === MOST_ROOM ? t('choiceCatalog.placement.automatic.name') : poolId !== undefined ? pool?.name ?? t('resourceGroups.selectionUnavailable') : host?.name ?? t(waitingForHost ? 'common.loading' : 'environments.make.hostUnavailable')}
               query={hostTyped} onQueryChange={setHostTyped} open={hostOpen} onOpenChange={(open) => { setHostOpen(open); if (!open) setHostTyped(''); }}
-              error={form.field('host_id').error ?? (noneOpen && form.values.host_id === MOST_ROOM ? noHostRefused ? undefined : noneWords : !hostAvailable && !waitingForHost ? t('environments.make.hostUnavailable') : undefined)}
+              error={form.field('host_id').error ?? (noneOpen && form.values.host_id === MOST_ROOM ? noHostRefused || noneToUse ? undefined : t('environments.make.noHost') : !hostAvailable && !waitingForHost ? t('environments.make.hostUnavailable') : undefined)}
               disabled={make.isPending}
               onSelect={(option) => { form.set('host_id', option.value); setHostOpen(false); setHostTyped(''); setDataSources(madeDataSources()); setRuntime(''); }}
               groups={[{ id:'hosts', label:'', options:[
-                { value: MOST_ROOM, ...choiceOption(t, 'placement.automatic'), text:t('choiceCatalog.placement.automatic.name'), description: noneOpen ? noneWords : t('environments.make.mostRoom') },
+                { value: MOST_ROOM, ...choiceOption(t, 'placement.automatic'), text:t('choiceCatalog.placement.automatic.name'), description: noneOpen ? t(noneToUse ? 'resourceChoices.hostUse' : 'environments.make.noHost') : t('environments.make.mostRoom') },
                 ...individualHosts.map((entry) => ({ ...hostChoice(entry, t, 'environment', template?.driver), value:entry.id, label:entry.name, text:entry.name })),
               ] }, { id:'pools', label:t('screens.pools.title'), options:pools.options }]}
               footer={<>{hosts.isPending && <SkeletonRows read={hosts} rows={1} />}{pools.footer}</>}
             />
+            {noneToUse && form.values.host_id === MOST_ROOM && !noHostRefused && noHostLine}
             {hosts.isError && <ErrorState compact error={hosts.error} retrying={hosts.isRefetching} onRetry={() => void hosts.refetch()} />}
             {templateAvailable && <RuntimeChoice template={template} hosts={host !== null && hostAvailable ? [host] : open} value={runtime} onChange={setRuntime} policy={runtimePolicy} disabled={make.isPending} />}
             {templateAvailable && <DataSourcesEditor machine={host?.machine.id} driver={template.driver} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={make.isPending} />}
