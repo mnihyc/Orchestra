@@ -1,13 +1,17 @@
-// The build pins the public thread document to this worker. Development uses the normal page.
-const threadShell = null;
+// The build pins the release's public application document to this worker, with the addresses of the screens it opens
+// (every screen of the application but sign-in, whose document carries the installation's policy). A returning screen
+// then opens without asking the network for its document: one round trip less before its first request. Development
+// uses the normal page.
+const shell = null;
+const screens = shell ? shell.screens.map((pattern) => new RegExp(pattern)) : [];
 
 function readShell() {
-  return fetch(threadShell.url, { credentials: 'omit', cache: 'force-cache', integrity: threadShell.integrity, redirect: 'error' });
+  return fetch(shell.url, { credentials: 'omit', cache: 'force-cache', integrity: shell.integrity, redirect: 'error' });
 }
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
-    if (threadShell) {
+    if (shell) {
       // A failed warmup leaves normal navigation and push available.
       try { await (await readShell()).arrayBuffer(); } catch { /* The next navigation can try again. */ }
     }
@@ -15,7 +19,7 @@ self.addEventListener('install', (event) => {
   })());
 });
 
-async function threadDocument(request) {
+async function shellDocument(request) {
   try {
     const source = await readShell();
     const headers = new Headers(source.headers);
@@ -37,10 +41,10 @@ async function threadDocument(request) {
 }
 
 self.addEventListener('fetch', (event) => {
-  if (!threadShell || event.request.method !== 'GET' || event.request.mode !== 'navigate') return;
+  if (!shell || event.request.method !== 'GET' || event.request.mode !== 'navigate') return;
   const address = new URL(event.request.url);
-  if (address.origin === self.location.origin && /^\/thread\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(address.pathname)) {
-    event.respondWith(threadDocument(event.request));
+  if (address.origin === self.location.origin && screens.some((screen) => screen.test(address.pathname))) {
+    event.respondWith(shellDocument(event.request));
   }
 });
 

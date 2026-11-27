@@ -1,7 +1,7 @@
 /** Usable topic profiles and qualified settings sections in both languages, widths and themes. */
 import { expect, test } from '@playwright/test';
 import { RUNS_ON } from '../doubles/fixtures.ts';
-import { ACME, expectAccessible, scenario, signIn } from './support.ts';
+import { ACME, expectAccessible, openTopicTab, scenario, signIn } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 const CONTROL_TIMEOUT_MS = 10_000;
@@ -24,7 +24,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await expect(main.getByRole('heading', { name: 'Fix login', level: 1, exact: true })).toBeVisible();
     expect(reads.filter((path) => path.endsWith('/binding/options'))).toEqual([]);
     const optionsReply = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith(`/nodes/${ACME.fixLogin}/binding/options`));
-    await main.getByRole('tab', { name: locale === 'en' ? 'Agents' : '智能体', exact: true }).click();
+    await openTopicTab(page, locale === 'en' ? 'Agents' : '智能体');
     expect((await optionsReply).ok()).toBe(true);
     const panel = main.locator('[data-topic-agents]');
     await expect(panel).toBeVisible();

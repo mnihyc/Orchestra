@@ -115,8 +115,7 @@ impl Command {
 }
 
 /// The refusal of a deletion plan that does not fit its command.
-pub const DELETION_PLAN_MISFIT: &str =
-    "Move to another org requires its complete native deletion plan, and only it and deletion take one";
+pub const DELETION_PLAN_MISFIT: &str = "Move to another org requires its complete native deletion plan, and only it and deletion take one";
 
 /// Canonical arguments, independent of the caller's display paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

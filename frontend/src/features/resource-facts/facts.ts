@@ -10,13 +10,13 @@ import { choiceObservation, speedText } from '@/features/usage/performance';
 import { reportedHarnessName } from '@/features/resources/agents/descriptor';
 import { programNameIn } from '@/features/resources/programNames';
 import { placementStorage } from '@/features/resources/hosts/words';
+import { diskWords } from '@/features/resources/amounts';
 import type { Agent, CapStatus, Environment, Host, HostRef, MachineRef, McpServer, McpState, ModelParameters, Mount, PlaceHost, Provider, ProviderRuntimeRow, ProviderChoiceUsage, ResourceSample, Pool, Skill, Template } from '@/generated/api-types';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { formatSpan, formatTimeOfDay, type TimeContext } from '@/lib/time';
 
-/** Resource counts use the binary megabytes and gigabytes already used by the places list. */
+/** Memory is counted in binary megabytes, as hosts report it; a disk is in decimal gigabytes, said by `diskWords`. */
 export const MEMORY_BYTES_PER_MB = 1024 * 1024;
-export const DISK_BYTES_PER_GB = 1024 * 1024 * 1024;
 
 export type ProviderFacts = Pick<Provider, 'id' | 'name'> & Omit<Partial<Provider>, 'runtime'> & { runtime?: Provider['runtime'] | ProviderRuntimeRow };
 export type HostFacts = Pick<Host, 'id' | 'name'> & Partial<Host>;
@@ -140,13 +140,14 @@ export function hostHint(subject: Extract<ResourceSubject, { kind: 'host' }>, co
     ? t('resourceFacts.memoryTotal', { total: memoryTotal })
     : t('resourceFacts.memoryFree', { free: formatBytes(Math.max(0, capacity.memory_mb - memory) * MEMORY_BYTES_PER_MB, locale), total: memoryTotal });
   // The disk is the storage the environment's volumes would go to, as the host page shows it: not the node's own data volume.
-  const storage = place === undefined ? undefined : placementStorage(place.storages);
-  const diskWords = storage === undefined || storage.capacity_gb <= 0 ? null
-    : t('resourceFacts.diskFree', { free: formatNumber(Math.max(0, storage.free_gb), locale), total: formatNumber(storage.capacity_gb, locale) });
+  // Every picker of a host says it, in the same words and units as memory: what is free of what there is.
+  const storage = placementStorage(place?.storages ?? host.storages ?? []);
+  const diskFree = storage === undefined || storage.capacity_gb <= 0 ? null
+    : t('resourceFacts.diskFree', { free: diskWords(Math.max(0, storage.free_gb), t, locale), total: diskWords(storage.capacity_gb, t, locale) });
   return hint([
     count === undefined ? null : t('resourceFacts.running', { count, value: formatNumber(count, locale) }),
     memoryWords,
-    diskWords,
+    diskFree,
   ].filter(Boolean).join(t('resourceFacts.separator')) || t('providerPlan.notReported'));
 }
 

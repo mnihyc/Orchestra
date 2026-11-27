@@ -534,7 +534,10 @@ impl effects::Apply for Delete {
                     .await
                     .map_err(ApiError::engine)?;
                 return Ok(effects::Outcome::Applied(Outcome::Deleted {
-                    receipt: NodeDeleted { deletion_id: None },
+                    receipt: NodeDeleted {
+                        deletion_id: None,
+                        environments: None,
+                    },
                     wake,
                     originals: value.original_callers.clone(),
                 }));
@@ -545,6 +548,8 @@ impl effects::Apply for Delete {
                 orch_settings::retention::deleted_keep_days(conn).await?,
             );
             let node = value.native.node();
+            // How many environments went to the trash with it, for a person's own session.
+            let mut trashed = None;
             if kind == NodeKind::Thread {
                 let removed = ctx
                     .app
@@ -612,21 +617,27 @@ impl effects::Apply for Delete {
                         .await
                         .map_err(ApiError::internal)?
                 } else {
-                    (
-                        ctx.app
-                            .engine
-                            .remove_prepared_home_in(
-                                conn,
-                                &value.native,
-                                principal.user(),
-                                principal.now(),
-                                value.keep_at,
-                            )
-                            .await
-                            .map_err(crate::routes::environments::removal_schedule_error)?,
-                        json!([]),
-                    )
+                    // A place's environments go to the trash with it, as an org's do, to come back with it; their
+                    // removal waits for the trash's end.
+                    ctx.app
+                        .engine
+                        .trash_prepared_home_resources_in(
+                            conn,
+                            &value.native,
+                            value.keep_at,
+                            principal.user(),
+                            (principal.now(), deadline),
+                            &origin(ctx),
+                        )
+                        .await
+                        .map_err(ApiError::internal)?
                 };
+                if value.keep_at.is_none()
+                    && !environments.is_empty()
+                    && !native::modern(principal.caller())
+                {
+                    trashed = Some(i64::try_from(environments.len()).unwrap_or(i64::MAX));
+                }
                 let gone = hierarchy::delete_subtree(conn, id, principal.user(), ctx.now)
                     .await?
                     .saturating_add(
@@ -639,7 +650,10 @@ impl effects::Apply for Delete {
             }
             let deletion_id = orch_db::queries::trace::node_deletion(conn, id).await?;
             Ok(effects::Outcome::Applied(Outcome::Deleted {
-                receipt: NodeDeleted { deletion_id },
+                receipt: NodeDeleted {
+                    deletion_id,
+                    environments: trashed,
+                },
                 wake: None,
                 originals: value.original_callers.clone(),
             }))

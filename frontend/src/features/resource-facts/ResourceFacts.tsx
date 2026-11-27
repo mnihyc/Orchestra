@@ -9,6 +9,7 @@ import { UserChip } from '@/ui/UserChip';
 import { useFormatContext } from '@/lib/appearance';
 import { useNow } from '@/lib/time';
 import { cx } from '@/ui/cx';
+import { factLine } from '@/ui/Choice';
 import { DetailCard, type CardPreview } from '@/ui/DetailCard';
 import { Meter } from '@/ui/Meter';
 import { StatusDot } from '@/ui/StatusDot';
@@ -84,10 +85,13 @@ function EnvironmentChoiceDetails({ subject }: { subject: Extract<ResourceSubjec
   const { environment } = subject;
   const location = environment.machine?.name ?? subject.host?.name ?? environment.host?.name;
   const standing = environmentHint(subject, { ...format, t, now }, false);
-  return <span data-resource-hint="environment" className="flex min-w-0 flex-wrap items-center gap-x-1 text-sm text-text-muted">
-    {location && <span className="wrap-anywhere">{location}</span>}
-    {environment.owner && environment.owner.id !== me && <UserChip user={environment.owner} size={24} />}
-    {standing.warning ? <StatusDot tone="warning" label={standing.text} showLabel /> : standing.text}
+  // Inline, so that a picker row keeps it to its one line.
+  return <span data-resource-hint="environment" className="min-w-0 text-sm text-text-muted">
+    {factLine([
+      location && <span className="wrap-anywhere">{location}</span>,
+      environment.owner && environment.owner.id !== me && <UserChip user={environment.owner} size={24} />,
+      standing.warning ? <StatusDot tone="warning" label={standing.text} showLabel /> : standing.text,
+    ], t('resourceFacts.separator'))}
   </span>;
 }
 
