@@ -111,6 +111,101 @@ use orch_types::Id;
 use orch_types::Json;
 
 use std::collections::BTreeMap;
+async fn environment_locations(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+) -> ApiResult<Vec<api::ProviderSetupEnvironment>> {
+    let ids: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM environments WHERE deleted_at IS NULL ORDER BY created_at,id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    let allowed: Vec<Id> = resources::effective_among(conn, principal, &ids, Policy::default())
+        .await
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|row| {
+            row.held
+                .iter()
+                .any(|held| held.permission == Permission::EnvironmentUse)
+        })
+        .map(|row| row.object.id)
+        .collect();
+    let environments = super::view::environment_refs(conn, &allowed, &[], principal.now()).await?;
+    let machines = orch_db::queries::provider_connections::current_machines(conn, &allowed).await?;
+    let ids: Vec<Id> = machines.iter().map(|(_, machine)| *machine).collect();
+    let mut references = machine_refs(&ctx.app, conn, &ids).await?;
+    let mut rows: std::collections::HashMap<Id, _> = queries::machines_among(conn, &ids)
+        .await?
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
+    let mut connectors = std::collections::HashMap::new();
+    for (environment, machine) in machines {
+        if let (Some(reference), Some(row)) = (references.remove(&machine), rows.remove(&machine)) {
+            connectors.insert(
+                environment,
+                runtime_service(reference, row.roles, &row.facts),
+            );
+        }
+    }
+    let result = environments
+        .into_iter()
+        .map(|(_, environment)| {
+            let connector = connectors.remove(&environment.id);
+            api::ProviderSetupEnvironment {
+                environment,
+                connector,
+            }
+        })
+        .collect();
+    Ok(result)
+}
+
+fn runtime_service(
+    machine: api::MachineRef,
+    roles: Vec<String>,
+    facts: &Json,
+) -> api::ProviderSetupMachine {
+    api::ProviderSetupMachine {
+        directory_runtime: facts
+            .get("provider_runtime_descriptor")
+            .or_else(|| facts.get("environment_descriptor"))
+            .and_then(|descriptor| descriptor.get("lifecycle"))
+            .and_then(Json::as_str)
+            == Some("attach"),
+        arrangements: orch_engine::binding::arrangements_of_policy(
+            orch_db::queries::environment_facts::policy_in(facts),
+        ),
+        upstreams: if machine.placement == orch_api_contract::environment::Placement::Managed {
+            Some(vec!["*".into()])
+        } else {
+            facts
+                .pointer("/policy/provider.upstreams")
+                .and_then(Json::as_array)
+                .map(|urls| {
+                    urls.iter()
+                        .filter_map(Json::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+        },
+        harnesses: facts
+            .get("adapters")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|adapter| adapter.get("kind").and_then(Json::as_str))
+            .filter(|kind| super::agents::machine_reports(facts, kind))
+            .map(str::to_owned)
+            .collect(),
+        machine,
+        roles,
+    }
+}
+
 /// What a protocol is called where a person chooses one.
 fn protocol_title(name: &str) -> &'static str {
     static INTERFACES: std::sync::OnceLock<
@@ -189,6 +284,7 @@ fn consents(
             available: placed_as.is_none_or(|types| types.contains(&kind)),
             puts: puts.to_owned(),
             form: leaves.then(|| ArrangementConsentForm {
+                expires: false,
                 name: "credential".to_owned(),
                 title: "Sign-in".to_owned(),
                 lifetime_secs: None,
@@ -387,7 +483,6 @@ pub(super) async fn prepare_reply(
         ),
     };
     let mut subscriptions = Vec::new();
-    let mut unreported = Vec::new();
     let mut unavailable = Vec::new();
     let mut withheld = Vec::new();
     let mut unshared = Vec::new();
@@ -407,10 +502,9 @@ pub(super) async fn prepare_reply(
                     name: agent.name.clone(),
                     names: crate::programs::shipped_name(&row.harness_kind, None).names,
                 },
-                agent: Some(agent.clone()),
+                agent: Some(agent),
                 reason: api::ProviderSetupSubscriptionUnavailableReason::NotReported,
             });
-            unreported.push(agent);
             continue;
         };
         for protocol in descriptor
@@ -471,12 +565,14 @@ pub(super) async fn prepare_reply(
             .filter_map(|entry| same(&entry.kind))
             .collect();
         let proposed: Vec<ArrangementType> = native.arrangements.iter().filter_map(same).collect();
+        let mut arrangements = consents(&proposed, Some(&placed_as));
+        super::providers::native_consent_forms(&mut arrangements, Some(&descriptor.credentials));
         subscriptions.push(ProviderSetupSubscription {
             agent,
             harness: name,
             methods: native.login_methods.iter().filter_map(same).collect(),
             options_schema: native.options_schema.clone(),
-            arrangements: consents(&proposed, Some(&placed_as)),
+            arrangements,
             template: template.clone(),
         });
     }
@@ -516,7 +612,7 @@ pub(super) async fn prepare_reply(
             reason,
         });
     }
-    let protocols = PROTOCOLS
+    let mut protocols: Vec<ProviderSetupProtocol> = PROTOCOLS
         .iter()
         .map(|name| ProviderSetupProtocol {
             name: (*name).to_owned(),
@@ -525,6 +621,8 @@ pub(super) async fn prepare_reply(
             agents: speaking.get(*name).cloned().unwrap_or_default(),
         })
         .collect();
+    protocols
+        .sort_by_key(|protocol| protocol.name != orch_model_contract::protocol::OPENAI_RESPONSES);
     let presets = presets_of(
         setting::<Json>(conn, Place::Node(org), keys::PROVIDERS_PRESETS)
             .await
@@ -548,41 +646,9 @@ pub(super) async fn prepare_reply(
                         .any(|permission| matches!(permission.as_str(), "machine.use" | "host.use"))
                 })
             })
-            .map(|machine| api::ProviderSetupMachine {
-                directory_runtime: machine
-                    .facts
-                    .get("provider_runtime_descriptor")
-                    .or_else(|| machine.facts.get("environment_descriptor"))
-                    .and_then(|descriptor| descriptor.get("lifecycle"))
-                    .and_then(Json::as_str)
-                    == Some("attach"),
-                arrangements: orch_engine::binding::arrangements_of_policy(
-                    orch_db::queries::environment_facts::policy_in(&machine.facts),
-                ),
-                upstreams: machine
-                    .facts
-                    .pointer("/policy/provider.upstreams")
-                    .and_then(Json::as_array)
-                    .map(|urls| {
-                        urls.iter()
-                            .filter_map(Json::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    }),
-                harnesses: machine
-                    .facts
-                    .get("adapters")
-                    .and_then(Json::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|adapter| adapter.get("kind").and_then(Json::as_str))
-                    .filter(|kind| super::agents::machine_reports(&machine.facts, kind))
-                    .map(str::to_owned)
-                    .collect(),
-                machine: machine.base,
-                roles: machine.roles,
-            })
+            .map(|machine| runtime_service(machine.base, machine.roles, &machine.facts))
             .collect();
+    let environments = environment_locations(ctx, conn, principal).await?;
     let mine: Vec<Id> = if let Some(provider) = &provider {
         provider.key_machine_id.into_iter().collect()
     } else {
@@ -674,6 +740,11 @@ pub(super) async fn prepare_reply(
             .map(|row| ("machine".to_owned(), row.machine.id)),
     );
     subjects.extend(
+        environments
+            .iter()
+            .map(|row| ("environment".to_owned(), row.environment.id)),
+    );
+    subjects.extend(
         template_rows
             .iter()
             .map(|row| ("template".to_owned(), row.id)),
@@ -682,10 +753,10 @@ pub(super) async fn prepare_reply(
     Ok(PreparedReply {
         grouping,
         reply: ProviderSetup {
+            environments: Some(environments),
             grouping: Vec::new(),
             machines: Some(choices),
             subscriptions,
-            subscriptions_unreported: Some(unreported),
             subscriptions_unavailable: Some(unavailable),
             subscriptions_withheld: withheld,
             subscriptions_unshared: unshared,

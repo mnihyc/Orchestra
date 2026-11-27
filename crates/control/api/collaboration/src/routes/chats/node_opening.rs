@@ -52,6 +52,27 @@ pub(super) struct PreparedNodeOpening {
     summaries: Option<std::sync::Arc<crate::routes::summaries::embedded::Embedded>>,
 }
 
+impl PreparedNodeOpening {
+    /// The selected chat and any chat whose words appear in a summary pass through the inspection door.
+    /// An additional chat has its own standing and must be checked on a writable snapshot.
+    pub(super) fn may_audit(&self) -> bool {
+        let chat = self.opening.as_ref().map(|read| &read.loaded);
+        chat.is_some_and(inspection::requires_audit)
+            || self
+                .summaries
+                .iter()
+                .flat_map(|summaries| &summaries.views)
+                .any(|view| {
+                    std::iter::once(view.identity.fact())
+                        .chain(&view.inputs)
+                        .any(|fact| {
+                            fact.object.kind == CHAT
+                                && chat.is_none_or(|loaded| Some(loaded.row.id) != fact.object.id)
+                        })
+                })
+    }
+}
+
 struct Scope {
     node: Id,
     kind: NodeKind,
@@ -208,14 +229,22 @@ async fn prepare_inner(
                 .map(|node| node.id)
         })
         .collect();
-    let visible =
-        view::viewable_ways(conn, &work.principal, &candidates, Policy::default()).await?;
+    let ancestors: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|id| *id != root)
+        .collect();
+    let visible = if ancestors.is_empty() {
+        Default::default()
+    } else {
+        view::viewable_ways(conn, &work.principal, &ancestors, Policy::default()).await?
+    };
     let mut scopes = Vec::new();
     let mut loaded = Vec::new();
     let mut chat_targets = Vec::new();
     // Retain the existing nearest-kind order rather than HashMap/database order.
     for id in candidates {
-        if !visible.contains_key(&id) {
+        if id != root && !visible.contains_key(&id) {
             continue;
         }
         let Some(node) = path.iter().find(|node| node.id == id) else {

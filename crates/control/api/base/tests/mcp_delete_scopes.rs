@@ -13,7 +13,7 @@ use orch_access_contract::{decisions::ObjectRef, key_scope::KeyScope, permission
 use orch_api_contract::resources::McpServerDelete;
 use orch_api_core::{
     dispatch::StoredCommand,
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
     thread_access::AuthzAccess,
 };
@@ -39,7 +39,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>, seconds: i64) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -76,9 +76,19 @@ async fn start(world: &World, kind: ResourceKind, id: Id, owner: Id) {
     .unwrap();
 }
 async fn server(world: &World, owner: Id, environment: Option<Id>, machine: Option<Id>) -> Id {
+    static PRESET_SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let id = new_id();
+    // Retained presets keep their unique name after deletion; each reviewed operation has its own resource.
+    let name = if machine.is_some() {
+        "native-tool".to_owned()
+    } else {
+        format!(
+            "native-tool-{}",
+            PRESET_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    };
     rows::insert(&mut *world.conn().await,&McpRow {
-        id,name:"native-tool".into(),description:"Private retained definition".into(),org_id:None,home_id:None,
+        id,name,description:"Private retained definition".into(),org_id:None,home_id:None,
         owner_id:Some(owner),machine_id:machine,environment_id:environment,
         spec:match machine {
             Some(_)=>json!({"transport":"stdio","imported":{"source":"fixture","scope":"user","name":"native-tool","digest":"copy-one"}}),
@@ -435,6 +445,8 @@ async fn committed_mcp_cleanup_is_exact_reducing_work_and_cannot_admit_a_fresh_c
         .link
         .dispatcher()
         .issue_stored(StoredCommand {
+            content_transit: false,
+            native_target: None,
             id: Some(fresh),
             machine,
             kind: saved.command.kind.clone(),
@@ -579,4 +591,201 @@ async fn mcp_delete_serializes_its_actual_secret_footprint_before_any_deletion_o
             assert!(current(&world, &saved(&world, id).await).await);
         }
     }
+}
+
+#[tokio::test]
+async fn mcp_and_mount_deletion_tell_their_reviewed_people_only_for_a_chosen_operation() {
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_api_contract::mounts::{MountDelete, MountDeletePreflight};
+    use orch_api_contract::resource_facts::{
+        FactTarget, ResourceImpactRead, ResourceNotificationQuery,
+    };
+    for kind in [ObjectKind::McpServer, ObjectKind::Mount] {
+        for notify in [false, true] {
+            // Deletion retains the resource's name; each independent choice gets its own namespace.
+            let world = World::new().await;
+            let company = resources::company(&world).await;
+            let id = if kind == ObjectKind::McpServer {
+                server(&world, company.boss.id(), None, None).await
+            } else {
+                let id = fixtures::insert_resource(
+                    &mut *world.conn().await,
+                    "mount",
+                    Some(company.boss.id()),
+                    Some(company.acme),
+                    if notify {
+                        "shared-data-notified"
+                    } else {
+                        "shared-data-quiet"
+                    },
+                )
+                .await
+                .unwrap();
+                start(&world, ResourceKind::Mount, id, company.boss.id()).await;
+                id
+            };
+            let permission = if kind == ObjectKind::McpServer {
+                "mcp.manage"
+            } else {
+                "mount.manage"
+            };
+            resources::name_person(&world, kind.as_str(), id, permission, company.admin.id()).await;
+            resources::name_person(&world, kind.as_str(), id, permission, company.viewer.id())
+                .await;
+            let impact_reply = world
+                .app
+                .call(ResourceImpactRead, &[])
+                .query(&serde_json::json!({"operation_notice":true}))
+                .token(&company.boss.token)
+                .body(&FactTarget {
+                    object: ObjectRef { kind, id },
+                    model_id: None,
+                })
+                .send()
+                .await;
+            assert_eq!(
+                impact_reply.status,
+                StatusCode::OK,
+                "impact kind={kind:?} notify={notify}: {}",
+                String::from_utf8_lossy(&impact_reply.raw)
+            );
+            let impact = impact_reply.ok();
+            let plan = impact.notification.unwrap();
+            assert!(!plan.default_on);
+            assert_eq!(plan.people, 2);
+            let choice = ResourceNotificationQuery {
+                notify: Some(notify),
+                notification_review: Some(plan.preview_id),
+            };
+            if kind == ObjectKind::McpServer {
+                world
+                    .app
+                    .call(McpServerDelete, &[&id])
+                    .token(&company.boss.token)
+                    .query(&choice)
+                    .send()
+                    .await
+                    .ok();
+            } else {
+                let cleanup = world
+                    .app
+                    .call(MountDeletePreflight, &[&id])
+                    .token(&company.boss.token)
+                    .send()
+                    .await
+                    .ok()
+                    .into_full()
+                    .unwrap();
+                assert_eq!(cleanup.people.len() as i64 + cleanup.other_people, 2);
+                world
+                    .app
+                    .call(MountDelete, &[&id])
+                    .token(&company.boss.token)
+                    .body(&orch_api_contract::storage::CleanupStart {
+                        plan_id: cleanup.id,
+                        choices: vec![],
+                        confirmation_name: None,
+                        notify,
+                    })
+                    .send()
+                    .await
+                    .ok();
+            }
+            let receivers:Vec<Id>=sqlx::query_scalar("SELECT user_id FROM notifications WHERE kind='environment.attention' AND data->'resource_ids' @> $1 ORDER BY user_id").bind(json!([[kind.as_str(),id]])).fetch_all(&world.db.pool).await.unwrap();
+            assert_eq!(receivers.len(), if notify { 2 } else { 0 });
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_environment_owned_server_reviews_notification_through_its_actual_environment_page() {
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_api_contract::resource_facts::{
+        FactTarget, ResourceImpactRead, ResourceNotificationQuery,
+    };
+    let world = World::new().await;
+    let company = resources::company(&world).await;
+    let environment = fixtures::insert_resource(
+        &mut *world.conn().await,
+        "environment",
+        Some(company.boss.id()),
+        Some(company.acme),
+        "Owner environment",
+    )
+    .await
+    .unwrap();
+    start(
+        &world,
+        ResourceKind::Environment,
+        environment,
+        company.boss.id(),
+    )
+    .await;
+    let id = server(&world, company.boss.id(), Some(environment), None).await;
+    resources::name_person(
+        &world,
+        "environment",
+        environment,
+        "environment.manage",
+        company.admin.id(),
+    )
+    .await;
+    let mut read_rule = rule("ResourceImpactRead", "environment", environment);
+    read_rule["allow"][0]["actions"] = json!(["read"]);
+    let reader = key(&world, company.boss.id(), vec![read_rule], 3600).await;
+    let plan = world
+        .app
+        .call(ResourceImpactRead, &[])
+        .query(&serde_json::json!({"operation_notice":true}))
+        .token(&company.boss.token)
+        .body(&FactTarget {
+            object: ObjectRef {
+                kind: ObjectKind::McpServer,
+                id,
+            },
+            model_id: None,
+        })
+        .send()
+        .await
+        .ok()
+        .notification
+        .unwrap();
+    world
+        .app
+        .call(ResourceImpactRead, &[])
+        .query(&serde_json::json!({"operation_notice":true}))
+        .token(&reader.secret)
+        .body(&FactTarget {
+            object: ObjectRef {
+                kind: ObjectKind::McpServer,
+                id,
+            },
+            model_id: None,
+        })
+        .send()
+        .await
+        .ok();
+    world
+        .app
+        .call(McpServerDelete, &[&id])
+        .token(&company.boss.token)
+        .query(&ResourceNotificationQuery {
+            notify: Some(true),
+            notification_review: Some(plan.preview_id),
+        })
+        .send()
+        .await
+        .ok();
+    let data: Json = sqlx::query_scalar(
+        "SELECT data FROM notifications WHERE user_id=$1 AND data->>'operation_kind'='mcp_delete'",
+    )
+    .bind(company.admin.id())
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(data["name"], json!("Owner environment"));
+    assert_eq!(
+        data["path"],
+        json!(format!("/resources/environments/{environment}"))
+    );
 }

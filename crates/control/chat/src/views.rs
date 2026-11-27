@@ -555,6 +555,7 @@ pub fn chat(seen: &Seen<'_>, lookups: &Lookups) -> Chat {
     let present: Vec<&MemberRow> = seen.members.iter().filter(|each| each.is_in()).collect();
     Chat {
         inspection_holders: None,
+        members_next_cursor: None,
         agents: None,
         base: chat_reference(row, lookups),
         members: people.then(|| {

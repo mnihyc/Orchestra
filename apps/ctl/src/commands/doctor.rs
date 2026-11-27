@@ -5,7 +5,8 @@
 //! stack runs (`docker compose exec api orchctl doctor`), it reads the
 //! configuration and the database address that the API has and tries, in turn,
 //! the configuration, the database, the API itself, the gateway's link to the
-//! API, the worker's heartbeat and the node. With `--url` it also tries the
+//! API, the worker's heartbeat and the node. It reports the file seed and stored address separately,
+//! and checks the page and API at the effective browser origin. With `--url` it also tries the
 //! edge in front of the stack from wherever it is run: a page, an API call, a
 //! WebSocket held idle, a body of 8 MiB, the machines' upgrade and one
 //! connection to each endpoint the system advertises, under the trust it is
@@ -47,7 +48,7 @@ const CA_FILE: &str = "orch_ca_cert.pem";
 /// What `orchctl doctor` is asked.
 #[derive(Args, Debug)]
 pub struct Options {
-    /// The public address of the system, to try the edge in front of it as well
+    /// An explicit browser route instead of the stored effective address, for full edge checks
     /// (a page, an API call, a WebSocket held idle for 60 s, a body of 8 MiB,
     /// the machines' upgrade and each advertised endpoint). With it the command
     /// can run anywhere; without a configuration to read it tries only the edge.
@@ -65,7 +66,7 @@ pub struct Options {
     #[arg(long, default_value = ".env", value_name = "FILE")]
     env_file: PathBuf,
     /// Try only these checks (`config`, `database`, `api`, `gateway`, `worker`,
-    /// `node`, `secrets`, and with `--url` `edge-page`, `edge-api`, `edge-body`, `edge-ws`,
+    /// `node`, `secrets`, `public-address`, and at the effective address or `--url` `edge-page`, `edge-api`, `edge-body`, `edge-ws`,
     /// `edge-link`, `edge-endpoints`, `edge-ports`, or `edge` for all of them).
     #[arg(long, value_delimiter = ',', value_name = "CHECKS")]
     only: Vec<String>,
@@ -141,14 +142,16 @@ fn line(id: &str, status: Status, said: impl Into<String>) -> Line {
 }
 
 /// The checks there are, by the name `--only` and `--skip` take.
-const CHECKS: [&str; 14] = [
+const CHECKS: [&str; 17] = [
     "config",
     "secrets",
     "database",
+    "public-address",
     "api",
     "gateway",
     "worker",
     "node",
+    "human-check",
     "edge",
     "edge-page",
     "edge-api",
@@ -156,9 +159,24 @@ const CHECKS: [&str; 14] = [
     "edge-ws",
     "edge-link",
     "edge-ports",
+    "edge-human-check",
 ];
 
 impl Options {
+    fn wants_edge(&self) -> bool {
+        [
+            "edge-page",
+            "edge-api",
+            "edge-body",
+            "edge-ws",
+            "edge-link",
+            "edge-endpoints",
+            "edge-ports",
+        ]
+        .iter()
+        .any(|id| self.wanted(id))
+    }
+
     /// Refuses a name that is no check and a choice that leaves nothing to run:
     /// a typo must not read as a pass.
     fn validate(&self) -> Result<(), String> {
@@ -171,11 +189,19 @@ impl Options {
             }
         }
         let host = [
-            "config", "secrets", "database", "api", "gateway", "worker", "node",
+            "config",
+            "secrets",
+            "database",
+            "public-address",
+            "api",
+            "gateway",
+            "worker",
+            "node",
+            "human-check",
         ]
         .iter()
         .any(|id| self.wanted(id));
-        let edge = self.url.is_some()
+        let edge = (self.url.is_some() || self.config.is_file())
             && [
                 "edge-page",
                 "edge-api",
@@ -184,13 +210,17 @@ impl Options {
                 "edge-link",
                 "edge-endpoints",
                 "edge-ports",
+                "edge-human-check",
             ]
             .iter()
             .any(|id| self.wanted(id));
         if host || edge {
             Ok(())
         } else {
-            Err("no check is left to run (the checks of the edge need --url)".to_owned())
+            Err(
+                "no check is left to run (edge checks need --url or a local configuration)"
+                    .to_owned(),
+            )
         }
     }
 
@@ -227,10 +257,13 @@ async fn checks(options: &Options) -> Result<(), String> {
         lines.extend(batch);
     };
 
+    let mut effective_url = None;
     // The stack itself, where there is a stack to read.
     let host = options.config.is_file() || options.url.is_none();
     if host {
-        show(host_checks(options).await, &mut lines);
+        let (batch, address) = host_checks(options).await;
+        effective_url = address;
+        show(batch, &mut lines);
     } else {
         show(
             vec![line(
@@ -246,21 +279,47 @@ async fn checks(options: &Options) -> Result<(), String> {
     }
 
     // The edge in front of it, which waits a minute for the socket.
-    if let Some(url) = &options.url {
+    let automatic = options.url.is_none();
+    if let Some(url) = options.url.as_ref().or(effective_url.as_ref()) {
         let address = Address::parse(url)?;
-        let wanted = |id: &str| options.wanted(id);
-        let edge = edge::Edge {
-            address,
-            resolve: &resolve,
-            secrets_dir: &options.secrets_dir,
-            access_token: options.access_token.as_deref(),
-            idle: Duration::from_secs(options.idle_secs),
-            wanted: &wanted,
-            ports_domain: orch_config::load::<ServerConfig>(&options.config)
-                .ok()
-                .and_then(|config| config.edge.ports_domain),
-        };
-        show(edge::checks(&edge).await, &mut lines);
+        if automatic && options.only.is_empty() && address.is_loopback() {
+            // Read in the API's container, a loopback address is that container, not the edge people open: the
+            // checks nobody named are not tried there, and the updater tries them from the host right after.
+            let skipped: Vec<Line> = ["edge-page", "edge-api"]
+                .into_iter()
+                .filter(|id| options.wanted(id))
+                .map(|id| {
+                    line(
+                        id,
+                        Status::Skip,
+                        format!(
+                            "{url} is a loopback address, which inside the stack is this container and not the edge: \
+                             ./update.sh doctor tries it from the host (there: orchctl doctor --url {url})"
+                        ),
+                    )
+                })
+                .collect();
+            show(skipped, &mut lines);
+        } else {
+            let wanted = |id: &str| {
+                options.wanted(id)
+                    && (!automatic
+                        || !options.only.is_empty()
+                        || matches!(id, "edge-page" | "edge-api"))
+            };
+            let edge = edge::Edge {
+                address,
+                resolve: &resolve,
+                secrets_dir: &options.secrets_dir,
+                access_token: options.access_token.as_deref(),
+                idle: Duration::from_secs(options.idle_secs),
+                wanted: &wanted,
+                ports_domain: orch_config::load::<ServerConfig>(&options.config)
+                    .ok()
+                    .and_then(|config| config.edge.ports_domain),
+            };
+            show(edge::checks(&edge).await, &mut lines);
+        }
     }
 
     let failed = lines
@@ -276,7 +335,7 @@ async fn checks(options: &Options) -> Result<(), String> {
 }
 
 /// The checks of the stack, in the order that a fault is found.
-async fn host_checks(options: &Options) -> Vec<Line> {
+async fn host_checks(options: &Options) -> (Vec<Line>, Option<String>) {
     let mut lines = Vec::new();
     if options.wanted("secrets") {
         lines.push(secret_permissions(options));
@@ -287,18 +346,46 @@ async fn host_checks(options: &Options) -> Vec<Line> {
             if options.wanted("config") {
                 lines.push(line("config", Status::Fail, error.to_string()));
             }
-            return lines;
+            if options.url.is_none()
+                && (!options.wanted("config"))
+                && (options.wanted("public-address") || options.wants_edge())
+            {
+                lines.push(line(
+                    "public-address",
+                    Status::Fail,
+                    "the effective address needs a readable local configuration",
+                ));
+            }
+            return (lines, None);
         }
     };
     if options.wanted("config") {
+        let seed = config.system.address_seed().validated();
+        let seed_status = if seed.is_ok() {
+            Status::Ok
+        } else {
+            Status::Part
+        };
+        let seed_text = match seed {
+            Ok(seed) => format!(
+                "{}; alternates: {}",
+                seed.public_url,
+                if seed.alternate_urls.is_empty() {
+                    "none".to_owned()
+                } else {
+                    seed.alternate_urls.join(", ")
+                }
+            ),
+            Err(error) => format!("invalid (system.{} {})", error.field, error),
+        };
         lines.push(line(
             "config",
-            Status::Ok,
+            seed_status,
             format!(
-                "read {}: {} at {}. {}",
+                "read {}: {}; file seed: {}. {}",
                 options.config.display(),
                 config.system.name,
-                config.system.public_url,
+                seed_text,
                 if config.api.trusted_proxy_cidrs.is_empty() {
                     "trusted_proxy_cidrs is empty: forwarded headers are ignored; callers behind an unnamed private proxy are counted as the proxy".to_owned()
                 } else {
@@ -308,9 +395,12 @@ async fn host_checks(options: &Options) -> Vec<Line> {
         ));
     }
 
-    let needs_database = ["database", "gateway", "worker", "node"]
-        .iter()
-        .any(|id| options.wanted(id));
+    let address_needed =
+        options.wanted("public-address") || (options.url.is_none() && options.wants_edge());
+    let needs_database = address_needed
+        || ["database", "gateway", "worker", "node", "human-check"]
+            .iter()
+            .any(|id| options.wanted(id));
     let (database, database_line) = if needs_database {
         let (db, said) = connect(&config).await;
         (db, Some(said))
@@ -341,7 +431,191 @@ async fn host_checks(options: &Options) -> Vec<Line> {
         };
         lines.push(done);
     }
-    lines
+    if options.wanted("human-check") {
+        lines.push(match &database {
+            Some(db) => within("human-check", human_check(db)).await,
+            None => line(
+                "human-check",
+                Status::Skip,
+                "needs the database, which does not answer",
+            ),
+        });
+    }
+    let effective_url = if address_needed {
+        match &database {
+            Some(db) => {
+                let read = async {
+                    let mut conn = db.acquire().await?;
+                    orch_db::queries::public_addresses::read(
+                        &mut conn,
+                        &config.system.address_seed(),
+                        SystemClock.now(),
+                    )
+                    .await
+                }
+                .await;
+                match read {
+                    Ok(snapshot) => {
+                        lines.push(line(
+                            "public-address",
+                            Status::Ok,
+                            format!(
+                                "stored address {}; revision {}; {}; alternates: {}",
+                                snapshot.addresses.public_url,
+                                snapshot.revision,
+                                if snapshot.from_file_seed {
+                                    "stored file seed"
+                                } else {
+                                    "stored override"
+                                },
+                                if snapshot.addresses.alternate_urls.is_empty() {
+                                    "none".to_owned()
+                                } else {
+                                    snapshot.addresses.alternate_urls.join(", ")
+                                }
+                            ),
+                        ));
+                        Some(snapshot.addresses.public_url)
+                    }
+                    Err(error) => {
+                        lines.push(line(
+                            "public-address",
+                            Status::Fail,
+                            format!("the committed public address could not be read: {error}"),
+                        ));
+                        None
+                    }
+                }
+            }
+            None => {
+                lines.push(line(
+                    "public-address",
+                    Status::Fail,
+                    "the committed public address needs the local database",
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    (lines, effective_url)
+}
+
+/// What a human check that is on has, and whether its service could be asked: the last day's rows of the audit, which
+/// say how many times it could not, why, and whether people were let in or turned away.
+async fn human_check(db: &Db) -> Line {
+    use orch_api_core::sign_in::human_check::{
+        SECRET_NAME, SECRET_OWNER, WhenUnreachable, policy, secret_owner_id,
+    };
+    const ID: &str = "human-check";
+    let mut conn = match db.acquire().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            return line(
+                ID,
+                Status::Fail,
+                format!("the database does not answer: {error}"),
+            );
+        }
+    };
+    let policy = match policy(&mut conn).await {
+        Ok(policy) => policy,
+        Err(error) => return line(ID, Status::Fail, format!("reading the settings: {error}")),
+    };
+    if policy.service.is_empty() {
+        return line(
+            ID,
+            Status::Ok,
+            "off: nothing is asked of people, nothing is loaded from outside and nothing is sent",
+        );
+    }
+    if !policy.active() {
+        return line(
+            ID,
+            Status::Part,
+            format!(
+                "{} is chosen and has no site key, so it asks nobody: set the site key in Management",
+                policy.service
+            ),
+        );
+    }
+    match orch_db::queries::settings::secret(
+        &mut conn,
+        SECRET_OWNER,
+        secret_owner_id(),
+        SECRET_NAME,
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return line(
+                ID,
+                Status::Fail,
+                format!(
+                    "{} is on and no secret is kept for it, so it cannot be asked: set the secret in Management",
+                    policy.service
+                ),
+            );
+        }
+        Err(error) => return line(ID, Status::Fail, format!("reading the secret: {error}")),
+    }
+    let now = SystemClock.now();
+    let rows = match orch_db::queries::human_check::since(
+        &mut conn,
+        &["auth.human_check_admitted", "auth.human_check_refused"],
+        now - chrono::Duration::hours(24),
+        50,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return line(ID, Status::Fail, format!("reading the audit: {error}")),
+    };
+    let way = match policy.when_unreachable {
+        WhenUnreachable::Admit => "people are let in without the check",
+        WhenUnreachable::Refuse => "people are turned away",
+    };
+    let Some(latest) = rows.first() else {
+        return line(
+            ID,
+            Status::Ok,
+            format!(
+                "{} is on for {} acts; its service could not be asked no time in the last 24 hours (if it cannot be, {way})",
+                policy.service,
+                policy.acts.len()
+            ),
+        );
+    };
+    let times: i64 = rows
+        .iter()
+        .map(|row| {
+            row.details
+                .get("count")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1)
+        })
+        .sum();
+    let word = |name: &str| {
+        latest
+            .details
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+            .to_owned()
+    };
+    line(
+        ID,
+        Status::Fail,
+        format!(
+            "{} could not be asked {times} time(s) in the last 24 hours, last at {} ({}: {}); {way}. The audit holds a row for each hour and act; `orchctl admin human-check off` switches it off",
+            policy.service,
+            latest.at.format("%Y-%m-%d %H:%M UTC"),
+            word("why"),
+            word("detail"),
+        ),
+    )
 }
 
 /// Inspect permissions without reading or printing any credential contents.
@@ -493,7 +767,13 @@ async fn connect(config: &ServerConfig) -> (Option<Db>, Line) {
     let tried = format!("connecting to {place}");
     let connecting = tokio::time::timeout(
         Duration::from_secs(CHECK_SECS),
-        Db::connect(url, DATABASE_CONNECTIONS),
+        Db::connect_with_limits(
+            url,
+            DATABASE_CONNECTIONS,
+            Duration::from_millis(config.database.slow_statement_ms),
+            Duration::from_millis(config.database.slow_acquire_ms),
+            orch_db::pool::Limits::background(&config.database),
+        ),
     )
     .await;
     let db = match connecting {
@@ -810,6 +1090,74 @@ fn beat_line(
     )
 }
 
+/// The operator reads ordinary native permissions for active accounts, including service identities.
+async fn server_host_access(conn: &mut orch_db::Conn) -> Result<String, String> {
+    use orch_access_contract::{
+        decisions::{Decision, ObjectRef},
+        permissions::{ObjectKind, Permission},
+    };
+    let hosts: Vec<orch_types::Id> = sqlx::query_scalar("SELECT h.id FROM hosts h JOIN machines m ON m.id=h.machine_id WHERE h.bundled_with_server AND m.status='active' AND m.deleted_at IS NULL ORDER BY h.id")
+        .fetch_all(&mut *conn).await.map_err(|error| error.to_string())?;
+    if hosts.is_empty() {
+        return Ok(String::new());
+    }
+    let accounts: Vec<orch_types::Id> = sqlx::query_scalar(
+        "SELECT id FROM users WHERE status='active' AND NOT is_system_admin ORDER BY id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|error| error.to_string())?;
+    let now = orch_types::Time::new(chrono::Utc::now());
+    let mut exposed = std::collections::BTreeSet::new();
+    for account in accounts {
+        let principal = orch_authz::Principal::load(
+            conn,
+            orch_authz::Caller::session(account).with_admin_mode(false),
+            now,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        if principal.has_system_admin_standing() {
+            continue;
+        }
+        for host in &hosts {
+            if matches!(
+                orch_authz::resources::check(
+                    conn,
+                    &principal,
+                    ObjectRef {
+                        kind: ObjectKind::Host,
+                        id: *host
+                    },
+                    Permission::HostUse,
+                    Default::default()
+                )
+                .await
+                .map_err(|error| error.to_string())?,
+                Decision::Allowed { .. }
+            ) {
+                exposed.insert(account);
+                break;
+            }
+        }
+    }
+    let boundary = format!(
+        "; {} host{} installed with the server; containers may share its kernel",
+        hosts.len(),
+        if hosts.len() == 1 { "" } else { "s" }
+    );
+    Ok(if exposed.is_empty() {
+        format!("{boundary}; no non-administrator account has Host Use")
+    } else {
+        format!(
+            "{boundary}; warning: {} non-administrator account{} {} Host Use",
+            exposed.len(),
+            if exposed.len() == 1 { "" } else { "s" },
+            if exposed.len() == 1 { "has" } else { "have" }
+        )
+    })
+}
+
 /// The node: a host of the system that has a session.
 async fn node(conn: &mut orch_db::Conn) -> Line {
     const ID: &str = "node";
@@ -832,17 +1180,25 @@ async fn node(conn: &mut orch_db::Conn) -> Line {
             Err(error) => line(ID, Status::Fail, format!("reading the users: {error}")),
         };
     }
+    let (access, access_status) = match server_host_access(conn).await {
+        Ok(value) => (value, Status::Ok),
+        Err(error) => (
+            format!("; server host access could not be checked: {error}"),
+            Status::Part,
+        ),
+    };
     let online: Vec<_> = hosts.iter().filter(|host| host.online).collect();
     if let Some(host) = online.first() {
         return line(
             ID,
-            Status::Ok,
+            access_status,
             format!(
-                "host {} is online (connector {}); {} of {} hosts have a session",
+                "host {} is online (connector {}); {} of {} hosts have a session{}",
                 host.name,
                 host.connector_version,
                 online.len(),
-                hosts.len()
+                hosts.len(),
+                access
             ),
         );
     }
@@ -856,5 +1212,9 @@ async fn node(conn: &mut orch_db::Conn) -> Line {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    line(ID, Status::Fail, format!("no host has a session: {seen}"))
+    line(
+        ID,
+        Status::Fail,
+        format!("no host has a session: {seen}{access}"),
+    )
 }
