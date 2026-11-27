@@ -40,7 +40,7 @@ for(const locale of ['en','zh-CN'] as const) test(`personal read sharing retains
   const submit=dialog.getByRole('button',{name:word('access.agents.dialog.button.read').replace('{{who}}',who).replace('{{what}}',what),exact:true});
   await expect(submit).toBeEnabled();await submit.click();
   const review=page.getByRole('alertdialog',{name:word('access.ownerReads.title'),exact:true});
-  await expect(review).toContainText(word('access.ownerReads.notice').replace('{{count}}','2'));
+  await expect(review).toContainText(word('access.ownerReads.notice_other').replace('{{count}}','2'));
   expect(creates).toBe(0);expect(attempts).toHaveLength(1);
   await review.getByRole('button',{name:word('access.ownerReads.confirm'),exact:true}).click();
   await expect(dialog.getByRole('alert')).toBeVisible();

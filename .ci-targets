@@ -1,0 +1,4 @@
+# A connector on a machine without certificate authorities: the node's tool cache unit cases (the new case opens the
+# cache where no HTTPS client can be made) and the connector's composition cases that open the build cache
+test -p orch-node-core --lib -- tools::
+test -p orch-connector --lib -- composition::

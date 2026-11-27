@@ -9,7 +9,7 @@ import {replySent,scenario,signIn} from './support';
 function impact(source:Fixture):ResourceImpact {
   const visible=[{object:{kind:'thread' as const,id:'019a0000-0000-7000-8000-000000000042'},name:'Repair redirects',relation:'binding' as const,until:null}];
   const empty={count:0,threads:0,visible:[],hidden:0,since:null};
-  return {target:source.target,name:source.name,stopping:false,
+  return {target:source.target,name:source.name,stopping:false,applications:[],application_complete:true,
     facts:{subject:{kind:'resource',object:source.target.object},as_of:'2026-10-28T00:00:00Z',dependents:[{relation:'binding',count:5,visible,hidden:4,until:null}],dependents_complete:true,uses:null},
     activity:{running:{count:2,threads:2,visible,hidden:1,since:null},waiting:empty,stopped:empty}};
 }
@@ -24,7 +24,7 @@ for(const kind of ['provider','model','agent','environment'] as const)for(const 
     if(typeof auth!=='object'||auth===null||!('access_token'in auth)||typeof auth.access_token!=='string')throw new Error('The disposable sign-in has no access token');
     const headers={Authorization:`Bearer ${auth.access_token}`};expect((await page.request.patch('/api/v1/me',{headers,data:{theme,locale}})).ok()).toBe(true);
     const source=await resourceFixture(page,kind,headers,true);await resourceLive(page,source);let accepted=0;
-    await page.route(/\/api\/v1\/resources\/impact$/u,(route)=>{expect(route.request().postDataJSON()).toEqual(source.target);return route.fulfill({status:200,json:impact(source)});});
+    await page.route(/\/api\/v1\/resources\/impact(?:\?|$)/u,(route)=>{expect(route.request().postDataJSON()).toEqual(source.target);return route.fulfill({status:200,json:impact(source)});});
     const path=act==='delete'?(kind==='model'?source.mutation:source.resourcePath):kind==='provider'||kind==='environment'?`${source.resourcePath}/disable`:source.mutation;
     const method=act==='delete'?'DELETE':source.method;
     await page.route(new RegExp(`${path}(?:\\?|$)`,'u'),async(route)=>{

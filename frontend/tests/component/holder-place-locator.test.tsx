@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Client from '@/api/client';
 import { ApiError } from '@/api/client';
+import { holderPickerQuery } from '@/api/access';
 import { queryClient as applicationQueries } from '@/api/query';
 import { useCandidates, type CandidateOptions } from '@/features/access/candidates';
 import type { HolderSearchReply, Org } from '@/generated/api-types';
@@ -107,7 +108,7 @@ it('browses more than ten places in one field and searches another tree natively
   await user.click(field()); await screen.findByRole('option', { name: 'Acme / Department 24' });
   expect(screen.getAllByRole('option')).toHaveLength(25);
   expect(listReads()).toHaveLength(1);
-  expect(listReads()[0]?.[1]?.params?.query).toEqual({ q: '', place_id: HOME, org_id: HOME, include_work: false, list_places: true });
+  expect(listReads()[0]?.[1]?.params?.query).toEqual({ q: '', picker: true, kinds: 'role', limit: 50, place_id: HOME, org_id: HOME, include_work: false, list_places: true });
   await user.click(screen.getByRole('option', { name: 'Acme / Department 24' }));
   const last = listed[23]; if (last?.input.kind !== 'role' || typeof last.input.at !== 'string') throw new Error('The late browse choice needs its exact source ID');
   const lateId = last.input.at;
@@ -116,30 +117,31 @@ it('browses more than ten places in one field and searches another tree natively
   expect(field()).toHaveValue('Acme / Department 24');
   await user.click(field()); await user.type(field(), 'remote');
   await screen.findByRole('option', { name: remote.place });
-  expect(listReads().at(-1)?.[1]?.params?.query).toEqual({ q: 'remote', org_id: HOME, include_work: false, list_places: true });
+  expect(listReads().at(-1)?.[1]?.params?.query).toEqual({ q: 'remote', picker: true, kinds: 'role', limit: 50, org_id: HOME, include_work: false, list_places: true });
   expect(holderReads()).toHaveLength(2); expect(calls.submit).not.toHaveBeenCalled();
   await user.keyboard('{Enter}');
   await waitFor(() => expect(screen.getByLabelText('Holder sources')).toHaveTextContent(FAR));
-  expect(holderReads().at(-1)?.[1]?.params?.query).toEqual({ q: '', place_id: FAR, org_id: HOME, include_work: false, list_places: false });
+  expect(holderReads().at(-1)?.[1]?.params?.query).toEqual({ q: '', picker: true, kinds: 'group,role', limit: 50, place_id: FAR, org_id: HOME, include_work: false, list_places: false });
   expect(field()).toHaveValue(remote.place);
   expect(calls.read.mock.calls.some(([path, options]) => path === '/nodes/{id}' && options?.params?.path?.id === FAR)).toBe(false);
   await user.click(field());
-  await waitFor(() => expect(listReads().at(-1)?.[1]?.params?.query).toEqual({ q: '', place_id: OTHER, org_id: OTHER, include_work: false, list_places: true }));
+  await waitFor(() => expect(listReads().at(-1)?.[1]?.params?.query).toEqual({ q: '', picker: true, kinds: 'role', limit: 50, place_id: OTHER, org_id: OTHER, include_work: false, list_places: true }));
   await user.click(screen.getByRole('option', { name: current() }));
   await waitFor(() => expect(screen.getByLabelText('Holder sources')).toHaveTextContent(TOPIC));
   expect(field()).toHaveValue(current());
-  // Returning to Current reuses its fresh exact query rather than manufacturing another read.
-  expect(holderReads()).toHaveLength(3);
+  // A newly opened empty picker reads the current personal order, including a return to Current.
+  expect(holderReads()).toHaveLength(4);
   expect(calls.submit).not.toHaveBeenCalled();
 });
 
-it('does not submit or choose old rows on one-character, empty-result, dismissed or composing Enter', async () => {
+it('searches from one character without submitting or choosing stale, empty, dismissed or composing results', async () => {
   draw(); const user = userEvent.setup();
   await user.click(field()); await screen.findByRole('option', { name: 'Acme / Department 24' });
   const before = listReads().length;
   await user.type(field(), 'x');
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, TYPING_PAUSE_MS * 2)); });
-  expect(screen.queryAllByRole('option')).toHaveLength(0); expect(listReads()).toHaveLength(before);
+  expect(screen.queryAllByRole('option')).toHaveLength(0); expect(listReads()).toHaveLength(before + 1);
+  expect(listReads().at(-1)?.[1]?.params?.query?.q).toBe('x');
   await user.keyboard('{Enter}'); expect(calls.submit).not.toHaveBeenCalled();
   await user.clear(field()); await user.type(field(), 'missing');
   expect(await screen.findByText(i18n.t('access.candidates.placeNone'))).toBeVisible();
@@ -208,14 +210,14 @@ it('omits redacted names and removes cached place/holder candidates after native
   await user.click(field()); await screen.findByRole('option', { name: 'Acme / Department 24' });
   expect(screen.getAllByRole('option')).toHaveLength(25); expect(screen.queryByText(/Hidden ancestor|Hidden leaf/)).toBeNull();
   refusePlaces = true;
-  await act(async () => { await drawn.client.refetchQueries({ queryKey: ['holder-search', '', HOME, HOME, false, true], exact: true }); });
+  await act(async () => { await drawn.client.refetchQueries({ queryKey: holderPickerQuery('', HOME, HOME, false, ['role'], true).queryKey, exact: true }); });
   await screen.findByRole('alert');
   expect(screen.queryByRole('option', { name: 'Acme / Department 24' })).toBeNull();
   expect(screen.getAllByRole('option')).toHaveLength(1); // Only the caller's Current sentinel is left.
   expect(screen.queryByText('Private diagnostic')).toBeNull();
   refuseHolders = true;
-  await act(async () => { await drawn.client.refetchQueries({ queryKey: ['holder-search', '', TOPIC, HOME, false, false], exact: true }); });
-  expect(drawn.client.getQueryState(['holder-search', '', TOPIC, HOME, false, false])?.status).toBe('error');
+  await act(async () => { await drawn.client.refetchQueries({ queryKey: holderPickerQuery('', TOPIC, HOME, false, ['group', 'role']).queryKey, exact: true }); });
+  expect(drawn.client.getQueryState(holderPickerQuery('', TOPIC, HOME, false, ['group', 'role']).queryKey)?.status).toBe('error');
   // Query notification is batched after its fetch promise settles.
   await waitFor(() => expect(screen.getByLabelText('Holder sources')).toBeEmptyDOMElement());
   expect(screen.getByRole('list', { name: 'Holder candidates' })).toBeEmptyDOMElement();
@@ -279,7 +281,7 @@ it.each(['root', 'search'] as const)('resets to Current without waiting for a pe
   await waitFor(() => expect(field()).toHaveValue(current()));
   expect(field()).toHaveAttribute('aria-expanded', 'false');
   await waitFor(() => expect(screen.getByLabelText('Holder sources')).toHaveTextContent(TOPIC));
-  expect(holderReads()).toHaveLength(2); expect(listReads()).toHaveLength(reads);
+  expect(holderReads()).toHaveLength(3); expect(listReads()).toHaveLength(reads);
   expect(calls.submit).not.toHaveBeenCalled();
   await act(async () => {
     release?.({ data: pending === 'root' ? sourceNode(FAR) : { items: [remote] } });
@@ -288,11 +290,11 @@ it.each(['root', 'search'] as const)('resets to Current without waiting for a pe
   expect(field()).toHaveValue(current());
   expect(field()).toHaveAttribute('aria-expanded', 'false');
   expect(screen.getByLabelText('Holder sources')).toHaveTextContent(TOPIC);
-  expect(holderReads()).toHaveLength(2); expect(listReads()).toHaveLength(reads);
+  expect(holderReads()).toHaveLength(3); expect(listReads()).toHaveLength(reads);
   await user.click(field()); await screen.findByRole('option', { name: 'Acme / Department 24' });
   expect(screen.getAllByRole('option')).toHaveLength(25);
   expect(screen.queryByRole('option', { name: remote.place })).toBeNull();
-  expect(listReads()).toHaveLength(reads); expect(calls.submit).not.toHaveBeenCalled();
+  expect(listReads()).toHaveLength(reads + 1); expect(calls.submit).not.toHaveBeenCalled();
 });
 
 it.each(['pointer', 'keyboard'] as const)('keeps Retry reachable after input blur and performs exactly one explicit retry (%s)', async (method) => {
@@ -331,9 +333,28 @@ it('keeps ordinary user-only and hidden-source consumers on their original nativ
   const drawn = draw({ kinds: ['user'], query: 'Ada', orgId: HOME });
   await waitFor(() => expect(holderReads()).toHaveLength(1));
   expect(screen.queryByRole('combobox')).toBeNull(); expect(listReads()).toHaveLength(0);
-  expect(holderReads()[0]?.[1]?.params?.query).toEqual({ q: 'Ada', place_id: TOPIC, org_id: HOME, include_work: false, list_places: false });
+  expect(holderReads()[0]?.[1]?.params?.query).toEqual({ q: 'Ada', picker: true, kinds: 'user', limit: 50, place_id: TOPIC, org_id: HOME, include_work: false, list_places: false });
   drawn.change({ browsePlaces: false, kinds: ['group', 'role', 'node'] });
   await waitFor(() => expect(holderReads()).toHaveLength(2));
-  expect(holderReads().at(-1)?.[1]?.params?.query).toEqual({ q: '', place_id: TOPIC, org_id: HOME, include_work: true, list_places: false });
+  expect(holderReads().at(-1)?.[1]?.params?.query).toEqual({ q: '', picker: true, kinds: 'group,role,node', limit: 50, place_id: TOPIC, org_id: HOME, include_work: true, list_places: false });
   expect(screen.queryByRole('combobox')).toBeNull(); expect(listReads()).toHaveLength(0);
+});
+
+it('continues the native place page and searches from the first key while holding the original source until a choice', async () => {
+  calls.read.mockImplementation((path, options) => {
+    if (path === '/nodes/{id}') return Promise.resolve({ data: sourceNode(options?.params?.path?.id ?? HOME) });
+    const query = options?.params?.query;
+    if (query?.list_places === true) return Promise.resolve({ data: query.q === 'r' ? { items: [remote] }
+      : query.cursor === 'later' ? { items: [listed[23]] } : { items: [listed[0]], next_cursor: 'later' } });
+    return Promise.resolve({ data: { items: [row(String(query?.place_id), `Holders of ${String(query?.place_id)}`)] } });
+  });
+  draw(); const user = userEvent.setup(); await user.click(field()); await screen.findByRole('option', { name: 'Acme / Department 1' });
+  expect(screen.queryByRole('option', { name: 'Acme / Department 24' })).toBeNull();
+  await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
+  await screen.findByRole('option', { name: 'Acme / Department 24' });
+  expect(holderReads()).toHaveLength(1);
+  await user.click(field()); await user.type(field(), 'r'); await screen.findByRole('option', { name: remote.place });
+  expect(listReads().at(-1)?.[1]?.params?.query?.q).toBe('r');
+  expect(holderReads()).toHaveLength(1); expect(screen.getByLabelText('Holder sources')).toHaveTextContent(TOPIC);
+  await user.keyboard('{Enter}'); await waitFor(() => expect(screen.getByLabelText('Holder sources')).toHaveTextContent(FAR));
 });

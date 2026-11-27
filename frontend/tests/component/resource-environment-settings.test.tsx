@@ -8,7 +8,10 @@ import { putSetting, targetSettingsKey } from '@/api/settings';
 import { UnitConfiguration } from '@/features/resources/UnitConfiguration';
 import type { ResolvedSetting, SettingDef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { detailAgent } from './resource-detail-fixtures';
+import { environmentMcpKey } from '@/api/environments';
+import { EnvironmentSettings } from '@/features/resources/environments/Settings';
+import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
+import { detailAgent, detailEnvironment } from './resource-detail-fixtures';
 import { show } from './support';
 
 const server = vi.hoisted(() => ({ definitions: vi.fn<() => Promise<SettingDef[]>>(), values: vi.fn<() => Promise<ResolvedSetting[]>>(), template: vi.fn(), search: '' }));
@@ -17,7 +20,7 @@ vi.mock('@/api/settings', async (load) => { const actual = await load<typeof Set
   targetSettingsQuery: (target: SettingsApi.SettingsTarget) => ({ queryKey: actual.targetSettingsKey(target), queryFn: server.values, staleTime: Infinity }) }; });
 vi.mock('@/api/resources', async (load) => ({ ...await load<object>(), templateQuery: (id: string) => ({ queryKey: ['detail-template-commands', id], queryFn: server.template, staleTime: Infinity }) }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/resources/environments/unit', searchStr: server.search }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const target = { kind: 'environment', id: 'unit' } as const;
 const place = { name: 'Research workspace', kind: null, owner: detailAgent.owner, access: { permissions: ['environment.manage'] } };
 const def = (index: number): SettingDef => ({ key: `env.detail_feature_${index}`, title: `Feature ${index}`, description: `Keep feature ${index} available.`,
@@ -83,4 +86,34 @@ it('opens the command editor from its failure recovery without a reload or a sta
   expect(recovery).toHaveAttribute('href', expect.stringContaining('setting=env.after_up'));
   expect(server.template).not.toHaveBeenCalled(); await userEvent.click(recovery);
   expect(await screen.findByText('/opt/cache')).toBeVisible(); expect(server.values).toHaveBeenCalledTimes(1); expect(server.template).toHaveBeenCalledTimes(1);
+});
+
+
+it.each(['en', 'zh-CN'] as const)('opens settings without a timing query or a dependency count on each row (%s)', async (locale) => {
+  await setLocale(locale);
+  const keys = ['env.mounts', 'env.resources', 'env.variables', 'env.secret_names', 'mcp.enabled', 'workspace.index'];
+  const definitions = SETTINGS_REGISTRY.filter((entry) => keys.includes(entry.key));
+  server.definitions.mockResolvedValue(definitions);
+  server.values.mockResolvedValue(definitions.map((entry) => value(entry.key, entry.default)));
+  const environment = { ...detailEnvironment, placement: 'connected' as const,
+    facts: { environment_descriptor: { lifecycle: 'attach' } }, runtime_changes: null,
+    threads: [{ thread: detailEnvironment.home, topic: detailEnvironment.home, directory: '', owner: detailEnvironment.owner }],
+    threads_hidden: 2 };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const view = show(<EnvironmentSettings environment={environment} />, client);
+  await waitFor(() => expect(view.container.querySelector('[data-setting="env.mounts"]')).toBeInTheDocument());
+  const rowFor = (key: string) => {
+    const row = view.container.querySelector<HTMLElement>(`[data-setting="${key}"]`);
+    if (row === null) throw new Error(`Missing environment setting ${key}`);
+    return row;
+  };
+  for (const key of keys) {
+    const row = rowFor(key);
+    expect(row).not.toHaveTextContent(locale === 'en' ? 'Takes effect' : '生效时间');
+    expect(row).not.toHaveTextContent(locale === 'en' ? '3 threads use this environment' : '3 个会话使用此环境');
+  }
+  expect(client.getQueryCache().findAll({ queryKey: environmentMcpKey(environment.id) })).toHaveLength(0);
+  expect(putSetting).not.toHaveBeenCalled();
+  view.unmount();
+  client.clear();
 });

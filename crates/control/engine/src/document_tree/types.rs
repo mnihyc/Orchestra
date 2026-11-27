@@ -11,19 +11,27 @@ pub const ITEMS_MAX: usize = 50;
 /// Deployment policy, supplied by the server rather than guessed from a request or database default.
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
-    /// Ordinary soft-delete retention.
-    pub retention: std::time::Duration,
+    /// Ordinary soft-delete retention: the system's `retention.deleted_keep_days` when the operation read it.
+    pub deleted_keep_days: u64,
     /// The existing content-version window for this producer.
     pub version_window_secs: i64,
 }
 
 impl Options {
-    /// The engine's existing retention and agent document version policy.
+    /// The system's current window for what is deleted, with the agent document version policy.
+    pub async fn for_engine(conn: &mut orch_db::Conn) -> Result<Self, orch_db::DbError> {
+        Ok(Self::with_days(
+            orch_settings::retention::deleted_keep_days(conn).await?,
+            crate::tools::edit::VERSION_WINDOW_SECS,
+        ))
+    }
+
+    /// The policy with a window of `days` for what is deleted and the given content-version window.
     #[must_use]
-    pub fn for_engine(engine: &crate::Engine) -> Self {
+    pub fn with_days(days: u64, version_window_secs: i64) -> Self {
         Self {
-            retention: engine.config().soft_delete,
-            version_window_secs: crate::tools::edit::VERSION_WINDOW_SECS,
+            deleted_keep_days: days,
+            version_window_secs,
         }
     }
 }
