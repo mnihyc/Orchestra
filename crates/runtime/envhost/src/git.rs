@@ -978,7 +978,7 @@ impl Files {
     }
 
     /// Unit fixtures collect one native stream; production callers page it through their owner.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     async fn git_diff(
         &self,
         tool: &GitTool,

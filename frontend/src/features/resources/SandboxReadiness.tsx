@@ -23,16 +23,23 @@ function needed(value:EnvironmentSandboxReadiness) {
   return usable.reduce<Mode|null>((lowest,mode)=>lowest===null || ORDER[mode]<ORDER[lowest]?mode:lowest,null);
 }
 
+/** What the tools that carry out a turn's commands can enforce on `name`, the machine or the environment, in one
+ * sentence: the agent's own tools, or the executor's that run them instead. */
+export function sandboxCapability(report:SandboxReadiness,name:string,t:TFunction):string {
+  const reference='executor_ref' in report?report.executor_ref:null;
+  const executor=report.executor===null?t('sandboxReadiness.nativeTools'):executorTitle(reference,currentLocale()) ?? t('sandboxReadiness.executorUnknown');
+  const mode=(mode:Mode)=>t(`sandboxReadiness.modes.${mode}.name`);
+  return report.enforceable.length===0?t('sandboxReadiness.unreported',{name,executor}):
+    report.enforceable.length===1 && report.enforceable[0]==='open'?t('sandboxReadiness.unconfined',{name,executor}):
+      t('sandboxReadiness.enforces',{name,executor,modes:report.enforceable.map(mode).join(', ')});
+}
+
 /** The same words appear in the machine's readiness and the blocked thread's status. */
 export function sandboxWords(value:EnvironmentSandboxReadiness,t:TFunction):string {
   const report=value.sandbox;
   const name=value.machine?.name ?? value.environment.name;
-  const reference='executor_ref' in report?report.executor_ref:null;
-  const executor=report.executor===null?t('sandboxReadiness.nativeTools'):executorTitle(reference,currentLocale()) ?? t('sandboxReadiness.executorUnknown');
   const mode=(mode:Mode)=>t(`sandboxReadiness.modes.${mode}.name`);
-  const capability=report.enforceable.length===0?t('sandboxReadiness.unreported',{name,executor}):
-    report.enforceable.length===1 && report.enforceable[0]==='open'?t('sandboxReadiness.unconfined',{name,executor}):
-      t('sandboxReadiness.enforces',{name,executor,modes:report.enforceable.map(mode).join(', ')});
+  const capability=sandboxCapability(report,name,t);
   const limit=t('sandboxReadiness.limit',{requested:mode(report.requested),widest:mode(report.widest),source:t(`sandboxReadiness.sources.${report.source}.name`)});
   const templateLimit=report.template_limit;
   const template=templateLimit===null?'':t('sandboxReadiness.templateLimit',{mode:mode(templateLimit)});

@@ -60,7 +60,7 @@ The sections an operator changes, with their shipped values:
 |---|---|---|
 | `[system]` | `name`, `public_url`, `alternate_urls`, `web_push_contact` | Push services receive `web_push_contact` (HTTPS or `mailto:`). When it is empty, Orch uses the public HTTPS origin or omits the contact on HTTP. |
 | `[release]` | `url`, `request_timeout_secs` (10), `manifest_max_bytes` (1 MiB) | The updater and read-only checks share this address. Scheduled notices of new releases are off (the system setting `release.check_days` is 0); **Management** reads an hourly cache; no check installs anything |
-| `[api]` | `db_pool` (32), `trusted_proxy_cidrs`, `metrics_bind`, `worker_stack_mib` | The API has no published port: only the web edge reaches it. [Run the HTTPS front](edge.md#5-name-the-proxies-that-may-describe-a-caller) explains the proxy list |
+| `[api]` | `db_pool` (32), `db_pool_warm` (8), `db_pool_lifetime_secs` (14400), `trusted_proxy_cidrs`, `metrics_bind`, `worker_stack_mib` | The API has no published port: only the web edge reaches it. [Run the HTTPS front](edge.md#5-name-the-proxies-that-may-describe-a-caller) explains the proxy list. See [Keep connections ready](#keep-connections-ready) |
 | `[gateway]` | `managed_endpoint`, `[[gateway.endpoints]]`, `metrics_bind`, `worker_stack_mib` | `pinned_bind` is the published port; `edge_bind` serves machines that come through the HTTPS front |
 | `[link]` | heartbeat (20 s), dead after (60 s), frame, tunnel and port limits | Change only for a measured reason |
 | `[worker]` | `db_pool` (8), `metrics_bind`, `worker_stack_mib` | |
@@ -108,6 +108,22 @@ runs a few hundred distinct statements, and the five hundred most used make almo
 kept statement holds some tens of kilobytes in its database session, for every connection of both pools
 (`[api] db_pool`, `[worker] db_pool`). Zero keeps none. `ORCH_DATABASE_PREPARED_STATEMENTS=1024` overrides it; restart
 the API and the worker after changing it.
+
+## Keep connections ready
+
+```toml
+[api]
+db_pool_warm = 8
+db_pool_lifetime_secs = 14400
+```
+
+The API keeps `db_pool_warm` database connections open while nobody is asking, so that the first page opened after a
+pause is answered by connections the database has already served: they keep their prepared statements and what those
+statements use. A page's first reads run at once, on several connections. When the API opens a connection, it
+prepares there, in the background, the statements its other connections ran most. A connection beyond the warm ones
+that sits idle is closed, one a minute. Each connection serves for `db_pool_lifetime_secs` before it is replaced; zero
+keeps it for good. With `db_pool_warm = 0` the API keeps none, and an idle connection closes after ten minutes. Restart
+the API after changing either.
 
 ## Database deadlines
 

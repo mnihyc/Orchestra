@@ -748,6 +748,208 @@ async fn host_managers_see_safe_volume_only_retention_without_receiving_a_purge_
     );
 }
 
+/// An environment of the company's boss in a new project, removed with its files kept on `host` (removal revision 3),
+/// and then the project deleted: a deleted place's trash keeps its environments for the window, and their files stay on
+/// the host meanwhile. Gives the environment and the project.
+async fn kept_in_a_deleted_project(world: &World, c: &Company, host: Id) -> (Id, Id) {
+    let project = make_project(world, &c.boss, c.acme, "Web").await.base.id;
+    let mut conn = world.conn().await;
+    let environment = fixtures::insert_resource(
+        &mut conn,
+        "environment",
+        Some(c.boss.id()),
+        Some(project),
+        "Kept in a deleted project",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Environment.into(),
+            id: environment,
+        },
+        c.boss.id(),
+        NewAccess::OnlyMe,
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    let refs = json!([{"runtime_id":orch_types::new_id(),"environment_id":environment,"host_id":host,"driver":"test","role":"workspace","name":"kept-volume","storage":"fast"}]);
+    sqlx::query("UPDATE environments SET status='removed',deleted_at=$2,removed_keep_days=7,volumes_purge_at=$3,removal_phase='kept',removal_revision=3,retained_volumes=$4,retained_bytes=2048 WHERE id=$1")
+        .bind(environment).bind(world.now()).bind(world.now() + chrono::Duration::days(7)).bind(refs)
+        .execute(&mut *conn).await.unwrap();
+    // The project goes to the trash after its environment.
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(project)
+        .bind(world.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    (environment, project)
+}
+
+/// Such kept data reads as gone on the host (no name, no place, no act), and the host and the list of hosts are read
+/// whole, by the host's owner and by an administrator with As admin on.
+#[tokio::test]
+async fn kept_data_of_an_environment_whose_place_was_deleted_reads_as_gone_and_no_host_read_fails()
+{
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Keeper").await;
+    let (environment, _) = kept_in_a_deleted_project(&world, &c, host).await;
+    let shown = read(&world, &c.boss, host).await;
+    let [kept] = shown.kept_data.as_slice() else {
+        panic!("one kept environment: {:?}", shown.kept_data)
+    };
+    assert_eq!(kept.environment_id, environment);
+    assert_eq!(kept.name, None);
+    assert!(kept.home.as_ref().is_none_or(|home| home.redacted));
+    assert_eq!(kept.bytes, Some(2048));
+    assert_eq!(
+        list(&world, &c.boss, &HostListQuery::default()).await,
+        ["Keeper"]
+    );
+    let root = admin(&world, "root").await;
+    assert!(
+        list(&world, &root, &HostListQuery::default())
+            .await
+            .contains(&"Keeper".to_owned())
+    );
+}
+
+/// What such an environment kept is acted on once its place is back. Restoring it and removing it for good, from its
+/// own acts or from the host's deletion, are refused for that alone and queue nothing; a list of kept environments
+/// leaves it out instead of failing; and with the place back the same restore is taken.
+#[tokio::test]
+async fn acts_on_what_an_environment_whose_place_was_deleted_kept_ask_for_the_place_back_first() {
+    use orch_api_contract::environment::{
+        EnvironmentPurge, EnvironmentPurgeQuery, EnvironmentRestore, EnvironmentRestoreBody,
+        NodeDeletedEnvironmentList, NodeDeletedEnvironmentListQuery,
+    };
+    use orch_api_contract::loss::{
+        HostDataChoice, HostDataFate, HostDeletePreflight, HostDeletePreflightBody,
+    };
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Keeper").await;
+    let (environment, project) = kept_in_a_deleted_project(&world, &c, host).await;
+    let restored = world
+        .app
+        .call(EnvironmentRestore, &[&environment])
+        .token(&c.boss.token)
+        .body(&EnvironmentRestoreBody {
+            expected_revision: 3,
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        restored.code,
+        ErrorCode::NodeRestoreParentFirst,
+        "{restored:?}"
+    );
+    assert!(
+        restored
+            .extra
+            .get("parent")
+            .is_none_or(|parent| parent.is_null() || parent["id"] == json!(project)),
+        "it names the deleted place, if any: {restored:?}"
+    );
+    let purged = world
+        .app
+        .call(EnvironmentPurge, &[&environment])
+        .token(&c.boss.token)
+        .query(&EnvironmentPurgeQuery {
+            confirm: "Kept in a deleted project".to_owned(),
+            expected_revision: 3,
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(purged.code, ErrorCode::NodeRestoreParentFirst, "{purged:?}");
+    let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE environment_id=$1")
+        .bind(environment)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0, "nothing is queued");
+    let listed = world
+        .app
+        .call(NodeDeletedEnvironmentList, &[&c.acme])
+        .token(&c.boss.token)
+        .query(&NodeDeletedEnvironmentListQuery {
+            under: Some(true),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|row| row.environment.id != environment),
+        "the org's kept environments leave it out until its place is back"
+    );
+    let row = format!("environment:{environment}");
+    let plan = world
+        .app
+        .call(HostDeletePreflight, &[&host])
+        .token(&c.boss.token)
+        .body(&HostDeletePreflightBody {
+            data: vec![HostDataChoice {
+                id: row.clone(),
+                fate: HostDataFate::Purge,
+                host_id: None,
+            }],
+            ..Default::default()
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(
+        plan.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&plan.raw)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&plan.raw).unwrap();
+    let kept = plan["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|data| data["id"] == json!(row))
+        .unwrap();
+    assert!(
+        kept["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "place_gone"),
+        "{kept}"
+    );
+    sqlx::query("UPDATE nodes SET deleted_at=NULL WHERE id=$1")
+        .bind(project)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let taken = world
+        .app
+        .call(EnvironmentRestore, &[&environment])
+        .token(&c.boss.token)
+        .body(&EnvironmentRestoreBody {
+            expected_revision: 3,
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(
+        taken.status.as_u16(),
+        202,
+        "{}",
+        String::from_utf8_lossy(&taken.raw)
+    );
+}
+
 async fn list(world: &World, by: &Who, query: &HostListQuery) -> Vec<String> {
     let mut names: Vec<String> = world
         .app

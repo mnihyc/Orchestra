@@ -412,7 +412,7 @@ async fn defaults(
     let provider = provider_for(&mut conn, &principal, id, Permission::ProviderManage).await?;
     let switches = add_switches(&mut conn, provider.home_id).await?;
     Ok(catalogued(
-        &provider.facts,
+        &catalogue(&mut conn, id).await?,
         &query.model_name,
         &ModelParameters::default(),
         switches,
@@ -426,11 +426,23 @@ async fn facts_models(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
-    let row = provider_for(&mut conn, &principal, id, Permission::ProviderView).await?;
-    let Some(listed) = row.facts.get("models").filter(|listed| listed.is_array()) else {
+    provider_for(&mut conn, &principal, id, Permission::ProviderView).await?;
+    let Some(listed) = orch_db::queries::resources::keeper::listed_models(&mut conn, id).await?
+    else {
         return Ok(Vec::new());
     };
-    serde_json::from_value(listed.clone()).map_err(ApiError::internal)
+    serde_json::from_value(listed).map_err(ApiError::internal)
+}
+
+/// The list the provider's models source last gave, as `catalogued` reads it (`{"models": [...]}`); empty where it
+/// gave none. The list is kept apart from the provider's facts, which every view of the provider reads.
+async fn catalogue(conn: &mut orch_db::Conn, provider: Id) -> ApiResult<Json> {
+    Ok(
+        match orch_db::queries::resources::keeper::listed_models(conn, provider).await? {
+            Some(models) => json!({ "models": models }),
+            None => json!({}),
+        },
+    )
 }
 
 /// Adds a model to a provider, enabled.
@@ -461,20 +473,21 @@ async fn create(
     ) {
         return Err(exists(&ctx, existing));
     }
+    let listed = catalogue(&mut tx, id).await?;
     definition.parameters = match &body.parameters {
         None => parameters_json(&catalogued(
-            &row.facts,
+            &listed,
             &definition.routing,
             &ModelParameters::default(),
             add_switches(&mut tx, row.home_id).await?,
         ))?,
         Some(asked) => {
             let mut written = parameters_json(asked)?;
-            fill_catalogue_facts(&mut written, &row.facts, &definition.routing);
+            fill_catalogue_facts(&mut written, &listed, &definition.routing);
             // Source offers are facts; carrying them never enables an optional choice.
             if asked.offered.is_none() {
                 let catalogue = catalogued(
-                    &row.facts,
+                    &listed,
                     &definition.routing,
                     &ModelParameters::default(),
                     AddSwitches::Nothing,
@@ -825,7 +838,11 @@ async fn update(
             {
                 members.insert("offered".to_owned(), offered.clone());
             }
-            fill_catalogue_facts(&mut written, &row.facts, &stored.model_name);
+            fill_catalogue_facts(
+                &mut written,
+                &catalogue(&mut tx, id).await?,
+                &stored.model_name,
+            );
             Some(written)
         }
         None => None,
@@ -1095,12 +1112,9 @@ async fn suggestions(
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
+    let listed = orch_db::queries::resources::keeper::listed_models(&mut conn, id).await?;
     drop(conn);
-    let cached = row
-        .facts
-        .get("models")
-        .filter(|value| !value.is_null())
-        .cloned()
+    let cached = listed
         .map(serde_json::from_value::<Vec<ModelSuggestion>>)
         .transpose()
         .map_err(ApiError::internal)?;

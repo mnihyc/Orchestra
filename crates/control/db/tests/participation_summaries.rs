@@ -595,3 +595,73 @@ async fn selected_provider_marks_match_full_owner_group_and_scope_boundaries() {
         assert_eq!(selected, full);
     }
 }
+
+/// Custom and generic plan counts of this connection's prepared summaries statements, summed over their shapes.
+async fn summary_plans(conn: &mut Conn) -> (i64, i64) {
+    let (custom, generic): (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT sum(custom_plans)::bigint, sum(generic_plans)::bigint FROM pg_prepared_statements
+          WHERE statement LIKE '-- Ordinary assignment summaries%'",
+    )
+    .persistent(false)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    (custom.unwrap_or(0), generic.unwrap_or(0))
+}
+
+#[tokio::test]
+async fn a_transaction_reads_its_summaries_on_one_plan_with_the_same_answers() {
+    use sqlx::Connection as _;
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    sqlx::query("INSERT INTO subscriptions (user_id,node_id,level,source) VALUES ($1,$2,'important','manual')")
+        .bind(f.person).bind(f.deep).execute(&mut *conn).await.unwrap();
+    access::testing::give_role(
+        &mut conn,
+        f.destination,
+        "user",
+        f.person,
+        "viewer",
+        f.person,
+        None,
+    )
+    .await
+    .unwrap();
+    let closed = Focus {
+        closed: vec![f.branch],
+        ..Focus::default()
+    };
+    // Outside a transaction each call is planned for its own sets, as before.
+    let planned = (
+        marks(&mut conn, &f, &Focus::default()).await,
+        marks(&mut conn, &f, &closed).await,
+    );
+    assert!(!planned.0.is_empty() && planned.0 != planned.1);
+    let (custom, generic) = summary_plans(&mut conn).await;
+    assert!(custom > 0, "the summaries were planned for their sets");
+    let mut tx = conn.begin().await.unwrap();
+    let rounds = 6;
+    for _ in 0..rounds {
+        assert_eq!(marks(&mut tx, &f, &Focus::default()).await, planned.0);
+        assert_eq!(marks(&mut tx, &f, &closed).await, planned.1);
+    }
+    let (custom_after, generic_after) = summary_plans(&mut tx).await;
+    assert_eq!(
+        custom_after, custom,
+        "no summaries call of the transaction is planned again"
+    );
+    assert!(
+        generic_after >= generic + rounds * 2,
+        "every call of the transaction runs on its connection's one plan ({generic} -> {generic_after})"
+    );
+    let mode: String = sqlx::query_scalar("SELECT current_setting('plan_cache_mode')")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        mode, "auto",
+        "the transaction's own statements keep their planning"
+    );
+    tx.rollback().await.unwrap();
+}

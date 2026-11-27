@@ -9,7 +9,7 @@
  * answers passed on as they come (a page's first reads are lines that arrive one by one). A WebSocket is passed through.
  */
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { X509Certificate, createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { request } from 'node:http';
 import { createSecureServer, type Http2ServerRequest, type Http2ServerResponse } from 'node:http2';
@@ -27,7 +27,9 @@ const HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade',
 const FILES = /^\/(?:assets|fonts)\//;
 const API = /^\/(?:api|health)(?:\/|$)/;
 
-export interface H2Origin { readonly origin: string; close: () => Promise<void> }
+/** `key` is the SHA-256 of its certificate's public key (base64), for a browser that is to trust it
+ * (`--ignore-certificate-errors-spki-list`). */
+export interface H2Origin { readonly origin: string; readonly key: string; close: () => Promise<void> }
 
 function passed(headers: Readonly<Record<string, string | string[] | undefined>>): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
@@ -94,8 +96,10 @@ export async function h2Origin(dist: string, api: URL, directory: string): Promi
   await new Promise<void>((done) => { server.listen(0, '127.0.0.1', done); });
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('The h2 origin needs a TCP port.');
+  const certificate = new X509Certificate(await readFile(certificateFile));
   return {
     origin: `https://127.0.0.1:${address.port}`,
+    key: createHash('sha256').update(certificate.publicKey.export({ type: 'spki', format: 'der' })).digest('base64'),
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((done) => { server.close(() => { done(); }); });

@@ -118,6 +118,11 @@ describe('the one line', () => {
     expect(trashWords(t, { moved: [], refused: [{ name: 'b', reason: 'You may not delete it.' }] })).toEqual({ title: '“b” was not moved to Trash', description: 'You may not delete it.', failed: true });
   });
 
+  it('says the environments that went to the trash with their places, stopped, beside the threads', () => {
+    expect(trashWords(t, { moved: ['a', 'b'], refused: [], environments: 2 })).toEqual({ title: 'Moved “a” and “b” to Trash', description: '2 environments stopped', failed: false });
+    expect(trashWords(t, { moved: ['a'], refused: [], stopped: 1, environments: 1 })).toEqual({ title: 'Moved “a” to Trash', description: '1 running thread stopped · 1 environment stopped', failed: false });
+  });
+
   it('says a side thread that the deletion closed apart from what went to the trash', () => {
     expect(trashWords(t, { moved: [], refused: [], closed: ['Side look'] })).toEqual({ title: 'Closed “Side look”', failed: false });
     expect(trashWords(t, { moved: ['Plan'], refused: [], closed: ['Side look'] })).toEqual({ title: 'Moved “Plan” to Trash', description: '1 side thread closed', failed: false });

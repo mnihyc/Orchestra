@@ -383,3 +383,22 @@ check "and the updater is the one of the release, executable" bash -c "cmp -s '$
 install_set "$WORK/v0.1.3"; printf 'kind=update\nstep=activating\n' > "$STACK/runtime/update/journal"
 refuses "with an unfinished update it refuses, whatever the digest" hop "$DIGEST"
 check "and the updater in use is as it was" same "$STACK/update.sh" "$WORK/update.sh.installed"
+
+# --- 11. The directory the installation records are mounted on -----------------------------------------------------------------
+
+step "the installation records' mount point is the stack user's before the API's container starts"
+# The API's container mounts runtime/update inside the server's data directory, and Docker makes a missing mount point
+# there itself, owned by root. A call that fails still prints, so that its check says what it found.
+rm -rf -- "$STACK/runtime/data"
+OUT="$(in_updater 'SERVICE_UID=$(id -u); SERVICE_GID=$(id -g); prepare_dirs; stat -c "%u %a" runtime/data/installation')" || true
+expect "the directories made before every start hold it, the stack user's" "$(id -u) 755" "$(tail -n 1 <<< "$OUT")"
+# One an earlier start left to Docker: here, a directory that is not the services' user's (they are someone else).
+mkdir -p "$STACK/runtime/data/installation"; chmod 700 "$STACK/runtime/data/installation"
+OUT="$(in_updater 'SERVICE_UID=4242; SERVICE_GID=4242; prepare_dirs; echo prepared')" || true
+expect "the directories made while the API runs leave it as it is, and go on" "prepared 700" "$(tail -n 1 <<< "$OUT") $(stat -c %a "$STACK/runtime/data/installation")"
+OUT="$(in_updater 'SERVICE_UID=4242; SERVICE_GID=4242; check_installation() { :; }; compose() { echo "compose $1 finds $(stat -c %a runtime/data/installation)" >&2; }; app_start')" || true
+expect "the start of the services makes it again, before Compose recreates them" "compose up finds 755" "$(tail -n 1 <<< "$OUT")"
+touch "$STACK/runtime/data/installation/kept"; chmod 700 "$STACK/runtime/data/installation"
+OUT="$(in_updater 'SERVICE_UID=4242; SERVICE_GID=4242; check_installation() { :; }; compose() { :; }; app_start; echo started')" || true
+expect "one that holds anything is left as it is" "started 700" "$(tail -n 1 <<< "$OUT") $(stat -c %a "$STACK/runtime/data/installation")"
+check "with what it holds" test -e "$STACK/runtime/data/installation/kept"

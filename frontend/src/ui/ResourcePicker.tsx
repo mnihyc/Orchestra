@@ -1,4 +1,8 @@
-/** One complete resource picker: the existing Combobox, with protected Home groups and native choices. */
+/** One complete resource picker: the existing Combobox, with protected Home groups and native choices.
+ *
+ * As a quick pick: the person's recent choices first, then the homes that hold a choice that can be made, each with the
+ * rows that can be chosen before those that cannot (which keep their reason); typing narrows names, homes, origins and
+ * the rows' short facts. */
 import { type KeyboardEvent, useCallback, useState } from 'react';
 import { usePickerRecents, recentChoiceRows } from '@/lib/pickerRecents';
 import { useTranslation } from 'react-i18next';
@@ -11,6 +15,7 @@ import { resourceGroupKey, useResourcePickerGroups } from '@/features/resources/
 import { groupResourceRows, resourceGroupMeta, resourceHomeLabel } from '@/features/resources/groups';
 import { MachineOrigin } from '@/features/resources/machines/MachineOrigin';
 import { Combobox, type ComboboxGroup, type ComboboxOption, type ComboboxProps } from '@/ui/Combobox';
+import { factLine } from '@/ui/Choice';
 import type { SelectOption, SelectProps } from '@/ui/Select';
 import type { ChoiceResource } from '@/ui/DetailCard';
 import type { MePickerRecentChoice } from '@/generated/api-types';
@@ -103,9 +108,12 @@ export function ResourcePickerLookup<Value extends string>({groups,query,onQuery
   const wanted=query.normalize('NFKC').toLocaleLowerCase(locale).trim();
   const matches=(option:ResourceLookupOption<Value>)=>{
     const meta=metadata(option);
-    return !filterLocal || wanted==='' || [option.text,meta.home===undefined?'':resourceHomeLabel(meta,t),meta.origin_machine?.name??'']
+    return !filterLocal || wanted==='' || [option.text,option.fullLabel??'',typeof option.description==='string'?option.description:'',meta.home===undefined?'':resourceHomeLabel(meta,t),meta.origin_machine?.name??'']
       .some((word)=>word.normalize('NFKC').toLocaleLowerCase(locale).includes(wanted));
   };
+  // The rows that can be chosen come first; those that cannot keep their order and their reason after them.
+  const refused=(option:ResourceLookupOption<Value>)=>option.disabled===true||typeof option.disabled==='string';
+  const fitting=<Row extends ResourceLookupOption<Value>>(rows:readonly Row[]):Row[]=>[...rows.filter((row)=>!refused(row)),...rows.filter(refused)];
   const chosen=options.find((option)=>option.value===props.initialActiveValue);
   const selectedHome=chosen===undefined?null:metadata(chosen).home;
   const preferred=currentHomes??[...context.currentHomes,...((selectedHome===null||selectedHome===undefined)?[]:[selectedHome.id])];
@@ -115,7 +123,8 @@ export function ResourcePickerLookup<Value extends string>({groups,query,onQuery
   },(option)=>option.disabled!==true&&typeof option.disabled!=='string'):[];
   const recentValues=new Set(recents.map((option)=>option.value));
   const resources=options.filter((option)=>identity(option)!==undefined&&!recentValues.has(option.value)&&matches(option));
-  const byHome=groupHomes?groupResourceRows(resources,'home',metadata,t,locale,preferred):[];
+  // A home that holds a choice that can be made comes before one whose rows all keep a reason; otherwise the homes keep their order.
+  const byHome=(groupHomes?groupResourceRows(resources,'home',metadata,t,locale,preferred):[]).sort((one,other)=>Number(one.rows.every(refused))-Number(other.rows.every(refused)));
   const special=groups.flatMap((group)=>{
     const options=group.options.filter((option)=>identity(option)===undefined&&matches(option));
     return options.length===0?[]:[{...group,options}];
@@ -143,7 +152,8 @@ export function ResourcePickerLookup<Value extends string>({groups,query,onQuery
       } as const;
       const alias=reason!==null&&Object.hasOwn(aliases,reason)?aliases[reason as keyof typeof aliases]:undefined;
       const unavailable=reason===null?null:alias===undefined?reason:t(`resourceGroups.reasons.${alias}`);
-      return {...option,description:<>{option.description}{unavailable!==null&&<span className="block text-sm text-text-muted">{unavailable}</span>}{(origin!==null&&origin!==undefined)&&<span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted"><MachineOrigin machine={origin}/></span>}</>};
+      // The row's facts read as one line: its own, the reason its machine gives, and where it comes from.
+      return {...option,description:factLine([option.description,unavailable,(origin!==null&&origin!==undefined)&&<span data-resource-origin className="inline-flex min-w-0 items-center gap-1"><MachineOrigin machine={origin}/></span>],t('resourceFacts.separator'))};
   };
   const homeGroups:ComboboxGroup<Value>[]=byHome.flatMap((group)=>{
     // Home remains the outer order and fold; native permission categories keep their own option groups.
@@ -155,17 +165,18 @@ export function ResourcePickerLookup<Value extends string>({groups,query,onQuery
     }
     return sections.map((section,index)=>({id:`${group.id}-${index}`,label:section.category||group.label,collapsed:folded(group.id),
     heading:<>{index===0&&<ResourceGroupHeader picking group={group} kinds={[...new Set(group.rows.flatMap((option)=>source(option)?.kind??[]))]} collapsed={folded(group.id)} onToggle={()=>toggle(group.id)}/>}{!folded(group.id)&&section.category!==''&&<div aria-hidden className="px-2 py-1 text-xs font-medium text-text-subtle">{section.category}</div>}</>,
-    options:section.rows.map(decorate),
+    options:fitting(section.rows).map(decorate),
     }));
   });
   const offered:ComboboxGroup<Value>[]=[...special,
     ...(recents.length===0?[]:[{id:'recent-resources',label:t('ui.picker.recent'),options:recents.map((option)=>{
-      const row=decorate(option),meta=metadata(option);
-      return meta.home===null||meta.home===undefined?row:{...row,description:<>{row.description}<span className="block text-sm text-text-muted">{resourceHomeLabel(meta,t)}</span></>};
+      const meta=metadata(option);
+      // A recent row stands apart from its home's group, so its home is one of its facts.
+      return decorate(meta.home===null||meta.home===undefined?option:{...option,description:factLine([option.description,resourceHomeLabel(meta,t)],t('resourceFacts.separator'))});
     })}]),
     ...(groupHomes?homeGroups:groups.flatMap((group)=>{
       const rows=group.options.filter((option)=>identity(option)!==undefined&&!recentValues.has(option.value)&&matches(option));
-      return rows.length===0?[]:[{...group,id:`${group.id}-resources`,options:rows.map(decorate)}];
+      return rows.length===0?[]:[{...group,id:`${group.id}-resources`,options:fitting(rows).map(decorate)}];
     })),
   ];
   const footer=recent.error===null?props.footer:<>{props.footer}<ErrorState compact title={t('ui.picker.recent')} error={recent.error} onRetry={recent.retry}/></>;

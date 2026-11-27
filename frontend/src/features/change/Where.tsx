@@ -1,4 +1,5 @@
-import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
+import { machineCapacityWords } from '@/features/resources/machines/MachineCapacityLine';
+import { factLine } from '@/ui/Choice';
 import { Select } from '@/ui/Select';
 import { ResourcePicker } from '@/ui/ResourcePicker';
 import { PlacePicker, type PlaceRow } from '@/features/start/PlacePicker';
@@ -16,6 +17,7 @@ import { useStore } from 'zustand';
 import { client } from '@/api/client';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
+import { useFormatContext } from '@/lib/appearance';
 
 import { placesQuery } from '@/api/forks';
 import type { Choices, WhereChoice } from '@/features/change/choices';
@@ -39,6 +41,7 @@ const isHost = (place: Place): place is PlaceHost => 'automatic' in place;
 /** The destination's short name stays in the page; capacity and refusals are read inside its dropdown. */
 export function HostChoices({ hosts, value, onChange, loading, machines = [], machine = null, onMachine }: { hosts: readonly PlaceHost[]; value: string | null; onChange: (hostId: string | null) => void; loading: boolean; machines?: readonly MoveMachine[]; machine?: string | null; onMachine?: (id: string | null) => void }) {
   const { t } = useTranslation();
+  const format = useFormatContext();
   if (loading) return <p className="text-sm text-text-muted">{t('changeCompact.loadingPlaces')}</p>;
   const automatic = hosts.find((place) => place.automatic);
   return (
@@ -71,7 +74,7 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
           };
         }),
         ...machines.map((place) => ({ value: `machine:${place.machine.id}`, name: place.machine.name, resource:{kind:'machine',id:place.machine.id,data:place},
-          description: <span className="flex flex-col gap-1"><MachineCapacityLine facts={place.capacity} />{t('uniformMoves.directory')}{!place.usable && <>{' '}{place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.join(' ')}</>}</span>,
+          description: factLine([!place.usable && (place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.join(' ')), t('uniformMoves.directory'), machineCapacityWords(place.capacity, t, format)], t('resourceFacts.separator')),
           disabled: !place.usable })),
       ]}
     />
