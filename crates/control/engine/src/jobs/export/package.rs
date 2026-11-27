@@ -15,7 +15,7 @@ use orch_api_contract::exports::{ExportCounts, ExportLeftOut, ExportRequest};
 use orch_api_contract::package::{
     PACKAGE_FORMAT, PACKAGE_VERSION, PackageAccess, PackageFile, PackageHeader, PackageKind,
     PackageLeftOut, PackageLeftOutWhat, PackageManifest, PackageObject, PackagePrincipal,
-    PackageRendering, PackageScope, PackageSource, PackageVersion,
+    PackageRendering, PackageScope, PackageVersion,
 };
 use orch_api_contract::users::UserKind;
 use orch_authz::Policy;
@@ -705,17 +705,12 @@ impl Exporting {
             count: 0,
             place: None,
         }));
-        let deployment = &self.engine.inner.config.deployment;
         Ok(PackageManifest {
             format: PACKAGE_FORMAT.to_owned(),
             version: PACKAGE_VERSION,
             header: PackageHeader {
                 package_id: self.export,
-                source: PackageSource {
-                    name: deployment.name.clone(),
-                    url: deployment.url.clone(),
-                    version: deployment.version.clone(),
-                },
+                source: self.source.clone(),
                 made_by: Some(self.user),
                 made_at: time(now),
                 scope: PackageScope {

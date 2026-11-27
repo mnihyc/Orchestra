@@ -41,7 +41,7 @@ test('every kind of item and of step is drawn, says what it is, and breaks nothi
   await expect(log.getByText('The environment was restarted while this turn ran.')).toBeVisible();
   await expect(log.getByRole('region', { name: 'Announcement' }).getByText('Release freeze')).toBeVisible();
   await expect(log.getByRole('region', { name: 'Announcement' }).getByText('No merges until Monday.')).toBeVisible();
-  await expect(step(/^Thought for/)).toBeVisible();
+  await expect(step(/^Thought\b/)).toBeVisible();
   await expect(log.getByRole('region', { name: 'Plan' }).getByText('Change the redirect')).toBeVisible();
 
   // Each kind of step, by its words.

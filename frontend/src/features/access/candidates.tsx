@@ -1,16 +1,18 @@
 /** One visible holder picker: current people, groups, roles and members with their source places. */
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { ShieldCheck, Users, X } from 'lucide-react';
 import { type KeyboardEvent, type ReactNode, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { type AccessRowTarget, holderSearchQuery, isNodeKind, SEARCH_MIN_CHARS } from '@/api/access';
+import { type AccessRowTarget, holderPickerQuery, isNodeKind } from '@/api/access';
 import { nodeQuery } from '@/api/nodes';
 import { ApiError } from '@/api/client';
 import type { Holder, HolderInput, NodeRef, Role, UserRef } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
-import { Avatar } from '@/ui/Avatar';
-import { Combobox, type ComboboxGroup, type ComboboxOption } from '@/ui/Combobox';
+import { UserChip } from '@/ui/UserChip';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
+import { Button } from '@/ui/Button';
+import { ResourcePickerLookup, type ResourceLookupOption, type ResourcePickerLookupProps } from '@/ui/ResourcePicker';
 import { NodeIcon } from '@/ui/NodeIcon';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
@@ -31,7 +33,8 @@ export interface Candidate {
 }
 
 export interface Candidates {
-  groups: ComboboxGroup<string>[];
+  groups: ResourcePickerLookupProps<string>['groups'];
+  footer?: ReactNode;
   byValue: ReadonlyMap<string, Candidate>;
   loading: boolean;
   /** The same place control beside every holder field. */
@@ -45,10 +48,6 @@ export function useTargetOrg(target: AccessRowTarget, enabled = true): string | 
   const node = useQuery({ ...nodeQuery(target.id), enabled: needed });
   return orgId ?? node.data?.org_id ?? null;
 }
-
-const personIcon = (user: UserRef) => (
-  <Avatar text={user.avatar.text} color={user.avatar.color} kind={user.kind === 'service' ? 'service' : 'human'} size={24} />
-);
 
 export interface CandidateOptions {
   /** A closed picker does not read candidates or source places. */
@@ -91,7 +90,7 @@ function HolderPlacePicker({ homeRoot, selected, thing, onSelect }: {
   const [open, setOpen] = useState(false);
   const text = address.trim(), exact = useDebounced(text);
   const browsing = text === '';
-  const searching = text.length >= SEARCH_MIN_CHARS;
+  const searching = text.length > 0;
   // A chosen source may belong to another tree. Until that node's own root is
   // known, a blank browse must not fall back to the target's home tree.
   const selectedNode = useQuery({ ...nodeQuery(selected?.ref.id ?? ''),
@@ -99,20 +98,21 @@ function HolderPlacePicker({ homeRoot, selected, thing, onSelect }: {
   const rootWaiting = browsing && selected !== null && (selectedNode.isPending || selectedNode.isFetching);
   const root = selected === null ? homeRoot : selectedNode.isSuccess && !selectedNode.isFetching ? selectedNode.data.org_id : null;
   const ready = text === exact && (searching || browsing && root !== null);
-  const placesQuery = useQuery({ ...holderSearchQuery(searching ? exact : '', searching ? null : root, searching ? homeRoot : root, false, true),
-    enabled: open && ready, retry: false });
+  const placeSource = holderPickerQuery(searching ? exact : '', searching ? null : root, searching ? homeRoot : root, false, ['role'], true);
+  const placesQuery = useInfiniteQuery({ ...placeSource, enabled: open && ready });
+  usePickerCursorRestart(placesQuery, placeSource.queryKey);
   const places = useMemo(() => {
     const found = new Map<string, HolderPlace>();
     // No previous query, failed refresh or unverified selected root may lend rows
     // to this input. The native reply itself supplies each safe display path.
-    if (!ready || placesQuery.isError || placesQuery.isFetching) return [];
-    for (const item of placesQuery.data?.items ?? []) {
+    if (!ready || placesQuery.isError && !placesQuery.isFetchNextPageError || placesQuery.isFetching && !placesQuery.isFetchingNextPage) return [];
+    for (const item of placesQuery.data?.pages.flatMap((page) => page.items) ?? []) {
       if (item.holder.kind === 'role' && item.holder.at !== null && !item.holder.at.redacted && item.holder.at.name !== null) {
         found.set(item.holder.at.id, { ref: item.holder.at, path: item.place });
       }
     }
     return [...found.values()].sort((one, other) => one.path.localeCompare(other.path));
-  }, [placesQuery.data, placesQuery.isError, placesQuery.isFetching, ready]);
+  }, [placesQuery.data, placesQuery.isError, placesQuery.isFetching, placesQuery.isFetchNextPageError, placesQuery.isFetchingNextPage, ready]);
   const rootError = browsing && selected !== null ? selectedNode.error : null;
   const searchError = ready ? placesQuery.error : null;
   const error = rootError ?? searchError;
@@ -120,7 +120,7 @@ function HolderPlacePicker({ homeRoot, selected, thing, onSelect }: {
   const hiddenSelection = unverifiedNode(selectedNode) || unavailable(searchError);
   const selectedName = selected === null ? undefined : hiddenSelection ? t('access.place.hidden') : selected.path;
   const current = t('access.candidates.thisPlace', { place: thing });
-  const busy = placesQuery.isFetching || open && (text !== exact || rootWaiting);
+  const busy = placesQuery.isFetching && !placesQuery.isFetchingNextPage || open && (text !== exact || rootWaiting);
   const resetCurrent = () => { setOpen(false); setAddress(''); onSelect(null); };
   const press = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!(event.target instanceof HTMLInputElement) || event.target.getAttribute('role') !== 'combobox') return;
@@ -136,15 +136,16 @@ function HolderPlacePicker({ homeRoot, selected, thing, onSelect }: {
       if (event.relatedTarget instanceof Node ? !event.currentTarget.contains(event.relatedTarget) : event.target instanceof HTMLInputElement) setAddress('');
     }}>
     <div className="flex min-w-0 items-end gap-1">
-    <Combobox fieldClassName="min-w-0 flex-1" label={t('access.candidates.place')} query={address} onQueryChange={setAddress} open={open} onOpenChange={setOpen}
+    <ResourcePickerLookup pickerKey="permission-source-place" groupHomes={false} filterLocal={false} fieldClassName="min-w-0 flex-1" label={t('access.candidates.place')} query={address} onQueryChange={setAddress} open={open} onOpenChange={setOpen}
       displayValue={selectedName ?? current} initialActiveValue={selected?.ref.id ?? 'current'}
       placeholder={t('access.candidates.placeAddress')} empty={error === null ? t('access.candidates.placeNone') : undefined}
       loading={busy}
+      footer={placesQuery.hasNextPage ? <Button size="sm" variant="ghost" pending={placesQuery.isFetchingNextPage} onClick={() => { void placesQuery.fetchNextPage(); }}>{t('ui.pagination.more')}</Button> : undefined}
       groups={[{ id: 'places', label: t('access.candidates.places'), options: [
         ...(browsing ? [{ value: 'current', label: current, text: current, disabled: busy }] : []),
         ...(browsing && selected !== null && !places.some((place) => place.ref.id === selected.ref.id)
           ? [{ value: selected.ref.id, label: selectedName ?? current, text: selectedName ?? current, disabled: true }] : []),
-        ...places.map((place) => ({ value: place.ref.id, label: place.path, text: place.path, icon: <NodeIcon kind={place.ref.kind} /> })),
+        ...places.map((place) => ({ value: place.ref.id, label: place.path, text: place.path, resource: { kind: place.ref.kind, id: place.ref.id }, icon: <NodeIcon kind={place.ref.kind} /> })),
       ] }]} onSelect={(option) => {
         setOpen(false);
         if (option.value === 'current' && browsing) onSelect(null);
@@ -164,6 +165,7 @@ function HolderPlacePicker({ homeRoot, selected, thing, onSelect }: {
       // Refetch the failed key once. Do not also reopen/enable it: focus returns
       // to the input only when the person asks for its cached, recovered rows.
       if (rootError !== null) void selectedNode.refetch({ cancelRefetch: false });
+      else if (placesQuery.isFetchNextPageError) void placesQuery.fetchNextPage();
       else void placesQuery.refetch({ cancelRefetch: false });
     }} />}
   </div>;
@@ -194,11 +196,12 @@ export function useCandidates(query: string, orgId: string | null, options: Cand
   const enabled = options.enabled !== false;
   const { selected, picker, homeRoot, selectedUnavailable } = useHolderPlace(orgId, options.placeId, enabled && options.browsePlaces !== false && (options.kinds.includes('group') || options.kinds.includes('role')), options.thing);
   const settled = useDebounced(query);
-  const results = useQuery({ ...holderSearchQuery(settled, selected?.ref.id ?? options.placeId ?? orgId, homeRoot, options.kinds.includes('node')),
-    enabled: enabled && !selectedUnavailable && query === settled && (options.kinds.some((kind) => kind !== 'user') || settled.trim().length >= SEARCH_MIN_CHARS) });
+  const source = holderPickerQuery(settled, selected?.ref.id ?? options.placeId ?? orgId, homeRoot, options.kinds.includes('node'), options.kinds);
+  const results = useInfiniteQuery({ ...source, enabled: enabled && !selectedUnavailable && query === settled });
+  usePickerCursorRestart(results, source.queryKey);
   const byValue = new Map<string, Candidate>();
-  const found: ComboboxOption<string>[] = [];
-  for (const item of enabled && !selectedUnavailable && query === settled && !results.isError ? results.data?.items ?? [] : []) {
+  const found: ResourceLookupOption<string>[] = [];
+  for (const item of enabled && !selectedUnavailable && query === settled && (!results.isError || results.isFetchNextPageError) ? results.data?.pages.flatMap((page) => page.items) ?? [] : []) {
     const kind = item.input.kind;
     if (!options.kinds.some((wanted) => wanted === kind)) continue;
     if (item.holder.kind === 'role' && options.withoutRoles?.includes(item.holder.role) === true) continue;
@@ -206,11 +209,18 @@ export function useCandidates(query: string, orgId: string | null, options: Cand
     const name = item.holder.kind === 'group' ? `${item.holder.group.name}, ${item.place}` : item.holder.kind === 'user' ? `${item.holder.user.display_name} · ${item.place}` : holderName(t, item.holder, item.place);
     const user = item.holder.kind === 'user' ? item.holder.user : undefined;
     byValue.set(value, { input: item.input, holder: item.holder, name, outside: item.outside, ...(user === undefined ? {} : { user }) });
-    found.push({ value, label: name, text: name, icon: user === undefined ? kind === 'group' ? <Users aria-hidden /> : <ShieldCheck aria-hidden /> : personIcon(user),
+    const resource = item.holder.kind === 'user' ? { kind: 'user', id: item.holder.user.id }
+      : item.holder.kind === 'group' ? { kind: 'group', id: item.holder.group.id }
+        : item.holder.kind === 'node' ? { kind: item.holder.node.kind, id: item.holder.node.id } : undefined;
+    found.push({ value, label: user === undefined ? name : <span className="flex min-w-0 items-center gap-2"><UserChip user={user} size={24} card={false} /><span className="truncate text-sm text-text-muted">{item.place}</span></span>, text: name, resource,
+      icon: user === undefined ? kind === 'group' ? <Users aria-hidden /> : <ShieldCheck aria-hidden /> : undefined,
       description: [t(`access.candidates.kind.${kind === 'role' && item.holder.kind === 'role' && item.holder.role === 'viewer' ? 'everyone' : kind}`),
         ...(item.outside ? [t('access.holder.outside')] : [])].join(' · '),
       disabled: item.outside && options.outsiderOff !== undefined ? `${t('access.holder.outside')} · ${options.outsiderOff}` : false });
   }
   return { groups: [{ id: 'holders', label: t('access.candidates.results'), options: found }], byValue,
-    loading: results.isFetching || query !== settled, placePicker: picker };
+    loading: results.isFetching && !results.isFetchingNextPage || query !== settled, placePicker: picker,
+    footer: results.isError ? <ErrorState compact error={results.error} onRetry={() => { void (results.isFetchNextPageError ? results.fetchNextPage() : results.refetch()); }} />
+      : results.hasNextPage ? <Button size="sm" variant="ghost" pending={results.isFetchingNextPage} onClick={() => { void results.fetchNextPage(); }}>{t('ui.pagination.more')}</Button> : undefined,
+  };
 }

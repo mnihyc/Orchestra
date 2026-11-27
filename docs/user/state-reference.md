@@ -2,571 +2,885 @@
 group: work
 screens: [/help, /thread/$threadId, /resources/providers/$id]
 keywords: [state, status, phase, reference, 状态, 阶段, 参考]
-summary: What each state shown beside a thread, provider or machine means.
+summary: Look up a status shown on a screen, what it means and what you can do next.
+heading_id.thread-in-the-sidebar: threaddisplaystate
+heading_id.current-turn-in-a-thread: threadstate
+heading_id.turn-history: turnstate
+heading_id.stopping-a-turn: stopstate
+heading_id.waiting-for-source-files: blockedreason
+heading_id.preparing-source-files: sourcestate
+heading_id.topic-board: topicstatus
+heading_id.plan-steps: planstepstatus
+heading_id.continuing-from-another-point: threadcontinuationstatus
+heading_id.side-sessions: sidestate
+heading_id.working-in-a-side-session: sidereading
+heading_id.session-files: nativehistorystate
+heading_id.reading-earlier-history: adopthistorystate
+heading_id.why-a-session-reopened: sessionreopenreason
+heading_id.session-changes-in-the-thread: markerkind
+heading_id.warnings-and-file-changes: markerharnesschanged
+heading_id.personal-questions: askstate
+heading_id.summaries: summarystate
+heading_id.automatic-archiving-and-deletion: noderetentionhold
+heading_id.sending-a-message: inputstate
+heading_id.what-the-program-received: modelinputstate
+heading_id.work-shown-in-a-message: itemstatus
+heading_id.scheduled-messages: inputschedulestate
+heading_id.a-scheduled-occurrence: inputschedulerunstate
+heading_id.inbox-notices: noticedecisionstate
+heading_id.why-a-notice-was-skipped: noticesuppressionreason
+heading_id.delivery-outside-orch: channelacceptancestate
+heading_id.missing-diagnostic-details: rawcaptureomissioncause
+heading_id.machine-connection: machinestatus
+heading_id.agent-program-connection: harnessstatus
+heading_id.gateway-connection: tunnelgatewaystate
+heading_id.pool-selections: poolchoicestate
+heading_id.environment-status: environmentstatus
+heading_id.removal-and-recovery: environmentremovalphase
+heading_id.mounted-storage: envmountstate
+heading_id.file-snapshots: snapshotstate
+heading_id.opening-a-file-version: fetchstatus
+heading_id.waiting-for-a-file: fetchunavailable
+heading_id.stored-uploads: uploadinventorystate
+heading_id.checking-an-upload: uploadphase
+heading_id.finding-workspace-files: environmentindexreason
+heading_id.provider-availability: providerstatus
+heading_id.model-information: memberstate
+heading_id.usage-limits: capstate
+heading_id.checking-a-program-build: harnessbuildstatus
+heading_id.checking-for-releases: programchannelstate
+heading_id.extensions: pluginstate
+heading_id.mcp-servers-found-on-a-machine: mcpofferingstate
+heading_id.mcp-server-status: mcpstate
+heading_id.sub-agents: subagentstate
+heading_id.answering-a-request: approvalstate
+heading_id.requests-list: approvalliststate
+heading_id.when-auto-is-unavailable: approvalchoicereason
+heading_id.checking-automatic-approval: autoapprovalstate
+heading_id.program-at-a-port: porttargetstate
+heading_id.sharing-a-port: portopeningstate
+heading_id.opening-a-view-from-outside: outsidewaystate
+heading_id.terminal-session: terminalstate
+heading_id.browser-session: browserstate
+heading_id.goal-progress: goalstatus
+heading_id.agent-reports: goalreportstatus
+heading_id.a-goal-waiting-for-you: goalreason
+heading_id.checking-the-result: goaloutcome
+heading_id.who-accepted-completion: goalcheckedby
+heading_id.reaching-background-work: backgroundstate
+heading_id.background-tasks: backgroundtaskstate
+heading_id.ending-a-command: backgroundendstate
+heading_id.jobs: jobstate
+heading_id.steps-in-a-job: phasestate
+heading_id.search-by-meaning: semanticstate
+heading_id.retrying-a-search-update: semanticretrynext
+heading_id.exports: exportstate
+heading_id.imports: importstate
+heading_id.organization-setup: firststepsstate
+heading_id.page-access: pagestate
+heading_id.shortcuts: shortcuttargetstate
+heading_id.who-can-use-a-shared-resource: agentsharecurrentstate
+heading_id.files-shared-with-a-thread: agentsharesnapshotstate
+heading_id.items-in-the-activity-history: auditobjectstate
+heading_id.account-access: adminuserstatus
+heading_id.sign-in-check: humancheckedgestate
 ---
 
 # State reference
 
-States describe reported facts. Offline can recover; lost means an explicit permanent-loss decision. A failed or unavailable state keeps its reason and the action the screen actually offers. Internal names below help match Details to the correct object; similar names do not share all meanings. See [thread states](thread-states.md) and [error recovery](error-reference.md).
+Find the screen where you saw the status. Select a label to link to its explanation. Names and dates below are examples. See also [thread states](thread-states.md) and [error recovery](error-reference.md).
 
-## Entries
+## Threads and turns
 
-### ThreadDisplayState
+### Thread in the sidebar
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ThreadDisplayState.waiting_approval` | A request or held input waits for a person. |
-| `state:ThreadDisplayState.blocked` | The thread cannot continue. |
-| `state:ThreadDisplayState.failed` | The last turn failed without a later accepted input. |
-| `state:ThreadDisplayState.running` | A turn is starting or running. |
-| `state:ThreadDisplayState.queued` | Messages wait to start. |
-| `state:ThreadDisplayState.held` | A person held the queue until Resume. |
-| `state:ThreadDisplayState.finished` | A completed turn has not been seen by this reader. |
-| `state:ThreadDisplayState.idle` | No work or unseen result needs an icon. |
-| `state:ThreadDisplayState.archived` | The thread or a place above it is archived. |
+| [Waiting for approval](#state:ThreadDisplayState.waiting_approval) | A request or a queued message needs a decision. Open Approvals or the thread to answer. |
+| [Blocked](#state:ThreadDisplayState.blocked) | Work is waiting on a requirement. Open the thread to see what it needs. |
+| [Failed](#state:ThreadDisplayState.failed) | The last turn failed. Read its error before sending another message. |
+| [Running](#state:ThreadDisplayState.running) | The agent is starting or working on a turn. Open the thread to follow its progress. |
+| [Messages waiting](#state:ThreadDisplayState.queued) | Messages will start in queue order when the agent is free. Open the queue to review them. |
+| [Held](#state:ThreadDisplayState.held) | Messages are saved in the queue. Choose Resume when they should run. |
+| [Finished](#state:ThreadDisplayState.finished) | A turn finished since you last read the thread. Open it to see the reply. |
+| [Idle](#state:ThreadDisplayState.idle) | The agent is free and you are caught up. Send a message to start work. |
+| [Archived](#state:ThreadDisplayState.archived) | This thread or its parent is archived. Open it to read earlier work. |
 
-### PageState
+### Current turn in a thread
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:PageState.follows` | Every row follows the defaults. |
-| `state:PageState.custom` | Somebody changed a row. |
-| `state:PageState.restricted` | Its View row no longer follows the defaults, which other products call private. |
+| [Idle](#state:ThreadState.idle) | Send a message when you want the agent to begin. |
+| [Starting](#state:ThreadState.starting) | The agent is getting ready. The thread shows which step it is on. |
+| [Running](#state:ThreadState.running) | The agent is working. Follow its replies in the thread. |
+| [Waiting for approval](#state:ThreadState.waiting_approval) | Work is waiting for someone to approve a request. Open the request to decide. |
+| [Blocked](#state:ThreadState.blocked) | The thread shows what prevented the next step. Resolve the named problem to continue. |
 
-### OutsideWayState
+### Turn history
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:OutsideWayState.ready` | It is on and nothing is wrong with it. |
-| `state:OutsideWayState.needs_attention` | It failed, lost its target or its channel, and says what would repair it. |
+| [Starting](#state:TurnState.starting) | The program is preparing this turn. Its progress appears in the thread. |
+| [Running](#state:TurnState.running) | Watch the thread for the next reply or request. |
+| [Done](#state:TurnState.completed) | The turn has finished. Read its reply and review any file changes. |
+| [Stopped](#state:TurnState.interrupted) | The turn stopped early. Read what it finished before deciding how to continue. |
+| [Failed](#state:TurnState.failed) | The program reported a failure. Open the turn to read the reason. |
 
-### EnvironmentStatus
+### Stopping a turn
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:EnvironmentStatus.none` | A record only, until its first use. |
-| `state:EnvironmentStatus.provisioning` | Being made. |
-| `state:EnvironmentStatus.running` | Up. |
-| `state:EnvironmentStatus.stopped` | Stopped. |
-| `state:EnvironmentStatus.recreating` | Being replaced by a new unit. |
-| `state:EnvironmentStatus.moving` | Moving to another host. |
-| `state:EnvironmentStatus.failed` | Failed. |
-| `state:EnvironmentStatus.offline` | Its machine is not reachable. |
-| `state:EnvironmentStatus.lost` | Explicitly declared permanently unreachable. |
-| `state:EnvironmentStatus.disabled` | Switched off. |
-| `state:EnvironmentStatus.removed` | Its unit was removed and owned files follow the recorded removal lifecycle. |
+| [Stopping…](#state:StopState.stopping) | Your stop request was accepted. Wait for the current work to finish stopping. |
+| [Stopped](#state:StopState.stopped) | The turn ended or its preparation was cancelled. Its outcome is in the thread. |
 
-### TopicStatus
+### Waiting for source files
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:TopicStatus.open` | Work goes on. |
-| `state:TopicStatus.done` | It is finished. |
+| [source preparation failed](#state:BlockedReason.source_failed) | Source files could not be prepared. Open Source, read the cause and choose Prepare again when ready. Your message stays queued. |
 
-### BackgroundTaskState
+### Preparing source files
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:BackgroundTaskState.running` | Native work still runs. |
-| `state:BackgroundTaskState.completed` | Native work finished successfully. |
-| `state:BackgroundTaskState.failed` | Native work ended unsuccessfully. |
-| `state:BackgroundTaskState.stopped` | A person explicitly ended the work. |
-| `state:BackgroundTaskState.lost` | The owning session disappeared. |
+| [The source is waiting to be prepared](#state:SourceState.pending) | Your work is waiting for the source files. Open Source to see the next step. |
+| [Preparing the source](#state:SourceState.preparing) | The environment is preparing the files. You can follow progress in Source. |
+| [The source could not be prepared](#state:SourceState.failed) | Preparation stopped with an error. Read the cause in Source before trying again. |
 
-### ThreadState
+### Topic board
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ThreadState.idle` | Waiting for something to be said. |
-| `state:ThreadState.starting` | Getting ready to take a turn. |
-| `state:ThreadState.running` | A turn is under way. |
-| `state:ThreadState.waiting_approval` | A turn waits for an approval. |
-| `state:ThreadState.blocked` | It cannot go on. |
+| [Open](#state:TopicStatus.open) | Work in this topic is still open. Open its board to see the threads. |
+| [Done](#state:TopicStatus.done) | This topic has been marked done. Reopen it if work needs to continue. |
 
-### HarnessBuildStatus
+### Plan steps
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:HarnessBuildStatus.untested` | Nothing checked it yet: it is offered as untested. |
-| `state:HarnessBuildStatus.checking` | Its check runs. |
-| `state:HarnessBuildStatus.checked` | Its interface and native cases passed, or it is the build this release was made with. |
-| `state:HarnessBuildStatus.failed` | Its check found something the adapter uses missing, or could not run; see its check. |
+| [Not started](#state:PlanStepStatus.pending) | The agent plans to do this step later. Follow the current step above it. |
+| [In progress](#state:PlanStepStatus.in_progress) | The agent is working on this step. Its updates appear in the turn. |
+| [Done](#state:PlanStepStatus.completed) | The agent marked this step complete. Read the turn for the result. |
 
-### ProviderStatus
+### Continuing from another point
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ProviderStatus.needs_setup` | It has to be set up. |
-| `state:ProviderStatus.ready` | Ready. |
-| `state:ProviderStatus.exhausted` | The vendor last reported exhaustion; observational, never a local quota gate. |
-| `state:ProviderStatus.error` | Something is wrong. |
-| `state:ProviderStatus.offline` | Its machine is not reachable. |
-| `state:ProviderStatus.disabled` | Switched off. |
+| [Preparing this message version…](#state:ThreadContinuationStatus.preparing) | The program is preparing the selected point in the conversation. Wait for it to become available. |
+| [Viewing a saved message version.](#state:ThreadContinuationStatus.ready) | You can select this continuation and carry on from it. |
+| [This message version could not be prepared.](#state:ThreadContinuationStatus.failed) | Preparation failed. You can still read the earlier history and use the previous continuation. |
 
-### SourceState
+### Side sessions
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:SourceState.pending` | Waiting for preparation. |
-| `state:SourceState.preparing` | Preparation is running. |
-| `state:SourceState.ready` | The directory is ready. |
-| `state:SourceState.failed` | Preparation failed, retaining its frozen source and waiting input. |
+| [The open side threads](#state:SideState.open) | Open the side session to follow its work or send a message. |
+| [Review · closed](#state:SideState.closed) | The side session has ended. Its earlier conversation is still available. |
 
-### JobState
+### Working in a side session
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:JobState.queued` | Waiting for its turn. |
-| `state:JobState.running` | Under way. |
-| `state:JobState.succeeded` | Finished well. |
-| `state:JobState.failed` | Failed. |
-| `state:JobState.cancelled` | Stopped by somebody. |
-| `state:JobState.lost` | The machine needed for this work was explicitly declared lost. |
+| [Can act](#state:SideReading.acting) | This side session can use the tools allowed in the main workspace. Review its actions in the side session. |
 
-### GoalStatus
+### Session files
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:GoalStatus.active` | Orch keeps the thread working on it. |
-| `state:GoalStatus.paused` | Held: a person paused it, or the agent said it is blocked. |
-| `state:GoalStatus.met` | The condition holds. |
-| `state:GoalStatus.stopped` | It ended without the condition: a limit was reached, or nobody may go on. |
-| `state:GoalStatus.cleared` | A person took it away. |
+| [Session files kept](#state:NativeHistoryState.retained) | The program found the files it uses to resume this session. You can read the conversation in Orch. |
+| [Session files removed](#state:NativeHistoryState.removed) | The program confirmed that its session files are gone. You can still read the conversation in Orch. |
+| [Not reported](#state:NativeHistoryState.unreported) | The program has not confirmed whether its session files are present. You can still read the conversation. |
 
-### GoalReportStatus
+### Reading earlier history
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:GoalReportStatus.working` | It is working on it. |
-| `state:GoalReportStatus.met` | The condition holds. |
-| `state:GoalReportStatus.blocked` | Only a person can go on. |
+| [From the session before Orch](#state:AdoptHistoryState.read) | Earlier messages were read. An empty conversation has no earlier messages to show. |
+| [The earlier history could not be read.](#state:AdoptHistoryState.unreadable) | Reading the earlier messages failed. Choose Read again to retry. |
+| [This agent program cannot read the session's earlier history.](#state:AdoptHistoryState.unsupported) | This program cannot read earlier messages from an existing session. Continue with the history you can see. |
+| [The session's machine is offline. Its history can be read when it returns.](#state:AdoptHistoryState.offline) | Reading can resume when the machine reconnects. Return here when it is online. |
+| [The session's machine or provider is no longer available.](#state:AdoptHistoryState.unavailable) | The session's machine, environment or provider is unreachable. Check its availability before trying again. |
 
-### FirstStepsState
+### Why a session reopened
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:FirstStepsState.done` | Observed complete. |
-| `state:FirstStepsState.open` | Still open. |
-| `state:FirstStepsState.unknown` | It could not be observed. |
+| [The session was opened again: it was not known to be open, because the server or the program started again.](#state:SessionReopenReason.unknown) | After the server or agent program restarted, it opened the session again. Continue in the same thread. |
+| [The session was opened again: the instructions changed.](#state:SessionReopenReason.instructions) | This turn uses the updated instructions. You can read them in the thread settings. |
+| [The session was opened again: the limits on its sub-agents changed.](#state:SessionReopenReason.limits) | The program reopened the session to apply the new sub-agent limits. Check Parameters for the values in force. |
+| [The session was opened again: a setting that only a new session takes changed.](#state:SessionReopenReason.configuration) | The working directory or another startup setting changed. Check the current workspace in the thread. |
+| [The session was opened again: the MCP servers it is offered changed.](#state:SessionReopenReason.mcp) | This turn uses the updated set of MCP servers. Check the thread's tools to see what is available. |
+| [The session was opened again: the Orch tools it is offered changed.](#state:SessionReopenReason.tools) | The set of Orch tools changed. The reopened session uses the tools available for this turn. |
+| [The session was opened again: the skills it is given changed.](#state:SessionReopenReason.skills) | This turn uses the updated skills. Check the skills available to the agent. |
+| [The session was opened again: this program reads the directory's files each time a session opens, so it opens one for every turn.](#state:SessionReopenReason.program_reloads) | The program reloads its context when a session opens. This turn will continue with that context. |
+| [The session was opened again: the history of this side thread was read from its parent again.](#state:SessionReopenReason.side_history) | The side session needed updated conversation history. Follow the next turn there. |
 
-### PortOpeningState
+### Session changes in the thread
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:PortOpeningState.waiting` | Awaiting a manager's decision. |
-| `state:PortOpeningState.opening` | Admitted, with its initial host bind still pending. |
-| `state:PortOpeningState.open` | Admitted and currently served. |
-| `state:PortOpeningState.stopped` | Admitted while its environment is stopped. |
-| `state:PortOpeningState.not_listening` | Admitted while no program serves the target. |
-| `state:PortOpeningState.unavailable` | Admitted but currently unavailable. |
-| `state:PortOpeningState.refused` | The reviewed exposure was refused. |
-| `state:PortOpeningState.closed` | Admission has ended and cannot be revived by restart. |
+| [The session was opened again: it was not known to be open, because the server or the program started again.](#state:MarkerKind.session_reopened) | The program reopened the session before this turn. Read the line to see what changed. |
 
-### AuditObjectState
+### Warnings and file changes
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:AuditObjectState.live` | The object is live. |
-| `state:AuditObjectState.deleted` | Retained after deletion. |
-| `state:AuditObjectState.purged` | Physical purge was confirmed. |
+| [Agent: Connection lost](#state:MarkerHarnessChanged.warning) | The program raised a warning during this turn. Read it alongside the reply to decide whether to act. |
+| [Agent updated the changed files.](#state:MarkerHarnessChanged.turn_diff) | The program updated the list of file changes for this turn. Open the changes to review the latest result. |
+| [Orch could not read Agent's updated diff. Earlier changed files were kept.](#state:MarkerHarnessChanged.turn_diff_unavailable) | The latest file-change report could not be read. The last readable changes are still shown. |
 
-### EnvMountState
+### Personal questions
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:EnvMountState.attached` | It is attached. |
-| `state:EnvMountState.unavailable` | It could not be attached. |
-| `state:EnvMountState.pending` | It is not created or attached yet. |
+| [Ready](#state:AskState.ready) | You can send your next question. |
+| [Answering](#state:AskState.running) | An answer is being prepared. Wait for it before sending another question. |
+| [Access ended](#state:AskState.closed) | You no longer have access to this conversation's organization. Ask an owner about access. |
+| [Kept as thread](#state:AskState.kept) | This conversation was kept as a thread. Open the thread to continue from its history. |
 
-### EnvironmentRemovalPhase
+### Summaries
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:EnvironmentRemovalPhase.scheduled` | Waiting for unit removal. |
-| `state:EnvironmentRemovalPhase.removing` | Removing the unit. |
-| `state:EnvironmentRemovalPhase.kept` | Keeping the owned volumes. |
-| `state:EnvironmentRemovalPhase.restoring` | Reserving volumes for restoration. |
-| `state:EnvironmentRemovalPhase.purging` | Removing the kept volumes. |
-| `state:EnvironmentRemovalPhase.purged` | Physical removal was confirmed. |
-| `state:EnvironmentRemovalPhase.lost` | The host was declared lost; deletion was never confirmed. |
+| [No summary yet](#state:SummaryState.empty) | There is no summary to read yet. You can still open the original content. |
+| [Fresh](#state:SummaryState.fresh) | The summary reflects the current content. Open the original for details. |
+| [Out of date](#state:SummaryState.stale) | The original changed after this summary was written. Read the original for the latest information. |
+| [Scheduled](#state:SummaryState.scheduled) | You can read the previous summary while the update waits for its next allowed start time. |
+| [Updating](#state:SummaryState.updating) | A summary update is queued or running. The new text appears when it finishes. |
+| [Failed](#state:SummaryState.failed) | The last update failed. You can read the previous summary and check the reason. |
+| [No summarizer](#state:SummaryState.no_summarizer) | A suitable summarizer is missing or unavailable. Check the summary settings. |
 
-### CapState
+### Automatic titles and tags
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:CapState.ok` | There is room. |
-| `state:CapState.warning` | The warning percent was passed. |
-| `state:CapState.reached` | There is no room. |
+| [Next update](#state:AutomaticScheduleState.queued) | An update is queued. The time shown is the earliest it can start. |
+| [Waiting to retry](#state:AutomaticScheduleState.retrying) | An earlier attempt failed. Check the time shown for the next retry. |
+| [Skipped · No summarizer](#state:AutomaticScheduleState.skipped) | The automatic update was skipped. The reason beside the label tells you what prevented it. |
 
-### MemberState
+### Automatic archiving and deletion
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:MemberState.unsupported` | The source does not declare it, and it was never told. |
-| `state:MemberState.not_read_yet` | The source declares it, and it was never told. |
-| `state:MemberState.empty` | It was told as `null` or `[]`: none offered. |
-| `state:MemberState.told` | It was told with a value. |
-| `state:MemberState.unsupported_because` | The source needs an admin key to offer this fact. This is an unavailable member, not a failed model call. |
+| [Active work](#state:NodeRetentionHold.active_work) | Active work keeps this place open. Automatic archiving can proceed after work finishes. |
+| [Already archived](#state:NodeRetentionHold.already_archived) | This place is already archived. You can still open it to read its history. |
+| [Parent archived](#state:NodeRetentionHold.ancestor_archived) | A parent is archived. Check the parent's status before changing this place. |
+| [Not archived](#state:NodeRetentionHold.not_archived) | Automatic deletion applies after archiving. This place is still open. |
 
-### HarnessStatus
+## Messages
 
-| Reference | Meaning |
+### Sending a message
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:HarnessStatus.offline` | Its machine is not reachable. |
-| `state:HarnessStatus.starting` | Being started. |
-| `state:HarnessStatus.online` | Up. |
-| `state:HarnessStatus.error` | It failed. |
+| [Messages waiting](#state:InputState.pending) | Your message is in the queue. You can review it before its turn starts. |
+| [Sending…](#state:InputState.delivering) | The message is being handed to the agent. Wait for delivery to finish. |
+| [Sent](#state:InputState.delivered) | The agent received your message. Follow the turn for its reply. |
+| [Cancelled](#state:InputState.cancelled) | The message was cancelled before delivery. Send it again if it is still needed. |
+| [Not sent](#state:InputState.failed) | The message could not be delivered. Check the reason in the thread before trying again. |
 
-### MachineStatus
+### What the program received
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:MachineStatus.active` | It is registered. |
-| `state:MachineStatus.revoked` | Its registration was withdrawn and its session dropped. |
+| [Prepared](#state:ModelInputState.prepared) | Your input is ready and delivery is under way. Wait for the program to confirm it. |
+| [Sent](#state:ModelInputState.sent) | The program accepted this input. You can see exactly what was sent in the thread. |
+| [Failed to send](#state:ModelInputState.failed) | The program refused the input or delivery failed. Read the error before retrying. |
+| [Delivery not confirmed](#state:ModelInputState.uncertain) | The program did not confirm delivery. Check the thread for a reply before resending. |
 
-### McpOfferingState
+### Work shown in a message
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:McpOfferingState.found` | A different or unrecorded definition was found, and nobody has selected it. |
-| `state:McpOfferingState.pending` | Copying the discovered definition under the connector's own policy. |
-| `state:McpOfferingState.ready` | The protected definition is available on that machine. |
-| `state:McpOfferingState.failed` | Its local policy or native source refused the copy. |
+| [Running](#state:ItemStatus.in_progress) | The agent is still producing this part of the reply. Updates appear here. |
+| [Done](#state:ItemStatus.completed) | This part of the turn is complete. Open it to read the result. |
+| [Failed](#state:ItemStatus.failed) | This part of the turn failed. Open it to read the error. |
+| [Stopped](#state:ItemStatus.cancelled) | This work was stopped. Any output already shown remains available. |
+| [Waiting](#state:ItemStatus.pending) | A request is waiting. Open it to answer or make a decision. |
+| [Approved](#state:ItemStatus.approved) | Permission was granted. Follow the turn to see what the agent did next. |
+| [Answered](#state:ItemStatus.answered) | Someone answered the program's question. Open the request to see the answer. |
+| [Denied](#state:ItemStatus.denied) | Permission was refused. Open the request to see the decision. |
+| [Expired](#state:ItemStatus.expired) | The time to decide has passed. The agent needs a new request to try this action again. |
 
-### AgentShareCurrentState
+### Scheduled messages
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:AgentShareCurrentState.active` | All requested area rights count on this exact source object for this recipient. |
-| `state:AgentShareCurrentState.reduced` | Some requested area rights count on this exact source object for this recipient. |
-| `state:AgentShareCurrentState.inactive` | This contribution supplies no rights in the assessed context. |
-| `state:AgentShareCurrentState.unassessed` | A per-object or per-recipient check is needed; this is not an inactive grant. |
+| [Active](#state:InputScheduleState.active) | Messages will be sent at the times shown. Open the schedule to see the next one. |
+| [Paused](#state:InputScheduleState.paused) | Future sends are paused. Resume the schedule when you want them to continue. |
+| [Finished](#state:InputScheduleState.finished) | The one-time send is over. Check its occurrence to see whether a turn started. |
+| [Cancelled](#state:InputScheduleState.deleted) | Future sends have been removed. Messages already queued stay in the thread. |
 
-### PortTargetState
+### A scheduled occurrence
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:PortTargetState.observed` | A usable owned binding was observed. |
-| `state:PortTargetState.stopped` | Its environment is stopped. |
-| `state:PortTargetState.not_listening` | The native measurement found no usable binding. |
-| `state:PortTargetState.unavailable` | Current availability cannot be established. |
+| [Queued](#state:InputScheduleRunState.queued) | The scheduled message is in the thread's queue. It will start when eligible. |
+| [Held](#state:InputScheduleRunState.blocked) | The scheduled message is being held. Open the thread to see what must change. |
+| [Started](#state:InputScheduleRunState.started) | A turn started for this message. Open the thread to follow it. |
+| [Could not start](#state:InputScheduleRunState.failed) | The message could not start or was cancelled. Read the occurrence details. |
+| [Skipped](#state:InputScheduleRunState.skipped) | No message was added for this time. Check whether the local time was skipped or the previous send was still waiting. |
 
-### PlanStepStatus
+### Inbox notices
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:PlanStepStatus.pending` | Not begun. |
-| `state:PlanStepStatus.in_progress` | Under way. |
-| `state:PlanStepStatus.completed` | Done. |
+| [Eligible](#state:NoticeDecisionState.eligible) | This notice qualified for your Inbox. For delivery to another channel, check the channel status. |
+| [Suppressed](#state:NoticeDecisionState.suppressed) | Orch skipped this notice. Open its details to see why. |
+| [Not evaluated](#state:NoticeDecisionState.not_evaluated) | Orch did not check whether to send this notice. The turn itself is available in the thread. |
 
-### ApprovalState
+### Why a notice was skipped
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ApprovalState.pending` | Waiting for a decision. |
-| `state:ApprovalState.approved` | Given. |
-| `state:ApprovalState.answered` | Content supplied in answer to the harness's question or form. |
-| `state:ApprovalState.denied` | Refused. |
-| `state:ApprovalState.cancelled` | Taken back by whoever asked. |
-| `state:ApprovalState.expired` | Ran out. |
+| [Interrupted](#state:NoticeSuppressionReason.interrupted) | The turn was stopped, so Orch skipped the usual end-of-turn notice. Open the thread for its outcome. |
+| [Did not start](#state:NoticeSuppressionReason.did_not_start) | Work failed before a turn began. Open the thread for the startup error. |
+| [Automatic recovery](#state:NoticeSuppressionReason.automatic_recovery) | Automatic recovery is handling this failure. Follow its progress in the thread. |
+| [Already watching](#state:NoticeSuppressionReason.already_watching) | You were already watching when the turn ended. Its result is in the thread. |
+| [Subagent notices off](#state:NoticeSuppressionReason.subagent_notices_off) | Sub-agent notices were off when this happened. Change your notification preferences for future turns. |
 
-### ThreadContinuationStatus
+### Delivery outside Orch
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ThreadContinuationStatus.preparing` | Its exact native source is being prepared. |
-| `state:ThreadContinuationStatus.ready` | The native result was verified and the continuation can be selected. |
-| `state:ThreadContinuationStatus.failed` | Preparation failed; the former execution/history remain intact. |
+| [Pending](#state:ChannelAcceptanceState.pending) | The notification channel has not confirmed delivery yet. Check this status again later. |
+| [Accepted by channel](#state:ChannelAcceptanceState.accepted) | The channel accepted the notice. Whether it appeared on your device depends on that channel. |
+| [Not confirmed](#state:ChannelAcceptanceState.unknown) | The channel may have received the notice. Check it before requesting another delivery. |
 
-### InputState
+### Missing diagnostic details
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:InputState.pending` | Waiting its turn. |
-| `state:InputState.delivering` | Being handed to the agent. |
-| `state:InputState.delivered` | Handed over. |
-| `state:InputState.cancelled` | Cancelled before it was. |
-| `state:InputState.failed` | It could not be. |
+| [Capture off](#state:RawCaptureOmissionCause.capture_off) | Diagnostic capture was off at the time. Those details cannot be recovered from this turn. |
+| [Masking inputs unavailable](#state:RawCaptureOmissionCause.masking_unavailable) | Orch could not safely hide sensitive values, so it left out the message contents. Other available details remain visible. |
+| [Capture allowance reached](#state:RawCaptureOmissionCause.capture_allowance) | Newer diagnostic messages took the available space. Only the remaining messages can be inspected. |
+| [Retention elapsed](#state:RawCaptureOmissionCause.retention_elapsed) | These details reached the end of their retention period and were removed. The turn can still be read. |
 
-### AgentMessagePhase
+## Machines
 
-| Reference | Meaning |
+### Machine connection
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:AgentMessagePhase.commentary` | Said on the way. |
-| `state:AgentMessagePhase.final` | The answer. |
+| [Online](#state:MachineStatus.active) | The machine is connected. Open it to see the environments available there. |
+| [Offline](#state:MachineConnection.offline) | The machine is disconnected. Check its connection or wait for it to come back online. |
+| [Lost](#state:MachineConnection.lost) | Someone marked the machine lost after its allowed absence. You can still read the threads and check which environments can be recovered. |
+| [Revoked](#state:MachineStatus.revoked) | This machine's registration was revoked. Register it again if it needs to connect. |
 
-### SubagentState
+### Agent program connection
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:SubagentState.running` | At work. |
-| `state:SubagentState.completed` | Done. |
-| `state:SubagentState.failed` | Failed. |
-| `state:SubagentState.interrupted` | Stopped. |
+| [Offline](#state:HarnessStatus.offline) | The program's machine is unreachable. Check the machine connection. |
+| [Starting](#state:HarnessStatus.starting) | The program is starting. Wait for it to come online. |
+| [Online](#state:HarnessStatus.online) | The program is online and can receive work. |
+| [Error](#state:HarnessStatus.error) | The program reported an error. Open its details before trying to start work. |
 
-### ItemStatus
+### Gateway connection
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ItemStatus.in_progress` | Still being produced. |
-| `state:ItemStatus.completed` | Done. |
-| `state:ItemStatus.failed` | Failed. |
-| `state:ItemStatus.cancelled` | Stopped. |
-| `state:ItemStatus.pending` | An approval that waits. |
-| `state:ItemStatus.approved` | An approval that was given. |
-| `state:ItemStatus.answered` | A harness question or form for which a person supplied content. |
-| `state:ItemStatus.denied` | An approval that was refused. |
-| `state:ItemStatus.expired` | An approval that ran out. |
+| [Local](#state:TunnelGatewayState.local) | The tools connect locally. You can use them without a gateway. |
+| [Connecting](#state:TunnelGatewayState.pending) | The gateway connection is being established. Wait for it to connect. |
+| [Tool connection](#state:TunnelGatewayState.attached) | The named gateway is carrying the thread’s tool requests. You can see which gateway is in use here. |
+| [Unavailable](#state:TunnelGatewayState.unavailable) | The gateway cannot be reached. Check its availability before reconnecting. |
+| [Not reported](#state:TunnelGatewayState.unknown) | No current gateway status is available. Check its connection details. |
 
-### TurnState
+## Environments
 
-| Reference | Meaning |
+### Pool selections
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:TurnState.starting` | Getting ready. |
-| `state:TurnState.running` | Under way. |
-| `state:TurnState.completed` | Done. |
-| `state:TurnState.interrupted` | Stopped. |
-| `state:TurnState.failed` | Failed. |
+| [Choosing](#state:PoolChoiceState.building) | Orch is recording the pool choice. You can open its details to check progress. |
+| [Selected](#state:PoolChoiceState.selected) | Orch selected a member. Open the choice details to see the member if you have access. |
+| [No eligible member](#state:PoolChoiceState.exhausted) | The pool found no eligible member for this request. Open its details to see the recorded reasons. |
 
-### TunnelGatewayState
+### Environment status
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:TunnelGatewayState.local` | Local connection only. |
-| `state:TunnelGatewayState.pending` | Waiting for the gateway connection. |
-| `state:TunnelGatewayState.attached` | Attached to the gateway. |
-| `state:TunnelGatewayState.unavailable` | The gateway is unavailable. |
-| `state:TunnelGatewayState.unknown` | No usable gateway state has been reported. |
+| [Not started](#state:EnvironmentStatus.none) | The environment has no running workspace yet. Check its setup before starting work. |
+| [Being made](#state:EnvironmentStatus.provisioning) | The workspace is being created. Open the environment to follow setup. |
+| [Running](#state:EnvironmentStatus.running) | The workspace is running. You can use it for work you have access to. |
+| [Stopped](#state:EnvironmentStatus.stopped) | The workspace is stopped. Start it when you need its programs or files. |
+| [Being recreated](#state:EnvironmentStatus.recreating) | The workspace is being created again. Follow progress on the environment page. |
+| [Being moved](#state:EnvironmentStatus.moving) | The workspace is being moved. Wait for the move to finish before using the new location. |
+| [Failed](#state:EnvironmentStatus.failed) | The environment could not complete its last operation. Read the error on its page. |
+| [Offline](#state:EnvironmentStatus.offline) | Its machine is disconnected. Check the connection and wait for it to return. |
+| [Lost](#state:EnvironmentStatus.lost) | The machine was marked lost. Read the recovery options before choosing a replacement workspace. |
+| [Switched off](#state:EnvironmentStatus.disabled) | Use of this environment is disabled. Ask its manager whether it can be enabled. |
+| [Removed](#state:EnvironmentStatus.removed) | The environment was removed. Check its removal details to see whether files can be restored. |
 
-### AdoptHistoryState
+### Removal and recovery
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:AdoptHistoryState.read` | Its earlier history was read, or it was empty. |
-| `state:AdoptHistoryState.unreadable` | The last read failed and may be retried. |
-| `state:AdoptHistoryState.unsupported` | The adapter cannot read sessions; another attempt would do nothing. |
-| `state:AdoptHistoryState.offline` | The session's machine is offline. |
-| `state:AdoptHistoryState.unavailable` | Its provider, environment or machine can no longer be reached. |
+| [Deletion queued](#state:EnvironmentRemovalPhase.scheduled) | Removal is queued. Check the environment's removal details for progress. |
+| [Deleting…](#state:EnvironmentRemovalPhase.removing) | The workspace is being removed. Wait for the result before attempting recovery. |
+| [Deleted; files kept](#state:EnvironmentRemovalPhase.kept) | The workspace was removed, but its storage was kept. Review the restore option before the retention period ends. |
+| [Restoring…](#state:EnvironmentRemovalPhase.restoring) | The kept storage is being prepared for restoration. Follow the restore progress. |
+| [Deleting kept files…](#state:EnvironmentRemovalPhase.purging) | The kept storage is being deleted. Wait for confirmation before considering cleanup complete. |
+| [Deleted](#state:EnvironmentRemovalPhase.purged) | Deletion of the storage was confirmed. It can no longer be restored here. |
+| [Lost](#state:EnvironmentRemovalPhase.lost) | The machine was marked lost before deletion could be confirmed. Check the machine's recovery details. |
 
-### SideState
+### Mounted storage
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:SideState.open` | Those that are open. |
-| `state:SideState.closed` | Those that were closed. |
+| [Attached](#state:EnvMountState.attached) | The storage is attached and available in the workspace at the displayed path. |
+| [Unavailable](#state:EnvMountState.unavailable) | The storage could not be attached. Read the mount details to find the cause. |
+| [Waiting to attach](#state:EnvMountState.pending) | The storage has not been created or attached yet. Check again when setup finishes. |
 
-### BackgroundState
+### File snapshots
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:BackgroundState.live` | Fresh facts of an existing native session. |
-| `state:BackgroundState.offline` | The machine or session is disconnected. |
-| `state:BackgroundState.unavailable` | The native facts are unavailable. |
+| [Creating](#state:SnapshotState.running) | Workspace files are being saved. Wait for the snapshot to finish. |
+| [Complete](#state:SnapshotState.complete) | All files selected for this snapshot were saved. You can review them before restoring. |
+| [Partial](#state:SnapshotState.partial) | Only some files were saved. Check which files are available before restoring. |
+| [Failed](#state:SnapshotState.failed) | The snapshot failed. Read the error before relying on it for restoration. |
+| [Unavailable](#state:SnapshotState.unavailable) | A complete snapshot is unavailable. Open its details to see the reason and any alternatives. |
+| [Expired](#state:SnapshotState.expired) | The saved files have expired. The turn still shows why a different source may be needed. |
 
-### PhaseState
+### File transfers
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:PhaseState.pending` | Not begun. |
-| `state:PhaseState.running` | Under way. |
-| `state:PhaseState.done` | Done. |
-| `state:PhaseState.skipped` | Left out. |
+| [Transferring](#state:FileTransferState.transferring) | The machine has started sending the file. Open its details to see when the latest part arrived. |
+| [Interrupted](#state:FileTransferState.interrupted) | The transfer stopped before the whole file arrived. Check the expiry time in its details. |
+| [Expired](#state:FileTransferState.expired) | The unfinished transfer expired and its partial data was cleared. Send the file again if you still need it. |
 
-### NativeCatalogState
+### Opening a file version
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:NativeCatalogState.ready` | The session supplied its effective mapping. |
-| `state:NativeCatalogState.not_ready` | The session cannot list yet. |
-| `state:NativeCatalogState.unsupported` | This adapter cannot guarantee native dispatch. |
-| `state:NativeCatalogState.failed` | The actual read failed. |
+| [Preview unavailable](#state:FetchStatus.unavailable) | This version cannot be fetched. Check the reason shown beside the file. If the file is relayed through an offline machine, wait for it to reconnect. |
 
-### SnapshotState
+A saved version opens from the file store. When the version is missing, the environment receives a request to upload it.
 
-| Reference | Meaning |
+### Waiting for a file
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:SnapshotState.running` | Being taken. |
-| `state:SnapshotState.complete` | All of it was taken. |
-| `state:SnapshotState.partial` | Some files could not be taken. |
-| `state:SnapshotState.failed` | Nothing usable came of it. |
-| `state:SnapshotState.unavailable` | Recording could not supply a complete state, with its reason retained. |
-| `state:SnapshotState.expired` | The kept state expired; its metadata still explains the turn's fallback. |
+| [Its environment is offline; this file is read directly from that environment.](#state:FetchUnavailable.offline) | The workspace must reconnect before its file can be opened. Check the environment's connection. |
 
-### InputScheduleState
+### Stored uploads
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:InputScheduleState.active` | Future occurrences are enabled. |
-| `state:InputScheduleState.paused` | Future occurrences are paused. |
-| `state:InputScheduleState.finished` | A single occurrence is over. |
-| `state:InputScheduleState.deleted` | Future work was removed; queued input is unchanged. |
+| [Complete](#state:UploadInventoryState.complete) | The entire upload was verified. You can use the file where you have access. |
+| [Partial](#state:UploadInventoryState.partial) | Only part of the file was received. Check the upload before deciding whether to resume. |
+| [Expired](#state:UploadInventoryState.expired) | The upload deadline passed before completion. Start a new upload if you still need the file. |
 
-### InputScheduleRunState
+### Checking an upload
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:InputScheduleRunState.queued` | Ordinary input is queued. |
-| `state:InputScheduleRunState.blocked` | Ordinary input is held. |
-| `state:InputScheduleRunState.started` | Its ordinary turn started. |
-| `state:InputScheduleRunState.failed` | It could not start or was cancelled. |
-| `state:InputScheduleRunState.skipped` | A nonexistent civil time or a previous pending occurrence. |
+| [Checking](#state:UploadPhase.verifying) | All pieces arrived and the receiver is checking the file. Wait for confirmation without resending them. |
 
-### FetchStatus
+### Finding workspace files
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:FetchStatus.ready` | That exact version is in the blob store. |
-| `state:FetchStatus.fetching` | The environment was asked to upload it. |
-| `state:FetchStatus.unavailable` | It cannot be had. |
+| [the rules could not be read](#state:EnvironmentIndexReason.unreadable) | Some file information or exclusion rules could not be read. Open the file directly to check what is available now. |
 
-### McpState
+## Providers
 
-| Reference | Meaning |
+### Provider availability
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:McpState.starting` | Its process and protocol are being started. |
-| `state:McpState.running` | Running. |
-| `state:McpState.stopped` | Stopped. |
-| `state:McpState.failed` | It failed. |
-| `state:McpState.unavailable` | It cannot be had there. |
+| [Needs setup](#state:ProviderStatus.needs_setup) | Setup is incomplete. Open the provider to see which step is missing. |
+| [Ready](#state:ProviderStatus.ready) | The provider is available for the models and access it offers. Choose an available model to begin. |
+| [Limit reached](#state:ProviderStatus.exhausted) | The provider has reached its allowance. Check its usage window for the next reset. |
+| [Error](#state:ProviderStatus.error) | The provider reported a problem. Open its details for the cause and recovery options. |
+| [Offline](#state:ProviderStatus.offline) | The provider cannot be reached. Check its machine or connection before trying again. |
+| [Disabled](#state:ProviderStatus.disabled) | The provider has been disabled. Ask its manager if it should be enabled. |
 
-### TerminalListState
+### Returning to the original model
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:TerminalListState.open` | Those that run. |
-| `state:TerminalListState.closed` | Those that ended. |
+| [When ready on a later turn](#state:CallReturnState.when_ready) | A later turn may use the original model when it is available. Open the model details to see which one is in use now. |
+| [Stay on failover](#state:CallReturnState.stay_on_failover) | The thread will keep using its replacement model. Open the model selector to review your choices. |
+| [Returning](#state:CallReturnState.returning) | The switch back to the original model has started. Check the active model in the thread. |
+| [Not reported](#state:CallReturnState.unreported) | The thread has no information about a return to the original model. Check the active model before continuing. |
 
-### TerminalState
+### Trying a provider again
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:TerminalState.opening` | Being started. |
-| `state:TerminalState.open` | Running. |
-| `state:TerminalState.closed` | Ended. |
+| [Reserved](#state:ProviderTrialState.reserved) | One message has been chosen to try this provider. Check the trial details to see which one. |
+| [Running](#state:ProviderTrialState.running) | The chosen turn is now trying the provider. Open the thread to follow its progress. |
+| [Used](#state:ProviderTrialState.consumed) | The trial has been used. Check the turn’s result to see whether the provider answered. |
+| [Not reserved](#state:ProviderTrialState.not_reserved) | This check has no message reserved for a trial. See the provider’s current status before sending work. |
 
-### BrowserState
+### Model information
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:BrowserState.opening` | Its place is reserved while its process starts. |
-| `state:BrowserState.open` | Its driving address answers. |
-| `state:BrowserState.closed` | It has ended. |
+| [This source does not list models; add them by name.](#state:MemberState.unsupported) | This source does not supply these details. Check what the provider lets you enter yourself. |
+| [Models · not read yet](#state:MemberState.not_read_yet) | These details can be read but have not arrived yet. Use the provider's read action if available. |
+| [The source lists no models.](#state:MemberState.empty) | The provider returned no entries for this part. Check its account or configuration if you expected some. |
+| [Models reported by the source](#state:MemberState.told) | The provider supplied these details. Open the section to read them. |
+| [Not offered · needs an admin key](#state:MemberState.unsupported_because) | This detail needs an administrator key. Ask the provider's manager about that access. |
 
-### ApprovalListState
+### Usage limits
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ApprovalListState.pending` | Waiting for a decision. |
-| `state:ApprovalListState.decided` | Decided. |
+| [Available](#state:CapState.ok) | The work is within its allowance. You can check how much is left in Usage. |
+| [Near limit](#state:CapState.warning) | Usage has crossed the warning level. Check the remaining allowance before starting more work. |
+| [At limit](#state:CapState.reached) | The allowance is exhausted. Open Usage to see the limit and when room may become available. |
 
-### ModelInputState
+## Agent programs
 
-| Reference | Meaning |
+### Checking a program build
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:ModelInputState.prepared` | Recorded, and being sent. |
-| `state:ModelInputState.sent` | The harness took it. |
-| `state:ModelInputState.failed` | The harness refused it, or it could not be sent. |
-| `state:ModelInputState.uncertain` | Whether it arrived is not known: the answer never came. |
+| [Untested](#state:HarnessBuildStatus.untested) | This program build has not been checked. Run its check before relying on it. |
+| [Checking](#state:HarnessBuildStatus.checking) | The program check is running. Its result will appear here. |
+| [Checked](#state:HarnessBuildStatus.checked) | The build passed its check. You can select it where it is available. |
+| [Failed](#state:HarnessBuildStatus.failed) | The build failed its check. Read the result before using it. |
 
-### AdminUserStatus
+### Checking for releases
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:AdminUserStatus.active` | They may. |
-| `state:AdminUserStatus.suspended` | Their sign-in is ended everywhere: every session and token of theirs is refused at once, and what they own stays theirs. |
+| [No release channel](#state:ProgramChannelState.none) | This program has no automatic release source. Check its installed versions directly. |
+| [Not read](#state:ProgramChannelState.unread) | A release source is configured but has not been read successfully. Check its address. |
+| [Read](#state:ProgramChannelState.ready) | Release information was read successfully. Open the version list to see what is available. |
+| [Read failed](#state:ProgramChannelState.failed) | The last release check failed. Read its reason before trying again. |
+| [Disabled](#state:ProgramChannelState.disabled) | Automatic release checks are off. Ask an administrator about the check interval. |
 
-### PluginState
+### Extensions
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:PluginState.running` | It runs. |
-| `state:PluginState.restarting` | It is being started again. |
-| `state:PluginState.failed` | It failed. |
+| [Running](#state:PluginState.running) | The extension is running. Its features are available where configured. |
+| [Restarting](#state:PluginState.restarting) | The extension is starting again. Wait for its status to return to running. |
+| [Failed](#state:PluginState.failed) | The extension failed. Open its details to see what needs attention. |
 
-### SemanticState
+### MCP servers found on a machine
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:SemanticState.off` | Search by meaning is off. |
-| `state:SemanticState.not_named` | It is on, and no embeddings provider and model are named. |
-| `state:SemanticState.unavailable` | The database cannot keep vectors. |
-| `state:SemanticState.idle` | Every piece has its vector. |
-| `state:SemanticState.indexing` | Pieces are being cut or made into vectors. |
-| `state:SemanticState.paused` | Indexing waits for what its reason names: the disk share, the provider, its machine, a cap or access. |
-| `state:SemanticState.waiting` | A new model waits for an admin's choice: the disk share cannot hold both generations. |
+| [Found](#state:McpOfferingState.found) | A server definition was found on the machine. Review it before selecting it for use. |
+| [Connecting…](#state:McpOfferingState.pending) | The machine is saving the selected definition. Wait for confirmation. |
+| [Available](#state:McpOfferingState.ready) | The saved definition can now be used on this machine. |
+| [Import failed](#state:McpOfferingState.failed) | The machine could not save the definition. Check the reason and its local settings. |
 
-### ProgramChannelState
+### MCP server status
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ProgramChannelState.none` | No automatic release source was declared. |
-| `state:ProgramChannelState.unread` | A source exists but has not been read successfully. |
-| `state:ProgramChannelState.ready` | A successful read has been recorded. |
-| `state:ProgramChannelState.failed` | The latest attempt failed. |
-| `state:ProgramChannelState.disabled` | Scheduled reads are disabled by the system interval. |
+| [Starting](#state:McpState.starting) | The server is starting. Wait for its tools to become available. |
+| [Running](#state:McpState.running) | The server is running. Check which tools it offers this session. |
+| [Stopped](#state:McpState.stopped) | The server is stopped. Start it if you need its tools. |
+| [Failed](#state:McpState.failed) | The server failed. Read the error before trying to start it again. |
+| [Unavailable](#state:McpState.unavailable) | The server cannot be used here. Open its details to see why. |
 
-### AgentShareSnapshotState
+### Sub-agents
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:AgentShareSnapshotState.pending` | It waits for the thread's next turn. |
-| `state:AgentShareSnapshotState.delivered` | It was written into the thread's directory. |
-| `state:AgentShareSnapshotState.revoked` | It was taken back. |
+| [running](#state:SubagentState.running) | The sub-agent is working. Follow its progress in the parent thread. |
+| [done](#state:SubagentState.completed) | The sub-agent finished. Read its result in the parent thread. |
+| [failed](#state:SubagentState.failed) | The sub-agent failed. Open its details to read the error. |
+| [stopped](#state:SubagentState.interrupted) | The sub-agent was stopped. Check its last output before starting more work. |
 
-### ExportState
+## Approvals and questions
 
-| Reference | Meaning |
+### Answering a request
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:ExportState.pending` | A job is writing it. |
-| `state:ExportState.ready` | It can be fetched. |
-| `state:ExportState.failed` | The job failed, or was cancelled; nothing was kept. |
-| `state:ExportState.expired` | It was removed, by its person or when its time ran out; the row stays for a month. |
+| [Waiting](#state:ApprovalState.pending) | Someone needs to decide. Open the request to see what the agent wants to do. |
+| [Approved](#state:ApprovalState.approved) | The request was allowed. Follow the thread to see what happened next. |
+| [Answered](#state:ApprovalState.answered) | Someone supplied the requested answer. Open the request to read it. |
+| [Denied](#state:ApprovalState.denied) | The request was refused. Open it to review the decision. |
+| [Cancelled](#state:ApprovalState.cancelled) | The requester withdrew the request. No decision is needed. |
+| [Expired](#state:ApprovalState.expired) | The decision deadline passed. Ask for a new request if the action is still needed. |
 
-### ImportState
+### Delivering your decision
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:ImportState.pending` | A job is bringing it. |
-| `state:ImportState.done` | It was brought, all of it that was asked for; the report says what each object came to. |
-| `state:ImportState.failed` | The job failed; what it had made stays, and the report says how far it came. |
-| `state:ImportState.cancelled` | The job was cancelled; what it had made stays, and the report says how far it came. |
-| `state:ImportState.undoing` | A job is taking back what it made. |
-| `state:ImportState.undone` | What it made was taken back. |
+| [Decision accepted · Delivery pending](#state:ApprovalDeliveryState.pending) | Your decision was accepted and is waiting to reach the agent program. Open Details to see the last attempt. |
+| [Applied](#state:ApprovalDeliveryState.applied) | The agent program confirmed your decision. Follow the thread to see what it does next. |
+| [Decision accepted · Delivery unknown](#state:ApprovalDeliveryState.unknown) | Orch accepted your decision but could not confirm delivery. Open Details for the last attempt and its result. |
 
-### BackgroundEndState
+### Requests list
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:BackgroundEndState.ended` | Native control confirmed the end. |
-| `state:BackgroundEndState.already_ended` | This exact command had already ended. |
-| `state:BackgroundEndState.still_running` | The command is known still to run. |
-| `state:BackgroundEndState.unknown` | Its end could not be proved. |
+| [Waiting for me](#state:ApprovalListState.pending) | These requests still need an answer. Choose one to see who can decide. |
+| [History](#state:ApprovalListState.decided) | These requests have been decided. Open one to read its outcome. |
 
-### SummaryState
+### When Auto is unavailable
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:SummaryState.empty` | No paragraph has been produced yet. |
-| `state:SummaryState.fresh` | The paragraph matches its captured current source. |
-| `state:SummaryState.stale` | The source changed without a queued automatic update. |
-| `state:SummaryState.scheduled` | An update waits until its minimum interval or recovery delay ends; previous text remains readable. |
-| `state:SummaryState.updating` | A real queued or running update exists. |
-| `state:SummaryState.failed` | The last attempt failed; previous text remains readable. |
-| `state:SummaryState.no_summarizer` | No producer is selected or available. |
+| [No build host is online to run the Auto approval check.](#state:ApprovalChoiceReason.auto_check_needs_host) | A connected machine's program is checked on a build host of the system, and none for its platform is online. A system administrator opens Hosts to bring one online; the check can run then. |
+| [Auto approval check has not passed on this machine.](#state:ApprovalChoiceReason.auto_not_proven) | This version has not passed the Auto check on this machine. Choose another available mode or ask for a check. |
+| [Auto approval check failed on this machine.](#state:ApprovalChoiceReason.auto_check_failed) | The Auto check failed for this version. Choose another available mode and review the check result. |
+| [No Auto check is available for this program.](#state:ApprovalChoiceReason.auto_check_unavailable) | This program has no available Auto check. Choose a supported approval mode. |
 
-### AskState
+### Checking automatic approval
 
-| Reference | Meaning |
+| Label on screen | What it means |
 | --- | --- |
-| `state:AskState.ready` | Ready to receive another message. |
-| `state:AskState.running` | One turn is active; a second input cannot start another simultaneous turn. |
-| `state:AskState.closed` | The owner can no longer enter the conversation’s root organization. |
-| `state:AskState.kept` | A permanent thread was created from this conversation’s history. |
+| [No build host is online to run the Auto approval check.](#state:AutoApprovalState.needs_host) | A connected machine's program is checked on a build host of the system, and none for its platform is online. A system administrator opens Hosts to bring one online; the check can run then. |
+| [Auto: Not proven on this machine yet.](#state:AutoApprovalState.not_proven) | The selected build has not passed its Auto check on this machine. A manager can run the check. |
+| [Auto: Failed its check on this machine.](#state:AutoApprovalState.failed) | This build failed its Auto check. Read the result or use another available approval mode. |
+| [Checked](#state:AutoApprovalState.passed) | The build passed its Auto check. Availability also depends on the reviewer's access and the thread's restrictions. |
+| [Auto: No Auto check is available for this program.](#state:AutoApprovalState.unavailable) | This program cannot demonstrate Auto approval here. Choose one of the modes offered. |
 
-### UploadInventoryState
+## Ports and views
 
-| Reference | Meaning |
+### Program at a port
+
+| Label on screen | What it means |
 | --- | --- |
-| `state:UploadInventoryState.complete` | Verified immutable bytes are in the catalogue. |
-| `state:UploadInventoryState.partial` | The upload is unfinished; this does not claim that a sender is active now. |
-| `state:UploadInventoryState.expired` | The upload session’s completion deadline passed. |
+| [Listening](#state:PortTargetState.observed) | A program is listening at this port. Open the view if you have access. |
+| [Environment stopped](#state:PortTargetState.stopped) | The environment is stopped. Start it to make the port available again. |
+| [Nothing listens](#state:PortTargetState.not_listening) | No program is listening at this port. Start the intended service and check its port number. |
+| [Unavailable](#state:PortTargetState.unavailable) | The current port cannot be checked. Look at the environment and its connection. |
+
+### Sharing a port
+
+| Label on screen | What it means |
+| --- | --- |
+| [Waiting](#state:PortOpeningState.waiting) | A manager is reviewing the request. Check its status before sharing the address. |
+| [Opening…](#state:PortOpeningState.opening) | Access was approved and the port is being opened. Wait for it to become available. |
+| [Open](#state:PortOpeningState.open) | The port is available at the shown address to the people allowed to use it. |
+| [Environment stopped](#state:PortOpeningState.stopped) | Access is approved, but the environment is stopped. Start it to use the port. |
+| [Nothing listens](#state:PortOpeningState.not_listening) | Access is approved. Start the program that should listen on this port. |
+| [Unavailable](#state:PortOpeningState.unavailable) | Access is approved, but the port cannot be reached. Check the environment's connection. |
+| [Refused](#state:PortOpeningState.refused) | The request to share the port was declined. Read the decision before making a new request. |
+| [Closed](#state:PortOpeningState.closed) | This opening has ended. A new opening is needed to share the port again. |
+
+### Opening a view from outside
+
+| Label on screen | What it means |
+| --- | --- |
+| [Ready](#state:OutsideWayState.ready) | The outside address is ready. Use it with the access shown. |
+| [Needs attention](#state:OutsideWayState.needs_attention) | This address needs attention before it can be used. Read the connection details. |
+
+### Terminal session
+
+| Label on screen | What it means |
+| --- | --- |
+| [at its prompt](#state:TerminalState.open) | The terminal is connected. You can enter commands when its prompt is ready. |
+| [closed](#state:TerminalState.closed) | This terminal has ended. Start a new terminal if you need a prompt. |
+
+### Browser session
+
+| Label on screen | What it means |
+| --- | --- |
+| [Starting](#state:BrowserState.opening) | The browser is starting. Wait for the page to appear. |
+| [Open](#state:BrowserState.open) | The browser is available. Open its view to interact with the page. |
+| [Closed](#state:BrowserState.closed) | This browser session has ended. Start a new one if you need to return. |
+
+## Goals
+
+### Goal progress
+
+| Label on screen | What it means |
+| --- | --- |
+| [Working](#state:GoalStatus.active) | The agent is working toward the goal. Follow the turns for progress. |
+| [Paused](#state:GoalStatus.paused) | Work on the goal is paused. Read the reason before deciding whether to resume. |
+| [Met](#state:GoalStatus.met) | The goal was checked or its evidence was accepted by a person. Open the goal to review the result. |
+| [Stopped](#state:GoalStatus.stopped) | Work stopped before reaching the goal. Read the reason to see whether it can continue. |
+| [Sam cleared the goal](#state:GoalStatus.cleared) | Someone cleared the goal. Set a new goal if more work is needed. |
+
+### Agent reports
+
+| Label on screen | What it means |
+| --- | --- |
+| [Working](#state:GoalReportStatus.working) | The agent reports that work is continuing. Follow the thread for the next update. |
+| [Met](#state:GoalReportStatus.met) | The agent says the condition has been met. Look at its evidence and the check before accepting completion. |
+| [Waiting for you](#state:GoalReportStatus.blocked) | The agent needs help to continue. Read its report and address the obstacle. |
+
+### A goal waiting for you
+
+| Label on screen | What it means |
+| --- | --- |
+| [The completion report needs a person's decision](#state:GoalReason.unchecked) | Completion has not been independently checked. Review the evidence and choose Mark met or Keep working. |
+
+### Checking the result
+
+| Label on screen | What it means |
+| --- | --- |
+| [Not checked](#state:GoalOutcome.unchecked) | The report and its evidence are available for review. A person can accept completion or ask the agent to continue. |
+
+### Who accepted completion
+
+| Label on screen | What it means |
+| --- | --- |
+| [confirmed by a person](#state:GoalCheckedBy.person) | A person accepted the completion evidence. Open the goal history to see who made the decision. |
+
+## Background work
+
+### Reaching background work
+
+| Label on screen | What it means |
+| --- | --- |
+| [Background work](#state:BackgroundState.live) | The session is connected. Open a task to see its current work. |
+| [Agent program offline. Its running commands are not known.](#state:BackgroundState.offline) | The session or its machine disconnected. Check again after it reconnects. |
+| [Control of the agent program’s commands is unavailable.](#state:BackgroundState.unavailable) | The program cannot report current background work. Check the session for details. |
+
+### Background tasks
+
+| Label on screen | What it means |
+| --- | --- |
+| [Running](#state:BackgroundTaskState.running) | The task is running. Open it to follow its output. |
+| [Finished](#state:BackgroundTaskState.completed) | The task finished. Open its result in the thread. |
+| [Failed](#state:BackgroundTaskState.failed) | The task failed. Read its error before starting it again. |
+| [Ended](#state:BackgroundTaskState.stopped) | The task was stopped. Check what it completed before it ended. |
+| [Lost](#state:BackgroundTaskState.lost) | The program lost the session that was running the task. Check its last output before repeating work. |
+
+### Ending a command
+
+| Label on screen | What it means |
+| --- | --- |
+| [Ended](#state:BackgroundEndState.ended) | The program confirmed that the command ended. Review its final output if needed. |
+| [Already ended](#state:BackgroundEndState.already_ended) | The command had already ended when you asked to stop it. No further stop is needed. |
+| [Still running](#state:BackgroundEndState.still_running) | The command is still running. Check its output before deciding whether to stop it again. |
+| [End not known](#state:BackgroundEndState.unknown) | The program could not confirm that the command ended. Check its status before starting another copy. |
+
+### Jobs
+
+| Label on screen | What it means |
+| --- | --- |
+| [Waiting to start](#state:JobState.queued) | The job is waiting for a worker. It will start when one is available. |
+| [Under way](#state:JobState.running) | Work is under way. Open the job to follow progress. |
+| [Done](#state:JobState.succeeded) | The job finished successfully. Open its result to see what changed. |
+| [Failed](#state:JobState.failed) | The job stopped with an error. Check the last completed step before retrying. |
+| [Cancelled](#state:JobState.cancelled) | The job was cancelled. Review what it completed before cancellation. |
+| [Lost](#state:JobState.lost) | Orch lost contact with the running job. Check what changed before starting it again. |
+
+### When a database request times out
+
+| Label on screen | What it means |
+| --- | --- |
+| [Database connection wait expired](#state:DatabaseWaitPhase.acquire) | Orch could not get a database connection in time. Try the request again after a short wait. |
+| [Database statement timed out](#state:DatabaseWaitPhase.statement) | The database stopped the operation when it ran out of time. Open Details to see the time limit. |
+| [Database transaction expired](#state:DatabaseWaitPhase.idle_transaction) | The database closed an operation that had been waiting too long. Refresh the page to check the current result. |
+
+### Steps in a job
+
+| Label on screen | What it means |
+| --- | --- |
+| [waiting](#state:PhaseState.pending) | This step has not started yet. Follow the step currently running. |
+| [under way](#state:PhaseState.running) | This step is running. Its result appears here when it finishes. |
+| [done](#state:PhaseState.done) | This step finished. Read the following steps for the overall outcome. |
+| [skipped](#state:PhaseState.skipped) | This step was skipped. Read the job details to see which steps were needed. |
+
+### Search by meaning
+
+| Label on screen | What it means |
+| --- | --- |
+| [Off](#state:SemanticState.off) | Search by meaning is switched off. You can still search by text. |
+| [Not set up](#state:SemanticState.not_named) | Select a provider and model for search by meaning before indexing can begin. |
+| [Unavailable](#state:SemanticState.unavailable) | The database cannot currently support search by meaning. Text search remains available. |
+| [Ready](#state:SemanticState.idle) | All selected text has been indexed. You can search by meaning now. |
+| [Indexing](#state:SemanticState.indexing) | Orch is preparing text for search by meaning. More results become available as work finishes. |
+| [Paused](#state:SemanticState.paused) | Indexing is paused. Check the listed reason for storage, provider availability, access or usage limits. |
+| [Needs a choice](#state:SemanticState.waiting) | The old and new indexes will not both fit. An administrator must choose how to proceed. |
+
+### Retrying a search update
+
+| Label on screen | What it means |
+| --- | --- |
+| [Index retry eligible](#state:SemanticRetryNext.immediate) | A smaller request can be tried as soon as capacity allows. You can follow its progress here. |
+| [Next indexing pass](#state:SemanticRetryNext.indexer_pass) | Orch will consider the request on the next indexing pass. Leave it queued for that check. |
+| [Done](#state:SemanticRetryNext.finished) | The retry finished. Open its result to see whether more work is needed. |
+
+### Exports
+
+| Label on screen | What it means |
+| --- | --- |
+| [Starting](#state:ExportState.pending) | Your export is being prepared. It will become available to download when ready. |
+| [Ready](#state:ExportState.ready) | The export is ready. Download it before it expires. |
+| [Failed](#state:ExportState.failed) | The export failed or was cancelled before a file was saved. Check the job before trying again. |
+| [Expired](#state:ExportState.expired) | The export file was removed. Create a new export if you need another copy. |
+
+### Imports
+
+| Label on screen | What it means |
+| --- | --- |
+| [Running](#state:ImportState.pending) | The import is being prepared or run. Open its job to follow progress. |
+| [Done](#state:ImportState.done) | The import finished. Read its report for the outcome of each selected item. |
+| [Failed](#state:ImportState.failed) | The import stopped with an error. Check its report for items already created. |
+| [Cancelled](#state:ImportState.cancelled) | The import was cancelled. Items already created are listed in the report. |
+| [Undoing](#state:ImportState.undoing) | Orch is undoing this import. Follow the job until it finishes. |
+| [Undone](#state:ImportState.undone) | The items created by this import were taken back. Read the report for details. |
+
+## People and sharing
+
+### Organization setup
+
+| Label on screen | What it means |
+| --- | --- |
+| [Configured](#state:FirstStepsState.done) | Orch verified this setup step. Continue to the next unfinished step. |
+| [Not done yet](#state:FirstStepsState.open) | This setup step still needs attention. Open it to see what to do. |
+| [Not known yet](#state:FirstStepsState.unknown) | Orch could not check this step. Check your access and try again. |
+
+### Page access
+
+| Label on screen | What it means |
+| --- | --- |
+| [Uses its place permissions](#state:PageState.follows) | This page follows its parent's sharing settings. Check the parent to see who can use it. |
+| [Custom](#state:PageState.custom) | This page has its own sharing settings. Open sharing on this page to review them. |
+| [Private](#state:PageState.restricted) | Access to this page is restricted. Ask its owner if you need access. |
+
+### Shortcuts
+
+| Label on screen | What it means |
+| --- | --- |
+| [Unavailable](#state:ShortcutTargetState.unavailable) | You cannot open what this shortcut points to. Ask its owner for access, or remove the shortcut. |
+| [Deleted](#state:ShortcutTargetState.deleted) | What this shortcut points to was deleted. The shortcut works again if it is restored. |
+
+### Who can use a shared resource
+
+| Label on screen | What it means |
+| --- | --- |
+| [Active for this material and recipient](#state:AgentShareCurrentState.active) | All requested permissions apply to this person here. Open the sharing details to review them. |
+| [Reduced by current limits](#state:AgentShareCurrentState.reduced) | Only some requested permissions apply. Check which ones this person can use here. |
+| [Inactive now](#state:AgentShareCurrentState.inactive) | This share gives the person no access here. Review other shares if they still have access. |
+| [Assessed per material or recipient](#state:AgentShareCurrentState.unassessed) | Access must be checked for the particular person and resource. Select them to see what applies. |
+
+### Files shared with a thread
+
+| Label on screen | What it means |
+| --- | --- |
+| [waiting to be delivered](#state:AgentShareSnapshotState.pending) | The shared files will be delivered on the thread's next turn. Leave them queued if still needed. |
+| [delivered](#state:AgentShareSnapshotState.delivered) | The shared files were written to the thread's working directory. Open the workspace to see them. |
+| [taken back](#state:AgentShareSnapshotState.revoked) | The share was withdrawn. Check current access before sharing the files again. |
+
+### Items in the activity history
+
+| Label on screen | What it means |
+| --- | --- |
+| [Open](#state:AuditObjectState.live) | This item still exists. Open it from the activity history if you have access. |
+| [Deleted](#state:AuditObjectState.deleted) | This item was deleted and is being kept for possible recovery. Check its retention details. |
+| [Gone on 20 November](#state:AuditObjectState.purged) | Deletion is final. Its activity history still explains what happened. |
+
+## Sign-in
+
+### Account access
+
+| Label on screen | What it means |
+| --- | --- |
+| [Active](#state:AdminUserStatus.active) | This person can sign in and use the access they have been granted. |
+| [Suspended](#state:AdminUserStatus.suspended) | This person's sign-ins and keys have been disabled. Their work stays theirs while access is suspended. |
+
+### Sign-in check
+
+| Label on screen | What it means |
+| --- | --- |
+| [Pages cannot load Turnstile: the web edge's policy lacks challenges.cloudflare.com. See the operator guide.](#state:HumanCheckEdgeState.blocks) | A web policy is blocking part of the sign-in check. Ask the administrator to allow the hosts named here. |
+| [The web edge's policy could not be read from here. See the operator guide.](#state:HumanCheckEdgeState.unknown) | Orch could not read the site's web policy. An administrator can check that the verification widget loads. |

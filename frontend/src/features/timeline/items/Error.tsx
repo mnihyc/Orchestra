@@ -19,9 +19,10 @@ export function ErrorRow({ item }: { item: ErrorItem }) {
   const { t } = useTranslation();
   const { threadId } = useTimelineContext();
   const attempts = useThreadPart(threadId, (view) => item.turn_id === null ? 1 : [...view.items.values()].filter((other) => other.kind === 'error' && other.turn_id === item.turn_id && failureKey(other.payload) === failureKey(item.payload)).length);
+  const storageGap = item.payload.code === 'storage.data' && item.storage_gap !== undefined && item.storage_gap !== null;
   return (
     <ItemFrame item={item} label={t('timeline.error.menu')}>
-      <FailureAlert error={item.payload} attempts={attempts} />
+      {!storageGap && <FailureAlert error={item.payload} attempts={attempts} />}
     </ItemFrame>
   );
 }

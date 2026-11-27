@@ -110,6 +110,8 @@ async fn scoped_creation_without_response_read(display: bool) -> Proof {
                     .token(&secret)
                     .header("Idempotency-Key", &act)
                     .body(&EnvironmentDisplayCreateBody {
+                        attach: None,
+                        desktop: None,
                         name: Some("Native scoped display".into()),
                         geometry: None,
                     })
@@ -323,6 +325,8 @@ async fn a_display_creation_replays_current_native_content_or_a_receipt_without_
                 .token(&secret)
                 .header("Idempotency-Key", &header)
                 .body(&EnvironmentDisplayCreateBody {
+                    attach: None,
+                    desktop: None,
                     name: Some("One native screen".into()),
                     geometry: Some("800x600".into()),
                 });

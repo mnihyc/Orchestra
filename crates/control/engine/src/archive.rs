@@ -38,6 +38,7 @@ use crate::preflight::Blocked;
 use crate::turns::{InputAfter, TurnEnd};
 use crate::unit::Unit;
 use chrono::{DateTime, Utc};
+use orch_api_contract::threads::{InputCancellation, InputCancellationCause};
 use orch_db::Conn;
 use orch_db::queries::{approvals, hierarchy, lifecycle, link, threads};
 use orch_link_contract::commands::{LeaseClose, SerialKey, TurnInterrupt};
@@ -110,10 +111,6 @@ pub struct ThreadRemoval {
 
 /// Every state a lifecycle action may settle while holding the thread row.
 const THREAD_STATES: [&str; 5] = ["idle", "starting", "running", "waiting_approval", "blocked"];
-/// The serial-key member used by the shared command journal.
-const COMMAND_KEY: &str = "$key";
-/// Seconds in the restoration window's complete UTC days.
-const SECONDS_PER_DAY: u64 = 86_400;
 
 impl Engine {
     /// Applies the ordinary thread lifecycle under an already authorized transaction.
@@ -416,8 +413,12 @@ impl Engine {
         now: Time,
     ) -> Result<bool, RemovalScheduleError> {
         self.check_removal_job(conn, environment).await?;
-        let days = i64::try_from(self.inner.config.soft_delete.as_secs() / SECONDS_PER_DAY)
-            .unwrap_or(i64::MAX);
+        let days = i64::try_from(
+            orch_settings::retention::deleted_keep_days(conn)
+                .await
+                .map_err(EngineError::from)?,
+        )
+        .unwrap_or(i64::MAX);
         Ok(self
             .schedule_environment_removal_with_days(
                 conn,
@@ -459,7 +460,14 @@ impl Engine {
         let ids = lifecycle::threads_under(conn, node).await?;
         let mut unit = Unit::new(conn, now.get());
         let mut result = self
-            .settle_in(&mut unit, &ids, by, "archived", false)
+            .settle_in(
+                &mut unit,
+                &ids,
+                by,
+                "archived",
+                InputCancellationCause::ThreadEnded,
+                false,
+            )
             .await?;
         let rows = hierarchy::with_ancestors(&mut *unit.conn, &[node]).await?;
         let root = rows
@@ -535,7 +543,14 @@ impl Engine {
         let ids = lifecycle::bindings(conn, environment).await?;
         let mut unit = Unit::new(conn, now.get());
         let result = self
-            .settle_in(&mut unit, &ids, by, "environment_removed", true)
+            .settle_in(
+                &mut unit,
+                &ids,
+                by,
+                "environment_removed",
+                InputCancellationCause::SourceUnavailable,
+                true,
+            )
             .await?;
         for id in ids {
             let thread = threads::thread(&mut *unit.conn, id)
@@ -582,8 +597,15 @@ impl Engine {
             return Ok(());
         };
         let mut unit = Unit::with_first_effect(conn, now.get(), before);
-        self.settle_in(&mut unit, &[side], by, "closed", false)
-            .await?;
+        self.settle_in(
+            &mut unit,
+            &[side],
+            by,
+            "closed",
+            InputCancellationCause::ThreadEnded,
+            false,
+        )
+        .await?;
         if let Some(segment) = thread.current_segment_id {
             let seq = unit.stamp(side).await?;
             threads::end_segment(&mut *unit.conn, segment, "archived", now.get(), seq).await?;
@@ -598,6 +620,7 @@ impl Engine {
         ids: &[Id],
         by: Option<Id>,
         reason: &str,
+        cancellation_cause: InputCancellationCause,
         removing: bool,
     ) -> Result<Settled, EngineError> {
         threads::tools::lock_threads(&mut *unit.conn, ids).await?;
@@ -664,7 +687,7 @@ impl Engine {
                         Outgoing::new(
                             ids::turn_interrupt(turn.id),
                             machine,
-                            SerialKey::Thread(*id),
+                            SerialKey::None,
                             &TurnInterrupt {
                                 thread_id: *id,
                                 turn_id: turn.id,
@@ -721,6 +744,13 @@ impl Engine {
                     )
                     .await?
                     {
+                        let cancellation = serde_json::to_value(InputCancellation {
+                            cause: cancellation_cause,
+                            at: Time::new(now),
+                            by: None,
+                        })?;
+                        threads::record_input_cancellation(unit.conn, input.id, &cancellation)
+                            .await?;
                         counts.inputs += 1;
                     }
                 }
@@ -821,7 +851,7 @@ impl Engine {
                     .map_err(orch_db::DbError::from)?;
                 }
             }
-            let mut body = row.body.clone();
+            let body = row.body.clone();
             let key = if row.serial_key() == Some("machine") {
                 SerialKey::Machine
             } else {
@@ -834,9 +864,6 @@ impl Engine {
                         _ => SerialKey::Thread(id),
                     })
             };
-            if let Some(object) = body.as_object_mut() {
-                object.remove(COMMAND_KEY);
-            }
             let kind = row.kind.parse().map_err(EngineError::unreadable)?;
             if matches!(
                 row.kind.as_str(),
@@ -863,7 +890,11 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    content_transit: row.content_transit,
+                    native_target: None,
                     authority: None,
+                    input_facts: None,
+                    session_offer: None,
                     id: row.id,
                     machine: row.machine_id,
                     key,
@@ -887,8 +918,6 @@ impl Engine {
                 };
                 let mut conn = self.inner.db.acquire().await?;
                 link::finish_command(&mut conn, row.id, &ending, self.inner.clock.now()).await?;
-                self.finish_disabled_unit_stop(&mut conn, &row, &outcome)
-                    .await?;
             }
         }
         Ok(())
@@ -915,6 +944,8 @@ impl Engine {
                 link::insert_command(
                     &mut tx,
                     &link::NewCommand {
+                        content_transit: previous.content_transit,
+                        native_target: None,
                         id,
                         machine_id: previous.machine_id,
                         kind: &previous.kind,
@@ -925,6 +956,7 @@ impl Engine {
                     now,
                 )
                 .await?;
+                link::narrow_command_authority_until(&mut tx, id, previous.authority_until).await?;
             }
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
@@ -943,6 +975,8 @@ pub(crate) async fn persist(
     link::insert_command(
         conn,
         &link::NewCommand {
+            content_transit: command.content_transit,
+            native_target: command.native_target.as_ref(),
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),

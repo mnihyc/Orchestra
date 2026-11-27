@@ -1,7 +1,7 @@
 /** The same document facts in recent lists and document directories: its title, the first line of what it is about, and who changed it when. */
 import { Link } from '@tanstack/react-router';
 import { Bot, FileText, MessageSquare } from 'lucide-react';
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { DocumentRef } from '@/generated/api-types';
 import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
@@ -9,16 +9,22 @@ import { AuthorChip } from '@/ui/AuthorChip';
 import { ContextMenu } from '@/ui/ContextMenu';
 import { LockBadge } from '@/ui/LockBadge';
 import type { MenuEntry } from '@/ui/Menu';
+import { onOwnControl } from '@/ui/RowSelection';
 import { RelativeTime } from '@/ui/RelativeTime';
 
-export function DocumentRow({ doc, here, where, me, name, actions, menu }: { doc: DocumentRef; here: string; where: boolean; me: string | null; name?: string; actions?: ReactNode; menu?: readonly MenuEntry[] }) {
+export function DocumentRow({ doc, here, where, me, name, actions, menu, select, onPick }: { doc: DocumentRef; here: string; where: boolean; me: string | null; name?: string; actions?: ReactNode; menu?: readonly MenuEntry[];
+  /** The box that ticks the row, first in it, in a list that picks rows. */
+  select?: ReactNode;
+  /** A click on the row outside its own controls, for `Shift` and `Ctrl`/`⌘` picking. */
+  onPick?: (event: MouseEvent<HTMLLIElement>) => void }) {
   const { t } = useTranslation();
   const by = doc.updated_by;
   const mine = by !== null && 'id' in by && by.id === me;
   const changed = !mine && (doc.seen_seq === null || doc.seq > doc.seen_seq);
   const agent = 'agent' in doc.created_by;
   const row = (
-    <li className="flex items-start gap-3 px-3 py-3" data-document-row={doc.id}>
+    <li className="flex items-start gap-3 px-3 py-3" data-document-row={doc.id} onClick={onPick === undefined ? undefined : (event) => { if (!onOwnControl(event.target)) onPick(event); }}>
+      {select}
       <span className="flex h-(--control-sm) shrink-0 items-center">{agent ? <Bot aria-hidden className="size-4 shrink-0 text-text-muted" /> : <FileText aria-hidden className="size-4 shrink-0 text-text-muted" />}</span>
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="flex min-h-(--control-sm) items-center gap-2">

@@ -8,6 +8,7 @@ use orch_db::idempotency::creation::Created;
 const CONVERSATION: &str = "ask_conversation";
 
 const KEEP: &str = "ask_kept_thread";
+const MOVE: &str = "ask_moved_thread";
 
 pub(super) fn conversation() -> Creation<(), api::AskCreateBody, api::AskReceipt> {
     Creation {
@@ -73,6 +74,40 @@ pub(super) fn keep() -> Creation<(), api::AskKeepBody, api::AskKeepReply> {
     }
 }
 
+pub(super) fn moved() -> Creation<(), api::AskMoveOutBody, api::AskKeepReply> {
+    Creation {
+        kind: MOVE,
+        identity: |value| {
+            Ok(Created {
+                kind: MOVE.into(),
+                id: value.thread_id,
+                data: json!({"source":value.conversation_id,"topic":value.topic_id}),
+            })
+        },
+        replay: |ctx, (), _body, created| {
+            Box::pin(async move {
+                let id = |field: &str| {
+                    created
+                        .data
+                        .get(field)
+                        .and_then(Json::as_str)
+                        .and_then(|id| id.parse::<Id>().ok())
+                        .ok_or_else(|| {
+                            ApiError::internal("The kept-thread receipt has no native identity")
+                        })
+                };
+                let receipt = api::AskKeepReply {
+                    conversation_id: id("source")?,
+                    thread_id: created.id,
+                    topic_id: id("topic")?,
+                };
+                crate::key_operations::publication::receipt(&ctx, &receipt)?;
+                Ok(receipt)
+            })
+        },
+    }
+}
+
 pub(super) async fn observe_conversation(
     conn: &mut Conn,
     person: Id,
@@ -101,6 +136,24 @@ pub(super) async fn observe_keep(
         conn,
         Some(person),
         KEEP,
+        thread,
+        json!({"source":source,"topic":topic}),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn observe_move(
+    conn: &mut Conn,
+    person: Id,
+    source: Id,
+    thread: Id,
+    topic: Id,
+) -> ApiResult<()> {
+    orch_db::idempotency::creation::observe_with(
+        conn,
+        Some(person),
+        MOVE,
         thread,
         json!({"source":source,"topic":topic}),
     )

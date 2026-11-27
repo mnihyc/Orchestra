@@ -39,3 +39,11 @@ it('does not treat a fabricated confirmation as permission or current observatio
   expect(() => world.documents.handle(person, 'POST', '/document-tree/operations', new URLSearchParams(), request)).toThrow(Refusal);
   expect(doc.deleted).toBe(false);
 });
+
+it('moves a document to the trash at once when no plan is given, as the server does', () => {
+  const { world, person, doc, request } = scene();
+  const reply = world.documents.handle(person, 'POST', '/document-tree/operations', new URLSearchParams(), request);
+  expect(reply?.status).toBe(200); expect(doc.deleted).toBe(true);
+  const back = world.documents.handle(person, 'POST', '/document-tree/operations', new URLSearchParams(), { ...request, command: 'restore', client_id: 'restore-native-observations' });
+  expect(back?.status).toBe(200); expect(doc.deleted).toBe(false);
+});

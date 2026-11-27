@@ -1,0 +1,2 @@
+web-e2e tests/e2e/topic-tabs-row.spec.ts tests/e2e/tabs-overflow.spec.ts tests/e2e/layout-pane-resize.spec.ts --project=chromium --retries=0
+web-e2e tests/e2e/documents-places.spec.ts tests/accessibility/places.spec.ts --project=chromium --retries=0 --grep "Documents has one page tab on a topic|a topic’s tabs, one after the other"

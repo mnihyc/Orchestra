@@ -665,6 +665,8 @@ async fn restore_uses_the_acknowledged_private_layout_after_its_command_journal_
     orch_db::queries::link::insert_command(
         &mut conn,
         &orch_db::queries::link::NewCommand {
+            content_transit: false,
+            native_target: None,
             id: command,
             machine_id: host.machine,
             kind: K::NodeMountsApply.as_str(),
@@ -1148,7 +1150,9 @@ async fn a_failed_purge_keeps_its_frozen_references_deadline_and_retry_phase_and
 async fn the_default_window_fits_a_shorter_system_window_and_an_incapable_driver_refuses_before_effects()
  {
     let world = world().await;
-    world.set_config(|config| config.soft_delete = std::time::Duration::from_secs(3 * 86_400));
+    world
+        .set_system("retention.deleted_keep_days", serde_json::json!(3))
+        .await;
     world.restart_api().await;
     hosting::serve(&world);
     let host = hosting::ScriptedHost::on(&world, "trace-short-window", 32_768).await;
@@ -1380,6 +1384,7 @@ async fn restore_and_early_purge_honor_the_tokens_current_scope_subtree_and_org_
         rows::lock_environment(&mut tx, made.id).await.unwrap();
         let token = orch_db::queries::identity::testing::insert_api_token(
             &mut tx,
+            orch_types::new_id(),
             world.ada,
             &[u8::try_from(number).unwrap() + 40; 32],
         )

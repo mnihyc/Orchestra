@@ -89,13 +89,17 @@ pub async fn lock_opening(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
     )
 }
 
-/// The physical publisher serialization already used by a Host opening's current validation.
-/// It is factual locking only; missing rows retain the native validator's eventual outcome.
+/// Serializes allocations on one physical publisher, independently of hardware observations.
+/// Its key pin still orders protected machine changes; a missing row keeps the validator's outcome.
 pub async fn lock_publisher_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR NO KEY UPDATE")
-        .bind(machine)
-        .execute(conn)
-        .await?;
+    sqlx::query(
+        "WITH publisher AS MATERIALIZED (
+             SELECT pg_advisory_xact_lock(hashtextextended('port-publisher:' || $1::uuid::text,0))
+         ) SELECT id FROM machines CROSS JOIN publisher WHERE id=$1 FOR KEY SHARE OF machines",
+    )
+    .bind(machine)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -283,6 +287,16 @@ pub async fn effect(
 ) -> Result<Option<Request>, DbError> {
     Ok(sqlx::query_as("SELECT r.* FROM port_open_requests r JOIN port_openings o ON o.id=r.opening_id WHERE r.environment_id=$1 AND r.user_id IS NOT DISTINCT FROM $2 AND r.thread_id IS NOT DISTINCT FROM $3 AND r.effect_hash=$4 AND (o.state NOT IN ('closed','refused') OR r.refused_until>$5) ORDER BY r.created_at LIMIT 1")
         .bind(environment).bind(user).bind(thread).bind(hash).bind(now).fetch_optional(conn).await?)
+}
+
+/// The stored end of a refusal shared by the requests for one opening.
+pub async fn refused_until(conn: &mut Conn, opening: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT max(refused_until) FROM port_open_requests WHERE opening_id=$1")
+            .bind(opening)
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 /// Adds a client fence to the one admission effect, without a second audience.
