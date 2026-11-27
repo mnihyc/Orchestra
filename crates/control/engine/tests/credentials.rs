@@ -864,6 +864,91 @@ async fn a_native_harness_that_needs_a_copy_of_the_login_is_not_offered_to_an_en
     assert_eq!(bound_in(&s, thread).await, "credential_shared");
 }
 
+/// A thread of the profile `agent` in the environment on the provider's own machine.
+async fn made_beside(
+    s: &Stand,
+    agent: Id,
+    arrangement: Option<ArrangementType>,
+    name: &str,
+) -> Result<orch_engine::binding::CreatedThread, CreateThreadError> {
+    s.world
+        .engine()
+        .create_thread(
+            &Caller::session(s.world.ada),
+            NewThread {
+                topic: s.world.topic,
+                name: name.to_owned(),
+                agent,
+                provider: s.world.provider,
+                environment: s.world.environment,
+                directory: "web".to_owned(),
+                arrangement,
+                model: Some(common::MODEL.to_owned()),
+                effort: None,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn another_profile_of_the_native_harness_beside_the_tools_is_offered_only_a_copy_the_provider_allows()
+ {
+    // The login is in the home of the provider's own profile. Another profile of the same harness on the
+    // provider's machine works on a copy of it: where the provider allows only `separated`, nothing is
+    // offered that the first turn would refuse for want of a form of the credential.
+    let s = stand().await;
+    let pool = s.world.pool.pool();
+    let other = new_id();
+    sqlx::query(
+        "INSERT INTO agents (id, name, owner_id, org_id, home_id, harness_kind, profile, descriptor)
+         VALUES ($1, 'Another profile', $2, $3, $3, 'fake', '{}', $4)",
+    )
+    .bind(other)
+    .bind(s.world.ada)
+    .bind(s.world.root)
+    .bind(declared())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE providers SET arrangements = ARRAY['separated'] WHERE id = $1")
+        .bind(s.world.provider)
+        .execute(pool)
+        .await
+        .unwrap();
+    for requested in [None, Some(ArrangementType::Together)] {
+        let result = made_beside(&s, other, requested, "beside the tools").await;
+        assert!(
+            matches!(
+                result,
+                Err(CreateThreadError::Incompatible(
+                    Incompatible::ArrangementNotAllowed {
+                        by: NotAllowedBy::Provider
+                    }
+                ))
+            ),
+            "{requested:?}: {result:?}"
+        );
+    }
+    // The provider's own profile there uses the login itself.
+    let own = made_beside(&s, s.world.agent, Some(ArrangementType::Together), "own")
+        .await
+        .unwrap();
+    assert_eq!(own.arrangement.form, None);
+    // A provider that allows a copy gives the other profile one, in a form its harness accepts.
+    sqlx::query(
+        "UPDATE providers SET arrangements = ARRAY['separated','credential_shared'] WHERE id = $1",
+    )
+    .bind(s.world.provider)
+    .execute(pool)
+    .await
+    .unwrap();
+    let copied = made_beside(&s, other, Some(ArrangementType::Together), "with a copy")
+        .await
+        .unwrap();
+    assert_eq!(copied.arrangement.kind, ArrangementType::Together);
+    assert!(copied.arrangement.form.is_some(), "{copied:?}");
+}
+
 #[tokio::test]
 async fn an_entry_that_names_the_copy_lets_it_be_made() {
     let s = stand().await;

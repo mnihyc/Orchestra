@@ -76,6 +76,76 @@ fn node_facts(node: &Node) -> (Id, NodeFacts) {
     }
 }
 
+/// Whether a target that does not open is gone with a name a trash could list it by: a deleted document, place or thread.
+fn named_in_a_trash(kind: &str, target: &hierarchy::ClosedTarget) -> bool {
+    target.gone && target.name.is_some() && (kind == "document" || NODE_KINDS.contains(&kind))
+}
+
+/// The names of the deleted targets among `closed` that `principal` would find by that name in the trash where each
+/// lies, and nobody else: a place or a thread in the trash of the place it lay in, which lists it to whoever manages
+/// that place; a document in its place's, which lists it to whoever could read it as it was. A chat lies in no trash,
+/// and a target that went with the place it lay in is listed under that place's name, not its own.
+async fn last_names(
+    conn: &mut Conn,
+    principal: &Principal,
+    closed: &HashMap<(String, Id), hierarchy::ClosedTarget>,
+) -> ApiResult<HashMap<(String, Id), String>> {
+    let mut parents: Vec<Id> = closed
+        .iter()
+        .filter(|((kind, _), target)| kind != "document" && named_in_a_trash(kind, target))
+        .filter_map(|(_, target)| target.place)
+        .collect();
+    parents.sort_unstable();
+    parents.dedup();
+    let managed: BTreeSet<Id> = if parents.is_empty() {
+        BTreeSet::new()
+    } else {
+        orch_authz::nodes::effective_many(conn, principal, &parents, Policy::default())
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .filter(|place| {
+                orch_access_contract::permissions::NodePermission::Manage
+                    .on(place.kind)
+                    .is_some_and(|manage| place.held.iter().any(|held| held.permission == manage))
+            })
+            .map(|place| place.node)
+            .collect()
+    };
+    let documents: Vec<Id> = closed
+        .iter()
+        .filter(|((kind, _), target)| kind == "document" && named_in_a_trash(kind, target))
+        .map(|((_, id), _)| *id)
+        .collect();
+    let readable: BTreeSet<Id> = if documents.is_empty() {
+        BTreeSet::new()
+    } else {
+        // The trash of a place lists a deleted document to whoever could read it as it was: the same retained read.
+        orch_db::queries::trace::read_scope(
+            &documents,
+            orch_authz::documents::listed(conn, principal, &documents, Policy::default()),
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|row| row.document.deleted && row.holds(Permission::DocView))
+        .map(|row| row.document.id)
+        .collect()
+    };
+    Ok(closed
+        .iter()
+        .filter(|((kind, _), target)| named_in_a_trash(kind, target))
+        .filter(|((kind, id), target)| {
+            if kind == "document" {
+                readable.contains(id)
+            } else {
+                target.place.is_some_and(|place| managed.contains(&place))
+            }
+        })
+        .filter_map(|(key, target)| target.name.clone().map(|name| (key.clone(), name)))
+        .collect())
+}
+
 /// The shortcuts of `rows`, in their order, as `principal` may see their targets now. With `names` (the node names a
 /// scoped reader's own operation may give), the way down to a place or a thread names only what that operation may
 /// name, and a document or a chat is not named at all: it says only whether it opens.
@@ -200,6 +270,12 @@ pub(crate) async fn render(
         .map(|(row, _)| (row.kind.clone(), row.target_id))
         .collect();
     let closed = hierarchy::closed_targets(conn, &closed).await?;
+    // A scoped reader's operation names no target of its own; the names of deleted ones are no exception.
+    let last = if names.is_none() {
+        last_names(conn, principal, &closed).await?
+    } else {
+        HashMap::new()
+    };
     let mut shortcuts = Vec::with_capacity(rows.len());
     for (row, (open, item)) in rows.iter().zip(seen) {
         let kind: NameKind =
@@ -212,6 +288,9 @@ pub(crate) async fn render(
         } else {
             ShortcutTargetState::Unavailable
         };
+        let last_name = (state == ShortcutTargetState::Deleted)
+            .then(|| last.get(&(row.kind.clone(), row.target_id)).cloned())
+            .flatten();
         // The reader's own list is shown org by org: it says in which, also of what no longer opens for them.
         let org_id = match row.node_id {
             Some(_) => None,
@@ -230,6 +309,7 @@ pub(crate) async fn render(
             position: row.position.clone(),
             state,
             item,
+            last_name,
             org_id,
             view: row
                 .view

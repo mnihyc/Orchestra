@@ -1,4 +1,5 @@
-/** The one line a move to the trash leaves: what went, what running work it stopped, what was refused, Show and Undo.
+/** The one line a move to the trash leaves: what went, what running work it stopped (the threads, and the environments
+ * that went with their places), what was refused, Show and Undo.
  *
  * Nothing about what depends on the things is asked before the act; this line says it after, beside the act's
  * result, and Show opens where they now lie. Undo puts back exactly what this act moved.
@@ -28,6 +29,8 @@ export interface TrashTip {
   closed?: readonly string[];
   /** Running threads the act stopped: the one loss that is said. */
   stopped?: number;
+  /** Environments at home in what went, which went to the trash with it and stopped: they come back with it. */
+  environments?: number;
   /** Opens the trash where it now lies. */
   show?: () => void;
   /** Puts back exactly what this act moved. */
@@ -47,7 +50,7 @@ function refusedLine(t: TFunction, refused: readonly Refusal[]): string {
 }
 
 /** The title and line of a trash notice. */
-export function trashWords(t: TFunction, tip: Pick<TrashTip, 'moved' | 'refused' | 'stopped' | 'closed'>): { title: string; description?: string; failed: boolean } {
+export function trashWords(t: TFunction, tip: Pick<TrashTip, 'moved' | 'refused' | 'stopped' | 'closed' | 'environments'>): { title: string; description?: string; failed: boolean } {
   const { moved, refused } = tip;
   const closed = tip.closed ?? [];
   const total = moved.length + refused.length;
@@ -60,6 +63,7 @@ export function trashWords(t: TFunction, tip: Pick<TrashTip, 'moved' | 'refused'
       : named(t, moved, 'trash.movedOne', 'trash.movedTwo', 'trash.movedMore');
   const parts = [
     (tip.stopped ?? 0) > 0 ? t('trash.stopped', { count: tip.stopped }) : null,
+    (tip.environments ?? 0) > 0 ? t('trash.environments', { count: tip.environments }) : null,
     closed.length > 0 && (moved.length > 0 || refused.length > 0) ? t('trash.closed', { count: closed.length }) : null,
     refused.length === 0 ? null : moved.length === 0 && refused.length === 1 ? refused[0]?.reason ?? null : refusedLine(t, refused),
   ].filter((part): part is string => part !== null && part !== '');

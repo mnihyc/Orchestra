@@ -119,15 +119,17 @@ const PAGES: { name: string; address: string; content: RegExp | null }[] = [
 test.beforeEach(async () => { await scenario(); });
 
 /**
- * A page of the built application served over h2, closed with the test. The browser is one of its own that accepts the
- * test's certificate everywhere, the application's worker included (a context's own setting covers pages, not a worker's
- * script), so that the page is the one a person gets from the edge.
+ * A page of the built application served over h2, closed with the test. The browser is one of its own that trusts the
+ * test's certificate by its key everywhere, the application's worker included (a context's own setting covers pages, not a
+ * worker's script), so that the page is the one a person gets from the edge: one that only ignored the certificate's errors
+ * would keep none of the files in its cache (Chromium caches nothing from a connection with certificate errors), and a
+ * returning tab would fetch them all again.
  */
 async function overH2(run: (page: Page) => Promise<void>): Promise<void> {
   const origin = await h2Origin(resolve(process.cwd(), 'dist'), new URL(DOUBLE), test.info().outputPath('h2-origin'));
   let browser: Browser | undefined;
   try {
-    browser = await chromium.launch({ args: ['--disable-gpu', '--ignore-certificate-errors'] });
+    browser = await chromium.launch({ args: ['--disable-gpu', `--ignore-certificate-errors-spki-list=${origin.key}`] });
     const context = await browser.newContext({ baseURL: origin.origin, ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC',
       viewport: { width: 1440, height: 900 } });
     await run(await context.newPage());

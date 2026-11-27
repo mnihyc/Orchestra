@@ -38,6 +38,22 @@ export function mainArea(page: Page): Locator {
   return page.locator('[data-main-area]:not([data-help-reading])');
 }
 
+/**
+ * Opens one of a topic's tabs as a person does: from its row, or from More at the row's end, where the tabs that do not fit
+ * wait (the chosen one then takes its place in the row). `name` is the tab's name without the count beside it.
+ */
+export async function openTopicTab(page: Page, name: string): Promise<void> {
+  const words = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const strip = mainArea(page).locator('[data-navigation-strip="tabs"]').filter({ has: page.locator('[data-tab-value="overview"]') }).first();
+  const tab = strip.getByRole('tab', { name: new RegExp(`^${words}(?:\\s*\\d+)?$`, 'u') });
+  const more = strip.locator('[data-tabs-more]');
+  // The row is drawn with the tabs that fit, and More where some wait under it.
+  await expect(tab.or(more).first()).toBeVisible();
+  if (await tab.isVisible()) { await tab.click(); return; }
+  await more.click();
+  await page.getByRole('menuitemradio', { name: new RegExp(`^${words}(?: \\(\\d+\\))?$`, 'u') }).click();
+}
+
 async function control(path: string, body: unknown = {}): Promise<unknown> {
   const response = await fetch(`${DOUBLE}/__double${path}`, {
     method: 'POST',

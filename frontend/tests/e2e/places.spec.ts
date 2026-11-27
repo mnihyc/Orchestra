@@ -1,7 +1,7 @@
 /** The places of an org at work: an org made inside an org, a project and a topic in it, a name changed, archiving and bringing back, what a refusal says is missing, the board and its filters, an invitation in both forms, and a role changed. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, deny, mailWorks, PEOPLE, scenario, signIn, mainArea, screenAddress } from './support.ts';
+import { ACME, deny, mailWorks, PEOPLE, scenario, signIn, mainArea, openTopicTab, screenAddress } from './support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -504,7 +504,7 @@ test('the Activity of a place lists what was done to it, newest first, and keeps
   await dialogField(page, /^Name/).fill('Fresh topic');
   await page.getByRole('dialog').getByRole('button', { name: 'Create topic' }).click();
   await expect(page).toHaveURL(/\/topic\//);
-  await page.getByRole('tab', { name: 'Activity' }).click();
+  await openTopicTab(page, 'Activity');
   await expect(page.getByRole('list').getByText('Ada Lovelace made the topic Fresh topic')).toBeVisible();
   await page.getByRole('radio', { name: 'Work' }).click();
   await expect(page.getByText('Nothing of this kind has happened here yet.')).toBeVisible();
@@ -529,11 +529,11 @@ test('a topic’s screen has its overview, its threads from the live tree and it
   await expect(page.getByRole('link', { name: 'Repro' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'bug' }).or(page.getByText('bug', { exact: true })).first()).toBeVisible();
 
-  await page.getByRole('tab', { name: /Threads/ }).click();
+  await openTopicTab(page, 'Threads');
   await expect(page.getByRole('table', { name: 'Threads' }).getByRole('row')).toHaveCount(3);
   await expect(page).toHaveURL(/tab=threads/);
 
-  await page.getByRole('tab', { name: /Environments/ }).click();
+  await openTopicTab(page, 'Environments');
   await expect(page.getByText('Default for new threads')).toBeVisible();
   await expect(page.getByText('Workspace', { exact: true })).toBeVisible();
 
@@ -541,7 +541,7 @@ test('a topic’s screen has its overview, its threads from the live tree and it
   await expect(mainArea(page).getByRole('tab', { name: 'Files' })).toHaveCount(0);
 
   // The starter on the overview makes a thread from the defaults of the place, and its setup opens the dialog that makes one with them chosen.
-  await page.getByRole('tab', { name: 'Overview' }).click();
+  await openTopicTab(page, 'Overview');
   await page.getByRole('region', { name: 'Start a thread' }).getByRole('button', { name: 'Thread setup', exact: true }).click();
   const setup = page.getByRole('dialog', { name: 'New thread in Fix login' });
   await expect(setup.getByRole('heading', { name: 'Provider Topic default' })).toBeVisible();

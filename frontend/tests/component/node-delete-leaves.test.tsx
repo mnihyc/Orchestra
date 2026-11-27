@@ -91,6 +91,18 @@ it('says the running work it stopped in the same line, without asking', async ()
   expect(await notice('1 running thread stopped')).toHaveTextContent('Moved “Upgrade deps” to Trash');
 });
 
+it('says the environments that went to the trash with the place, stopped, and Undo brings them back with it', async () => {
+  vi.mocked(deleteNode).mockImplementation(() => {
+    treeWriter.reset(ACME.org, acmeTree().filter((row) => row.id !== ACME.upgradeDeps && row.id !== ACME.depsThread), 101);
+    return Promise.resolve({ deletion_id: 'deletion', environments: 2 });
+  });
+  remove();
+  const line = await notice('2 environments stopped');
+  expect(line).toHaveTextContent('Moved “Upgrade deps” to Trash');
+  await userEvent.click(within(line).getByRole('button', { name: 'Undo' }));
+  await vi.waitFor(() => expect(restoreNode).toHaveBeenCalledWith(ACME.upgradeDeps, 'deletion', expect.any(String), { answerFirst: true }));
+});
+
 it('names a refusal in the line and offers no Undo for what did not move', async () => {
   vi.mocked(deleteNode).mockRejectedValue(new Error('not allowed here'));
   remove();

@@ -1773,12 +1773,17 @@ pub async fn delete_shortcut(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
 
 /// What is known of a thing a shortcut points to that does not open for its reader: whether it is gone (deleted, to
 /// the trash or for good, or lying in a place that was), and the root org it lies in, where it still lies anywhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedTarget {
     /// Whether it is gone; a thing restored from the trash is no longer gone.
     pub gone: bool,
     /// Its root org.
     pub org_id: Option<Id>,
+    /// What it is called: a place's or a thread's name, a document's title, a chat's name; as it was when it went.
+    /// Never told to a reader as such: only to one who would find it in the trash where it lies.
+    pub name: Option<String>,
+    /// Where it lies: a place's or a thread's parent, a document's place; none for a chat.
+    pub place: Option<Id>,
 }
 
 /// What is known of the things named by kind and identity that do not open for a reader: each is looked up by its
@@ -1791,7 +1796,11 @@ pub async fn closed_targets(
         return Ok(std::collections::HashMap::new());
     }
     let (kinds, ids): (Vec<String>, Vec<Id>) = targets.iter().cloned().unzip();
-    let rows: Vec<(String, Id, Option<Id>, bool)> = sqlx::query_as(
+    #[allow(
+        clippy::type_complexity,
+        reason = "one row of the statement, as it is selected"
+    )]
+    let rows: Vec<(String, Id, Option<Id>, bool, Option<String>, Option<Id>)> = sqlx::query_as(
         "WITH wanted(kind, id) AS (SELECT * FROM unnest($1::text[], $2::uuid[]))
          SELECT w.kind, w.id,
                 CASE w.kind
@@ -1808,7 +1817,15 @@ pub async fn closed_targets(
                      WHERE c.id = w.id AND (SELECT state.live FROM orch_path_state(p.path) state))
                   ELSE EXISTS (
                     SELECT 1 FROM nodes n
-                     WHERE n.id = w.id AND (SELECT state.live FROM orch_path_state(n.path) state)) END AS gone
+                     WHERE n.id = w.id AND (SELECT state.live FROM orch_path_state(n.path) state)) END AS gone,
+                CASE w.kind
+                  WHEN 'document' THEN (SELECT d.title FROM documents d WHERE d.id = w.id)
+                  WHEN 'chat' THEN (SELECT c.name FROM chats c WHERE c.id = w.id)
+                  ELSE (SELECT n.name FROM nodes n WHERE n.id = w.id) END AS name,
+                CASE w.kind
+                  WHEN 'document' THEN (SELECT d.node_id FROM documents d WHERE d.id = w.id)
+                  WHEN 'chat' THEN NULL::uuid
+                  ELSE (SELECT n.parent_id FROM nodes n WHERE n.id = w.id) END AS place
            FROM wanted w",
     )
     .bind(&kinds)
@@ -1817,7 +1834,17 @@ pub async fn closed_targets(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(kind, id, org_id, gone)| ((kind, id), ClosedTarget { gone, org_id }))
+        .map(|(kind, id, org_id, gone, name, place)| {
+            (
+                (kind, id),
+                ClosedTarget {
+                    gone,
+                    org_id,
+                    name,
+                    place,
+                },
+            )
+        })
         .collect())
 }
 
