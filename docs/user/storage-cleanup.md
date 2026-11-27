@@ -8,6 +8,8 @@ summary: Review unused caches, retained data and releases before freeing storage
 
 # Storage cleanup
 
+This page shows how to free storage on a host or a machine, what Orch keeps and why, and how to uninstall the node or the connector. Review what is kept before you remove it.
+
 ## Unused caches
 
 Open a host's **Settings** and find **Clean unused caches**. The system starts
@@ -15,7 +17,7 @@ with seven days. A host manager can choose another value unless the system
 administrator locked it. **Reset to inherited** follows the system again.
 
 Zero shows **Off** and switches automatic cache cleanup off. Focus the field
-to edit its numeric value. A cache that a unit or a retained environment still
+to edit its numeric value. A cache that a container or a retained environment still
 needs stays. Unknown use is kept until Orch can establish what needs it.
 
 Orch checks caches when the node joins and with its regular storage report.
@@ -25,7 +27,7 @@ not counted as cleaned.
 ## Kept data
 
 Files kept for restore follow their own recovery dates. Changing cache cleanup
-does not shorten those dates. A stopped unit still keeps its volumes in use.
+does not shorten those dates. A stopped container still keeps its volumes in use.
 Zero for **Removed files** makes future removals eligible for immediate purge;
 it does not change a retention window that was already promised.
 
@@ -81,11 +83,28 @@ Choose **Clean up…** in a resource menu, or select records in Storage and choo
 
 Each row shows its size, why it is kept, and its recovery date. Open **Kept by** to follow its dependents. Hidden names stay a count. A blocked row stays in the plan with its reason.
 
-Choose **Keep**, **Remove**, **Stop and remove**, or **Purge now** where offered. Stopping a unit keeps its volumes unless those volumes are selected too. **Purge now** erases kept data and asks you to type the plan's name. A manager cannot shorten an environment's recovery window without administration of its current home.
+Choose **Keep**, **Remove**, **Stop and remove**, or **Purge now** where offered. Stopping a container keeps its volumes unless those volumes are selected too. **Purge now** erases kept data and asks you to type the plan's name. A manager cannot shorten an environment's recovery window without administration of its current home.
 
 The job keeps running after you close the dialog. **Cancel remaining** waits for the active removal to finish, then stops before the next item. The result lists what was removed, kept, blocked or failed. Removed items stay removed after cancellation.
 
 A kept environment's row keeps the accepted job's progress after **Hide**. Kept-data views refresh from the server's confirmed result.
+
+
+## Copy mount data
+
+Choose **Copy data** from a mount's menu, one of its **Locations**, or its row in a machine's **Mounts here** list. The mount's Delete plan opens the same copy act and keeps its own draft when you return. Choose the source and destination machines. You need use of the mount and management of both machines; paths and volume names come from their recorded locations.
+
+The plan counts the source and any destination data. Where data already exists, **Replace** keeps it separately before copying, and **Keep both** creates a new location and keeps the previous one. A borrowed or busy location cannot be replaced. Neither choice removes the source. Changed locations or data-making capabilities require a new review.
+
+**Copy data** accepts a durable job with the usual progress and outcome. Close it while it runs; reopen Copy data to see your latest copy. Cancellation waits for the native work to stop, then restores what it can and reports any data kept. The destination becomes the mount's current location only after copying succeeds.
+
+## Delete a mount
+
+**Delete** lists the places that enable the mount. You see the names you may read and a count of the others. **Switch off and delete** removes those settings and the mount together. You need permission to change each place. The plan identifies any visible place that prevents deletion. A running environment keeps its existing attachment until its next start.
+
+Owned data starts at **Keep**. **Mount data on deletion** changes the proposed default. **Purge now** appears only where you may manage the data and it is not held by an environment; type the mount's exact name. Existing folders stay. Missing access or a lost machine never prevents deleting the definition and keeping its data.
+
+**Notify** starts unchecked for mount deletion. Each eligible person receives at most one item, however many environments they have. After confirming, the shared job retains progress and each data outcome. Kept volumes remain in **Storage** under their original mount and machine permissions. Close the result to return to Mounts. If the data location changed after the preview, read the plan again before confirming.
 
 ## Server files
 

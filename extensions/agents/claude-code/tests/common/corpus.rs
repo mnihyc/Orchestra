@@ -438,6 +438,7 @@ impl Actor {
                 home.path().to_str().unwrap().into(),
             )]),
             as_root: false,
+            sandbox: Default::default(),
         };
         let (sink, events) = EventSink::channel();
         let (handle, settler) = conversation::start_with_settler(
@@ -459,6 +460,7 @@ impl Actor {
             handle
                 .ask(|reply| Command::Warm {
                     turn: Box::new(TurnSettings {
+                        program_output: Ok(None),
                         cache_lifetimes: None,
                         page_fetch: None,
                         model: "mock-large".into(),

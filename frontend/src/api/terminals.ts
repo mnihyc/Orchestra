@@ -62,9 +62,9 @@ export async function shellRecording(terminalId: string): Promise<Uint8Array | n
 }
 
 /** The reasons for which opening a shell is refused though the caller holds the permission. */
-export type NotAllowedReason = 'disabled_by_policy' | 'environment_switch_off' | 'machine_policy' | 'environment_offline';
+export type NotAllowedReason = 'disabled_by_policy' | 'environment_switch_off' | 'machine_policy' | 'environment_offline' | 'environment_stopping';
 
-const REASONS: readonly string[] = ['disabled_by_policy', 'environment_switch_off', 'machine_policy', 'environment_offline'];
+const REASONS: readonly string[] = ['disabled_by_policy', 'environment_switch_off', 'machine_policy', 'environment_offline', 'environment_stopping'];
 
 /** Why a shell was not opened, when the refusal is one that no permission lifts. */
 export function notAllowedReason(error: unknown): NotAllowedReason | null {

@@ -210,6 +210,30 @@ pub struct ToolContext<'a> {
     pub directory: &'a str,
     /// Where the agent starts, inside it.
     pub cwd: &'a str,
+    /// Native cache uploaded before publication; absent for metadata-only callers.
+    pub outputs: Option<&'a std::path::Path>,
+    /// The accepted session capture allowance.
+    pub output_capture_bytes: u64,
+}
+impl ToolContext<'_> {
+    /// Captures the original text before creating its compact timeline excerpt.
+    pub fn output(&self, text: &str) -> OutputRef {
+        let total = i64::try_from(text.len()).unwrap_or(i64::MAX);
+        if let Some(directory) = self.outputs {
+            match orch_agent_contract::output::OutputStore::new(directory.to_owned()).retain(
+                text,
+                total,
+                self.output_capture_bytes,
+            ) {
+                Ok((output, _)) => return output,
+                Err(error) => tracing::warn!(%error,"native output capture is unavailable"),
+            }
+        }
+        orch_agent_contract::output::inline(
+            orch_agent_contract::output::tail(text, self.output_capture_bytes),
+            total,
+        )
+    }
 }
 
 /// A path as it is shown: relative to the thread's directory where it lies in it, else as it is.
@@ -222,6 +246,42 @@ pub fn shown_path(path: &str, directory: &str) -> String {
         }
         _ => path.to_owned(),
     }
+}
+
+/// The quote mark that opens and closes a JSON string.
+const QUOTE: char = '\u{22}';
+
+/// The text of a string member of a call's input that is still being written, once that member is whole (a
+/// `description` whose closing quote has come is read while the `prompt` after it is still being written); `None`
+/// while it is not.
+#[must_use]
+pub fn partial_text(partial: &str, member: &str) -> Option<String> {
+    let key = format!("\"{member}\"");
+    let mut from = 0;
+    while let Some(at) = partial[from..].find(&key) {
+        let after = from + at + key.len();
+        from = after;
+        let Some(value) = partial[after..].trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let Some(body) = value.trim_start().strip_prefix(QUOTE) else {
+            continue;
+        };
+        // The string ends at the first quote that no backslash escapes; until it is written the member is not whole.
+        let mut escaped = false;
+        for (index, character) in body.char_indices() {
+            match character {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                QUOTE => {
+                    return serde_json::from_str::<String>(&format!("\"{}\"", &body[..index])).ok();
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    None
 }
 
 fn text_of<'a>(input: &'a Json, member: &str) -> Option<&'a str> {
@@ -594,7 +654,7 @@ pub fn tool_payload(
             command: text_of(input, "command").unwrap_or_default().to_owned(),
             cwd: ctx.cwd.to_owned(),
             exit_code: outcome.map(exit_code_of),
-            output: OutputRef::of(
+            output: ctx.output(
                 text.map(|text| {
                     if outcome.is_some_and(|outcome| outcome.is_error) {
                         text.strip_prefix("Exit code ")
@@ -649,7 +709,7 @@ pub fn tool_payload(
                 total_lines: file
                     .and_then(|file| file.get("totalLines"))
                     .and_then(Json::as_i64),
-                content: OutputRef::of(
+                content: ctx.output(
                     file.and_then(|file| file.get("content"))
                         .and_then(Json::as_str)
                         .or(if image { Some("") } else { text })
@@ -726,7 +786,7 @@ pub fn tool_payload(
                     .and_then(|result| result.get("code"))
                     .and_then(Json::as_u64)
                     .and_then(|code| u16::try_from(code).ok()),
-                content: OutputRef::of(
+                content: ctx.output(
                     structured
                         .and_then(|result| result.get("result"))
                         .and_then(Json::as_str)
@@ -751,13 +811,17 @@ pub fn tool_payload(
             // definition's model or the session's, which the turn's use by model names.
             model: text_of(input, "model").map(str::to_owned),
         },
-        Family::Orch(tool) => ToolPayload::Orch {
-            tool: *tool,
-            arguments: input.clone(),
-            result: outcome
-                .filter(|outcome| !outcome.is_error)
-                .map(|outcome| json_or_text(&outcome.text)),
-        },
+        Family::Orch(tool) => {
+            let result = outcome.map(|outcome| json_or_text(&outcome.text));
+            ToolPayload::Orch {
+                tool: *tool,
+                arguments: input.clone(),
+                rate_limit: outcome
+                    .filter(|outcome| outcome.is_error)
+                    .and_then(|_| orch_agent_contract::events::tool_rate_limit(result.as_ref())),
+                result,
+            }
+        }
         Family::Mcp { server, tool } => ToolPayload::Mcp {
             server: server.clone(),
             tool: tool.clone(),
@@ -873,11 +937,74 @@ pub fn is_exec_tool(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_member_of_a_call_still_being_written_is_read_once_it_is_whole() {
+        let written =
+            r#"{"description":"Find the \"login\" flow","prompt":"Look at src/login.ts and"#;
+        assert_eq!(
+            partial_text(written, "description").as_deref(),
+            Some(r#"Find the "login" flow"#)
+        );
+        assert_eq!(
+            partial_text(written, "prompt"),
+            None,
+            "the prompt is still being written"
+        );
+        assert_eq!(partial_text(written, "subagent_type"), None);
+        assert_eq!(
+            partial_text(r#"{"description": "Half"#, "description"),
+            None
+        );
+        assert_eq!(
+            partial_text(r#"{"description" : "Spaced", "x":1}"#, "description").as_deref(),
+            Some("Spaced")
+        );
+        assert_eq!(
+            partial_text(r#"{"description":"Ends in a backslash \\","#, "description").as_deref(),
+            Some(r"Ends in a backslash \")
+        );
+        assert_eq!(partial_text(r#"{"description":7}"#, "description"), None);
+    }
+
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn a_completed_native_command_keeps_the_chosen_output_interval_before_inline_cropping() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ToolContext {
+            directory: "/work",
+            cwd: "/work",
+            outputs: Some(directory.path()),
+            output_capture_bytes: 32_769,
+        };
+        let original = "native output 字🙂\n".repeat(4_000);
+        let outcome = ToolOutcome::from_block(&json!({"content":original}), None);
+        let payload = tool_payload(
+            &Family::Command,
+            "Bash",
+            "call",
+            &json!({"command":"build"}),
+            Some(&outcome),
+            &context,
+        );
+        let ToolPayload::Command { output, .. } = payload else {
+            panic!("command")
+        };
+        assert_eq!(output.total_len, i64::try_from(original.len()).unwrap());
+        let range = output.retained.unwrap();
+        assert_eq!(range.offset + range.len, output.total_len);
+        assert!(range.len <= 32_769);
+        assert_eq!(
+            std::fs::read(directory.path().join(output.blob.unwrap().to_string())).unwrap(),
+            orch_agent_contract::output::tail(&original, 32_769).as_bytes()
+        );
+    }
+
     fn ctx() -> ToolContext<'static> {
         ToolContext {
+            outputs: None,
+            output_capture_bytes: orch_agent_contract::output::DEFAULT_CAPTURE_BYTES,
             directory: "/workspace/web",
             cwd: "/workspace/web/api",
         }
@@ -1086,6 +1213,26 @@ mod tests {
         );
         assert_eq!(content.inline, "fn main() {}");
         assert_eq!(media_type, None);
+    }
+
+    #[test]
+    fn an_orch_refusal_keeps_its_structured_facts_when_the_native_result_is_failed() {
+        let value = json!({"error":{"code":"rate_limited","rate_limit":{"allowed_calls":2,"period_secs":60}}});
+        let failed = tool_payload(
+            &family_of("mcp__orch__announce"),
+            "mcp__orch__announce",
+            "refused",
+            &json!({"title":"A real refusal"}),
+            Some(&ToolOutcome {
+                text: value.to_string(),
+                is_error: true,
+                ..ToolOutcome::default()
+            }),
+            &ctx(),
+        );
+        assert!(
+            matches!(failed, ToolPayload::Orch { result: Some(ref result), .. } if result == &value)
+        );
     }
 
     #[test]

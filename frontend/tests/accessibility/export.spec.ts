@@ -52,7 +52,7 @@ test('the dialog of a place with everything ticked, a place half ticked, and all
 
   await dialog(page).getByRole('treeitem', { name: /^Search/ }).click();
   await expect(dialog(page).getByRole('treeitem', { name: /^Shop/ })).toHaveAttribute('aria-checked', 'mixed');
-  await expect(dialog(page).getByRole('combobox', { name: /Conversations/ })).toBeVisible();
+  await expect(dialog(page).getByRole('combobox', { name: /Threads/ })).toBeVisible();
   await expect(dialog(page).getByRole('checkbox', { name: 'Attachments' })).toBeVisible();
   await expect(dialog(page).getByLabel('From', { exact: true })).toBeVisible();
   await expect(dialog(page).getByLabel('To', { exact: true })).toBeVisible();

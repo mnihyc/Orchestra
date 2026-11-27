@@ -8,6 +8,8 @@ summary: Follow counts and transfers, cancel running work and arrange your statu
 
 # Follow progress and arrange status items
 
+This page shows how to follow counts and transfers, cancel work that is running, and arrange the status items you see.
+
 ## Read progress
 
 A plan can count files and bytes in the background. Counting shows what it
@@ -37,7 +39,9 @@ its phase. Read its outcome before repeating a change that may have committed.
 The status bar, thread header and live line can show speed, elapsed time,
 tokens, cost, context, usage and resource load. Only reported values and
 explicit estimates appear. A provider limit and a model's context are separate
-facts; opening their card explains each one.
+facts; opening their card explains each one. The live line above the composer
+shows what is being done and the elapsed time of the turn until you add more,
+such as speed or tokens.
 
 Open an item's context menu to hide it or Move to another place. Choose
 Customize, or Layout → Status items, for the common editor. Select a place,

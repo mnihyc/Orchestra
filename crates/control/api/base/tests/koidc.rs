@@ -995,7 +995,7 @@ async fn oidc_keeps_system_admission_and_explicit_team_acceptance_separate_from_
                 permissions: None,
                 email: None,
                 max_uses: Some(1),
-                expires_in_hours: None,
+                expires_in_minutes: None,
                 note: None,
             })
             .send()
@@ -1070,7 +1070,7 @@ async fn an_oidc_registration_withdrawn_by_its_issuer_makes_no_account_or_home()
             permissions: None,
             email: None,
             max_uses: Some(2),
-            expires_in_hours: None,
+            expires_in_minutes: None,
             note: None,
         })
         .send()
@@ -1117,7 +1117,7 @@ async fn identity_link_key(sso: &Sso, user: Id) -> (Id, String) {
         KeyAction, KeyIdentityKind, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget,
         KeyTargetKind,
     };
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 
     let kind = KeyTargetKind::Identity(KeyIdentityKind::Account);
@@ -1140,9 +1140,9 @@ async fn identity_link_key(sso: &Sso, user: Id) -> (Id, String) {
         constraints: Vec::new(),
         excluded_places: Vec::new(),
     };
-    let key = new_token(API_TOKEN_PREFIX);
-    let hash = token_hash(&key);
     let id = new_id();
+    let key = new_api_token(id);
+    let hash = token_hash(&key);
     let policy = serde_json::to_value(scope).unwrap();
     create_api_token_scoped(
         &mut sso.world.db.pool.acquire().await.unwrap(),
@@ -1315,8 +1315,9 @@ async fn an_oidc_link_rechecks_its_originating_key_at_callback_and_does_not_borr
             .await
             .unwrap();
         assert_eq!(remains, 0, "refused callbacks still consume the state once");
-        let credential = identity::api_token_by_hash(
+        let credential = identity::api_token_by_identity(
             &mut sso.world.db.pool.acquire().await.unwrap(),
+            orch_api_contract::api_keys::key_id(&key).unwrap(),
             &token_hash(&key),
             sso.world.app.clock.now(),
         )
@@ -1324,4 +1325,44 @@ async fn an_oidc_link_rechecks_its_originating_key_at_callback_and_does_not_borr
         .unwrap();
         assert_eq!(credential.is_some(), loss == "scope");
     }
+}
+
+#[tokio::test]
+async fn an_admitted_identity_login_keeps_its_callback_when_the_public_address_changes() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let sso = sso().await;
+    sso.provider.sign_in_as(dana());
+    let mut browser = Browser::default();
+    let to_provider = sso.begin(&mut browser, None, None).await;
+    let callback_before = query_of(&to_provider)["redirect_uri"].clone();
+    let back = sso.provider.authorize(&to_provider).await.unwrap();
+    let seed = sso.world.app.app.config.system.address_seed();
+    let before = public_addresses::read(&mut *sso.world.conn().await, &seed, sso.world.now())
+        .await
+        .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *sso.world.conn().await,
+            &candidate,
+            before.revision,
+            None,
+            sso.world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    assert_eq!(sso.come_back(&mut browser, &back).await, "/");
+    assert!(browser.has("orch_session"));
+    let new_start = sso.begin(&mut Browser::default(), None, None).await;
+    assert_ne!(query_of(&new_start)["redirect_uri"], callback_before);
+    assert_eq!(
+        query_of(&new_start)["redirect_uri"],
+        "https://changed.example.test/api/v1/auth/oidc/acme/callback"
+    );
 }
