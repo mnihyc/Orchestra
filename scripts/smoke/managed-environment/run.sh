@@ -204,7 +204,9 @@ fi
 lab policy set provider.upstreams "[\"http://$BRIDGE:$MODEL_PORT/v1\"]" > /dev/null
 docker exec -d "$LAB" sh -c 'exec orch-connector --data-dir /data run > /data/run.log 2>&1'
 machine_online() { [ "$(call GET /machines | jq -r '[.[] | select(.name == "lab")][0].online')" = true ]; }
-wait_for 60 "the machine is online" machine_online
+# When it is not, the connector's own words say why: its output and the end of its log.
+wait_for 60 "the machine is online" machine_online ||
+  { docker exec "$LAB" sh -c 'tail -n 40 /data/run.log; for f in $(ls -t /data/logs/* 2>/dev/null | head -1); do echo "== $f"; tail -n 40 "$f"; done' >&2 || true; false; }
 LAB_ID="$(call GET /machines | jq -r '[.[] | select(.name == "lab")][0].id')"
 # A machine is online before its facts are in, and its provider is registered against what they say its policy lets it
 # forward: the answer to a provider asked for too soon is a refusal.

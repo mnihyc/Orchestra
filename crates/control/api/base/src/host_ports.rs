@@ -219,6 +219,7 @@ pub async fn publish(
     let mut tickets = Vec::with_capacity(transports.len());
     for transport in &transports {
         let claims = PortTicketClaims {
+            machine_reach: false,
             environment_id: row.environment_id,
             generation: i64::from(env.generation),
             port,
@@ -619,6 +620,8 @@ async fn ask_for_reader(
     dispatcher
         .issue_stored_before(
             crate::dispatch::StoredCommand {
+                content_transit: false,
+                native_target: command.native_target.clone(),
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().into(),

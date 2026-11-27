@@ -1,4 +1,5 @@
 /** A retained report lists every outcome and offers download and a planned undo. */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -98,7 +99,7 @@ export function ImportReport({ id, onOpen, inspectOnly = false }: { id: string; 
     {item.failure !== null && <ErrorAlert error={item.failure} message={item.failure.code === 'internal' ? item.failure.message : importReason(item.failure, t, locale)} />}
     <ImportReasons reasons={item.losses} label={t('importWizard.review.notImported')} />
     <div className="flex flex-wrap items-end gap-2">
-      <Select<ReportFilter> size="sm" label={t('importWizard.report.filter')} value={filter} onValueChange={(next) => { setFilter(next); rememberFilter(next); }} options={[
+      <Select<ReportFilter> size="sm" label={t('importWizard.report.filter')} value={filter} onValueChange={carryDeviceChoice((next: ReportFilter) => { setFilter(next); rememberFilter(next); }, rememberFilter)} options={[
         { value: 'all', label: t('importWizard.report.all') }, { value: 'failed', label: t('importWizard.report.failed') },
         { value: 'warnings', label: t('importWizard.report.warnings') }, { value: 'skipped', label: t('importWizard.report.skipped') },
       ]} />
@@ -121,7 +122,7 @@ export function ImportReport({ id, onOpen, inspectOnly = false }: { id: string; 
     {!inspectOnly && undoing && <ImportUndo id={id} onClose={() => setUndoing(false)} onStarted={(job) => {
       watchImport(job, item.node?.id ?? null, false, true, id);
       void cache.invalidateQueries({ queryKey: importKeys.one(id), exact: true });
-      void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });
+      void cache.invalidateQueries({ queryKey: importKeys.mine() });
     }} />}
   </div>;
 }

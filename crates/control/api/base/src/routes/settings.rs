@@ -57,7 +57,7 @@ orch_api_base::api_family_callback! {
     slot __ApiCallbackddd9a09986, __API_CALLBACK_DDD9A09986, __api_set_ddd9a09986;
     base orch_api_base::routes::settings;
 
-    fn registry_definitions() -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::settings::SettingDef>>;
+    fn registry_definitions<'__api>(arg0: Option<&'__api orch_engine::Engine>) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::settings::SettingDef>>;
 }
 
 orch_api_base::api_family_callback! {
@@ -74,8 +74,8 @@ pub struct Holds {
     pub permissions: HashSet<Permission>,
     pub system_admin: bool,
     /// For a thread that is in an environment: that environment, and whether
-    /// the caller manages it. Where a thread starts and how far its commands
-    /// are confined are its environment's to decide, not the thread's.
+    /// the caller manages it. Where a thread starts in it is its environment's
+    /// to decide, not the thread's.
     pub environment: Option<(Id, bool)>,
 }
 

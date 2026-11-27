@@ -6,6 +6,7 @@
  * The request is built here and nowhere else.
  */
 import type { ArrangementType, ChangeOptions, CopyInto, FileSelection, ForkEnvironment, ForkHistory, ForkRequest, MountChoice, MountFate, PlanMount, Thread, ThreadAccess } from '@/generated/api-types';
+import { hostChoiceTarget } from '@/features/resources/pools/hostTarget';
 
 /** What the person chose for one mount; a mount without one takes its default. */
 export interface MountPick {
@@ -147,7 +148,7 @@ function environmentOf(where: WhereChoice): ForkEnvironment | null {
     case 'new':
       return {
         new: {
-          ...(where.hostId === null ? { host_id: null } : { host_id: where.hostId }),
+          ...(where.hostId === null ? { host_id: null } : { host_id: hostChoiceTarget(where.hostId) }),
           ...(where.name.trim() === '' ? {} : { name: where.name.trim() }),
           ...(where.files.mode === 'all' ? {} : { files: selectionOf(where.files) }),
           ...(where.home ? { home: true } : {}),

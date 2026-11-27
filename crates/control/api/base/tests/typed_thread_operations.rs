@@ -20,7 +20,7 @@ use orch_api_contract::threads::{
     AdoptHistoryState, ThreadAdoptHistoryGet, ThreadDraftDelete, ThreadDraftGet, ThreadRawList,
     ThreadRawListQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, settings, threads};
 use orch_db::secrets::MasterKey;
 use orch_types::{Id, Json, new_id};
@@ -34,13 +34,14 @@ async fn key(world: &World, user: Id, kind: &str, id: Id, allow: Json) -> String
     }))
     .unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let scope = serde_json::to_value(scope).unwrap();
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Direct thread control",
             token_hash: &hash,
@@ -124,6 +125,8 @@ async fn raw_inspection_requires_its_manage_selection_and_current_thread_managem
         .keep(
             &mut conn,
             &orch_link_contract::events::RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 1,
                 direction: "in".into(),
                 payload: json!({"result":"Stored diagnostic"}),
