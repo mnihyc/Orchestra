@@ -15,7 +15,7 @@ use orch_api_contract::access::Role;
 use orch_api_contract::users::{
     InvitationCreate, InvitationCreateBody, InvitationKind, InvitationLookup,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
@@ -31,7 +31,7 @@ fn body(project: Id) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: Some(3),
-        expires_in_hours: Some(1),
+        expires_in_minutes: Some(60),
         note: None,
     }
 }
@@ -48,7 +48,7 @@ async fn issuer(room: &chat_world::Room) -> (Id, String) {
     ]})).unwrap();
     assert!(policy.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {

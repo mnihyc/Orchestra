@@ -33,6 +33,8 @@ export const PAGE_ROUTES = [
   "/resources/mcp/",
   "/resources/mounts/$id/",
   "/resources/mounts/",
+  "/resources/pools/$id/",
+  "/resources/pools/",
   "/resources/providers/$id/",
   "/resources/providers/",
   "/resources/skills/$id/",
@@ -99,4 +101,12 @@ export function pageParam(target: PageTarget, name: string): string {
   const value = target.params[name];
   if (value === undefined || value === '') throw new Error('This view has an invalid resource address.');
   return value;
+}
+
+
+/** A routed landing owns its sections and details; an identity below an unserved collection owns its own page. */
+export function pageDestination(target: PageTarget): string {
+  const parts = target.pathname.split('/').filter(Boolean);
+  const root = '/' + (parts[0] ?? '');
+  return locatePage(root) !== null || parts.length < 2 ? root : root + '/' + (parts[1] ?? '');
 }

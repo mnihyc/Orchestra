@@ -43,7 +43,7 @@ fn endpoint(protocol: &str, base_url: &str, options: Json) -> Upstream {
 
 fn api_body(name: &str, home: Id) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: name.to_owned(),
         home_id: home,
         access: None,
@@ -64,6 +64,51 @@ fn api_body(name: &str, home: Id) -> CreateProvider {
 async fn world() -> World {
     install_master_key(MasterKey::new(MASTER));
     World::new().await
+}
+
+#[tokio::test]
+async fn a_provider_owner_can_change_the_expiry_notice_and_return_to_the_inherited_value() {
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Expiry notice", c.acme)).await;
+    let key = "providers.expiry_notice_days";
+    let mut revision = provider.revision;
+    for (config, effective) in [(json!({(key): 7}), 7), (json!({}), 14)] {
+        let changed = world
+            .app
+            .call(ProviderUpdate, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&ProviderUpdateBody {
+                relay: None,
+                service_offerings: None,
+                model_group_options: None,
+                name: None,
+                upstreams: None,
+                config: None,
+                arrangements: None,
+                runtime_config: Some(config),
+                expected_revision: revision,
+            })
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap()
+            .provider;
+        revision = changed.revision;
+        let settings = world
+            .app
+            .call(
+                orch_api_contract::settings::ProviderSettingList,
+                &[&provider.base.id],
+            )
+            .token(&c.boss.token)
+            .send()
+            .await
+            .ok();
+        let notice = settings.iter().find(|row| row.key == key).unwrap();
+        assert_eq!(notice.value, Some(json!(effective)));
+    }
 }
 
 #[tokio::test]
@@ -151,12 +196,16 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
     let runtime = directory_keeper(&world, &c.boss, c.acme, "Harness runtime").await;
     let mut api = api_body("Separated locations", c.acme);
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut api
     {
-        *runtime_machine_id = Some(runtime);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: runtime,
+            },
+        );
         *key_machine_id = Some(keeper);
     }
     let made = make(&world, &c.boss, &api).await;
@@ -246,7 +295,11 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
         agent_id: agent,
         access: None,
         arrangements: None,
-        runtime_machine_id: Some(runtime),
+        runtime_location: Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: runtime,
+            },
+        ),
         key_machine_id: Some(keeper),
         config: None,
         sign_in: None,
@@ -268,6 +321,42 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
         made.runtime_support.unwrap().sign_in.unwrap().home_owned,
         "the other runtime's borrowed path does not redirect the native keeper's own selected home"
     );
+    // Renewal eligibility describes the keeper's explicit home, even when its adapter owns the default.
+    sqlx::query("UPDATE agents SET profile=jsonb_set(profile,'{attach}',COALESCE(profile->'attach','{}'::jsonb) || jsonb_build_object('home',$2::jsonb)) WHERE id=$1")
+        .bind(agent)
+        .bind(json!({"kind":"existing_directory","path":"/allowed/keeper-home"}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let borrowed = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        !borrowed
+            .runtime_support
+            .unwrap()
+            .sign_in
+            .unwrap()
+            .home_owned
+    );
+    sqlx::query("UPDATE agents SET profile=jsonb_set(profile,'{attach}',COALESCE(profile->'attach','{}'::jsonb) || jsonb_build_object('home',$2::jsonb)) WHERE id=$1")
+        .bind(agent)
+        .bind(json!({"kind":"made_by_orch"}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let owned = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert!(owned.runtime_support.unwrap().sign_in.unwrap().home_owned);
     let units: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM jobs WHERE provider_id=$1 AND kind='provider_provision'",
     )
@@ -359,6 +448,7 @@ async fn a_runtime_home_uses_the_physical_machines_roots_and_the_provider_manage
         .await
         .unwrap();
     let body = |home| ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: None,
@@ -457,6 +547,7 @@ async fn provider_managers_can_keep_commands_but_only_owners_can_add_replace_or_
     );
     let commands = json!({"10-helper":{"command":["/opt/helper","a b"],"timeout_secs":30}});
     let body = |revision, config| ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: None,
@@ -538,12 +629,16 @@ async fn a_providers_arrangement_choices_and_writes_use_its_credential_keepers_p
     let keeper = directory_keeper(&world, &c.boss, c.acme, "Credential keeper").await;
     let mut body = api_body("Policy-aware provider", c.acme);
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut body
     {
-        *runtime_machine_id = Some(keeper);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: keeper,
+            },
+        );
         *key_machine_id = Some(keeper);
     }
     let provider = make(&world, &c.boss, &body).await;
@@ -558,6 +653,7 @@ async fn a_providers_arrangement_choices_and_writes_use_its_credential_keepers_p
         [ArrangementType::Separated, ArrangementType::KeySeparated]
     );
     let change = ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: None,
@@ -640,7 +736,7 @@ async fn make(world: &World, by: &Who, body: &CreateProvider) -> Provider {
 #[tokio::test]
 async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secret_values() {
     use orch_access_contract::permissions::Permission;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     const FACT: &str = "provider-view-only-private-fact";
     let world = world().await;
@@ -680,11 +776,12 @@ async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secr
         !grant.carries(Permission::ProviderView),
         "the fixture delegates no View permission"
     );
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let token = new_api_token(issued_key_id);
     create_api_token(
         &mut *world.conn().await,
         &NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: c.boss.id(),
             name: "Legacy metadata management",
             token_hash: &token_hash(&token),
@@ -787,6 +884,7 @@ async fn runtime_variables_and_secret_names_are_editable_but_the_sealed_value_is
         }
         let updated = world.app.call(ProviderUpdate, &[&made.base.id]).token(&c.boss.token)
         .body(&ProviderUpdateBody {
+        relay: None,
             service_offerings: None, model_group_options: None,  name:None,upstreams:None,config:None,arrangements:None,expected_revision:made.revision,
             runtime_config:Some(json!({"runtime.variables":{"REGION":"east"},"runtime.secret_names":["SERVICE_TOKEN"]})) })
         .send().await.ok().into_full().expect("a full provider reply").provider;
@@ -1062,6 +1160,7 @@ async fn no_request_about_a_provider_returns_its_key_or_a_secret_header() {
             .call(ProviderUpdate, &[&id])
             .token(&c.boss.token)
             .body(&ProviderUpdateBody {
+                relay: None,
                 service_offerings: None,
                 model_group_options: None,
                 name: Some("Renamed".into()),
@@ -1081,6 +1180,7 @@ async fn no_request_about_a_provider_returns_its_key_or_a_secret_header() {
             .call(ProviderUpdate, &[&id])
             .token(&c.boss.token)
             .body(&ProviderUpdateBody {
+                relay: None,
                 service_offerings: None,
                 model_group_options: None,
                 name: Some("Again".into()),
@@ -1190,7 +1290,7 @@ async fn a_provider_is_ready_when_it_has_a_key_and_an_enabled_model_and_not_befo
     assert_eq!(status(&world).await, ProviderStatus::Ready);
     // A provider that takes no key is ready as soon as it has a model.
     let keyless = CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: "Local".to_owned(),
         home_id: c.acme,
         access: None,
@@ -1250,6 +1350,7 @@ async fn endpoint_model_defaults_survive_provider_create_update_and_reload() {
         .call(ProviderUpdate, &[&made.base.id])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -1281,6 +1382,7 @@ async fn endpoint_model_defaults_survive_provider_create_update_and_reload() {
         .call(ProviderUpdate, &[&made.base.id])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -1446,7 +1548,7 @@ async fn what_is_wrong_with_a_new_provider_is_told_member_by_member() {
     assert_eq!(count, 0, "nothing was made");
     // A subscription of a profile that is not there is refused, naming the member.
     let subscription = CreateProvider::Subscription {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: "Team Pro".to_owned(),
         home_id: c.acme,
@@ -1759,6 +1861,7 @@ async fn a_provider_is_changed_by_whoever_manages_it_and_a_change_against_an_old
     let provider = make(&world, &c.boss, &api_body("Team key", c.acme)).await;
     let id = provider.base.id;
     let change = |revision: i64| ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: Some("Renamed".to_owned()),
@@ -1836,6 +1939,7 @@ async fn a_provider_is_changed_by_whoever_manages_it_and_a_change_against_an_old
     assert_eq!(stale.extra["current"]["name"], "Renamed");
     // Taking away every type, or naming an endpoint twice, is not a change.
     let none = ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         arrangements: Some(vec![]),
@@ -1871,6 +1975,7 @@ async fn the_secret_header_of_an_endpoint_that_goes_is_forgotten_with_it() {
         .call(ProviderUpdate, &[&id])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -2188,4 +2293,1134 @@ async fn the_owner_row_of_a_new_provider_names_its_maker_and_a_choice_of_who_els
     );
     assert!(names(&world, &c.stranger, None).await.is_empty());
     let _ = name_on_page; // naming people by hand is done in the other tests
+}
+
+#[tokio::test]
+async fn a_new_key_provider_keeps_public_relay_off_and_does_not_expose_that_choice_to_a_stranger() {
+    use orch_api_contract::resources::ProviderRelayResponses;
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Private model access", c.acme)).await;
+    let relay = provider
+        .relay
+        .as_ref()
+        .expect("a key provider reports its relay choice");
+    assert!(!relay.enabled);
+    assert!(relay.models.is_empty());
+    let request = json!({"model":"not-opened","input":"A direct model call","stream":true});
+    let refused = world
+        .app
+        .call(ProviderRelayResponses, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert_eq!(refused.status, http::StatusCode::FORBIDDEN);
+    assert_eq!(refused.problem().code, ErrorCode::ProviderRelayUnavailable);
+    let accepted: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_relay_calls")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(accepted, 0, "a disabled relay admits no model work");
+    assert!(!String::from_utf8_lossy(&refused.raw).contains(KEY));
+    let stranger = world
+        .app
+        .call(ProviderRelayResponses, &[&provider.base.id])
+        .token(&c.stranger.token)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert!(!stranger.status.is_success());
+    assert_ne!(stranger.problem().code, ErrorCode::ProviderRelayUnavailable);
+    assert!(!String::from_utf8_lossy(&stranger.raw).contains(KEY));
+    let commands: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind='provider.relay'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        commands, 0,
+        "an off or unreadable relay has no native model effect"
+    );
+}
+
+#[test]
+fn relay_has_its_own_grant_and_the_same_model_option_rules_as_provider_use() {
+    use orch_access_contract::permissions::{Choice, ObjectKind, Options, Permission};
+    assert!(
+        !Permission::ProviderRelay
+            .held_through()
+            .any(|permission| permission == Permission::ProviderUse)
+    );
+    let written = json!({"models":["team/*"],"efforts":["low"],"arrangements":["key_separated"]});
+    assert_eq!(
+        Options::parse(Permission::ProviderRelay, &written).unwrap(),
+        Options::parse(Permission::ProviderUse, &written).unwrap()
+    );
+    assert_eq!(
+        Permission::ProviderRelay.options_schema(),
+        Permission::ProviderUse.options_schema()
+    );
+    assert!(
+        !Choice::FullInteract
+            .permissions(ObjectKind::Provider)
+            .contains(&Permission::ProviderRelay),
+        "ordinary Can use does not silently open the public API"
+    );
+    assert_eq!(
+        Choice::highest(ObjectKind::Provider, &[Permission::ProviderUse]),
+        Some(Choice::FullInteract)
+    );
+    assert_eq!(
+        Choice::highest(
+            ObjectKind::Provider,
+            &[Permission::ProviderUse, Permission::ProviderRelay]
+        ),
+        Some(Choice::FullInteract)
+    );
+}
+
+#[tokio::test]
+async fn a_manager_opens_exact_enabled_models_and_a_bad_relay_edit_keeps_the_saved_choice() {
+    let world = world().await;
+    let c = company(&world).await;
+    let made = make(&world, &c.boss, &api_body("Explicit API relay", c.acme)).await;
+    world
+        .app
+        .call(ProviderModelCreate, &[&made.base.id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "chosen".into(),
+            display_name: None,
+            parameters: None,
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let current = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    let updated=world.app.call(ProviderUpdate,&[&made.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}}))
+        .send().await.ok().into_full().unwrap().provider;
+    assert_eq!(updated.relay.as_ref().unwrap().models, vec!["chosen"]);
+    assert!(updated.relay.as_ref().unwrap().enabled);
+    let refused=world.app.call(ProviderUpdate,&[&made.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":updated.revision,"relay":{"enabled":true,"models":["missing"]}}))
+        .send().await.problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    let saved = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(saved.revision, updated.revision);
+    assert_eq!(saved.relay, updated.relay);
+}
+
+#[tokio::test]
+async fn a_relay_call_checks_declared_options_before_starting_its_runtime() {
+    use orch_api_contract::resources::ProviderRelayResponses;
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Declared relay options", c.acme)).await;
+    world
+        .app
+        .call(ProviderModelCreate, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "chosen".into(),
+            display_name: None,
+            parameters: None,
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let current = world
+        .app
+        .call(ProviderGet, &[&provider.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    world.app.call(ProviderUpdate,&[&provider.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}}))
+        .send().await.ok();
+    let refused = world
+        .app
+        .call(ProviderRelayResponses, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&json!({"model":"chosen","input":"Only declared choices","made_up_paid_option":true}))
+        .send_bytes()
+        .await;
+    assert_eq!(refused.problem().code, ErrorCode::RequestInvalid);
+    let native: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind='provider.relay'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_relay_calls")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (native, calls),
+        (0, 0),
+        "undeclared options have no admitted or native model call"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum StreamEnd {
+    Complete,
+    Metered,
+    Disconnect,
+    Revoke,
+    ProcessLost,
+}
+#[tokio::test]
+async fn a_public_model_response_arrives_before_its_native_call_ends_and_keeps_no_server_file() {
+    public_model_stream(StreamEnd::Complete, false).await;
+}
+#[tokio::test]
+async fn a_completed_public_model_call_is_counted_once_and_its_cap_stops_the_next_request() {
+    public_model_stream(StreamEnd::Metered, false).await;
+}
+
+#[tokio::test]
+async fn disconnecting_a_public_model_reader_closes_its_exact_command_and_fence() {
+    public_model_stream(StreamEnd::Disconnect, false).await;
+}
+#[tokio::test]
+async fn a_revoked_public_model_reader_cannot_receive_the_next_piece_or_a_successful_eof() {
+    public_model_stream(StreamEnd::Revoke, false).await;
+}
+#[tokio::test]
+async fn a_recovered_api_process_closes_the_old_public_model_reader_and_its_command() {
+    public_model_stream(StreamEnd::ProcessLost, false).await;
+}
+#[tokio::test]
+async fn a_native_interactions_provider_uses_the_same_authenticated_streaming_relay() {
+    public_model_stream(StreamEnd::Complete, true).await;
+}
+async fn public_model_stream(ending: StreamEnd, interactions: bool) {
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use orch_api_contract::resources::{
+        ProviderConnectionLocation, ProviderRelayInteractions, ProviderRelayResponses,
+    };
+    use orch_api_core::{relay::Relays, testing::Machine};
+    use orch_link_contract::commands::{
+        Cmd, CommandError, CommandKind, LeaseCloseResult, ProviderRelay, ProviderRelayHead,
+    };
+    use std::{sync::Arc, time::Duration};
+    struct Native {
+        relays: Relays,
+        finish: Arc<tokio::sync::Notify>,
+        cancelled: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl Machine for Native {
+        fn cancel(&self, _: Id) {
+            self.cancelled.notify_one();
+        }
+        async fn run(&self, command: &Cmd) -> Result<Json, CommandError> {
+            if command.kind != CommandKind::ProviderRelay.as_str() {
+                return Ok(json!({}));
+            }
+            let body: ProviderRelay = serde_json::from_value(command.body.clone()).unwrap();
+            assert_eq!(body.lease.lease_id, command.id);
+            assert!(!serde_json::to_string(&command.body).unwrap().contains(KEY));
+            let pipe = self.relays.get(body.relay_id).unwrap();
+            pipe.stand(0).unwrap();
+            let mut input = Vec::new();
+            while i64::try_from(input.len()).unwrap() < body.request_bytes {
+                let offset = u64::try_from(input.len()).unwrap();
+                let length = u64::try_from(body.request_bytes).unwrap() - offset;
+                input.extend_from_slice(&pipe.pull(offset, length).await.unwrap().unwrap());
+                pipe.stand(u64::try_from(input.len()).unwrap()).unwrap();
+            }
+            assert_eq!(orch_types::Hash::of(&input), body.request_hash);
+            let input: Json = serde_json::from_slice(&input).unwrap();
+            assert_eq!(input["model"], "chosen");
+            let head = serde_json::to_vec(&ProviderRelayHead {
+                status: 200,
+                headers: vec![("content-type".into(), b"text/event-stream".to_vec())],
+            })
+            .unwrap();
+            let mut offset = u64::try_from(body.request_bytes).unwrap();
+            offset = pipe
+                .push(
+                    offset,
+                    Bytes::copy_from_slice(&u64::try_from(head.len()).unwrap().to_be_bytes()),
+                )
+                .await
+                .unwrap();
+            offset = pipe.push(offset, Bytes::from(head)).await.unwrap();
+            offset = pipe
+                .push(offset, Bytes::from_static(b"data: first\n\n"))
+                .await
+                .unwrap();
+            tokio::select! {
+                _=self.finish.notified()=>{},
+                _=self.cancelled.notified()=>return Err(CommandError::new(orch_link_contract::commands::ErrorCode::Conflict,"The reader ended its model call.")),
+            }
+            pipe.push(offset, Bytes::from_static(b"data: last\n\n"))
+                .await
+                .map_err(|error| {
+                    CommandError::new(
+                        orch_link_contract::commands::ErrorCode::Conflict,
+                        error.to_string(),
+                    )
+                })?;
+            Ok(serde_json::to_value(LeaseCloseResult {
+                requests: 1,
+                usage: None,
+                usage_groups: Some(Vec::new()),
+            })
+            .unwrap())
+        }
+    }
+    let world = world().await;
+    let c = company(&world).await;
+    let keeper = directory_keeper(&world, &c.boss, c.acme, "SDK keeper").await;
+    let mut setup = api_body("SDK stream", c.acme);
+    if let CreateProvider::Api {
+        runtime_location,
+        key_machine_id,
+        ..
+    } = &mut setup
+    {
+        *runtime_location = Some(ProviderConnectionLocation::Machine { machine_id: keeper });
+        *key_machine_id = Some(keeper);
+    }
+    if interactions && let CreateProvider::Api { upstreams, .. } = &mut setup {
+        upstreams[0].protocol = "google-interactions".into();
+    }
+    let provider = make(&world, &c.boss, &setup).await;
+    world
+        .app
+        .call(ProviderModelCreate, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "chosen".into(),
+            display_name: None,
+            parameters: None,
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let current = world
+        .app
+        .call(ProviderGet, &[&provider.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    world.app.call(ProviderUpdate,&[&provider.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}})).send().await.ok();
+    if matches!(ending, StreamEnd::Metered) {
+        world
+            .app
+            .call(orch_api_contract::usage::UsageCapCreate, &[])
+            .token(&c.boss.token)
+            .raw_body(&json!({
+                "provider_id": provider.base.id, "subject": {"kind":"everyone"}, "split":"each",
+                "models":["chosen"], "purposes":["relay"], "meter":"tokens", "period":"day",
+                "amount":"1", "at_limit":"finish_turn"
+            }))
+            .send()
+            .await
+            .ok();
+    }
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let played = world.app.play(
+        keeper,
+        Arc::new(Native {
+            relays: world.app.app.blobs.model_relays().clone(),
+            finish: Arc::clone(&finish),
+            cancelled: Arc::new(tokio::sync::Notify::new()),
+        }),
+    );
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let response=if interactions {world
+            .app
+            .call(ProviderRelayInteractions, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&json!({"model":"chosen","input":"An SDK request","stream":true}))
+            .send_response()
+            .await}else{world
+            .app
+            .call(ProviderRelayResponses, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&json!({"model":"chosen","input":"An SDK request","stream":true}))
+            .send_response()
+            .await};
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(!response.headers().contains_key("content-length"));
+        let mut body = response.into_body();
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(first, Bytes::from_static(b"data: first\n\n"));
+        let command = played.seen_of(CommandKind::ProviderRelay).pop().unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
+            .bind(command.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            state, "accepted",
+            "the first response piece precedes native completion"
+        );
+        if matches!(ending,StreamEnd::Complete | StreamEnd::Metered) {
+        sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{offered}',$2,true) WHERE provider_id=$1 AND model_name='chosen'")
+            .bind(provider.base.id).bind(json!({"cache_lifetimes":["1h"]})).execute(&world.db.pool).await.unwrap();
+        finish.notify_one();
+        assert_eq!(
+            body.collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"data: last\n\n")
+        );
+        if matches!(ending, StreamEnd::Metered) {
+            check_native_relay_usage(&world, &c.boss, keeper, provider.base.id, command.id).await;
+        }
+        } else {
+            if matches!(ending,StreamEnd::Disconnect) {drop(body);} else {
+                if matches!(ending,StreamEnd::Revoke) {
+                    let mut conn=world.db.pool.acquire().await.unwrap();
+                    orch_db::queries::identity::revoke_sessions_of(&mut conn,c.boss.id(),None,world.now()).await.unwrap();
+                } else {
+                    let recovered=orch_api_core::blobs::Blobs::in_memory();
+                    recovered.reap_command_transfers(&world.app.app.db,world.app.app.clock.as_ref(),&world.app.app.link.dispatcher()).await.unwrap();
+                }
+                // Keep the native response unfinished until the denied reader has ended it.
+                assert!(body.collect().await.is_err(),"authority loss never becomes a successful EOF");
+            }
+            loop {
+                let state:(String,bool,bool)=sqlx::query_as("SELECT c.state,t.released_at IS NOT NULL,r.finished_at IS NOT NULL FROM commands c JOIN command_transfers t ON t.command_id=c.id JOIN provider_relay_calls r ON r.id=c.id WHERE c.id=$1")
+                    .bind(command.id).fetch_one(&world.db.pool).await.unwrap();
+                if state.0=="cancelled" && state.1 && state.2 {break;}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+    })
+    .await
+    .expect("the SDK stream must progress without waiting for its whole response");
+}
+
+async fn check_native_relay_usage(world: &World, owner: &Who, keeper: Id, provider: Id, call: Id) {
+    use orch_api_contract::{
+        resources::ProviderRelayResponses,
+        usage::{UsageCapList, UsageCapListQuery},
+    };
+    use orch_link::streams::DeliveredEvent;
+    use orch_link_contract::streams::Stream;
+
+    let stream = Stream::Provider {
+        provider_id: provider,
+    };
+    let report = DeliveredEvent {
+        native_opening_id: None,
+        seq: 1,
+        at: orch_types::Time::new(world.now()),
+        kind: "lease.usage".into(),
+        body: json!({
+            "lease_id":call, "model":"chosen", "request_ref":"upstream-response",
+            "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+        }),
+    };
+    // Only the usage of the admitted model belongs to this public call. A relay has no turn lease to deny.
+    let mut other_model = report.body.clone();
+    other_model["model"] = json!("different-model");
+    for (kind, body) in [
+        ("lease.usage", &other_model),
+        ("lease.denied", &report.body),
+    ] {
+        let mut tx = world.db.pool.begin().await.unwrap();
+        assert!(
+            !orch_db::queries::machine_reports::accepts(&mut tx, keeper, &stream, &[(kind, body)])
+                .await
+                .unwrap()
+        );
+        tx.rollback().await.unwrap();
+    }
+    // A provider move leaves the already completed call with the machine that executed it.
+    let mut tx = world.db.pool.begin().await.unwrap();
+    let later =
+        orch_db::queries::resources::testing::insert_machine(&mut tx, "next keeper", "connected")
+            .await
+            .unwrap();
+    sqlx::query("UPDATE providers SET key_machine_id=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(later)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for (source, expected) in [(keeper, true), (later, false)] {
+        assert_eq!(
+            orch_db::queries::machine_reports::accepts(
+                &mut tx,
+                source,
+                &stream,
+                &[("lease.usage", &report.body)]
+            )
+            .await
+            .unwrap(),
+            expected,
+        );
+    }
+    tx.rollback().await.unwrap();
+    // The native spool can redeliver the report after the HTTP response has finished.
+    for _ in 0..2 {
+        let mut tx = world.db.pool.begin().await.unwrap();
+        world
+            .app
+            .app
+            .engine
+            .apply_stream_events(&mut tx, keeper, &stream, std::slice::from_ref(&report))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let tokens: Vec<i64> = sqlx::query_scalar(
+        "SELECT total_tokens FROM usage_events WHERE provider_id=$1 AND purpose='relay'",
+    )
+    .bind(provider)
+    .fetch_all(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(tokens, [2]);
+    let caps = world
+        .app
+        .call(UsageCapList, &[])
+        .token(&owner.token)
+        .query(&UsageCapListQuery {
+            provider_id: Some(provider),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].used, "2");
+    let refused = world
+        .app
+        .call(ProviderRelayResponses, &[&provider])
+        .token(&owner.token)
+        .body(&json!({"model":"chosen","input":"A second call"}))
+        .send_bytes()
+        .await;
+    assert_eq!(refused.problem().code, ErrorCode::ProviderRelayUnavailable);
+    let calls: Vec<Id> =
+        sqlx::query_scalar("SELECT id FROM provider_relay_calls WHERE provider_id=$1")
+            .bind(provider)
+            .fetch_all(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(calls, [call]);
+}
+
+#[tokio::test]
+async fn ordinary_provider_use_does_not_open_relay_and_both_all_purpose_and_relay_caps_refuse_before_model_work()
+ {
+    use orch_api_contract::{
+        access::NewResourceAccess,
+        resources::ProviderRelayResponses,
+        usage::{CapInput, CapMeter, CapPeriod, CapSplit, CapSubjectInput, UsageCapCreate},
+    };
+    for purposes in [None, Some(vec!["relay".to_owned()])] {
+        let world = world().await;
+        let c = company(&world).await;
+        let mut setup = api_body("Capped direct access", c.acme);
+        if let CreateProvider::Api { access, .. } = &mut setup {
+            *access = Some(NewResourceAccess::Home);
+        }
+        let provider = make(&world, &c.boss, &setup).await;
+        world
+            .app
+            .call(ProviderModelCreate, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&ProviderModelCreateBody {
+                model_name: "chosen".into(),
+                display_name: None,
+                parameters: None,
+                groups: None,
+            })
+            .send()
+            .await
+            .ok();
+        let current = world
+            .app
+            .call(ProviderGet, &[&provider.base.id])
+            .token(&c.boss.token)
+            .send()
+            .await
+            .ok();
+        world.app.call(ProviderUpdate,&[&provider.base.id]).token(&c.boss.token)
+            .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}})).send().await.ok();
+        let request =
+            json!({"model":"chosen","input":"Direct access follows its own grant and cap"});
+        let only_use = world
+            .app
+            .call(ProviderRelayResponses, &[&provider.base.id])
+            .token(&c.viewer.token)
+            .body(&request)
+            .send_bytes()
+            .await;
+        assert!(!only_use.status.is_success());
+        assert_ne!(
+            only_use.problem().code,
+            ErrorCode::ProviderRelayUnavailable,
+            "private relay choices stay behind the independent grant"
+        );
+        world
+            .app
+            .call(UsageCapCreate, &[])
+            .token(&c.boss.token)
+            .body(&CapInput {
+                node_id: Some(c.acme),
+                provider_id: None,
+                subject: CapSubjectInput::Everyone,
+                split: CapSplit::Shared,
+                models: None,
+                services: None,
+                purposes,
+                tiers: None,
+                harness_kinds: None,
+                meter: CapMeter::Tokens,
+                period: Some(CapPeriod::Total),
+                counted_from: None,
+                amount: Some("0".into()),
+                at_limit: None,
+                warn_percent: None,
+                uncounted: None,
+                note: None,
+            })
+            .send()
+            .await
+            .ok();
+        let capped = world
+            .app
+            .call(ProviderRelayResponses, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&request)
+            .send_bytes()
+            .await;
+        assert_eq!(capped.problem().code, ErrorCode::ProviderRelayUnavailable);
+        let accepted: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_relay_calls")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        let native: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind='provider.relay'")
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+        assert_eq!((accepted, native), (0, 0));
+    }
+}
+
+#[tokio::test]
+async fn a_provider_stops_even_if_its_optional_notice_audience_has_expired() {
+    let world = world().await;
+    let company = company(&world).await;
+    let provider = make(
+        &world,
+        &company.boss,
+        &api_body("Unavailable audience", company.acme),
+    )
+    .await;
+    let stale = orch_types::new_id();
+    world
+        .app
+        .call(ProviderDisable, &[&provider.base.id])
+        .token(&company.boss.token)
+        .raw_query(&format!("notify=true&notification_review={stale}"))
+        .send()
+        .await
+        .ok();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notifications WHERE data->>'operation_kind'='provider_disable'",
+    )
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn a_provider_pause_or_removal_notifies_each_affected_person_once_only_when_chosen() {
+    for (remove, notify) in [
+        (false, None),
+        (false, Some(false)),
+        (false, Some(true)),
+        (true, None),
+        (true, Some(false)),
+        (true, Some(true)),
+    ] {
+        let world = world().await;
+        let c = company(&world).await;
+        let provider = make(&world, &c.boss, &api_body("Shared key", c.acme)).await;
+        name_on_page(
+            &world,
+            "provider",
+            provider.base.id,
+            "provider.manage",
+            ("user", Some(c.admin.id()), None),
+        )
+        .await;
+        let first = bind_thread(&world, &c, provider.base.id).await;
+        let second = bind_thread(&world, &c, provider.base.id).await;
+        sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=ANY($1)")
+            .bind(vec![first, second])
+            .bind(c.viewer.id())
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let review = world
+            .app
+            .call(orch_api_contract::resource_facts::ResourceImpactRead, &[])
+            .query(&serde_json::json!({"operation_notice":true}))
+            .token(&c.boss.token)
+            .raw_body(&json!({"object":{"kind":"provider","id":provider.base.id},"model_id":null}))
+            .send()
+            .await
+            .ok()
+            .notification
+            .unwrap();
+        let query = match notify {
+            Some(true) => format!("notify=true&notification_review={}", review.preview_id),
+            Some(false) => "notify=false".into(),
+            None => String::new(),
+        };
+        if remove {
+            let reply = world
+                .app
+                .call(ProviderDelete, &[&provider.base.id])
+                .token(&c.boss.token)
+                .raw_query(&query)
+                .send()
+                .await;
+            assert_eq!(reply.status, 204, "{:?}", reply.body);
+        } else {
+            world
+                .app
+                .call(ProviderDisable, &[&provider.base.id])
+                .token(&c.boss.token)
+                .raw_query(&query)
+                .send()
+                .await
+                .ok();
+        }
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.viewer.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            notices,
+            i64::from(notify.unwrap_or(false)),
+            "the same person owns two affected threads"
+        );
+        if notify == Some(true) {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.viewer.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                data["actor"],
+                json!(c.boss.id()),
+                "the affected person can see who acted"
+            );
+        }
+        if remove && notify == Some(true) {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.admin.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                data["path"], "/resources/providers",
+                "a removed provider's managers are not linked to its missing page"
+            );
+        }
+        let duplicates: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT user_id FROM notifications WHERE kind='environment.attention' GROUP BY user_id HAVING count(*)>1) repeated")
+            .fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(duplicates, 0);
+        let actor: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.boss.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            actor, 0,
+            "the confirming person is not part of Notify others"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_provider_confirmation_reads_distinct_people_and_its_inherited_notice_default_without_sending()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Shared key", c.acme)).await;
+    name_on_page(
+        &world,
+        "provider",
+        provider.base.id,
+        "provider.manage",
+        ("user", Some(c.admin.id()), None),
+    )
+    .await;
+    let first = bind_thread(&world, &c, provider.base.id).await;
+    let second = bind_thread(&world, &c, provider.base.id).await;
+    sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=ANY($1)")
+        .bind(vec![first, second])
+        .bind(c.viewer.id())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for (choice, expected) in [("when_blocking", true), ("never", false)] {
+        world
+            .set_at(
+                Target::Node(c.acme),
+                orch_settings_contract::registry::keys::NOTIFY_OPERATIONS,
+                json!(choice),
+            )
+            .await;
+        let read = world
+            .app
+            .call(orch_api_contract::resource_facts::ResourceImpactRead, &[])
+            .query(&serde_json::json!({"operation_notice":true}))
+            .token(&c.boss.token)
+            .raw_body(&json!({"object":{"kind":"provider","id":provider.base.id},"model_id":null}))
+            .send()
+            .await;
+        assert_eq!(read.status, 200, "{:?}", read.body);
+        let data: Json = serde_json::from_slice(&read.raw).unwrap();
+        assert_eq!(data["notification"]["default_on"], expected);
+        let people = data["notification"]["audience"]["people"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            people
+                .iter()
+                .filter(|person| person["id"] == json!(c.viewer.id()))
+                .count(),
+            1
+        );
+        assert!(
+            !people
+                .iter()
+                .any(|person| person["id"] == json!(c.boss.id()))
+        );
+        let review: Id =
+            serde_json::from_value(data["notification"]["preview_id"].clone()).unwrap();
+        let recipients = world
+            .app
+            .call(orch_api_contract::loss::OperationRecipientsGet, &[&review])
+            .token(&c.boss.token)
+            .query(&orch_api_contract::common::PageQuery::default())
+            .send()
+            .await
+            .ok();
+        assert_eq!(
+            recipients.total,
+            data["notification"]["people"].as_i64().unwrap()
+        );
+        assert_eq!(
+            recipients.hidden,
+            data["notification"]["audience"]["hidden"].as_i64().unwrap()
+        );
+        assert!(
+            recipients
+                .people
+                .items
+                .iter()
+                .any(|person| person.id == c.viewer.id())
+        );
+        assert!(
+            !recipients
+                .people
+                .items
+                .iter()
+                .any(|person| person.id == c.admin.id())
+        );
+    }
+    let notices: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notifications WHERE kind='environment.attention'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(notices, 0);
+}
+
+#[tokio::test]
+async fn a_model_pause_or_removal_notifies_its_own_threads_once_only_when_explicitly_chosen() {
+    use orch_api_contract::resource_facts::{FactTarget, ResourceImpactRead};
+    use orch_api_contract::resources::{
+        ProviderModelCreate, ProviderModelCreateBody, ProviderModelDelete, ProviderModelUpdate,
+        ProviderModelUpdateBody,
+    };
+    for (remove, notify) in [
+        (false, None),
+        (false, Some(false)),
+        (false, Some(true)),
+        (true, None),
+        (true, Some(false)),
+        (true, Some(true)),
+    ] {
+        let world = world().await;
+        let c = company(&world).await;
+        let provider = make(&world, &c.boss, &api_body("Model notices", c.acme)).await;
+        let mut models = Vec::new();
+        for name in ["chosen-model", "other-model"] {
+            models.push(
+                world
+                    .app
+                    .call(ProviderModelCreate, &[&provider.base.id])
+                    .token(&c.boss.token)
+                    .body(&ProviderModelCreateBody {
+                        model_name: name.into(),
+                        display_name: Some(name.into()),
+                        parameters: None,
+                        groups: None,
+                    })
+                    .send()
+                    .await
+                    .ok()
+                    .into_full()
+                    .unwrap(),
+            );
+        }
+        sqlx::query("UPDATE provider_models SET enabled=true WHERE provider_id=$1")
+            .bind(provider.base.id)
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let first = bind_thread(&world, &c, provider.base.id).await;
+        let second = bind_thread(&world, &c, provider.base.id).await;
+        let unrelated = bind_thread(&world, &c, provider.base.id).await;
+        for (thread, model, owner) in [
+            (first, &models[0], c.viewer.id()),
+            (second, &models[0], c.viewer.id()),
+            (unrelated, &models[1], c.stranger.id()),
+        ] {
+            sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,$2,$3) ON CONFLICT(node_id,key) DO UPDATE SET value=excluded.value")
+                .bind(thread).bind(orch_settings_contract::registry::keys::AGENT_MODEL).bind(json!(model.model_name)).execute(&world.db.pool).await.unwrap();
+            sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=$1")
+                .bind(thread)
+                .bind(owner)
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        }
+        let target = FactTarget {
+            object: orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Provider,
+                id: provider.base.id,
+            },
+            model_id: Some(models[0].id),
+        };
+        let preview = world
+            .app
+            .call(ResourceImpactRead, &[])
+            .query(&serde_json::json!({"operation_notice":true}))
+            .token(&c.boss.token)
+            .body(&target)
+            .send()
+            .await
+            .ok();
+        assert!(
+            preview.notification.is_some(),
+            "the exact model exposes its own optional audience"
+        );
+        let query = match notify {
+            Some(true) => "notify=true",
+            Some(false) => "notify=false",
+            None => "",
+        };
+        if remove {
+            let response = world
+                .app
+                .call(ProviderModelDelete, &[&provider.base.id, &models[0].id])
+                .token(&c.boss.token)
+                .raw_query(query)
+                .send()
+                .await;
+            assert_eq!(response.status, 204, "{:?}", response.body);
+        } else {
+            for _ in 0..2 {
+                world
+                    .app
+                    .call(ProviderModelUpdate, &[&provider.base.id, &models[0].id])
+                    .token(&c.boss.token)
+                    .raw_query(query)
+                    .body(&ProviderModelUpdateBody {
+                        enabled: Some(false),
+                        ..Default::default()
+                    })
+                    .send()
+                    .await
+                    .ok();
+            }
+        }
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.viewer.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            notices,
+            i64::from(notify.unwrap_or(false)),
+            "two threads and a repeated pause produce one chosen notice"
+        );
+        let unrelated_notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.stranger.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unrelated_notices, 0,
+            "another model on this provider is a different audience"
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_deletion_tells_its_affected_people_only_when_this_operation_was_chosen() {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_api_contract::resource_facts::{
+        FactTarget, ResourceImpactRead, ResourceNotificationQuery,
+    };
+    let world = world().await;
+    let company = company(&world).await;
+    for notify in [false, true] {
+        let provider = make(
+            &world,
+            &company.boss,
+            &api_body("Retained provider", company.acme),
+        )
+        .await;
+        let id = provider.base.id;
+        name_on_page(
+            &world,
+            "provider",
+            id,
+            "provider.manage",
+            ("user", Some(company.admin.id()), None),
+        )
+        .await;
+        let plan = world
+            .app
+            .call(ResourceImpactRead, &[])
+            .query(&serde_json::json!({"operation_notice":true}))
+            .token(&company.boss.token)
+            .body(&FactTarget {
+                object: ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id,
+                },
+                model_id: None,
+            })
+            .send()
+            .await
+            .ok()
+            .notification
+            .unwrap();
+        assert!(!plan.default_on);
+        world
+            .app
+            .call(ProviderDelete, &[&id])
+            .token(&company.boss.token)
+            .query(&ResourceNotificationQuery {
+                notify: Some(notify),
+                notification_review: Some(plan.preview_id),
+            })
+            .send()
+            .await
+            .ok();
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM notifications WHERE user_id=$1 AND data->'provider_ids' @> $2 AND data->>'operation_kind'='provider_delete'").bind(company.admin.id()).bind(json!([id])).fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(count, i64::from(notify));
+    }
+}
+
+#[tokio::test]
+async fn a_machine_allows_its_listed_origins_api_path_and_tells_its_manager_which_addresses_it_allows()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let machine = directory_keeper(&world, &c.boss, c.acme, "Own model machine").await;
+    sqlx::query(
+        "UPDATE machines SET facts=jsonb_set(facts,'{policy,provider.upstreams}',$2) WHERE id=$1",
+    )
+    .bind(machine)
+    .bind(json!(["https://openrouter.ai"]))
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    let mut body = api_body("Own OpenRouter key", c.acme);
+    if let CreateProvider::Api {
+        key_machine_id,
+        upstreams,
+        ..
+    } = &mut body
+    {
+        *key_machine_id = Some(machine);
+        upstreams[0].base_url = "https://openrouter.ai/api/v1".into();
+    }
+    let made = make(&world, &c.boss, &body).await;
+    assert_eq!(made.upstreams[0].base_url, "https://openrouter.ai/api/v1");
+    if let CreateProvider::Api { upstreams, .. } = &mut body {
+        upstreams[0].base_url = "https://openrouter.ai.example/api/v1".into();
+    }
+    let refused = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&c.boss.token)
+        .body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    assert_eq!(refused.extra["reason"], "machine_upstream");
+    assert_eq!(refused.extra["policy"], "provider.upstreams");
+    assert_eq!(refused.extra["field"], "upstreams[0].base_url");
+    assert_eq!(
+        refused.extra["allowed_upstreams"],
+        json!(["https://openrouter.ai"])
+    );
+    let reason = serde_json::to_string(&refused).unwrap();
+    assert!(reason.contains("provider.upstreams"), "{reason}");
+    assert!(reason.contains("https://openrouter.ai"), "{reason}");
 }

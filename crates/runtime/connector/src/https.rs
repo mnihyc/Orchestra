@@ -1,12 +1,12 @@
 //! A small HTTPS client for the few requests a connector makes beside its session: enrolling, renewing, moving content.
 //!
-//! One request, one connection, over a TLS configuration the caller chose: the system's own authority
-//! (pinned), the public roots, or the authority's pin at first contact. The system trust store is
-//! never consulted for the system's own certificates. Requests are few and large, so there is no pool;
-//! a connection is made, used and dropped.
+//! Connections use the caller's TLS configuration: the system's authority, public roots, or the
+//! authority's pin at first contact. File requests reuse verified connections and wait for silence
+//! only; short control requests keep their finite allowance. The system trust store is never
+//! consulted for the system's own certificates.
 //! Enrollment alone also accepts explicit loopback HTTP, with a direct loopback peer and no proxy.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -17,8 +17,7 @@ use rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
 use url::Url;
 
-/// The most a reply may hold: a piece of content is at most 4 MiB and every other reply is a few lines of
-/// JSON, so eight is generous and bounds what a bad server can make the connector hold.
+/// Metadata replies are bounded independently of file ranges, whose requested length is their bound.
 pub const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 /// How long connecting may take before the attempt is given up: the link's own figure.
 pub const CONNECT_TIMEOUT: Duration =
@@ -105,11 +104,19 @@ pub fn enrollment_base(address: &str) -> Result<Url, HttpsError> {
     https_base(address)
 }
 
+/// Accepted file-body and connection limits, independent of small control requests.
+pub(crate) struct ContentOptions {
+    pub(crate) idle: Duration,
+    pub(crate) maximum_reply: usize,
+    pub(crate) pooled_connections: usize,
+}
+
 /// A client over one TLS configuration, with an explicit local-enrollment exception.
 #[derive(Clone)]
 pub struct HttpsClient {
     tls: Arc<rustls::ClientConfig>,
     loopback_enrollment: bool,
+    content_pool: Arc<Mutex<Vec<(String, ContentConnection)>>>,
 }
 
 impl std::fmt::Debug for HttpsClient {
@@ -121,10 +128,11 @@ impl std::fmt::Debug for HttpsClient {
 impl HttpsClient {
     /// A client that verifies servers as `tls` says.
     #[must_use]
-    pub const fn new(tls: Arc<rustls::ClientConfig>) -> Self {
+    pub fn new(tls: Arc<rustls::ClientConfig>) -> Self {
         Self {
             tls,
             loopback_enrollment: false,
+            content_pool: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -151,6 +159,70 @@ impl HttpsClient {
         )
         .await
         .map_err(|_| HttpsError::TimedOut)?
+    }
+
+    /// File requests reuse verified connections and renew patience on positive socket I/O.
+    pub(crate) async fn send_content(
+        &self,
+        base: &Url,
+        method: Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Bytes,
+        limits: ContentOptions,
+    ) -> Result<Reply, HttpsError> {
+        let key = base.origin().ascii_serialization();
+        let held = {
+            let mut pool = self
+                .content_pool
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            pool.retain(|(_, connection)| !connection.0.sender.is_closed());
+            pool.iter()
+                .position(|(origin, _)| origin == &key)
+                .map(|index| pool.swap_remove(index).1)
+        };
+        let mut connection = match held {
+            Some(connection) => connection,
+            None => ContentConnection(
+                tokio::time::timeout(CONNECT_TIMEOUT, self.connection(base, false))
+                    .await
+                    .map_err(|_| HttpsError::TimedOut)??,
+            ),
+        };
+        let mut activity = connection.0.activity.clone();
+        activity.borrow_and_update();
+        let initial = tokio::time::Instant::now();
+        let response = {
+            let work = connection.0.send_bounded_with_refusal(
+                method,
+                path,
+                headers,
+                body,
+                limits.maximum_reply,
+                MAX_REPLY_BYTES,
+            );
+            tokio::pin!(work);
+            loop {
+                let last = (*activity.borrow_and_update()).max(initial);
+                tokio::select! {
+                    result=&mut work=>break result,
+                    changed=activity.changed()=>{if changed.is_err(){break Err(HttpsError::Http("the connection ended".into()));}},
+                    ()=tokio::time::sleep_until(last+limits.idle)=>break Err(HttpsError::TimedOut),
+                }
+            }
+        };
+        if response.is_ok() && !connection.0.sender.is_closed() {
+            let mut pool = self
+                .content_pool
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if pool.iter().filter(|(origin, _)| origin == &key).count() < limits.pooled_connections
+            {
+                pool.push((key, connection));
+            }
+        }
+        response
     }
 
     /// Makes one `GET` and writes its body to `path` as it arrives, at most `max` bytes, within `limit`; gives
@@ -296,19 +368,83 @@ async fn connection_on<S>(stream: S, authority: String) -> Result<HttpConnection
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let (activity, observed) = tokio::sync::watch::channel(tokio::time::Instant::now());
+    let stream = MovingIo {
+        inner: stream,
+        activity,
+    };
     let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|e| HttpsError::Http(e.to_string()))?;
-    tokio::spawn(async move {
+    let driver = tokio::spawn(async move {
         let _ = connection.await;
-    });
-    Ok(HttpConnection { sender, authority })
+    })
+    .abort_handle();
+    Ok(HttpConnection {
+        sender,
+        authority,
+        activity: observed,
+        driver,
+    })
+}
+
+// File requests own the driver through cancellation and pooling. Short callers keep their body owner.
+struct ContentConnection(HttpConnection);
+impl Drop for ContentConnection {
+    fn drop(&mut self) {
+        self.0.driver.abort();
+    }
+}
+struct MovingIo<S> {
+    inner: S,
+    activity: tokio::sync::watch::Sender<tokio::time::Instant>,
+}
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MovingIo<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.activity.send_replace(tokio::time::Instant::now());
+        }
+        result
+    }
+}
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for MovingIo<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, buf);
+        if matches!(result,std::task::Poll::Ready(Ok(n)) if n>0) {
+            self.activity.send_replace(tokio::time::Instant::now());
+        }
+        result
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 /// A verified HTTP/1 connection. Body reads remain explicitly bounded by the caller.
 pub(crate) struct HttpConnection {
     sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
     authority: String,
+    activity: tokio::sync::watch::Receiver<tokio::time::Instant>,
+    driver: tokio::task::AbortHandle,
 }
 
 impl HttpConnection {
@@ -343,9 +479,27 @@ impl HttpConnection {
         body: Bytes,
         max: usize,
     ) -> Result<Reply, HttpsError> {
+        self.send_bounded_with_refusal(method, path, headers, body, max, max)
+            .await
+    }
+
+    async fn send_bounded_with_refusal(
+        &mut self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Bytes,
+        max: usize,
+        error_max: usize,
+    ) -> Result<Reply, HttpsError> {
         let response = self.respond(method, path, headers, body).await?;
         let (parts, incoming) = response.into_parts();
-        let body = Limited::new(incoming, max)
+        let limit = if parts.status.is_success() {
+            max
+        } else {
+            error_max
+        };
+        let body = Limited::new(incoming, limit)
             .collect()
             .await
             .map_err(|error| HttpsError::Http(error.to_string()))?
@@ -455,5 +609,290 @@ mod tests {
     #[test]
     fn the_public_roots_are_not_empty() {
         assert!(!public_roots().roots.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+    use hyper::service::service_fn;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite};
+
+    // Pace the connection itself: buffered body frames do not show socket progress.
+    struct PacedWrites {
+        inner: tokio::io::DuplexStream,
+        next: Pin<Box<tokio::time::Sleep>>,
+    }
+
+    impl PacedWrites {
+        fn new(inner: tokio::io::DuplexStream) -> Self {
+            Self {
+                inner,
+                next: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            }
+        }
+    }
+
+    impl AsyncRead for PacedWrites {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for PacedWrites {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            std::task::ready!(this.next.as_mut().poll(cx));
+            let result = Pin::new(&mut this.inner).poll_write(cx, &buf[..buf.len().min(64)]);
+            if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                this.next
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + Duration::from_millis(20));
+            }
+            result
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    fn client() -> Result<HttpsClient, rustls::Error> {
+        Ok(HttpsClient::new(Arc::new(
+            rustls::ClientConfig::builder_with_provider(orch_pki::verification::crypto())
+                .with_safe_default_protocol_versions()?
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        )))
+    }
+    async fn pooled<S>(client: &HttpsClient, stream: S, base: &Url) -> Result<(), HttpsError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let connection = connection_on(stream, "content.test".to_owned()).await?;
+        client
+            .content_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((
+                base.origin().ascii_serialization(),
+                ContentConnection(connection),
+            ));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn file_progress_outlasts_the_silence_limit_and_reuses_the_same_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = client()?;
+        let base = Url::parse("https://content.test")?;
+        let (send, receive) = tokio::io::duplex(64);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let serving = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(PacedWrites::new(receive)),
+                    service_fn(move |request: Request<hyper::body::Incoming>| {
+                        let seen = Arc::clone(&seen);
+                        async move {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            let bytes = request.into_body().collect().await?.to_bytes();
+                            Ok::<_, hyper::Error>(hyper::Response::new(Full::new(bytes)))
+                        }
+                    }),
+                )
+                .await
+        });
+        pooled(&client, PacedWrites::new(send), &base).await?;
+        let began = tokio::time::Instant::now();
+        let bytes = Bytes::from(vec![7; 1024]);
+        for _ in 0..2 {
+            let reply = client
+                .send_content(
+                    &base,
+                    Method::PUT,
+                    "/piece",
+                    &[],
+                    bytes.clone(),
+                    ContentOptions {
+                        idle: Duration::from_millis(50),
+                        maximum_reply: bytes.len(),
+                        pooled_connections: 5,
+                    },
+                )
+                .await?;
+            assert_eq!(reply.body, bytes);
+        }
+        assert!(began.elapsed() > Duration::from_millis(100));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(client);
+        serving.abort();
+        let _ = serving.await;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_file_request_is_aborted_after_actual_silence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = client()?;
+        let base = Url::parse("https://content.test")?;
+        let (send, receive) = tokio::io::duplex(64);
+        let serving = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(receive),
+                    service_fn(|_request: Request<hyper::body::Incoming>| async move {
+                        std::future::pending::<()>().await;
+                        Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::new())))
+                    }),
+                )
+                .await
+        });
+        pooled(&client, send, &base).await?;
+        let reply = client
+            .send_content(
+                &base,
+                Method::PUT,
+                "/piece",
+                &[],
+                Bytes::from(vec![7; 1024]),
+                ContentOptions {
+                    idle: Duration::from_millis(50),
+                    maximum_reply: 64,
+                    pooled_connections: 5,
+                },
+            )
+            .await;
+        assert!(matches!(reply, Err(HttpsError::TimedOut)));
+        assert!(
+            client
+                .content_pool
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
+        serving.abort();
+        let _ = serving.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_file_reply_is_bounded_by_its_requested_range_rather_than_the_metadata_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = client()?;
+        let base = Url::parse("https://content.test")?;
+        let (send, receive) = tokio::io::duplex(64 * 1024);
+        let bytes = MAX_REPLY_BYTES + 17;
+        let serving = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(receive),
+                    service_fn(move |_request: Request<hyper::body::Incoming>| async move {
+                        Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::from(vec![
+                            7;
+                            bytes
+                        ]))))
+                    }),
+                )
+                .await
+        });
+        pooled(&client, send, &base).await?;
+        let reply = client
+            .send_content(
+                &base,
+                Method::GET,
+                "/piece",
+                &[],
+                Bytes::new(),
+                ContentOptions {
+                    idle: Duration::from_secs(1),
+                    maximum_reply: bytes,
+                    pooled_connections: 5,
+                },
+            )
+            .await?;
+        assert_eq!(reply.body.len(), bytes);
+        assert!(
+            client
+                .send_content(
+                    &base,
+                    Method::GET,
+                    "/piece",
+                    &[],
+                    Bytes::new(),
+                    ContentOptions {
+                        idle: Duration::from_secs(1),
+                        maximum_reply: bytes - 1,
+                        pooled_connections: 5
+                    }
+                )
+                .await
+                .is_err()
+        );
+        serving.abort();
+        let _ = serving.await;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn a_one_byte_file_tail_preserves_its_structured_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = client()?;
+        let base = Url::parse("https://content.test")?;
+        let (send, receive) = tokio::io::duplex(1024);
+        let serving = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(receive),
+                    service_fn(move |_request: Request<hyper::body::Incoming>| async move {
+                        let mut response = hyper::Response::new(Full::new(Bytes::from_static(
+                            b"the requested bytes are not permitted",
+                        )));
+                        *response.status_mut() = StatusCode::FORBIDDEN;
+                        Ok::<_, Infallible>(response)
+                    }),
+                )
+                .await
+        });
+        pooled(&client, send, &base).await?;
+        let reply = client
+            .send_content(
+                &base,
+                Method::GET,
+                "/piece",
+                &[],
+                Bytes::new(),
+                ContentOptions {
+                    idle: Duration::from_secs(1),
+                    maximum_reply: 1,
+                    pooled_connections: 5,
+                },
+            )
+            .await?;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN);
+        assert!(reply.body.len() > 1);
+        serving.abort();
+        let _ = serving.await;
+        Ok(())
     }
 }

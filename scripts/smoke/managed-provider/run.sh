@@ -114,6 +114,13 @@ host_has_a_driver() { [ "$(call GET /hosts | jq -r '.[0].drivers[0].name')" = do
 wait_for 120 "the host has told which drivers it has" host_has_a_driver
 ORG="$(call POST /orgs '{"name":"Acme","slug":"acme"}' | jq -r .id)"
 check "an org was made" test -n "$ORG" -a "$ORG" != null
+# The host installed with the server is its installer's alone until she shares it (a system administrator otherwise
+# reaches it only through her switch, which a provider's runtime job does not carry); the providers below are Acme's, so
+# she shares its Use with the people of Acme, through the same act and confirmation as the page.
+HOST_ID="$(call GET /hosts | jq -r '[.[] | select(.bundled_with_server)][0].id')"
+share_server_host "$HOST_ID" "$(jq -cn --arg org "$ORG" '{rows:[{permission:"host.use",add:[{holder:{kind:"role",role:"developer",at:$org}}]}]}')"
+expect "sharing the server's own host with the people of Acme asks first for its confirmation, and is then done" \
+  "409 conflict.confirmation_required 1 200" "$SHARE_ASKED $SHARE_STATUS"
 TEMPLATES="$(call GET /templates)"
 SEEDED="$(printf '%s' "$TEMPLATES" | jq -c '[.[] | select(.name == "Provider runtime")][0]')"
 check "the seeded provider template is listed" test "$SEEDED" != null

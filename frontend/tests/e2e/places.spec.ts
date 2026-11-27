@@ -1,13 +1,13 @@
 /** The places of an org at work: an org made inside an org, a project and a topic in it, a name changed, archiving and bringing back, what a refusal says is missing, the board and its filters, an invitation in both forms, and a role changed. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, deny, mailWorks, PEOPLE, scenario, signIn, mainArea, screenAddress } from './support.ts';
+import { ACME, deny, mailWorks, PEOPLE, scenario, signIn, mainArea, openTopicTab, screenAddress } from './support.ts';
 
 test.beforeEach(async () => {
   await scenario();
 });
 
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 const dialogField = (page: Page, name: RegExp | string) => page.getByRole('dialog').getByRole('textbox', { name });
 
@@ -83,7 +83,7 @@ test('an org is made inside an org, then a project in it and a topic in that, ea
   topicUrl.searchParams.set('tab', 'documents');
   await page.goto(topicUrl.toString());
   expect((await deletedRead).status()).toBe(200);
-  await expect(page.getByRole('button', { name: /^Recently deleted/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Trash/ })).toHaveCount(0);
 
   // The topic is in the project's list without another header count.
   await page.getByRole('navigation', { name: 'Where this is' }).getByRole('link', { name: 'Pipelines' }).click();
@@ -104,7 +104,7 @@ test('a topic made without a name is called New topic, and a short name that is 
   await page.getByRole('dialog').getByRole('textbox', { name: 'Name', exact: true }).fill('Research');
   await page.getByRole('dialog').getByRole('button', { name: 'Create department' }).click();
   // The org that has the short name is named, and a free one is offered.
-  await expect(page.getByRole('dialog').getByText('Research has the short name research here already, and two orgs of one place cannot share an address. Choose another.')).toBeVisible();
+  await expect(page.getByRole('dialog').getByText('Research has the short name research here already, and two organizations of one place cannot share an address. Choose another.')).toBeVisible();
   await expect(page.getByRole('dialog').getByRole('button', { name: 'Use research-2' })).toBeVisible();
   // The dialog stays, with what was typed, for the person to change.
   await expect(page.getByRole('dialog').getByRole('textbox', { name: 'Short name' })).toHaveValue('research');
@@ -130,14 +130,12 @@ test('a name is changed in a dialog and the screen, the tree and the path all sa
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
-test('an archive says what it does before it does it, shows as the topic’s own banner, and is undone from there', async ({ page }) => {
+test('an archive that stops nothing is made at once, shows as the topic’s own banner, and is undone from there', async ({ page }) => {
   await open(page, `/topic/${ACME.upgradeDeps}`);
 
   await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
-  await page.getByRole('menuitem', { name: 'Archive…' }).click();
-  const confirm = page.getByRole('alertdialog', { name: /^Archive the topic Upgrade deps, in .+\?$/ });
-  await expect(confirm).toContainText('Archive makes these places, their chats and documents read-only.');
-  await confirm.getByRole('button', { name: 'Archive Upgrade deps' }).click();
+  await page.getByRole('menuitem', { name: 'Archive', exact: true }).click();
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
 
   await expect(page.getByText('This topic is archived. It is read-only until it is brought back.')).toBeVisible();
   // What is archived is out of the tree until the person asks to see it.
@@ -149,34 +147,39 @@ test('an archive says what it does before it does it, shows as the topic’s own
   await expect(tree(page).getByRole('treeitem', { name: /Upgrade deps/ })).toBeVisible();
 });
 
-test('a deleted topic is found in Recently deleted, with until when, and comes back archived', async ({ page }) => {
+test('a deleted topic goes to the Trash at once, Show finds it there, and it comes back archived', async ({ page }) => {
   await open(page, `/topic/${ACME.upgradeDeps}`);
 
   await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
-  await page.getByRole('menuitem', { name: 'Delete…' }).click();
-  const confirm = page.getByRole('alertdialog', { name: /^Delete the topic Upgrade deps, in .+\?$/ });
-  // The server's plan says until when, and who may bring it back.
-  await expect(confirm).toContainText(/Whoever manages Web can bring it back from “Recently deleted” until .+; then it is gone for good\./);
-  await confirm.getByRole('button', { name: 'Delete Upgrade deps' }).click();
-
-  // The screen it was on has nothing left to show: the person is taken to the project it lay in.
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  // Nothing is asked. The screen it was on has nothing left to show: the person is taken to the project it lay in.
   await expect(page).toHaveURL(new RegExp(`/project/${ACME.web}$`));
-  await expect(notices(page).getByText('Upgrade deps deleted')).toBeVisible();
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(notices(page).getByText('Moved “Upgrade deps” to Trash')).toBeVisible();
   await expect(tree(page).getByRole('treeitem', { name: /Upgrade deps/ })).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Actions for Web' }).first().click();
-  await page.getByRole('menuitem', { name: 'Recently deleted…' }).click();
-  const list = page.getByRole('dialog', { name: /^Recently deleted in the project Web, in / });
+  // Show on that line opens the Trash it lies in.
+  await notices(page).getByRole('button', { name: 'Show', exact: true }).click();
+  const list = page.getByRole('dialog', { name: /^Trash in the project Web, in / });
   await expect(list.getByText('Upgrade deps')).toBeVisible();
   await expect(list.locator('li').filter({ hasText: 'Upgrade deps' }).getByText(/Can be brought back until/)).toBeVisible();
+  // Restore asks nothing either: what was brought back leaves the list at once.
   await list.locator('li').filter({ hasText: 'Upgrade deps' }).getByRole('button', { name: 'Bring it back', exact: true }).click();
-  await page.getByRole('dialog', { name: 'Bring back the selected things' }).getByRole('button', { name: 'Bring back', exact: true }).click();
-  // What was brought back leaves the list at once.
   await expect(list.getByText('Upgrade deps', { exact: true })).toHaveCount(0);
   // Notices wait while a dialog is open: the one for the place brought back is there once it is closed.
   await list.getByRole('button', { name: 'Close', exact: true }).last().click();
   await expect(list).toHaveCount(0);
   await expect(notices(page).getByText('Upgrade deps is back, archived')).toBeVisible();
+});
+
+test('Undo on the line of a deletion puts the place back as it stood', async ({ page }) => {
+  await open(page, `/topic/${ACME.upgradeDeps}`);
+  await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await expect(notices(page).getByText('Moved “Upgrade deps” to Trash')).toBeVisible();
+  await notices(page).getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(notices(page).getByText('“Upgrade deps” is back')).toBeVisible();
+  await expect(tree(page).getByRole('treeitem', { name: /Upgrade deps/ })).toBeVisible();
 });
 
 test('a refusal says what is missing and whom to ask, beside the act that was refused', async ({ page }) => {
@@ -273,7 +276,7 @@ test('a row has its menu by right click and by its button, and a place that is s
   await row.getByRole('button', { name: 'Actions for Fix login' }).click();
   // Opened by its button, the menu is named by that button.
   const menu = page.getByRole('menu', { name: 'Actions for Fix login' });
-  for (const entry of ['Open', 'New thread…', 'Star', 'Mark done', 'Rename…', 'Copy link', 'Archive…', 'Delete…']) {
+  for (const entry of ['Open', 'New thread…', 'Star', 'Mark done', 'Rename…', 'Copy link', 'Archive', 'Delete']) {
     await expect(menu.getByRole('menuitem', { name: entry, exact: true })).toBeVisible();
   }
   await menu.getByRole('menuitem', { name: 'Star' }).click();
@@ -419,7 +422,7 @@ test('an invitation is made as a link for one address and as a link to share, an
   // A link to share, for up to three people.
   await page.getByRole('button', { name: 'Invite…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Invite to Acme' });
-  await expect(dialog.getByText('Whoever uses it will be a Viewer of Acme.')).toBeVisible();
+  await expect(dialog.getByText('Whoever uses it will hold the role Viewer of Acme.')).toBeVisible();
   await expect(dialog.getByText('30 days at most here, by the setting of Acme.')).toBeVisible();
   await dialog.getByRole('radio', { name: 'Link' }).click();
   await dialog.getByRole('spinbutton', { name: 'How many people' }).fill('3');
@@ -501,7 +504,7 @@ test('the Activity of a place lists what was done to it, newest first, and keeps
   await dialogField(page, /^Name/).fill('Fresh topic');
   await page.getByRole('dialog').getByRole('button', { name: 'Create topic' }).click();
   await expect(page).toHaveURL(/\/topic\//);
-  await page.getByRole('tab', { name: 'Activity' }).click();
+  await openTopicTab(page, 'Activity');
   await expect(page.getByRole('list').getByText('Ada Lovelace made the topic Fresh topic')).toBeVisible();
   await page.getByRole('radio', { name: 'Work' }).click();
   await expect(page.getByText('Nothing of this kind has happened here yet.')).toBeVisible();
@@ -526,11 +529,11 @@ test('a topic’s screen has its overview, its threads from the live tree and it
   await expect(page.getByRole('link', { name: 'Repro' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'bug' }).or(page.getByText('bug', { exact: true })).first()).toBeVisible();
 
-  await page.getByRole('tab', { name: /Threads/ }).click();
+  await openTopicTab(page, 'Threads');
   await expect(page.getByRole('table', { name: 'Threads' }).getByRole('row')).toHaveCount(3);
   await expect(page).toHaveURL(/tab=threads/);
 
-  await page.getByRole('tab', { name: /Environments/ }).click();
+  await openTopicTab(page, 'Environments');
   await expect(page.getByText('Default for new threads')).toBeVisible();
   await expect(page.getByText('Workspace', { exact: true })).toBeVisible();
 
@@ -538,7 +541,7 @@ test('a topic’s screen has its overview, its threads from the live tree and it
   await expect(mainArea(page).getByRole('tab', { name: 'Files' })).toHaveCount(0);
 
   // The starter on the overview makes a thread from the defaults of the place, and its setup opens the dialog that makes one with them chosen.
-  await page.getByRole('tab', { name: 'Overview' }).click();
+  await openTopicTab(page, 'Overview');
   await page.getByRole('region', { name: 'Start a thread' }).getByRole('button', { name: 'Thread setup', exact: true }).click();
   const setup = page.getByRole('dialog', { name: 'New thread in Fix login' });
   await expect(setup.getByRole('heading', { name: 'Provider Topic default' })).toBeVisible();

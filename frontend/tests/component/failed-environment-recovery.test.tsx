@@ -9,6 +9,7 @@ import type * as ThreadsApi from '@/api/threads';
 import { QueueTray } from '@/features/composer/QueueTray';
 import { SourcePreparation } from '@/features/source/Preparation';
 import { BlockedBanner } from '@/features/thread/BlockedBanner';
+import { EnvironmentStartRecovery } from '@/features/thread/EnvironmentStartRecovery';
 import { NOT_PICKING, TimelineContextValue } from '@/features/timeline/context';
 import { queuedInputs } from '@/features/timeline/rows';
 import { StatusLine } from '@/features/timeline/StatusLine';
@@ -25,7 +26,7 @@ vi.mock('@/api/environments', async (load) => ({ ...await load<typeof Environmen
 vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), sendInput: calls.send }));
 vi.mock('@/api/source', async (load) => ({ ...await load<typeof SourceApi>(), prepareSource: calls.prepare }));
 vi.mock('@/features/change/target', async (load) => ({ ...await load<object>(), openChange: calls.change }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const priorAppearance = useAppearance.getState();
 let shownId: string | null = null;
 beforeEach(() => { vi.clearAllMocks(); calls.start.mockReset(); });
@@ -37,7 +38,7 @@ function draw(thread: Thread, input: ThreadInput) {
   function Surface() {
     const view = useThreadView(thread.id);
     const current = view.thread ?? thread;
-    return <><TimelineContextValue.Provider value={{ threadId: current.id, threadName: current.name, detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined, meId: current.owner.id, canInteract: current.access.permissions.includes('thread.interact'), canManage: current.access.permissions.includes('thread.manage'), live: true, lit: null, selection: NOT_PICKING }}><StatusLine /></TimelineContextValue.Provider>
+    return <><TimelineContextValue.Provider value={{ threadId: current.id, threadName: current.name, detail: 'normal', layout: 'one', setLayout: () => undefined, meId: current.owner.id, canInteract: current.access.permissions.includes('thread.interact'), canManage: current.access.permissions.includes('thread.manage'), live: true, lit: null, selection: NOT_PICKING }}><StatusLine threadId={current.id} blockedReasonShown /></TimelineContextValue.Provider>
       <BlockedBanner thread={current} onProceed={calls.proceed} /><SourcePreparation thread={current} /><QueueTray threadId={thread.id} queued={queuedInputs(view)} sending={[]} /></>;
   }
   return show(<Surface />);
@@ -65,6 +66,32 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(queuedInputs(threadViewOf(thread.id))).toEqual([input]);
   });
 }
+
+for (const locale of ['en', 'zh-CN'] as const) it(`gives the reason a failed environment could not start (${locale})`, async () => {
+  await setLocale(locale);
+  const { thread: failed, input } = failedStart();
+  if (failed.blocked === null) throw new Error('the fixture is blocked');
+  const thread: Thread = { ...failed, blocked: { ...failed.blocked, detail: 'the environment failed: schedule: its creator may use no host' } };
+  draw(thread, input);
+  expect(screen.getByText(`${i18n.t('startRecovery.failedWhy', { environment: 'Main', why: 'its creator may use no host' })} ${i18n.t('startRecovery.held')}`)).toBeVisible();
+  expect(screen.queryByText(i18n.t('source.prepare.pending'))).not.toBeInTheDocument();
+});
+
+it('says that an idle thread’s environment failed, with its ways on, instead of a source waiting to be prepared', async () => {
+  const { thread: failed } = failedStart();
+  const thread: Thread = { ...failed, state: 'idle', blocked: null, pending_inputs: 0 };
+  shownId = thread.id; client.session.setState({ userId: thread.owner.id });
+  threadWriter.reset(thread.id, { thread, inputs: [] }, false);
+  const user = userEvent.setup();
+  show(<><EnvironmentStartRecovery thread={thread} /><SourcePreparation thread={thread} /></>);
+  expect(screen.getByText(i18n.t('startRecovery.failed', { environment: 'Main' }))).toBeVisible();
+  expect(screen.queryByText(i18n.t('source.prepare.pending'))).not.toBeInTheDocument();
+  expect(screen.queryByText(i18n.t('source.prepare.held'))).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: i18n.t('startRecovery.elsewhere') }));
+  expect(calls.change).toHaveBeenCalledExactlyOnceWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'environment' });
+  await user.click(screen.getByRole('button', { name: i18n.t('startRecovery.retry') }));
+  await waitFor(() => expect(calls.start).toHaveBeenCalledExactlyOnceWith('failed-environment'));
+});
 
 it('keeps the alternative available during a slow retry and ignores an old refusal after a native environment switch', async () => {
   const { thread, input, job } = failedStart();

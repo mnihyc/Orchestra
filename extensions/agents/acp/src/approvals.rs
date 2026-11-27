@@ -103,6 +103,8 @@ fn options_of(params: &Json) -> (Vec<ApprovalOption>, Vec<OfferedOption>) {
                 OptionScope::Once
             }),
             rule: None,
+            // Words with a refusal travel in `_meta`, which an agent may not read: none are offered.
+            note: false,
         });
         offered.push(OfferedOption {
             id: id.to_owned(),
@@ -207,6 +209,7 @@ pub fn plan_review(params: &Json) -> Option<PermissionRequest> {
         style,
         scope: Some(OptionScope::Once),
         rule: None,
+        note: false,
     };
     Some(PermissionRequest {
         style: Style::PlanReview,

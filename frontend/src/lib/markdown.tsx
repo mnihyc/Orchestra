@@ -6,6 +6,7 @@
  * safe to follow (web, mail, or this application's own), and an image is a link to it and is never
  * fetched by the page itself.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { Lexer, type Token, type Tokens } from 'marked';
 import { createContext, type ReactNode, useContext } from 'react';
 import { i18n } from '@/i18n';
@@ -64,14 +65,14 @@ function MessageLink({ href, title, children }: { href: string; title?: string; 
   const target = local === null ? rewritten : `${local.pathname}${local.search}${local.hash}`;
   const external = !OWN_ADDRESS.test(target.trim());
   return (
-    <a
+    <PathLink
       href={target}
       {...(title ? { title } : {})}
       {...(external ? NEW_TAB : {})}
       className="text-accent-text underline underline-offset-2 hover:text-accent-hover"
     >
       {children}
-    </a>
+    </PathLink>
   );
 }
 

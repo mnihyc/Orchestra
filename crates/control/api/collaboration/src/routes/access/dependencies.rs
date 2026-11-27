@@ -197,7 +197,14 @@ pub(crate) async fn prepare_page(
                 provider: id_setting(conn, id, keys::AGENT_DEFAULT_PROVIDER_ID).await?,
                 profile: id_setting(conn, id, keys::AGENT_DEFAULT_AGENT_ID).await?,
                 host: if environment.is_none() {
-                    id_setting(conn, id, keys::ENV_HOST_ID).await?
+                    get::<orch_provider_contract::pools::Target>(
+                        conn,
+                        Place::Node(id),
+                        keys::ENV_HOST_ID,
+                    )
+                    .await
+                    .map_err(ApiError::internal)?
+                    .and_then(|target| target.single_host())
                 } else {
                     None
                 },

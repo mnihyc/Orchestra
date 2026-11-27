@@ -223,9 +223,9 @@ pub fn fields() -> Vec<Field> {
         ),
         text(
             "hello_name",
-            "Name for the greeting",
+            "EHLO name",
             false,
-            "The name this system gives the server when it greets it; the name of the machine where that is left out.",
+            "The host name given to the mail server when connecting. Empty: this machine's name.",
         ),
         tls_ca,
         timeout,
@@ -445,7 +445,7 @@ pub fn classify(error: &lettre::transport::smtp::Error, step: Step) -> DeliverEr
         .map_or_else(|| "smtp".to_owned(), |code| code.to_string());
     if error.is_tls() || (!replied_by_server(error) && says_tls(&message)) {
         return if step == Step::Check {
-            DeliverError::refused("tls", &message)
+            DeliverError::refused("tls", &message).at("security")
         } else {
             DeliverError::temporary("tls", &message)
         };
@@ -460,7 +460,7 @@ pub fn classify(error: &lettre::transport::smtp::Error, step: Step) -> DeliverEr
         let auth = matches!(code.as_str(), "530" | "534" | "535" | "538")
             || (step != Step::Send && message.to_ascii_lowercase().contains("auth"));
         if auth {
-            return DeliverError::refused("authentication_failed", &message);
+            return DeliverError::refused("authentication_failed", &message).at("password");
         }
         if step == Step::Send && recipient_is_gone(&message) {
             return DeliverError::gone(&code, &message);
@@ -478,6 +478,7 @@ pub fn classify(error: &lettre::transport::smtp::Error, step: Step) -> DeliverEr
                     "the server did not answer like an SMTP server; check the port and the security ({message})"
                 ),
             )
+            .at("port")
         } else {
             DeliverError::temporary("protocol", &message)
         };
@@ -515,10 +516,7 @@ async fn vetted_addresses(
         }
     }
     match (vetted.is_empty(), refusal) {
-        (true, Some(refused)) => Err(DeliverError::refused(
-            "address_not_allowed",
-            &refused.to_string(),
-        )),
+        (true, Some(refused)) => Err(refused.refusal("host")),
         _ => Ok(vetted),
     }
 }
@@ -572,6 +570,7 @@ pub async fn open(
                 let mut fault = classify(&error, step);
                 if error.is_permanent() || error.is_client() {
                     fault.code = "authentication_failed".to_owned();
+                    fault.field = Some("password".to_owned());
                 }
                 return Err(fault);
             }
@@ -629,6 +628,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mail_operator_sees_the_smtp_greeting_name_and_its_machine_default() {
+        let greeting = fields()
+            .into_iter()
+            .find(|field| field.name == "hello_name")
+            .unwrap();
+        assert_eq!(greeting.label, "EHLO name");
+        assert_eq!(
+            greeting.help.as_deref(),
+            Some(
+                "The host name given to the mail server when connecting. Empty: this machine's name."
+            )
+        );
+        assert!(!greeting.required);
+    }
+
+    #[test]
     fn a_server_with_nothing_but_a_name_and_a_sender_takes_the_usual_settings() {
         let settings = SmtpSettings::from_config(&config(
             json!({ "host": "smtp.example.org", "from": "Orch <orch@example.org>" }),
@@ -642,6 +657,29 @@ mod tests {
             settings.credentials().is_none(),
             "no name and password: no sign-in"
         );
+    }
+
+    #[test]
+    fn a_new_channel_with_the_forms_defaults_is_read_as_it_is_sent() {
+        // What the New channel form sends when only the server and the sender are typed: each field it
+        // declares a default for, as the text the form holds.
+        let mut sent = json!({ "host": "127.0.0.1", "from": "r13b <r13b@example.com>" });
+        for field in fields() {
+            if let Some(value) = &field.default {
+                sent[field.name.as_str()] = value.clone();
+            }
+        }
+        assert_eq!(
+            sent,
+            json!({ "host": "127.0.0.1", "port": "587", "security": "starttls", "auth": "auto",
+                    "from": "r13b <r13b@example.com>", "timeout_secs": "30" })
+        );
+        let settings = SmtpSettings::from_config(&config(sent)).unwrap();
+        assert_eq!(
+            (settings.port, settings.security, settings.auth),
+            (587, Security::StartTls, Auth::Auto)
+        );
+        assert_eq!(settings.timeout, Duration::from_secs(30));
     }
 
     #[test]
