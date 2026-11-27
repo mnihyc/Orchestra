@@ -1,13 +1,15 @@
 /** Page selection lives in the table header; its reviewed results survive clearing the selection. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { changeTopicStatus } from '@/api/day100';
+import { TopicList } from '@/features/project/TopicList';
 import { Topics } from '@/features/project/Topics';
 import type { Project, Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { useRowSelection } from '@/ui/RowSelection';
 import { me, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
@@ -24,31 +26,31 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), topic
   queryFn: () => Promise.resolve({ items: topics, next_cursor: null }),
 }) }));
 vi.mock('@/api/day100', async (original) => ({ ...await original<object>(), changeTopicStatus: vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useIsPending: () => false, NodeMenuButton: () => null }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useIsPending: () => false, NodeMenuButton: () => null }));
 vi.mock('@/features/topic/TopicMenu', () => ({ TopicMenu: () => null, TopicMenuEntries: () => null }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),
   PlaceLink: ({ place, children, className }: { place: { id: string }; children: ReactNode; className?: string }) => <a href={`/topic/${place.id}`} className={className}>{children}</a>,
 }));
 const appearance = useAppearance.getState();
 beforeEach(() => { vi.clearAllMocks(); });
-afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { vi.restoreAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`selects one loaded page with a mixed state, then clears only that page (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     show(<Topics project={project} search={{ view: 'list' }} onSearch={vi.fn()} />);
     const table = await screen.findByRole('table', { name: i18n.t('places.topics.title') });
-    const page = within(table).getByRole('checkbox', { name: i18n.t('day100.batch.selectPage') });
+    const page = within(table).getByRole('checkbox', { name: i18n.t('resources.bulk.selectAll') });
     expect(page.closest('thead')).not.toBeNull();
-    expect(screen.queryByRole('button', { name: i18n.t('day100.batch.selectPage') })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: i18n.t('resources.bulk.selectAll') })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: i18n.t('day100.batch.selection') })).not.toBeInTheDocument();
-    const first = within(table).getByRole('checkbox', { name: i18n.t('day100.batch.selectRow', { name: topics[0]!.name }) });
+    const first = within(table).getByRole('checkbox', { name: i18n.t('resources.bulk.select', { name: topics[0]!.name }) });
     const user = userEvent.setup();
     await user.click(first);
     expect(page).toHaveAttribute('aria-checked', 'mixed');
     await user.click(page);
     expect(page).toBeChecked();
-    for (const topic of topics) expect(within(table).getByRole('checkbox', { name: i18n.t('day100.batch.selectRow', { name: topic.name }) })).toBeChecked();
+    for (const topic of topics) expect(within(table).getByRole('checkbox', { name: i18n.t('resources.bulk.select', { name: topic.name }) })).toBeChecked();
     await user.click(page);
     expect(page).not.toBeChecked();
     expect(screen.queryByRole('region', { name: i18n.t('day100.batch.selection') })).not.toBeInTheDocument();
@@ -64,7 +66,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     });
     show(<Topics project={project} search={{ view: 'list' }} onSearch={vi.fn()} />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('checkbox', { name: i18n.t('day100.batch.selectPage') }));
+    await user.click(await screen.findByRole('checkbox', { name: i18n.t('resources.bulk.selectAll') }));
     await user.click(screen.getByRole('button', { name: i18n.t('places.menu.markDone') }));
     const review = screen.getByRole('dialog', { name: i18n.t('day100.batch.review', { count: 2 }) });
     expect(within(review).getAllByRole('button', { name: i18n.t('common.close') })).toHaveLength(1);
@@ -79,6 +81,27 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(within(results).getAllByRole('button', { name: i18n.t('common.close') })).toHaveLength(1);
     await user.click(within(results).getByRole('button', { name: i18n.t('common.close') }));
     expect(screen.queryByRole('region', { name: i18n.t('day100.batch.selection') })).not.toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: i18n.t('day100.batch.selectPage') })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: i18n.t('resources.bulk.selectAll') })).not.toBeChecked();
   });
 }
+
+
+it('keeps selection while a long topic list scrolls to its final loaded row', () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  const rows = Array.from({ length: 1_200 }, (_, index) => makeTopic('long-' + String(index), 'Topic ' + String(index)));
+  function List() {
+    const selection = useRowSelection(rows, (topic) => topic.id);
+    return <><output aria-label="Selected count">{selection.selected.length}</output><TopicList topics={rows} selection={selection} /></>;
+  }
+  show(<List />);
+  const table = screen.getByRole('table', { name: i18n.t('places.topics.title') });
+  expect(table).toHaveAttribute('aria-rowcount', '1201');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  fireEvent.click(within(table).getByRole('checkbox', { name: i18n.t('resources.bulk.select', { name: 'Topic 0' }) }));
+  expect(screen.getByLabelText('Selected count')).toHaveTextContent('1');
+  fireEvent.scroll(screen.getByRole('region', { name: i18n.t('places.topics.title') }), { target: { scrollTop: 1_197 * 72 } });
+  expect(within(table).getByText('Topic 1199')).toBeVisible();
+  expect(screen.getByLabelText('Selected count')).toHaveTextContent('1');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+});

@@ -24,6 +24,8 @@ import { timelineUi } from '@/features/timeline/state';
 export interface SideAsk {
   threadId: string;
   threadName: string;
+  /** Original composer text, cleared only if this draft is accepted and still matches. */
+  composerDraft?: string;
   toTurn: number | null;
   text: string;
   /** Local opener only; native requests still address threadId. */
@@ -37,7 +39,7 @@ function asideScope(target: ThreadReadTarget, toTurn: number | null): string {
   return JSON.stringify(read.key.kind === 'thread' ? [read.threadId, toTurn] : [read.threadId, toTurn, read.key.kind, read.key.owner]);
 }
 
-interface Question { text: string; toTurn: number | null }
+interface Question { acting?: boolean; text: string; toTurn: number | null }
 type SideReply = Awaited<ReturnType<typeof startSide>>;
 interface Acceptance { reply: SideReply; question: Question; lifetime: number; reader: number | undefined; origin: ThreadReadCapture }
 interface Attempt {
@@ -112,7 +114,7 @@ export function useAskOnSide(target: ThreadReadTarget, { toTurn = null, origin, 
   const lifetime = useSideAsk((state) => state.lifetime);
   const mutation = useMutation({
     mutationKey: ['side-ask', lifetime, scope],
-    mutationFn: ({ text }: Question) => requestAside(read, scope, { text, toTurn }, origin),
+    mutationFn: (question: Question) => requestAside(read, scope, { ...question, toTurn }, origin),
     // Hook-level acceptance also runs after navigation unmounts the caller. A late answer from
     // a previous account lifetime must never clear the new person's draft or close their dialog.
     onSuccess: (accepted) => {
@@ -158,6 +160,7 @@ function requestAside(read: ThreadReadRef, scope: string, question: Question, ex
   });
   const request = startSide(threadId, {
     content: [{ type: 'text', text: attempt.question.text }], client_id: attempt.key,
+    ...(attempt.question.acting ? { acting: true } : {}),
     ...(attempt.question.toTurn === null ? {} : { to_turn: attempt.question.toTurn }),
   }).then((reply) => {
     if (reply.thread.id === threadId || reply.thread.side_of?.id !== threadId || reply.input.thread_id !== reply.thread.id) {

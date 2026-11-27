@@ -5,7 +5,7 @@ use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::threads::{UploadBlobDelete, UploadBlobDeleteQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, uploads};
 use orch_types::Json;
 
@@ -17,11 +17,12 @@ fn rule(operation: &str, kind: &str, id: Id, action: &str) -> Json {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Native upload custody fixture",
             token_hash: &token_hash(&secret),
@@ -258,6 +259,7 @@ async fn unfinished(world: &World, actor: &Who) -> Id {
         .call(UploadSessionCreate, &[])
         .token(&actor.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             name: "private-session-name.txt".into(),
             size: 20,
             media_type: Some("text/plain".into()),
@@ -525,7 +527,9 @@ async fn upload_session_completion_is_its_own_write_and_returns_the_native_new_b
         .token(&secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!(reply.blob, Hash::of(COMPLETE_BYTES));
     assert_eq!(reply.size, 20);
     assert_eq!(reply.name, "private-session-name.txt");
@@ -547,9 +551,10 @@ async fn upload_session_completion_is_its_own_write_and_returns_the_native_new_b
         .app
         .call(UploadSessionComplete, &[&upload])
         .token(&secret)
-        .send_bytes()
-        .await;
-    assert_eq!(again.status, StatusCode::NOT_FOUND);
+        .send()
+        .await
+        .ok();
+    assert_eq!(again.into_file(), Some(reply));
 }
 
 #[tokio::test]
@@ -562,6 +567,7 @@ async fn upload_session_completion_keeps_the_native_empty_file_and_owner_rules()
         .call(UploadSessionCreate, &[])
         .token(&owner.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 0,
             name: "empty.txt".into(),
             media_type: None,
@@ -595,7 +601,9 @@ async fn upload_session_completion_keeps_the_native_empty_file_and_owner_rules()
         .token(&secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!(reply.size, 0);
     assert_eq!(reply.blob, Hash::of(b""));
     assert!(owns(&world, owner.id(), &reply.blob).await);
@@ -620,13 +628,19 @@ struct PutGate {
 
 #[async_trait::async_trait]
 impl BlobStore for PutGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        let stored = self.inner.put(hash, size, body).await?;
+        publication.check(self.lifetimes(), hash)?;
+        let stored = self.inner.put_held(hash, size, body, publication).await?;
         if *hash == self.hash {
             assert_eq!(stored.meta.hash, self.hash);
             assert_eq!(stored.meta.size, 20);
@@ -645,8 +659,13 @@ impl BlobStore for PutGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 
@@ -671,6 +690,7 @@ fn gate_completion(world: &mut World) -> Arc<PutGate> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(gate.clone(), gate.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
@@ -814,6 +834,15 @@ async fn stored_prefix(world: &World, upload: Id) -> Vec<u8> {
         .await
         .unwrap_or_default()
 }
+async fn expires(world: &World, upload: Id) -> orch_types::Time {
+    orch_types::Time::new(
+        sqlx::query_scalar("SELECT expires_at FROM upload_sessions WHERE id=$1")
+            .bind(upload)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap(),
+    )
+}
 async fn received(world: &World, upload: Id) -> i64 {
     sqlx::query_scalar("SELECT received FROM upload_sessions WHERE id=$1")
         .bind(upload)
@@ -884,7 +913,7 @@ async fn upload_piece_binds_the_real_session_keeps_native_offsets_and_needs_only
     );
     assert_eq!(
         serde_json::from_slice::<Json>(&response.raw).unwrap(),
-        json!({"received":7})
+        json!({"received":7,"expires_at":expires(&world,upload).await})
     );
     let misplaced = world
         .app
@@ -923,7 +952,7 @@ async fn upload_piece_binds_the_real_session_keeps_native_offsets_and_needs_only
     assert_eq!(next.status, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Json>(&next.raw).unwrap(),
-        json!({"received":11})
+        json!({"received":11,"expires_at":expires(&world,upload).await})
     );
     assert_eq!(received(&world, upload).await, 11);
     assert_eq!(stored_prefix(&world, upload).await, b"partialtail");
@@ -1126,6 +1155,7 @@ async fn completed_upload_piece_keeps_its_native_progress_receipt_after_activity
     }
     assert_eq!(received(&world, upload).await, 11);
     assert_eq!(stored_prefix(&world, upload).await, b"partialtail");
+    let accepted_expiry = expires(&world, upload).await;
     world.advance(Duration::hours(2));
     held.rollback().await.unwrap();
     let response =
@@ -1140,7 +1170,7 @@ async fn completed_upload_piece_keeps_its_native_progress_receipt_after_activity
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Json>(&response.raw).unwrap(),
-        json!({"received":11})
+        json!({"received":11,"expires_at":accepted_expiry})
     );
     assert_eq!(stored_prefix(&world, upload).await, b"partialtail");
 }
@@ -1354,13 +1384,19 @@ struct AttachmentSizeGate {
 }
 #[async_trait::async_trait]
 impl BlobStore for AttachmentSizeGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         self.inner.get(hash, range).await
@@ -1375,8 +1411,13 @@ impl BlobStore for AttachmentSizeGate {
         }
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 fn gate_attachment_size(world: &mut World, hash: Hash) -> Arc<AttachmentSizeGate> {
@@ -1400,6 +1441,7 @@ fn gate_attachment_size(world: &mut World, hash: Hash) -> Arc<AttachmentSizeGate
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(gate.clone(), gate.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
@@ -1580,4 +1622,154 @@ async fn thread_attachment_direct_checks_before_body_and_preserves_no_reservatio
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(reservation_count(&site).await, 0);
+}
+
+#[tokio::test]
+async fn scoped_concurrent_pieces_bind_one_session_while_its_progress_changes() {
+    let world = World::new().await;
+    let owner = places::person(&world, "concurrent_piece_owner").await;
+    let upload = unfinished(&world, &owner).await;
+    let secret = key(
+        &world,
+        owner.id(),
+        vec![rule("UploadSessionPut", "upload", upload, "write")],
+    )
+    .await;
+    let bytes = b"01234567890123456789";
+    let send = |offset: i64, part: &'static [u8]| {
+        let app = &world.app;
+        let secret = &secret;
+        async move {
+            app.call(UploadSessionPut, &[&upload])
+                .token(secret)
+                .query(&UploadSessionPutQuery { offset })
+                .bytes(part)
+                .send_bytes()
+                .await
+        }
+    };
+    let (suffix, prefix, middle) = tokio::join!(
+        send(14, &bytes[14..]),
+        send(0, &bytes[..7]),
+        send(7, &bytes[7..14])
+    );
+    for reply in [suffix, prefix, middle] {
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.raw)
+        );
+    }
+    assert_eq!(received(&world, upload).await, 20);
+    assert_eq!(stored_prefix(&world, upload).await, bytes);
+    let reader = key(
+        &world,
+        owner.id(),
+        vec![rule("UploadSessionGet", "upload", upload, "read")],
+    )
+    .await;
+    let status = world
+        .app
+        .call(orch_api_contract::threads::UploadSessionGet, &[&upload])
+        .token(&reader)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        status.ranges,
+        vec![orch_api_contract::threads::UploadRange { start: 0, len: 20 }]
+    );
+}
+
+#[tokio::test]
+async fn repeated_completion_keeps_current_writer_checks_and_does_not_restore_released_custody() {
+    let world = World::new().await;
+    let owner = places::person(&world, "receipt_owner").await;
+    let outsider = places::person(&world, "receipt_outsider").await;
+    let upload = filled(&world, &owner).await;
+    let writer = key(
+        &world,
+        owner.id(),
+        vec![rule("UploadSessionComplete", "upload", upload, "write")],
+    )
+    .await;
+    let receipt = world
+        .app
+        .call(UploadSessionComplete, &[&upload])
+        .token(&writer)
+        .send()
+        .await
+        .ok();
+    let orch_api_contract::threads::UploadSessionCompletion::Ready { file } = &receipt else {
+        panic!("the completed session has a verified file receipt");
+    };
+    assert!(owns(&world, owner.id(), &file.blob).await);
+    let released = world
+        .app
+        .call(UploadBlobDelete, &[&file.blob])
+        .token(&owner.token)
+        .query(&UploadBlobDeleteQuery::default())
+        .send_bytes()
+        .await;
+    assert_eq!(released.status, StatusCode::NO_CONTENT);
+    assert!(!owns(&world, owner.id(), &file.blob).await);
+    assert_eq!(
+        world
+            .app
+            .call(UploadSessionComplete, &[&upload])
+            .token(&writer)
+            .send()
+            .await
+            .ok(),
+        receipt
+    );
+    assert!(
+        !owns(&world, owner.id(), &file.blob).await,
+        "reading the receipt must not reacquire custody"
+    );
+    let reader = key(
+        &world,
+        owner.id(),
+        vec![rule("UploadSessionComplete", "upload", upload, "read")],
+    )
+    .await;
+    assert_eq!(
+        world
+            .app
+            .call(UploadSessionComplete, &[&upload])
+            .token(&reader)
+            .send_bytes()
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    let other = key(
+        &world,
+        outsider.id(),
+        vec![rule("UploadSessionComplete", "upload", upload, "write")],
+    )
+    .await;
+    assert_eq!(
+        world
+            .app
+            .call(UploadSessionComplete, &[&upload])
+            .token(&other)
+            .send_bytes()
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    world.advance(Duration::hours(2));
+    assert_eq!(
+        world
+            .app
+            .call(UploadSessionComplete, &[&upload])
+            .token(&writer)
+            .send_bytes()
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(!owns(&world, owner.id(), &file.blob).await);
 }

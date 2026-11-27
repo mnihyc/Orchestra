@@ -5,13 +5,15 @@ mod catalogue;
 pub mod counters;
 mod execute;
 mod model;
+mod predicates;
 pub mod pricing;
 mod projection;
 mod resolve;
 
 pub use catalogue::{catalogue, protocol_interfaces};
 pub use execute::{
-    CallSource, CapabilityCall, CapabilityExecutor, CapabilityItem, CapabilityResult, Executors,
+    CallSource, CapabilityCall, CapabilityError, CapabilityExecutor, CapabilityItem,
+    CapabilityResult, Executors,
 };
 pub use model::*;
 pub use projection::{

@@ -1257,10 +1257,8 @@ async fn prepare_tree(
     text_copy: Option<&super::TextCopy>,
 ) -> Result<PreparedTree, Error> {
     prepare::validate(request)?;
-    if matches!(request.command, Command::Delete | Command::MoveOut) != deletion_plan.is_some() {
-        return Err(Error::Invalid(
-            "deletion and Move to another org require their complete native deletion plan",
-        ));
+    if !request.command.fits_deletion_plan(deletion_plan.is_some()) {
+        return Err(Error::Invalid(crate::document_tree::DELETION_PLAN_MISFIT));
     }
     let sources = sources::prepare_with_copy(conn, actor, request, text_copy).await?;
     sources::check_association(conn, actor, &sources).await?;
@@ -1582,10 +1580,8 @@ async fn execute_inner(
     text_copy: Option<&super::TextCopy>,
 ) -> Result<Receipt, Error> {
     prepare::validate(request)?;
-    if matches!(request.command, Command::Delete | Command::MoveOut) != deletion_plan.is_some() {
-        return Err(Error::Invalid(
-            "deletion and Move to another org require their complete native deletion plan",
-        ));
+    if !request.command.fits_deletion_plan(deletion_plan.is_some()) {
+        return Err(Error::Invalid(crate::document_tree::DELETION_PLAN_MISFIT));
     }
     let sources = sources::prepare_with_copy(&mut *tx, actor, request, text_copy).await?;
     let prepared =

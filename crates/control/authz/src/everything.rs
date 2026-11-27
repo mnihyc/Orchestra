@@ -291,6 +291,18 @@ pub async fn project(
     project_seeds(conn, principal, seeds, false, false, true).await
 }
 
+/// Prepares the same exact frame for a list that shows only resources of `kinds`: each of those resources is decided
+/// as [`project`] decides it, from its own site, its home and the places above it, without deciding every place,
+/// document and chat the reader could open.
+pub async fn project_resources(
+    conn: &mut Conn,
+    principal: &Principal,
+    kinds: &[String],
+) -> Result<Projection, Error> {
+    let seeds = rows::resource_access_seeds(conn, kinds).await?;
+    project_seeds(conn, principal, seeds, false, false, true).await
+}
+
 /// Prepares the same exact frame for an indexed search's selected content, without reading every document inventory.
 pub async fn project_search(
     conn: &mut Conn,
@@ -487,6 +499,7 @@ async fn prepare_seeds(
                     | "mcp_server"
                     | "mount"
                     | "skill"
+                    | "pool"
             )
         })
         .map(|seed| seed.id)

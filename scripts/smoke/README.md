@@ -11,6 +11,8 @@ own; two runs of the same scenario at once need `ORCH_SMOKE_PORT`).
 | Scenario | What it shows |
 |----------|---------------|
 | [first-start](first-start/README.md) | A clean directory and a release become a running system, and nothing is installed from files that do not match the manifest |
+| [update-doctor](update-doctor/README.md) | `./update.sh doctor` and the wait of an update build the same two checks: the address of the edge check and where it came from, every line of both, a failure of either, and nothing changed; with no stack, against stand-ins for docker and orchctl |
+| [update-files](update-files/README.md) | The files of the orch-deploy bundle follow the release: published files replaced as a set, an edit keeps its set with the shipped files as `.new`, the oldest generation the payloads work with, the PostgreSQL, bind and image guards, the updater's own replacement, rollback and recover of files, the first hop; no stack |
 | [update](update/README.md) | A newer release is installed in a transaction; one that does not become ready is taken back with the database |
 | [rollback](rollback/README.md) | The previous release and the database as it was when it was left come back together, and back again |
 | [recover](recover/README.md) | A transaction cut off by a power cut is finished or undone, never left ambiguous |
@@ -29,12 +31,13 @@ own; two runs of the same scenario at once need `ORCH_SMOKE_PORT`).
 Two sets of them are run together by `run-all.sh`:
 
 - `fresh` proves a fresh installation and its operation, and needs one packaged release: `first-start`, `restore`,
-  `installers`, `installation-records`, `managed-environment`, `managed-harness`, `managed-provider` and `shipped-image`.
+  `installers`, `installation-records`, `managed-environment`, `managed-harness`, `managed-provider`, `shipped-image`,
+  `update-doctor` and `update-files`.
   This is the set that gates a release.
 - `upgrade` proves an update, a rollback or a recovery from an earlier release, and needs two real releases (the earlier
   as `ORCH_SMOKE_RELEASE_A`, the later as `ORCH_SMOKE_RELEASE_B`): `update`, `rollback`, `recover` and
-  `release-distribution`. This first release has none before it to carry state from, so these are reported, not gating;
-  when a second real release exists they join the gating set.
+  `release-distribution`. Until two real releases exist there is no earlier one to carry state from, so these are reported, not gating;
+  once a second real release exists they join the gating set.
 
 ```sh
 scripts/smoke/run-all.sh                     # every scenario, one after the other
