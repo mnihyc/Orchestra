@@ -592,17 +592,49 @@ pub async fn threads_with_waiting_inputs(conn: &mut Conn, limit: i64) -> Result<
 
 /// Blocked threads whose block is one of `reasons`, a cause of their own (what they are bound to, where they run),
 /// whether or not anything waits: the recheck looks at them again, so that a cause mended without an act the
-/// engine hears of still lets such a thread be idle.
+/// engine hears of still lets such a thread be idle. A page at a time after the thread `after`, so that the
+/// recheck goes round all of them however many there are; the next page begins after the last one given, and
+/// none is given once the page was not full.
 pub async fn threads_blocked_by_their_own_cause(
     conn: &mut Conn,
+    reasons: &[&str],
+    after: Option<Id>,
+    limit: i64,
+) -> Result<(Vec<Id>, Option<Id>), DbError> {
+    let page: Vec<Id> = sqlx::query_scalar(
+        "SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
+          WHERE t.state = 'blocked' AND t.blocked_reason = ANY($1) AND n.deleted_at IS NULL
+            AND t.node_id > $2
+          ORDER BY t.node_id LIMIT $3",
+    )
+    .bind(reasons)
+    .bind(after.unwrap_or_else(Id::nil))
+    .bind(limit)
+    .fetch_all(conn)
+    .await?;
+    let next = if i64::try_from(page.len()).unwrap_or(i64::MAX) == limit {
+        page.last().copied()
+    } else {
+        None
+    };
+    Ok((page, next))
+}
+
+/// The threads at or under `node`, or every thread where `node` is none (a change of the system's), that are blocked
+/// by one of `reasons`, a cause of their own: a change of what that place resolves may have mended it.
+pub async fn threads_blocked_by_their_own_cause_under(
+    conn: &mut Conn,
+    node: Option<Id>,
     reasons: &[&str],
     limit: i64,
 ) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
-          WHERE t.state = 'blocked' AND t.blocked_reason = ANY($1) AND n.deleted_at IS NULL
-          ORDER BY t.node_id LIMIT $2",
+          WHERE t.state = 'blocked' AND t.blocked_reason = ANY($2) AND n.deleted_at IS NULL
+            AND ($1::uuid IS NULL OR $1 = ANY(n.path))
+          ORDER BY t.node_id LIMIT $3",
     )
+    .bind(node)
     .bind(reasons)
     .bind(limit)
     .fetch_all(conn)

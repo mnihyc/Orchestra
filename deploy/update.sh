@@ -256,6 +256,19 @@ seed_node_policy() {
   mv -- "$initial" "$path"
 }
 
+# records_mount_point [replace]: the directory in the server's data directory that the API's container mounts the
+# installation records (runtime/update) on. Docker makes a missing mount point itself, owned by root, where the
+# operator cannot change it; made here first, it is the services' user's. One an earlier start left to root is given
+# back when root runs this. Otherwise it is empty and in a directory of ours: `replace` makes it again, and only
+# app_start asks for that, as the API that has it mounted is recreated right after.
+records_mount_point() {
+  local path="$DATA_DIR/installation"
+  if [ -d "$path" ] && [ "$(id -u)" -ne 0 ] && [ "$(stat -c %u -- "$path")" != "$SERVICE_UID" ]; then
+    [ "${1:-}" = replace ] && rmdir -- "$path" 2> /dev/null || return 0
+  fi
+  make_dir 755 "$path"
+}
+
 prepare_dirs() {
   local kind
   private_env
@@ -265,6 +278,7 @@ prepare_dirs() {
   make_dir 750 "$DATA_DIR"
   make_dir 755 "$DATA_DIR/update-status"
   make_dir 750 "$DATA_DIR/frontend-tls"
+  records_mount_point
   make_dir 700 runtime/node
   ensure_node_lock
   make_dir 700 runtime/update
@@ -1094,6 +1108,7 @@ app_stop() { compose stop -t "$STOP_TIMEOUT" $STOP_SERVICES > /dev/null; }
 # the whole picture, and not a reason to stop here.
 app_start() {
   check_installation
+  records_mount_point replace
   # shellcheck disable=SC2086 # a list of service names, split on purpose
   if ! compose up -d --quiet-pull --force-recreate --no-deps $APP_SERVICES > /dev/null; then
     note "docker compose could not bring every service up healthy; the readiness check says which"

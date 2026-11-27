@@ -4,7 +4,7 @@ import { api, ok } from '@/api/client';
 import { record } from '@/api/cache';
 import type { Change } from '@/api/acts';
 import type { EnrollmentProgress } from '@/generated/api-types';
-import { readAgain } from '@/api/readAgain';
+import { READ_AGAIN_DOWN_MS } from '@/api/readAgain';
 import { resourceFollowing } from '@/realtime/resourceFollowing';
 
 export const ENROLLMENT_PROGRESS = 'enrollment-progress';
@@ -54,11 +54,18 @@ export function keepOnline(held: unknown, answer: EnrollmentProgress): Enrollmen
   return kept;
 }
 
+/**
+ * How often Add machine reads its progress again while it waits for its machine, with the live connection up or not. The
+ * machine's arrival is told over the person's feed, once, and the enrollment itself changes what the person may see: the
+ * server then drops what it had not yet sent on that feed and has the page join it again, and a notice in that window is
+ * never told again (the read when the feed joins again can come before the machine's session). A person is watching the
+ * dialog, so it waits no longer than they would before wondering whether it works.
+ */
+export const ENROLLMENT_READ_AGAIN_MS = READ_AGAIN_DOWN_MS;
+
 export const enrollmentProgressQuery = (receipt: string) => queryOptions({
   queryKey: enrollmentProgressKey(receipt), staleTime: Infinity, retry: false,
   structuralSharing: (held: unknown, answer: unknown) => replaceEqualDeep(held, record(answer) ? keepOnline(held, answer as unknown as EnrollmentProgress) : answer),
-  // The machine's arrival is told over the live connection, once. Until it is online the dialog reads again by itself.
-  refetchInterval: readAgain<EnrollmentProgress>((progress) => !(progress?.machine?.online === true || progress?.host?.machine.online === true)),
   // The cache owns this read across transient mounts. Native events cancel its pending result
   // before applying a newer receipt/resource, so a delayed answer cannot roll progress back.
   queryFn: async (): Promise<EnrollmentProgress> => {

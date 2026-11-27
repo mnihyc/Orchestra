@@ -1511,7 +1511,7 @@ async fn a_two_hundred_item_thread_opens_with_one_screen_under_one_hundred_twent
         "parameters":{"request_options":{"openai-responses":{"type":"object","description":"x".repeat(4096)}}}
     })).collect();
     sqlx::query(
-        "UPDATE providers SET facts=facts || jsonb_build_object('models',$2::jsonb) WHERE id=$1",
+        "INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2) ON CONFLICT (provider_id) DO UPDATE SET models = EXCLUDED.models",
     )
     .bind(s.on.provider)
     .bind(json!(listing))
@@ -1619,7 +1619,7 @@ async fn a_two_hundred_item_thread_opens_with_one_screen_under_one_hundred_twent
             .await
             .unwrap();
     let upstream: i32 =
-        sqlx::query_scalar("SELECT jsonb_array_length(facts->'models') FROM providers WHERE id=$1")
+        sqlx::query_scalar("SELECT listed FROM provider_model_lists WHERE provider_id=$1")
             .bind(s.on.provider)
             .fetch_one(s.rig.db.pool())
             .await

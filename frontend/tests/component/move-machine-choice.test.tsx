@@ -43,5 +43,6 @@ it('shows the current machine capacity in the place picker when its reported tot
   page.rerender(<HostChoices {...props} machines={[choice(36 * 1024 ** 3)]}/>);
   expect(await screen.findByText(/36 GiB/)).toBeVisible();
   expect(screen.queryByText(/40 GiB/)).not.toBeInTheDocument();
-  expect(screen.getByText(/128 GiB/)).toBeVisible();
+  // A disk reads in the whole decimal gigabytes its storage report gives, as on the machine's Storage tab: 128 GiB is 137 GB.
+  expect(screen.getByText(/137 GB data disk/)).toBeVisible();
 });

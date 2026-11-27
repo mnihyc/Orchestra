@@ -55,7 +55,7 @@ pub async fn operation_audience(
         let Some(environment) = environments::hosting::environment(conn, *id).await? else {
             continue;
         };
-        let mut people = managers(
+        let mut people = match managers(
             conn,
             principal,
             ObjectRef {
@@ -64,7 +64,13 @@ pub async fn operation_audience(
             },
             Permission::EnvironmentManage,
         )
-        .await?;
+        .await
+        {
+            Ok(people) => people,
+            // What a deleted place kept has no home whose managers can be told; its owner still is.
+            Err(error) if crate::jobs::retained::place_gone(&error) => Vec::new(),
+            Err(error) => return Err(error),
+        };
         people.push(environment.owner_id);
         let threads = environments::threads_in(conn, &[*id]).await?;
         for user in people {

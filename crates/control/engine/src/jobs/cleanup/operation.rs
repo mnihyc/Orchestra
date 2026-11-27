@@ -396,7 +396,14 @@ async fn require_work(conn: &mut Conn, principal: &Principal, work: &Work) -> Re
     }) = work.target.as_ref()
     {
         let (manager, admin) =
-            super::super::retained::authority(conn, principal, *environment).await?;
+            match super::super::retained::authority(conn, principal, *environment).await {
+                Ok(rights) => rights,
+                // What a deleted place kept is cleaned up once the place is back, or at the end of its window.
+                Err(error) if super::super::retained::place_gone(&error) => {
+                    return Err(unavailable());
+                }
+                Err(error) => return Err(error.into()),
+            };
         let promise = retained::removal(conn, *environment)
             .await?
             .ok_or_else(unavailable)?;

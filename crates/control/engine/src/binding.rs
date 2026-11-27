@@ -2384,7 +2384,10 @@ pub fn options_placed(
     let mut listed: Vec<ArrangementOption> = all
         .into_iter()
         .map(|(kind, candidate)| {
-            let needs_copy=kind==ArrangementType::Separated && candidate.as_ref().is_ok_and(|chosen|chosen.protocol.is_none())
+            // A native harness of a profile other than the one that keeps the login works on a copy of it, with the
+            // provider or beside the tools alike (`credential_path`): the copy needs a shared form and consent to share.
+            let needs_copy=matches!(kind,ArrangementType::Separated|ArrangementType::Together)
+                && candidate.as_ref().is_ok_and(|chosen|chosen.protocol.is_none())
                 && !native_login_here(kind,facts.provider,facts.runtime.agent_id);
             let candidate=if needs_copy {candidate.and_then(|mut chosen| {
                 chosen.form=Some(usable_forms(&provider.issues,&facts.descriptor.credentials.accepts,Some(Custody::Shared))

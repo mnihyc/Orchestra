@@ -177,10 +177,14 @@ impl native::Selected for RetainedRows {
                     };
                     match may_read(conn, &principal, *id).await {
                         Ok(_) => {}
+                        // What a deleted place kept comes back into the list with the place.
                         Err(error)
                             if matches!(
                                 error.code(),
-                                ErrorCode::AuthzDenied | ErrorCode::NotFound | ErrorCode::Gone
+                                ErrorCode::AuthzDenied
+                                    | ErrorCode::NotFound
+                                    | ErrorCode::Gone
+                                    | ErrorCode::NodeRestoreParentFirst
                             ) =>
                         {
                             continue;

@@ -23,6 +23,7 @@ It prints one line per check, saying what it tried and what came back, and exits
   FAIL  worker           last heard 58 s ago, and a live one reports every few seconds: it reports through the database
   ```
 
+- With a loopback public address, such as a trial's `http://127.0.0.1:5180`, `edge-page` and `edge-api` say `skip`: inside the container that address is the container itself. `./update.sh doctor` tries them from the host.
 - The same program checks the HTTPS front from wherever you run it: [Check the front](edge.md#6-check-the-front).
 
 ## 2. Scrape the services

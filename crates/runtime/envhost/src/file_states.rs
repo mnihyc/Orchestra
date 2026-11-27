@@ -910,7 +910,7 @@ impl FileStates {
     }
 
     /// Makes coverage unknown immediately when watching loses events or ignore rules change: every
-    /// scope is looked at again, in the background, by [`FileStates::take_work`].
+    /// scope is looked at again, in the background, by `FileStates::take_work`.
     pub fn invalidate(&self, reason: &'static str) {
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         for baseline in self

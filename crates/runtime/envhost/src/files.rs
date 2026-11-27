@@ -1367,7 +1367,8 @@ impl Files {
         })
     }
 
-    #[cfg(test)]
+    // Used only by the unit cases below, which run on Unix.
+    #[cfg(all(test, unix))]
     fn copy_for_move(&self, from: &RelPath, to: &RelPath) -> Result<(FileStat, CopyJournal)> {
         self.copy_for_move_into(from, self, to)
     }

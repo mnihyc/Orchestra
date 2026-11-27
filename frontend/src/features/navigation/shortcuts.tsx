@@ -85,11 +85,23 @@ function kindLabel(t: TFunction, shortcut: Shortcut): string {
   return kind === 'chat' ? t('navigation.chat.name') : t(`navigation.row.${kind}` as 'navigation.row.document');
 }
 
-/** What a shortcut is called: its target's current name, or what is said in its place where there is none to give. */
+/** The name a deleted target had, where its reader would find it by that name in its trash; none otherwise. */
+function lastName(shortcut: Shortcut): string | null {
+  const name = shortcut.state === 'deleted' ? shortcut.last_name : null;
+  return name === undefined || name === null || name === '' ? null : name;
+}
+
+/** What a shortcut is called: its target's current name, the name a deleted target had where its reader may know it, or
+ * what is said in its place where there is none to give. */
 export function shortcutName(t: TFunction, shortcut: Shortcut): string {
   const name = shortcut.item?.name;
   if (shortcut.state === 'open' && name !== undefined && name !== null) return name;
-  return shortcut.state === 'deleted' ? t('shortcuts.state.deleted') : t('shortcuts.state.unavailable');
+  return lastName(shortcut) ?? (shortcut.state === 'deleted' ? t('shortcuts.state.deleted') : t('shortcuts.state.unavailable'));
+}
+
+/** The mark beside the last name of a deleted target, so that the name is never taken for one that opens. */
+export function shortcutMark(t: TFunction, shortcut: Shortcut): string | null {
+  return lastName(shortcut) === null ? null : t('shortcuts.state.deleted');
 }
 
 /** Where a shortcut leads: its target's own screen, the same address Copy link gives; none while it does not open. */
@@ -227,11 +239,13 @@ export function ShortcutLink({ shortcut, className, arrow = true, named = false,
   const kind = shortcut.target.kind;
   const live = useTreeNode(shortcut.state === 'open' && (kind === 'org' || kind === 'project' || kind === 'topic' || kind === 'thread') ? shortcut.target.id : null);
   const name = live?.name ?? shortcutName(t, shortcut);
+  const mark = shortcutMark(t, shortcut);
   const carried: Carried = { id: shortcut.id, name, from: shortcut.node_id };
   const body = (
     <>
       <ShortcutIcon shortcut={shortcut} arrow={arrow} />
       <span className={cx('truncate', path === null && 'text-text-subtle italic')}>{name}</span>
+      {mark !== null && <span className="shrink-0 text-xs text-text-subtle" data-shortcut-mark>{mark}</span>}
       <span className="sr-only">{t('shortcuts.of', { kind: kindLabel(t, shortcut) })}</span>
       {children}
     </>
@@ -245,7 +259,7 @@ export function ShortcutLink({ shortcut, className, arrow = true, named = false,
   };
   if (path === null) {
     return (
-      <span className={className} title={name} data-shortcut={shortcut.id} data-row-name-place={named || undefined} {...drag}>
+      <span className={className} title={mark === null ? name : t('shortcuts.state.deletedNamed', { name })} data-shortcut={shortcut.id} data-row-name-place={named || undefined} {...drag}>
         {body}
       </span>
     );

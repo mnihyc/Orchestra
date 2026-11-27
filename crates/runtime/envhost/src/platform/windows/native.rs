@@ -454,7 +454,7 @@ fn u16_at(bytes: &[u8], offset: usize) -> io::Result<u16> {
     Ok(u16::from_le_bytes([slice[0], slice[1]]))
 }
 fn wide_at(bytes: &[u8], offset: usize, length: usize) -> io::Result<OsString> {
-    if length % 2 != 0 {
+    if !length.is_multiple_of(2) {
         return Err(bad_data());
     }
     let end = offset.checked_add(length).ok_or_else(bad_data)?;
@@ -544,7 +544,7 @@ impl DirectoryNames {
             let entry = if next == 0 {
                 remaining
             } else {
-                if next < 12 || next % 4 != 0 {
+                if next < 12 || !next.is_multiple_of(4) {
                     return Err(bad_data());
                 }
                 remaining.get(..next).ok_or_else(bad_data)?

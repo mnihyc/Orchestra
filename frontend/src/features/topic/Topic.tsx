@@ -6,8 +6,8 @@
  * files and documents, its Activity and its settings. The status and the tags are set by whoever may
  * start work in the topic; the bell and the star are each person's own and show at once.
  *
- * Which tab is open is in the address, so that a link reproduces it. A tab whose part is not built
- * yet says so in words and says what it will show.
+ * Which tab is open is in the address, so that a link reproduces it. The tabs are one row at any width: those that do
+ * not fit are under More at its end. A tab whose part is not built yet says so in words and says what it will show.
  */
 import { ResourceSummary } from '@/features/summaries/ResourceSummary';
 import { useContentFocused } from '@/features/workbench/instance';
@@ -190,6 +190,7 @@ export function Topic({ topicId, tab, onTab, section, onSection, q, onThreadQuer
           { value: 'settings', label: t('places.topic.tabs.settings'), panel: <TopicSettings topic={data} section={section} onSection={onSection} /> },
         ]}
         panelClassName="pt-6"
+        overflow="menu"
       />
     </Page>
   );

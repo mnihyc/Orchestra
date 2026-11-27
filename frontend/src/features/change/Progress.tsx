@@ -125,7 +125,8 @@ export function JobActivityLine({ job, transfer }: { job: Job; transfer?: Transf
     : active && job.lifecycle_wait?.phase === 'cleanup' && job.lifecycle_wait.recovering === true ? t('placeFacts.recoveringCleanup') : line;
   return <p className="text-sm text-text-muted tabular-nums" aria-live="polite" title={title || undefined} data-job-activity>
     <span data-job-line className={delayedStop ? 'text-warning-text' : undefined}>{delayedStop ? t('liveWork.stoppingOn', { machine: waiting.name }) : job.call_recovery === null || job.call_recovery === undefined ? coordination : <CallRecoveryStatus recovery={job.call_recovery} service />}</span>
-    {Number.isFinite(elapsed) && <span data-job-elapsed className="inline-block min-w-[11ch]">{SEPARATOR}{formatSpan(elapsed, format, 'clock')}</span>}
+    {/* A job that is over and has no start time (one that never started, or a reader's progress-only view) has no length to give. */}
+    {Number.isFinite(elapsed) && (active || job.started_at !== null) && <span data-job-elapsed className="inline-block min-w-[11ch]">{SEPARATOR}{formatSpan(elapsed, format, 'clock')}</span>}
     {recovering && <CallHelp section="services" />}
     {stalled && !stopping && <span className="text-warning-text" data-job-stalled>{SEPARATOR}{t('liveWork.unchanged', { time: formatTimeOfDay(updated, format, now) })}</span>}
     {' '}<JobFacts job={job} />
