@@ -332,6 +332,31 @@ fn gives(gives: &Gives) -> api::PageGives {
     }
 }
 
+/// Resolve the entries, origins and locks of the defaults shown beside a resource group.
+pub(crate) async fn resource_default_rows(
+    conn: &mut Conn,
+    principal: &Principal,
+    defaults: &orch_authz::pages::ResourceDefaults,
+    now: Time,
+    bounds: &NameBounds,
+) -> ApiResult<Vec<api::PermissionRow>> {
+    let wanted = Wanted::rows(&defaults.rows);
+    let role_place = defaults
+        .role_place
+        .filter(|_| wanted.roles.iter().any(|(_, place)| place.is_none()));
+    let names = Names::load(
+        conn,
+        principal,
+        defaults.root,
+        role_place,
+        now,
+        wanted,
+        bounds.limited.then_some(bounds),
+    )
+    .await?;
+    Ok(defaults.rows.iter().map(|each| row(each, &names)).collect())
+}
+
 /// The permission page a client draws from what the engine read.
 pub async fn permission_page(
     conn: &mut Conn,
@@ -417,7 +442,33 @@ async fn permission_page_with(
                 |kind| same::<_, String>(&kind).unwrap_or_default(),
             ),
     };
+    let file_reach = match view_of.target {
+        orch_authz::pages::Target::Resource(object)
+            if object.kind == orch_access_contract::permissions::ObjectKind::Environment =>
+        {
+            Some(
+                match orch_authz::file_reach::effective(
+                    conn,
+                    principal,
+                    object.id,
+                    orch_authz::Policy::default(),
+                )
+                .await
+                {
+                    Ok(reach) => reach,
+                    Err(error) => {
+                        return Err(crate::middleware::authorization::engine_problem(
+                            conn, principal, error,
+                        )
+                        .await);
+                    }
+                },
+            )
+        }
+        _ => None,
+    };
     Ok(api::PermissionPage {
+        file_reach,
         object: api::ObjectRef {
             kind: kind_word,
             id: target.unwrap_or_else(Id::nil),

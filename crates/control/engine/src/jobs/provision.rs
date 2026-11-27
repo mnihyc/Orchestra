@@ -205,6 +205,19 @@ pub fn phases(mode: Mode, _init: bool) -> Vec<Phase> {
     }
 }
 
+/// Whether `user` queued this job from a request in their explicit administrator mode, as the origin its
+/// plan keeps says (trusted request provenance, written by [`queue`]). A job no creator authority was kept
+/// for places the environment as that same person, with that same mode: a host the request admitted
+/// through the mode (a system administrator's reach to another person's host) is the same host the job
+/// may schedule on. Whether the person is still a system administrator is read when the job's principal
+/// is loaded; an agent's turn and another person never carry the mode.
+fn queued_as_admin(plan: &Json, user: Id) -> bool {
+    plan.pointer("/origin/as_admin")
+        .and_then(Json::as_str)
+        .and_then(|id| id.parse::<Id>().ok())
+        == Some(user)
+}
+
 /// Queues the job that makes or starts the unit of an environment, in the caller's transaction. A job
 /// of the kinds that run one at a time that is not over is [`MakeError::Running`].
 pub async fn queue(
@@ -233,6 +246,16 @@ pub async fn queue(
     {
         plan["initial_files"] = files;
     }
+    let original = if mode == Mode::Start {
+        env_rows::live_runtime(conn, environment.id)
+            .await?
+            .map(|runtime| runtime.id)
+    } else {
+        None
+    };
+    if mode == Mode::Start {
+        plan["runtime"] = json!(original);
+    }
     let job = make(
         conn,
         &Making {
@@ -245,6 +268,9 @@ pub async fn queue(
         now,
     )
     .await?;
+    if let Some(runtime) = original {
+        super::runtime_commands::capture(conn, job.id, runtime).await?;
+    }
     // An environment that is stopped and has no unit to start is made anew, so a make begins from
     // that too.
     let from: &[&str] = match mode {
@@ -258,6 +284,20 @@ pub async fn queue(
         Mode::Start => &[status::STOPPED, status::PROVISIONING],
         Mode::Copy => &[status::NONE, status::PROVISIONING],
     };
+    crate::environment_preparation::accepted_job(
+        conn,
+        environment.id,
+        environment.generation,
+        if mode == Mode::Start {
+            orch_api_contract::threads::EnvironmentPreparationKind::Start
+        } else {
+            orch_api_contract::threads::EnvironmentPreparationKind::Create
+        },
+        job.id,
+        now,
+    )
+    .await
+    .map_err(MakeError::Internal)?;
     env_rows::set_status(conn, environment.id, from, status::PROVISIONING, None, now).await?;
     Ok(job)
 }
@@ -318,11 +358,14 @@ pub struct SpecInputs<'a> {
     pub volumes: &'a Json,
 }
 
+/// The variable that gives the connector in a unit the identifier of the runtime the unit is of.
+pub const UNIT_VARIABLE: &str = "ORCH_RUNTIME_ID";
+
 /// The body of `node.runtime.create`, in the stored form: the token is the reference to the secret that
 /// holds it, which the link seals to the host's key when the command is written.
 #[must_use]
 pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
-    let env: BTreeMap<String, String> = inputs
+    let mut env: BTreeMap<String, String> = inputs
         .spec
         .get("env")
         .and_then(Json::as_object)
@@ -335,12 +378,15 @@ pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
                 .collect()
         })
         .unwrap_or_default();
+    // The connector in the unit keeps the state of its machine on a volume that outlives the unit: it
+    // tells its own state from that of an earlier unit by this.
+    env.insert(UNIT_VARIABLE.to_owned(), inputs.runtime.to_string());
     // A harness that runs beside the tools needs the connector in the unit to host agents as well.
     let beside = !orch_agent_programs::Programs::colocated_for(inputs.spec).is_empty();
     let roles: &[&str] = if beside {
-        &["environment", "agent"]
+        &["environment", "agent", "provider"]
     } else {
-        &["environment"]
+        &["environment", "provider"]
     };
     json!({
         "runtime_id": inputs.runtime,
@@ -433,6 +479,10 @@ impl Provision {
     }
 
     async fn placed(&self, job: &Job) -> Result<Placed, Stop> {
+        self.placed_for(job, false).await
+    }
+
+    async fn placed_for(&self, job: &Job, creating: bool) -> Result<Placed, Stop> {
         let plan = job.plan().await?;
         let mut conn = self
             .engine
@@ -454,12 +504,22 @@ impl Provision {
             .and_then(|id| id.parse::<Id>().ok());
         let runtime = match planned {
             Some(id) => env_rows::runtime(&mut conn, id).await?,
+            None if plan.get("runtime").is_some() => None,
             None => env_rows::live_runtime(&mut conn, environment.id).await?,
         }
         .ok_or_else(|| failed("runtime_gone", "the environment has no unit to work on"))?;
         let host = host_rows::host(&mut conn, runtime.host_id)
             .await?
             .ok_or_else(|| failed("no_host", "the host the unit is on is gone"))?;
+        super::runtime_commands::placement(
+            &mut conn,
+            job.id(),
+            runtime.id,
+            runtime.host_id,
+            host.machine_id,
+            creating,
+        )
+        .await?;
         if host.disabled || environment.status == "disabled" {
             return Err(failed(
                 "environment_unavailable",
@@ -537,18 +597,20 @@ impl Provision {
         .await?
         {
             Some(principal) => principal,
-            None => Principal::load(
-                &mut tx,
-                Caller::session(
-                    plan.pointer("/recovery/by")
-                        .and_then(Json::as_str)
-                        .and_then(|id| id.parse().ok())
-                        .unwrap_or(environment.owner_id),
-                ),
-                Time::new(now),
-            )
-            .await
-            .map_err(EngineError::from)?,
+            None => {
+                let user = plan
+                    .pointer("/recovery/by")
+                    .and_then(Json::as_str)
+                    .and_then(|id| id.parse().ok())
+                    .unwrap_or(environment.owner_id);
+                Principal::load(
+                    &mut tx,
+                    Caller::session(user).with_admin_mode(queued_as_admin(&plan, user)),
+                    Time::new(now),
+                )
+                .await
+                .map_err(EngineError::from)?
+            }
         };
         // An environment that has been made stays on the host that has its volumes.
         let previous = if environment.generation > 0 && plan.get("recovery").is_none() {
@@ -563,18 +625,36 @@ impl Provision {
             &environment.config,
         )
         .await?;
+        let pool = crate::resource_choice::host::retained(&mut tx, &owner, &environment).await?;
+        let admitted = plan
+            .get("admitted_host")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<Id>)
+            .transpose()
+            .map_err(EngineError::from)?;
         let named: Option<Id> = if let Some(recovery) = plan.get("recovery") {
             serde_json::from_value(recovery["host"].clone()).map_err(EngineError::from)?
         } else {
             match previous {
                 Some(host) => Some(host),
-                None => setting(
+                None if admitted.is_some() => admitted,
+                None => setting::<orch_provider_contract::pools::Target>(
                     &mut tx,
                     SettingsPlace::Environment(environment.id),
                     keys::ENV_HOST_ID,
                 )
                 .await
-                .map_err(EngineError::from)?,
+                .map_err(EngineError::from)?
+                .map(|target| {
+                    target.single_host().ok_or_else(|| {
+                        failed(
+                            "pool_choice_missing",
+                            "the new environment has no admitted host pool choice",
+                        )
+                    })
+                })
+                .transpose()?,
             }
         };
         let minutes_idle = setting::<i64>(
@@ -602,6 +682,37 @@ impl Provision {
                 host,
             )
             .await?
+        } else if let Some(pool) = &pool {
+            crate::resource_choice::host::current(
+                &mut tx,
+                &principal,
+                &owner,
+                &environment,
+                pool.host().ok_or_else(|| {
+                    failed(
+                        "pool_choice_missing",
+                        "the admitted pool member is not a host",
+                    )
+                })?,
+            )
+            .await?
+            .into_iter()
+            .collect()
+        } else if let Some(host) = admitted {
+            places::host_places_for_environment_among(
+                &mut tx,
+                &principal,
+                &Ask {
+                    home: environment.home_node_id,
+                    wanted: &wanted,
+                    current: None,
+                    minutes_idle,
+                    now,
+                },
+                environment.id,
+                &[host],
+            )
+            .await?
         } else {
             places::host_places_for_environment(
                 &mut tx,
@@ -625,6 +736,7 @@ impl Provision {
                 &known,
                 template.id,
                 &wanted.mounts,
+                &pool.as_ref().map_or_else(Vec::new, |pool| pool.pools()),
                 &mut listed,
             )
             .await
@@ -643,6 +755,16 @@ impl Provision {
                 "no_capacity",
                 "The selected Use entry has no remaining environment capacity.",
             ));
+        }
+        if previous.is_none()
+            && let Some(created) = &chosen.created
+        {
+            orch_db::queries::environments::record_creation_entries(
+                &mut tx,
+                environment.id,
+                &created.pool_entries,
+            )
+            .await?;
         }
         let standalone_check = if crate::environment_creation::standalone(&owner) {
             creator_authority::selected(
@@ -684,6 +806,7 @@ impl Provision {
                 now,
             )
             .await?;
+        super::runtime_commands::capture(&mut tx, job.id(), runtime_id).await?;
         if let Some(recovery) = plan.get("recovery") {
             let mut volumes = recovery["volumes"].clone();
             volumes["state"] = json!({"name":format!("orch-state-{}-{}",environment.id,runtime_id.simple()),"storage":null});
@@ -718,6 +841,7 @@ impl Provision {
             &mut tx,
             job.id(),
             &json!({
+                "calculation": chosen.place.calculation,
                 "host": chosen.place.host.id,
                 "host_name": chosen.place.host.name,
                 "runtime": runtime_id,
@@ -1074,7 +1198,7 @@ impl Provision {
     // ------------------------------------------------------------ create, start
 
     async fn create(&self, job: &Job) -> Result<Done, Stop> {
-        let placed = self.placed(job).await?;
+        let placed = self.placed_for(job, true).await?;
         let plan = job.plan().await?;
         let services = self.services()?;
         let enrollment: Enrollment = if super::recreate::environment_authority::is_restricted(
@@ -1358,6 +1482,11 @@ impl Provision {
                     spec[field] = value.clone();
                 }
             }
+            // What was kept says which runtime the old unit was of; this unit is of its own, and its connector
+            // puts the machine of the old unit aside by that.
+            if let Some(env) = spec["env"].as_object_mut() {
+                env.insert(UNIT_VARIABLE.to_owned(), json!(placed.runtime.id));
+            }
         }
         // Runtime replacement keeps the exact command definition for later recreation.
         job.remember(&json!({ "created_spec": spec })).await?;
@@ -1390,9 +1519,30 @@ impl Provision {
             &NodeRuntimeCreate(serde_json::from_value(spec).map_err(EngineError::from)?),
         )
         .map_err(body_stop)?;
-        if let Err(stop) = job.command(made).await {
-            return Err(self.explain_creation(&plan, &placed, stop));
-        }
+        let (original, made) = super::runtime_commands::prepare_create(
+            &self.engine,
+            job.id(),
+            placed.runtime.id,
+            made,
+        )
+        .await?;
+        let created_command = made.id;
+        let created_result = job
+            .command(made)
+            .await
+            .map_err(|stop| self.explain_creation(&plan, &placed, stop))?;
+        let created_source = match original.as_ref() {
+            Some(original) => Some(
+                super::runtime_commands::created(
+                    &self.engine,
+                    original,
+                    created_command,
+                    &created_result,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         job.progress(0.5, Some("starting the unit")).await?;
         let started = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"create"]),
@@ -1403,9 +1553,28 @@ impl Provision {
             },
         )
         .map_err(body_stop)?;
-        job.command(started)
+        let started = match (original.as_ref(), created_source) {
+            (Some(original), Some(source)) => {
+                super::runtime_commands::prepare_start(&self.engine, original, source, started)
+                    .await?
+            }
+            _ => started,
+        };
+        let start_command = started.id;
+        let start_result = job
+            .command(started)
             .await
             .map_err(|stop| self.explain_creation(&plan, &placed, stop))?;
+        if let (Some(original), Some(source)) = (original.as_ref(), created_source) {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                source,
+                start_command,
+                &start_result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1475,23 +1644,15 @@ impl Provision {
                 .await?;
             }
         }
-        let mut conn = self
-            .engine
-            .inner
-            .db
-            .acquire()
-            .await
-            .map_err(EngineError::from)?;
-        env_rows::set_runtime_state(
-            &mut conn,
+        let original = super::runtime_commands::starting(
+            &self.engine,
+            job.id(),
             placed.runtime.id,
-            &[runtime_state::STOPPED, runtime_state::FAILED],
-            runtime_state::CREATING,
-            None,
+            placed.host.id,
+            placed.host.machine_id,
             job.now(),
         )
         .await?;
-        drop(conn);
         let command = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"start"]),
             placed.host.machine_id,
@@ -1501,9 +1662,33 @@ impl Provision {
             },
         )
         .map_err(body_stop)?;
-        job.command(command)
+        let command = match original.as_ref() {
+            Some(original) => {
+                super::runtime_commands::prepare_start(
+                    &self.engine,
+                    original,
+                    original.source(),
+                    command,
+                )
+                .await?
+            }
+            None => command,
+        };
+        let id = command.id;
+        let result = job
+            .command(command)
             .await
             .map_err(|stop| self.explain_creation(&json!({}), &placed, stop))?;
+        if let Some(original) = original.as_ref() {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                original.source(),
+                id,
+                &result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1738,6 +1923,15 @@ impl Provision {
         let current = env_rows::lock_environment(&mut tx, placed.environment.id)
             .await?
             .ok_or_else(|| failed("environment_gone", "the environment was removed"))?;
+        super::runtime_commands::placement(
+            &mut tx,
+            job.id(),
+            placed.runtime.id,
+            placed.runtime.host_id,
+            placed.host.machine_id,
+            false,
+        )
+        .await?;
         let up = env_rows::make_running(
             &mut tx,
             current.id,
@@ -1829,7 +2023,7 @@ impl Provision {
                     "Recovery files and history were not verified",
                 ));
             }
-            sqlx::query("UPDATE environments SET lost_at=NULL,lost_by=NULL,loss_missing=false,removal_phase=NULL,config=jsonb_set(config,'{env.host_id}',$2),revision=revision+1 WHERE id=$1").bind(current.id).bind(json!(recipe.host)).execute(&mut *tx).await.map_err(DbError::from)?;
+            sqlx::query("UPDATE environments SET lost_at=NULL,lost_by=NULL,loss_missing=false,removal_phase=NULL,config=jsonb_set(config,'{env.host_id}',$2),revision=revision+1 WHERE id=$1").bind(current.id).bind(json!(orch_provider_contract::pools::Target::host(recipe.host))).execute(&mut *tx).await.map_err(DbError::from)?;
             crate::recovery::commit_threads(
                 job,
                 &mut tx,
@@ -1842,7 +2036,8 @@ impl Provision {
             )
             .await?;
         }
-        crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
+        let copy_released =
+            crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
         if self.mode == Mode::Make {
             crate::resource_facts::library::created(
                 &mut tx,
@@ -1887,6 +2082,9 @@ impl Provision {
             checked.check(self.engine.inner.clock.as_ref())?;
         }
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(released) = copy_released {
+            released.settle(&self.engine).await;
+        }
         Ok(Done::Finished)
     }
 
@@ -1914,11 +2112,12 @@ impl Provision {
 
     async fn undo_make(&self, job: &Job, why: &Stop) -> Undone {
         if let Ok(mut tx) = self.engine.db().begin().await
-            && crate::initial_files::release(&mut tx, job.id(), Time::new(job.now()))
-                .await
-                .is_ok()
+            && let Ok(released) =
+                crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await
+            && tx.commit().await.is_ok()
+            && let Some(released) = released
         {
-            let _ = tx.commit().await;
+            released.settle(&self.engine).await;
         }
         let Ok(plan) = job.plan().await else {
             return Undone::Partly("the job's plan could not be read".to_owned());
@@ -1951,7 +2150,12 @@ impl Provision {
         }
         let fresh = plan.get("fresh").and_then(Json::as_bool).unwrap_or(false);
         if left.is_empty() {
-            left.extend(crate::mount_copies::undo(job).await);
+            match crate::mount_copies::undo(job).await {
+                Ok(copies) => left.extend(copies),
+                Err(_) => {
+                    return Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into());
+                }
+            }
         }
         if (fresh || plan.get("recovery").is_some()) && left.is_empty() {
             for (role, volume) in placed.runtime.volumes.as_object().into_iter().flatten() {
@@ -2221,6 +2425,18 @@ impl Phased for Provision {
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        if let Ok(plan) = job.plan().await
+            && let Some(runtime) = plan
+                .get("runtime")
+                .and_then(Json::as_str)
+                .and_then(|id| id.parse::<Id>().ok())
+        {
+            match super::runtime_commands::undo_current(&self.engine, job.id(), runtime).await {
+                Ok(true) => {},
+                Ok(false) => return Undone::Partly("The original native unit or control changed; its unit and data were left unchanged.".into()),
+                Err(error) => return Undone::Deferred(format!("The original native unit could not be confirmed before cleanup: {error:?}")),
+            }
+        }
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted after-start outcome could not be recorded");
         }
@@ -2238,6 +2454,7 @@ impl Phased for Provision {
             "runtime": plan.get("runtime"),
             "host": plan.get("host"),
             "warnings": plan.get("warnings"),
+            "calculation": plan.get("calculation"),
         }))
     }
 }
@@ -2245,6 +2462,30 @@ impl Phased for Provision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_keeps_the_administrator_mode_of_the_person_whose_request_queued_it_and_of_nobody_else()
+    {
+        let person = new_id();
+        let other = new_id();
+        let queued = |as_admin: Option<Id>| {
+            json!({"mode":"make","by":person,"generation":0,
+                "origin": orch_db::audit::Origin { as_admin, ..Default::default() }})
+        };
+        assert!(queued_as_admin(&queued(Some(person)), person));
+        assert!(
+            !queued_as_admin(&queued(None), person),
+            "a request without the mode gives the job none"
+        );
+        assert!(
+            !queued_as_admin(&queued(Some(other)), person),
+            "another person's mode is never the job's"
+        );
+        assert!(
+            !queued_as_admin(&json!({"mode":"make"}), person),
+            "a job queued outside a request knows of no mode"
+        );
+    }
 
     #[test]
     fn a_unit_is_given_the_builds_of_the_harnesses_its_template_lets_run_there_and_of_the_one_whose_exec_server_it_offers()
@@ -2337,8 +2578,12 @@ mod tests {
             spec["enroll_token"],
             json!({ "$secret": enrollment.secret })
         );
-        assert_eq!(spec["roles"], json!(["environment"]));
-        assert_eq!(spec["env"], json!({ "A": "b" }), "only text is a variable");
+        assert_eq!(spec["roles"], json!(["environment", "provider"]));
+        assert_eq!(
+            spec["env"],
+            json!({ "A": "b", "ORCH_RUNTIME_ID": runtime }),
+            "only text is a variable, and the unit is told which runtime it is of"
+        );
         assert_eq!(spec["labels"]["orch.system"], "acme");
         assert_eq!(spec["labels"]["orch.kind"], "environment");
         assert!(

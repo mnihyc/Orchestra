@@ -4,6 +4,7 @@
  * did first) does not vanish: it turns into its decided line in the place it stood, and says who answered,
  * until the person leaves the list. Requests one person sent together are one card with a row for each.
  */
+import { READ_NOW } from '@/api/freshness';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ShieldCheck } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -202,7 +203,7 @@ function HarnessCard({ approval, live, onSettled }: { approval: HarnessApproval;
           onProceed={() => decision.decide(planDecision(true), t('plan.proceed'))}
           onKeepPlanning={(words) => decision.decide(planDecision(false, words), t('plan.keepPlanning'))} />
       ) : (
-        <OptionButtons target={request.request_kind === 'command' ? request.detail.command : approval.title} options={request.options} disabled={!may || busy} reason={reason} pressed={decision.pressed} onChoose={(option) => decision.decide(decisionOfOption(option), option.label)} />
+        <OptionButtons target={request.request_kind === 'command' ? request.detail.command : approval.title} options={request.options} disabled={!may || busy} reason={reason} pressed={decision.pressed} onChoose={(option, note) => decision.decide(decisionOfOption(option, note), option.label)} />
       )}
       {!approval.can_decide && <p className="text-sm text-text-muted">{t('approvals.cannotAnswer')}</p>}
       {approval.can_decide && !live && <p className="text-sm text-text-muted">{t('approvals.waitForLine')}</p>}
@@ -229,7 +230,7 @@ function useSettled(items: readonly Approval[]) {
   };
   const readOutcome = useCallback((id: string, createdAt: string) => {
     setOutcomes((held) => new Map(held).set(id, { createdAt, error: null, pending: true }));
-    void queryClient.query({ ...approvalQuery(id), staleTime: 0 }).then(
+    void queryClient.query({ ...approvalQuery(id), ...READ_NOW }).then(
       (approval) => {
         setOutcomes((held) => { const next = new Map(held); next.delete(id); return next; });
         if (approval.state !== 'pending') setSettled((held) => new Map(held).set(id, approval));

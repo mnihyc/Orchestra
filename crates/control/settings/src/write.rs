@@ -128,6 +128,12 @@ pub enum WriteError {
     /// The place is a side thread, which has no settings of its own.
     #[error("a side thread has no settings of its own")]
     SideThread,
+    /// A proposed local value exceeds a limit set by an ancestor.
+    #[error("a higher level sets a lower maximum")]
+    Ceiling {
+        /// The current view provides the already-resolved inherited limit for the refusal.
+        current: Box<SettingView>,
+    },
     /// A lock above decides the key.
     #[error("a lock above decides this setting")]
     Locked {
@@ -277,10 +283,30 @@ async fn audit_change(
                         | keys::ORGS_CREATED_BY
                         | keys::AUTH_LOCAL_LOGIN
                         | keys::AUTH_EMAIL_CODE
+                        | keys::INTERFACE_KEPT_CLOSED_TABS
+                        | keys::INTERFACE_PROGRESS_DELAY_MS
+                        | keys::INTERFACE_READ_FRESHNESS_MS
+                        | keys::INTERFACE_CONNECTION_QUALITY
+                        | keys::HUMAN_CHECK_PROVIDER
+                        | keys::HUMAN_CHECK_SITE_KEY
+                        | keys::HUMAN_CHECK_MODE
+                        | keys::HUMAN_CHECK_ACTS
+                        | keys::HUMAN_CHECK_ALTERNATE_HOST
+                        | keys::HUMAN_CHECK_PAGE_WAIT_SECS
                 )
             })
     {
         orch_db::sequences::notify_meta_changed(conn, line.origin.request_id.as_deref()).await?;
+    }
+    if matches!(snapshot.place(), Place::System)
+        && entry.details.get("key").and_then(serde_json::Value::as_str)
+            == Some(keys::EDGE_TRANSPORT)
+    {
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(orch_db::sequences::EDGE_CHANNEL)
+            .execute(conn)
+            .await
+            .map_err(DbError::from)?;
     }
     Ok(())
 }
@@ -428,6 +454,21 @@ pub async fn prepare_write(
         return Err(WriteError::Stale {
             current: Box::new(before),
         });
+    }
+    if before.exceeds_ceiling(&value) {
+        return Err(WriteError::Ceiling {
+            current: Box::new(before),
+        });
+    }
+    if let Some(path) = before.widening_field(&value) {
+        return Err(Invalid::Value {
+            key: def.key,
+            faults: vec![orch_types::fields::FieldError {
+                path,
+                message: "a place above holds a stricter policy".into(),
+            }],
+        }
+        .into());
     }
     let changed = !(same_value && lock == LockChange::Kept && at_revision);
     Ok(PreparedWrite {

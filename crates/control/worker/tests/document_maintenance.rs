@@ -429,7 +429,10 @@ async fn a_second_scheduler_cannot_cut_or_purge_while_the_same_job_is_running() 
 #[derive(Default)]
 struct PurgeCounts {
     events: AtomicUsize,
+    /// Reads of a home's own settings.
     settings: AtomicUsize,
+    /// Reads of one window the system sets (what was deleted, unreferenced files).
+    windows: AtomicUsize,
     pages: AtomicUsize,
 }
 
@@ -467,7 +470,9 @@ impl tracing::Subscriber for PurgeReads {
         let mut sql = Sql::default();
         event.record(&mut sql);
         let sql: String = sql.0.split_whitespace().collect();
-        if sql.contains("FROMsettings") {
+        if sql.contains("FROMsettingsWHEREnode_idISNULLANDkey=") {
+            self.0.windows.fetch_add(1, Ordering::Relaxed);
+        } else if sql.contains("FROMsettings") {
             self.0.settings.fetch_add(1, Ordering::Relaxed);
         }
         if sql.contains("SELECTid,node_idFROMdocuments") {
@@ -544,6 +549,11 @@ async fn a_page_of_documents_with_one_home_loads_its_settings_once() {
         reads.0.settings.load(Ordering::Relaxed),
         1,
         "one real settings read for the shared home"
+    );
+    assert_eq!(
+        reads.0.windows.load(Ordering::Relaxed),
+        2,
+        "the system's deleted-items window for the full page and its unreferenced-files window for the file sweep"
     );
     assert_eq!(
         reads.0.pages.load(Ordering::Relaxed),
@@ -633,6 +643,11 @@ async fn cancelling_a_hundred_thousand_document_purge_finishes_only_its_current_
         "no second candidate page is read"
     );
     assert_eq!(reads.0.settings.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        reads.0.windows.load(Ordering::Relaxed),
+        1,
+        "only the current page's deleted-items window"
+    );
     let pages: i64 = sqlx::query_scalar("SELECT count(*) FROM observed_purge_pages")
         .fetch_one(&world.test.pool)
         .await

@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import { caption } from '../../e2e/capture/open';
 import type { ProgramDetail, ProgramSummary } from '../../src/generated/api-types';
 import { signInForManagement } from './admin-mode-support';
-import { scenario } from './support';
+import { readsOneByOne, scenario } from './support';
 
 const group = { en: 'Research tools', 'zh-CN': '研究工具' };
 const title = (index: number) => ({ en: `Research tool ${index}`, 'zh-CN': `研究工具 ${index}` });
@@ -30,6 +30,8 @@ test('program facts and grouped declarations stay readable at 400px in both them
   });
   await page.route('**/api/v1/admin/programs/research/builds?*', (route) => route.fulfill({ json: { items: [], next_cursor: null } }));
   await signInForManagement(page);
+  // A returning directory must read the same routed program fixture on every visit.
+  await readsOneByOne(page);
   for (const locale of ['en', 'zh-CN'] as const) {
     if (locale === 'zh-CN') {
       await page.goto('/settings/interface');

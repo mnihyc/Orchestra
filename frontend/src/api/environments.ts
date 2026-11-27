@@ -8,6 +8,7 @@
  */
 import { queryOptions } from '@tanstack/react-query';
 
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { accepted, api, done, ok, repeatable } from '@/api/client';
 import { cachedRow, feedSequences } from '@/api/cache';
 import { agentReachKey } from '@/api/agentReach';
@@ -29,10 +30,39 @@ import type {
 export const environmentsKey = ['environments'] as const;
 export const environmentKey = (id: string) => ['environment', id] as const;
 export const environmentSettingsKey = (id: string) => ['environment-settings', id] as const;
-export const environmentMcpKey = (id: string) => ['environment-mcp', id] as const;
+export const environmentMcpKey = (id: string, threadId?: string) => threadId === undefined ? ['environment-mcp', id] as const : ['environment-mcp', id, threadId] as const;
+
+/** A visible child directory uses the same native whole/through-thread/retained read authority. */
+export const environmentThreadsPageQuery = (id: string, q: string, version = '') => collectionQuery(['environment-threads', id, version], q,
+  async (query, signal) => {
+    const reply = await ok(api.GET('/environments/{id}', { params: { path: { id }, query: {
+      threads_q: query.q, threads_limit: query.limit, ...(query.cursor === undefined ? {} : { threads_cursor: query.cursor }),
+    } }, signal }));
+    return { items: reply.threads, next_cursor: reply.threads_next_cursor ?? null, hidden: reply.threads_hidden };
+  });
 
 /** Current hosted server states and masked failures. */
-export const environmentMcpQuery = (id: string) => queryOptions({ queryKey: environmentMcpKey(id), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id } }, signal })) });
+export const environmentMcpPageQuery = (id: string, collection: 'servers' | 'found', q: string, threadId?: string) => collectionQuery([...environmentMcpKey(id, threadId), collection], q,
+  async (query, signal) => {
+    const reply = await ok(api.GET('/environments/{id}/mcp', { params: { path: { id }, query: { ...query, collection, ...(threadId === undefined ? {} : { thread_id: threadId }) } }, signal }));
+    return { ...reply, items: collection === 'found' ? reply.found : reply.servers };
+  });
+
+/** Bulk import/configuration needs every admitted definition, independently of the visible page. */
+export const environmentMcpQuery = (id: string, threadId?: string) => queryOptions({ queryKey: [...environmentMcpKey(id, threadId), 'complete'], queryFn: async ({ signal }): Promise<EnvironmentMcp> => {
+  let facts: EnvironmentMcp | undefined;
+  const connections = new Map<string, NonNullable<EnvironmentMcp['connections']>[number]>();
+  const read = async (collection: 'servers' | 'found', cursor: string | null) => {
+    const reply = await ok(api.GET('/environments/{id}/mcp', { params: { path: { id }, query: { collection, ...(threadId === undefined ? {} : { thread_id: threadId }), ...(cursor === null ? {} : { cursor }) } }, signal }));
+    if (collection === 'found') for (const row of reply.connections ?? []) connections.set(JSON.stringify([row.source, row.name]), row);
+    facts = reply;
+    return reply;
+  };
+  const servers = await readAllPages(async (cursor) => { const reply = await read('servers', cursor); return { items: reply.servers, next_cursor: reply.next_cursor }; }, signal);
+  const found = await readAllPages(async (cursor) => { const reply = await read('found', cursor); return { items: reply.found, next_cursor: reply.next_cursor }; }, signal);
+  if (facts === undefined) throw new Error('The native catalogue did not return its facts.');
+  return { ...facts, servers, found, connections: [...connections.values()], next_cursor: null };
+} });
 
 /** Import and optional enablement are one producer, including an accepted restricted receipt. */
 export async function importEnvironmentMcp(id: string, body: EnvironmentMcpImportCreateBody, key: string) {
@@ -110,9 +140,10 @@ export function deleteEnvironment(id: string, confirm: string): Promise<void> {
   return done(api.DELETE('/environments/{id}', { params: { path: { id }, query: { confirm } } }));
 }
 
-/** Makes an environment from a template on a host; it is being made, by a job, when the answer comes. */
+/** Makes an environment from a template on a host; it is being made, by a job, when the answer comes. The caller has that
+ * answer as soon as the server accepts it: Add environment closes on it and opens the environment being made. */
 export function createEnvironment(body: NewEnvironment, key: string): Promise<Environment> {
-  return ok(api.POST('/environments', { body, ...repeatable(key) }));
+  return ok(api.POST('/environments', { body, ...repeatable(key, { answerFirst: true }) }));
 }
 
 /** Starts a stopped environment that Orch made; the job that does it is the answer. */

@@ -217,6 +217,17 @@ pub struct Refused {
     pub address: IpAddr,
 }
 
+/// The code of a refusal by [`may_connect`]: the address is refused here, before the far side is asked.
+pub const NOT_ALLOWED: &str = "address_not_allowed";
+
+impl Refused {
+    /// The refusal of a call to a channel whose declared field `field` gave this host.
+    #[must_use]
+    pub fn refusal(&self, field: &str) -> crate::delivery::DeliverError {
+        crate::delivery::DeliverError::refused(NOT_ALLOWED, &self.to_string()).at(field)
+    }
+}
+
 /// Whether a connection to `host`, which resolved to `address`, is allowed. `allowed` is the list handed to
 /// the call: `None` for a channel that is not held to it, otherwise the entries. A public address is always
 /// allowed; any other only if an entry lists the host's name or the address. This is

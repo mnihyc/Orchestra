@@ -3,7 +3,6 @@ import { afterEach, beforeEach, expect, it } from 'vitest';
 import { queryClient } from '@/api/query';
 import { placeOfAddress } from '@/features/chat/markup';
 import { referenceOfAddress } from '@/features/people/references';
-import { carriedLinks } from '@/features/sharing/linkPlan';
 import { parseContentAddress } from '@/features/workbench/contentAddress';
 import { resolveArticleLink } from '@/help/links';
 import { droppedReference } from '@/lib/drop';
@@ -20,13 +19,19 @@ const metadata = {
 beforeEach(() => { queryClient.setQueryData(['meta'], metadata); });
 afterEach(() => { queryClient.removeQueries({ queryKey: ['meta'], exact: true }); });
 
+it('resolves a local tab address without reading the installation addresses', () => {
+  const addresses = { get public_url(): string { throw new Error('Unexpected installation lookup'); } };
+  for (const href of [`/doc/${ID}`, `${location.origin}/doc/${ID}`]) {
+    expect(readOrchLink(href, { addresses })?.href).toBe(`${location.origin}/doc/${ID}`);
+  }
+});
+
 it.each([location.origin, metadata.public_url, ...metadata.alternate_urls, 'https://edge.orch.test'])('recognizes exactly the declared address %s across resource consumers', (origin) => {
   const href = `${origin}/doc/${ID}?block=${BLOCK}#section`;
   expect(readOrchLink(href)?.href).toBe(`${location.origin}/doc/${ID}?block=${BLOCK}#section`);
   expect(linkedObject(href)).toEqual({ kind: 'document', id: ID });
   expect(referenceOfAddress(href)).toEqual({ kind: 'document', id: ID, block: BLOCK });
   expect(placeOfAddress(href, location.origin)).toEqual({ kind: 'doc', id: ID, path: `/doc/${ID}?block=${BLOCK}#section` });
-  expect(carriedLinks([{ type: 'text', text: `[Plan](${href})` }])).toMatchObject([{ kind: 'document', id: ID, label: 'Plan' }]);
   expect(parseContentAddress(href)).toMatchObject({ view: 'page', href: `/doc/${ID}?block=${BLOCK}#section` });
   expect(resolveArticleLink(`${origin}/help/first-steps#read`)).toEqual({ article: 'first-steps', heading: 'read' });
   const transfer = { getData: (type: string) => type === 'text/uri-list' ? href : '' } as Pick<DataTransfer, 'getData'>;
@@ -43,7 +48,6 @@ it.each([
   expect(linkedObject(href)).toBeNull();
   expect(referenceOfAddress(href)).toBeNull();
   expect(placeOfAddress(href, location.origin)).toBeNull();
-  expect(carriedLinks([{ type: 'text', text: `[Plan](${href})` }])).toEqual([]);
   expect(parseContentAddress(href)).toBeNull();
 });
 

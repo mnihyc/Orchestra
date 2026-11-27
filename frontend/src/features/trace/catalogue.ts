@@ -33,6 +33,7 @@ export const ACTIONS: Record<AuditKind, readonly string[]> = {
     "workspace.worktree_created"
   ],
   "changed": [
+    "server.update_requested",
     "harness.changed",
     "host.ports_changed",
     "agent.disabled",
@@ -263,6 +264,9 @@ export const ACTIONS: Record<AuditKind, readonly string[]> = {
     "auth.email_code_disabled",
     "auth.email_code_enabled",
     "auth.identity_linked",
+    "auth.human_check_admitted",
+    "auth.human_check_refused",
+    "auth.human_check_secret_changed",
     "auth.identity_unlinked",
     "auth.locked",
     "auth.login",
