@@ -1,0 +1,10 @@
+# the first update's assembly: contracts, fmt, clippy, the whole web suite, and the crates its branches touched
+contracts
+fmt
+clippy
+web typecheck
+web lint
+web test
+test -p orch-engine --lib
+test -p orch-api-core --test provider_setup --test bootstrap
+test -p orch-connector --bin orch-connector -- composition::

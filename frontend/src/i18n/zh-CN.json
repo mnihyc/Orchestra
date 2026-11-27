@@ -5803,6 +5803,8 @@
     "noneMoved": "没有内容被移到回收站",
     "stopped_one": "{{count}} 个正在运行的会话已停止",
     "stopped_other": "{{count}} 个正在运行的会话已停止",
+    "environments_one": "{{count}} 个环境已停止",
+    "environments_other": "{{count}} 个环境已停止",
     "refused": "未移动：{{names}}",
     "because": "{{name}}（{{reason}}）",
     "show": "查看",
@@ -6549,6 +6551,15 @@
       "failed": "失败",
       "cancelled": "已取消",
       "lost": "已丢失"
+    },
+    "step": {
+      "validate": "检查权限",
+      "apply": "准备文件",
+      "verify": "检查结果",
+      "files": "写入初始文件",
+      "commit": "收尾",
+      "other": "某一步",
+      "line": "{{step}} · {{why}}"
     },
     "git": {
       "commit": "提交…",
@@ -9078,6 +9089,9 @@
     "open": "打开"
   },
   "ui": {
+    "tabs": {
+      "more": "更多"
+    },
     "sectionNav": {
       "search": "查找分区"
     },
@@ -15443,6 +15457,7 @@
       "delete": "删除…",
       "enable": "启用",
       "disable": "停用…",
+      "disableNow": "停用",
       "start": "启动",
       "stop": "停止",
       "refresh": "刷新",
@@ -17483,6 +17498,9 @@
       "disableTitle": "停用 {{name}}？",
       "disableConfirm": "停用 {{name}}",
       "disabled": "已停用 {{name}}",
+      "enabledAgain": "已重新启用 {{name}}",
+      "notEnabled": "未能重新启用 {{name}}",
+      "notDisabled": "未能停用 {{name}}",
       "enableSection": "启用",
       "enable": "启用",
       "deleteSection": "删除",
@@ -17524,11 +17542,6 @@
       "disabled_other": "已停用 {{count}} 个提供方",
       "deleted_one": "已删除 {{count}} 个提供方",
       "deleted_other": "已删除 {{count}} 个提供方",
-      "disableTitle_one": "停用 {{count}} 个提供方？",
-      "disableTitle_other": "停用 {{count}} 个提供方？",
-      "disableBody": "在重新启用之前，没有会话可以在它们上面开始新的轮次。正在运行的轮次会一直运行到结束。",
-      "disableConfirm_one": "停用 {{count}} 个提供方",
-      "disableConfirm_other": "停用 {{count}} 个提供方",
       "deleteTitle_one": "删除 {{count}} 个提供方？",
       "deleteTitle_other": "删除 {{count}} 个提供方？",
       "deleteConfirm_one": "删除 {{count}} 个提供方",
@@ -17888,7 +17901,6 @@
     "title": "存储",
     "lead": "此机器创建自有数据的命名位置。在环境或托管提供方的容器配置中选择这些名称。",
     "default": "{{name}}（默认）",
-    "space": "可用 {{free}} GB，共 {{capacity}} GB",
     "none": "此机器尚未报告可用的存储。"
   },
   "templates": {
@@ -18843,7 +18855,7 @@
       "over": "声明的比主机拥有的还多。",
       "unknown": "主机没有报告容量。",
       "measuredMemory": "已用 {{used}} · 可用 {{free}}，共 {{capacity}}",
-      "measuredStorage": "{{name}} · 可用 {{free}}，共 {{capacity}}"
+      "measuredStorage": "{{name}} · {{capacity}} 磁盘，可用 {{free}}"
     },
     "storages": {
       "title": "存储",
@@ -25721,7 +25733,6 @@
     "offline": "离线",
     "offlineSince": "自 {{time}} 起离线",
     "full": "已满",
-    "free": "可用 {{size}}",
     "hostOffline": "主机离线",
     "idleFor": "空闲 {{time}}",
     "status": "状态",
@@ -25807,7 +25818,7 @@
     "environmentState": "环境 · {{state}}",
     "memoryFree": "{{total}} 内存，可用 {{free}}",
     "memoryTotal": "{{total}} 内存",
-    "diskFree": "{{total}} GB 磁盘，可用 {{free}} GB"
+    "diskFree": "{{total}} 磁盘，可用 {{free}}"
   },
   "statusItems": {
     "textEstimateHint": "在提供方报告用量前，根据文本长度估算",
@@ -27924,8 +27935,6 @@
     "resultsRootPending": "暂时无法打开结果所属的组织。请稍后重试。",
     "model": "模型摘要器",
     "details": "摘要详情",
-    "hide": "隐藏摘要",
-    "show": "显示摘要",
     "inputFacts": "源条目：纳入 {{included}} 条 · 缩短 {{shortened}} 条 · 未纳入 {{omitted}} 条",
     "baseRates": "所选模型基础费率",
     "noRates": "未提供基础费率",
@@ -29558,7 +29567,8 @@
     "notRemoved": "无法移除快捷方式“{{name}}”",
     "state": {
       "unavailable": "不可用",
-      "deleted": "已删除"
+      "deleted": "已删除",
+      "deletedNamed": "{{name}} · 已删除"
     },
     "of": "指向{{kind}}的快捷方式",
     "loading": "正在加载快捷方式…",

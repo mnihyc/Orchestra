@@ -6,7 +6,9 @@
  * instead, and offers the act that lifts it. A directory of one of their connected machines becomes an environment when it is
  * registered. Where nothing may be made, the step says so and how to ask.
  */
-import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
+import { machineCapacityWords } from '@/features/resources/machines/MachineCapacityLine';
+import { factLine } from '@/ui/Choice';
+import { useFormatContext } from '@/lib/appearance';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { FolderPlus, Laptop, Plus } from 'lucide-react';
@@ -87,6 +89,7 @@ function defaultDirectoryMachine(online: readonly Machine[], userId: string | nu
 
 function DirectoryRegistration({ machines, loading = false, homeId, onRegistered, reader }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void; reader: string }) {
   const { t } = useTranslation();
+  const format = useFormatContext();
   const userId = useStore(client.session, (state) => state.userId);
   const actKey = useActKey();
   const online = machines.filter((machine) => machine.online);
@@ -124,7 +127,8 @@ function DirectoryRegistration({ machines, loading = false, homeId, onRegistered
       {online.length === 0 ? <InlineAlert tone="warning">{t('start.where.allOffline')}</InlineAlert> : <>
         <ResourcePicker pickerKey="thread-directory-machine" label={t('start.where.machine')} placeholder={t('start.where.chooseMachine')} value={chosen} disabled={register.isPending}
           onValueChange={(id) => { setMachineId(id); setRoot(''); setName(''); setReady(false); register.reset(); }}
-          options={online.map((machine) => ({ value: machine.id, label: machine.name, resource: { kind: 'machine', id: machine.id, data: machine }, description: <span className="flex flex-col gap-1"><MachineCapacityLine facts={machine.facts} />{machine.owner !== null && <UserChip user={machine.owner} />}</span> }))} />
+          options={online.map((machine) => ({ value: machine.id, label: machine.name, resource: { kind: 'machine', id: machine.id, data: machine },
+            description: factLine([machine.owner !== null && <UserChip user={machine.owner} size={24} />, machineCapacityWords(machine.facts, t, format)], t('resourceFacts.separator')) }))} />
         {machine !== undefined && <DirectoryControl key={machine.id} ref={directory} target={{ kind: 'machine', machine }} value={root}
           onChange={(value) => { setRoot(value); if (register.error !== null) register.reset(); }} onReady={setReady} disabled={register.isPending}
           error={fieldFailure ? directoryProblem(register.error) : undefined} />}

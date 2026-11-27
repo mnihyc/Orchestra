@@ -3,6 +3,7 @@ import type { TFunction } from 'i18next';
 import type { Agent, Environment, Host, Template } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
+import { factLine } from '@/ui/Choice';
 
 export function templateUnavailable(template: Template, t: TFunction): string | null {
   if (!template.enabled) return t('resourceChoices.disabled');
@@ -16,16 +17,17 @@ export function hostUnavailable(host: Host, t: TFunction, kind: 'environment' | 
     ? null : t('resourceChoices.driver');
 }
 
-function explained(choice: ReturnType<typeof resourceChoice>, reason: string | null) {
-  return { ...choice, disabled: reason !== null, description: <>{choice.description}{reason !== null && <span className="block text-sm text-text-muted">{reason}</span>}</> };
+/** A refused choice says why first, then its own facts, as one passage under its name. */
+function explained(choice: ReturnType<typeof resourceChoice>, reason: string | null, t: TFunction) {
+  return { ...choice, disabled: reason !== null, description: factLine([reason, choice.description], t('resourceFacts.separator')) };
 }
 
 export function templateChoice(template: Template, t: TFunction) {
-  return { value: template.id, name: template.name, ...explained(resourceChoice({ kind: 'template', template }), templateUnavailable(template, t)) };
+  return { value: template.id, name: template.name, ...explained(resourceChoice({ kind: 'template', template }), templateUnavailable(template, t), t) };
 }
 
 export function hostChoice(host: Host, t: TFunction, kind: 'environment' | 'provider', driver?: string) {
-  return { value: host.id, name: host.name, ...explained(resourceChoice({ kind: 'host', host }), hostUnavailable(host, t, kind, driver)) };
+  return { value: host.id, name: host.name, ...explained(resourceChoice({ kind: 'host', host }), hostUnavailable(host, t, kind, driver), t) };
 }
 
 /** A setting can name an environment only where its person manages it: the new threads join it, and it is that person's to start, stop and change. */
@@ -34,7 +36,7 @@ export function environmentUnavailable(environment: Environment, t: TFunction): 
 }
 
 export function environmentChoice(environment: Environment, t: TFunction) {
-  return { value: environment.id, name: environment.name, ...explained(resourceChoice({ kind: 'environment', environment }), environmentUnavailable(environment, t)) };
+  return { value: environment.id, name: environment.name, ...explained(resourceChoice({ kind: 'environment', environment }), environmentUnavailable(environment, t), t) };
 }
 
 /** An agent profile is named by a setting only by whoever may use it. */
@@ -43,5 +45,5 @@ export function agentUnavailable(agent: Agent, t: TFunction): string | null {
 }
 
 export function agentChoice(agent: Agent, t: TFunction) {
-  return { value: agent.id, name: agent.name, ...explained(resourceChoice({ kind: 'agent', agent }), agentUnavailable(agent, t)) };
+  return { value: agent.id, name: agent.name, ...explained(resourceChoice({ kind: 'agent', agent }), agentUnavailable(agent, t), t) };
 }

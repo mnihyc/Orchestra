@@ -47,6 +47,7 @@ url.workspace = true
 
 [dev-dependencies]
 orch-pki.workspace = true
+orch-telemetry.workspace = true
 orch-testkit.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

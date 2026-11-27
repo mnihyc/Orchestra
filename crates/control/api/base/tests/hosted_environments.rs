@@ -156,6 +156,61 @@ fn wanted(team: &Team, name: &str) -> NewEnvironment {
     }
 }
 
+/// The plan of the job that makes the environment `id` the first time.
+async fn first_make_plan(world: &World, id: Id) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT plan FROM jobs WHERE environment_id = $1 AND kind = 'environment_provision' ORDER BY created_at LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap()
+}
+
+/// A system admin acting as one makes an environment in an org he is not a member of. As anything an outsider makes,
+/// it is the org's first owner's, and so is its first Make, as every later one is. The creator's authority used to
+/// require the creator to be its owner: the request ended in a 500 and nothing was made.
+#[tokio::test]
+async fn a_system_admin_makes_an_environment_in_an_org_he_is_no_member_of() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    world.make_admin(&t.c.stranger.person).await;
+    places::admin_mode(&world, &t.c.stranger, true).await;
+    let made = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.stranger.token)
+        .body(&wanted(&t, "Made from outside"))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(made.base.owner.id, t.c.boss.id());
+    let plan = first_make_plan(&world, made.base.id).await;
+    assert_eq!(plan["mode"], json!("make"));
+    assert!(plan.get("creator_provision").is_none(), "{plan}");
+    places::admin_mode(&world, &t.c.stranger, false).await;
+    // A member makes hers as before: she owns it, and its first Make keeps her own authority.
+    let own = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.admin.token)
+        .body(&wanted(&t, "Made from inside"))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(own.base.owner.id, t.c.admin.id());
+    let plan = first_make_plan(&world, own.base.id).await;
+    assert_eq!(
+        plan["creator_provision"]["standalone"],
+        json!(true),
+        "{plan}"
+    );
+}
+
 #[tokio::test]
 async fn ten_creations_through_a_lent_host_pool_share_one_last_slot_and_keep_the_admitted_host() {
     let world = World::new().await;

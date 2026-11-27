@@ -61,6 +61,21 @@ it.each(['en', 'zh-CN'] as const)('says why before sending and lets the thread m
   } finally { view.unmount(); cache.clear(); await setLocale('en'); }
 });
 
+it.each(['en', 'zh-CN'] as const)('says why where an executor runs the commands and gives no reason of its own, in %s', async (locale) => {
+  // "Run with provider": the provider's own Claude Code profile runs beside its sign-in and Orch's tools carry out its
+  // commands in the environment. They report Open alone and no sentence; the line says what they can enforce there, as
+  // the blocked thread's line and the environment's readiness do.
+  await setLocale(locale);
+  const executor: SandboxReadiness = { ...shortfall, executor: 'orch-exec', executor_ref: { kind: 'orch-exec', title: { en: 'Orch tools', 'zh-CN': 'Orch 工具' }, tool_set: null }, reason: null };
+  const view = show(<SandboxShortfallLine thread={thread(['thread.manage', 'thread.interact'])} report={executor} />);
+  try {
+    const line = await screen.findByRole('status');
+    const executorName = locale === 'en' ? 'Orch tools' : 'Orch 工具';
+    expect(line).toHaveTextContent(i18n.t('composer.confinement.shortfall', { mode: i18n.t('choiceCatalog.sandboxLevel.workspace.name'), place: 'Lab workspace' }));
+    expect(line).toHaveTextContent(i18n.t('sandboxReadiness.unconfined', { name: 'Lab workspace', executor: executorName }));
+  } finally { view.unmount(); await setLocale('en'); }
+});
+
 it('names who may change it for someone who does not manage the thread, and offers nothing to press', async () => {
   const view = show(<SandboxShortfallLine thread={thread(['thread.interact'])} report={shortfall} />);
   try {
