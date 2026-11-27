@@ -53,7 +53,9 @@ async fn a_provider_uses_its_borrowed_harness_home_and_cleanup_leaves_the_direct
             directory: Some(DirectoryBinding {
                 path: path.display().to_string(),
                 device: Some(before.dev()),
-                inode: Some(before.ino()),
+                inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    before.ino(),
+                )),
             }),
         },
     );
@@ -124,7 +126,9 @@ async fn borrowed_data_is_bound_without_chown_and_survives_restart_recreate_and_
     let binding = DirectoryBinding {
         path: path.display().to_string(),
         device: Some(before.dev()),
-        inode: Some(before.ino()),
+        inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+            before.ino(),
+        )),
     };
     let mut request = lab.request("environment", "borrowed-roots", |body| {
         body["spec"]["user"] = json!({"uid":uid,"gid":uid});
