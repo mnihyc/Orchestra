@@ -35,7 +35,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), re
 }));
 vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(), shareWithAgents: calls.share }));
 vi.mock('@/features/people/ThreadIdentity', () => ({ ThreadIdentity: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 
 const target = { kind: 'document' as const, id: 'document', name: 'Plan' };
@@ -54,10 +54,9 @@ beforeEach(() => {
 afterEach(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
-  for (const failedRead of ['page', 'preview'] as const) it(`retries the actual ${failedRead} failure before confirming (${locale}, ${theme})`, async () => {
+  it(`retries a failed page read before confirming, as the change is made on that page (${locale}, ${theme})`, async () => {
     await setLocale(locale);
-    if (failedRead === 'page') calls.read.mockRejectedValueOnce(missing());
-    else calls.preview.mockRejectedValueOnce(missing());
+    calls.read.mockRejectedValueOnce(missing());
     const run = vi.fn<Changes['run']>().mockResolvedValue(true);
     const close = vi.fn();
     const asked: Asked = { title: 'Review Plan', body: 'Remove a named entry from Plan.', confirmLabel: 'Remove entry', label: 'Remove entry', make: (page) => ({ expected_revision: page.revision }) };
@@ -68,15 +67,32 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const confirm = screen.getByRole('button', { name: asked.confirmLabel });
     expect(confirm).toBeDisabled();
     expect(run).not.toHaveBeenCalled();
-    expect(screen.queryByText(i18n.t('access.preview.nobody'), { exact: true })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
-    await screen.findByText(i18n.t('access.preview.nobody'), { exact: true });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);
     await waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(run).toHaveBeenCalledWith({ label: asked.label, make: asked.make });
-    expect(calls.read).toHaveBeenCalledTimes(failedRead === 'page' ? 2 : 1);
-    expect(calls.preview).toHaveBeenCalledTimes(failedRead === 'preview' ? 2 : 1);
+    expect(calls.read).toHaveBeenCalledTimes(2);
+  });
+
+  it(`confirms while the account of whom it reaches failed, and that account can still be retried (${locale}, ${theme})`, async () => {
+    await setLocale(locale);
+    calls.preview.mockRejectedValueOnce(missing());
+    const run = vi.fn<Changes['run']>().mockResolvedValue(true);
+    const close = vi.fn();
+    const asked: Asked = { title: 'Review Plan', body: 'Remove a named entry from Plan.', confirmLabel: 'Remove entry', label: 'Remove entry', make: (page) => ({ expected_revision: page.revision }) };
+    const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: vi.fn(), again: () => Promise.resolve(false), run };
+    show(<div data-theme={theme}><ChangePreview source={{ type: 'page', target }} asked={asked} changes={changes} onClose={close} /></div>);
+    const error = await screen.findByRole('alert');
+    expect(error).toHaveTextContent(apiErrorSentence('not_found', 404, i18n.t, locale));
+    const confirm = screen.getByRole('button', { name: asked.confirmLabel });
+    expect(confirm).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+    await screen.findByText(i18n.t('access.preview.nobody'), { exact: true });
+    await userEvent.click(confirm);
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(run).toHaveBeenCalledWith({ label: asked.label, make: asked.make });
+    expect(calls.preview).toHaveBeenCalledTimes(2);
   });
 
   it(`keeps a refused copy as Copy, shows the native cause, then retries the same copy (${locale}, ${theme})`, async () => {

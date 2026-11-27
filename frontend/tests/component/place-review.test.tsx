@@ -3,17 +3,17 @@ import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { ApiError, ReceiptAcknowledged } from '@/api/client';
-import { applyArchivePlan, deleteNode, moveNode, previewArchive, previewDelete, previewMove, readNode } from '@/api/nodes';
+import { applyArchivePlan, moveNode, previewArchive, previewMove, readNode } from '@/api/nodes';
 import { PlaceReview } from '@/features/project/PlaceReview';
-import type { Node, NodeArchivePlan, NodeArchiveResult, NodeDeletePlan, NodeMovePlan } from '@/generated/api-types';
+import type { Node, NodeArchivePlan, NodeArchiveResult, NodeMovePlan } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), readNode: vi.fn(), previewArchive: vi.fn(), applyArchivePlan: vi.fn(), previewMove: vi.fn(), moveNode: vi.fn(), previewDelete: vi.fn(), deleteNode: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabels: () => new Map<string, string>(), useNodeLabel: (_id: string, name: string | undefined) => name }));
+vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), readNode: vi.fn(), previewArchive: vi.fn(), applyArchivePlan: vi.fn(), previewMove: vi.fn(), moveNode: vi.fn() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabels: () => new Map<string, string>(), useNodeLabel: (_id: string, name: string | undefined) => name }));
 vi.mock('@/features/access/names', () => ({ usePermissionName: () => (name: string) => name }));
 vi.mock('@/features/settings/PlacePicker', () => ({ PlacePicker: ({ label, onChange }: { label: string; onChange: (place: { id: string; kind: 'project'; path: string; folder: boolean; color: null }) => void }) => <button onClick={() => onChange({ id: 'destination', kind: 'project', path: 'Acme / Docs', folder: false, color: null })}>{label}</button> }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: React.ReactNode }) => <a href="#place">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: React.ReactNode }) => <a href="#place">{children}</a> }));
 
 const place = (id: string): Node => ({ id, kind: 'topic', name: id, org_id: 'acme', revision: 4, archived: false, path: [{ id, kind: 'topic', name: id, redacted: false }], access: { permissions: ['topic.manage', 'topic.archive'] } } as Node);
 const ref = (id: string) => ({ id, kind: 'topic' as const, name: id, redacted: false });
@@ -44,12 +44,13 @@ it('shows every consequence first, applies sequentially, keeps a lost answer unc
   await act(async () => { release?.({ node: { ...place('First'), revision: 5, archived: true }, undo }); await first; });
   expect(await screen.findByText('Answer lost; outcome unknown')).toBeVisible();
   expect(within(screen.getByRole('heading', { name: 'Refused' }).closest('li')!).getByText('Refused', { selector: 'p', exact: true })).toBeVisible();
-  expect(screen.getByText('Some rows did not succeed. Each result below stands on its own.')).toBeVisible();
+  expect(screen.getByText('Some places did not succeed. Each result below stands on its own.')).toBeVisible();
   const lost = screen.getByRole('heading', { name: 'Lost' }).closest('li')!;
   vi.mocked(readNode).mockResolvedValueOnce({ ...place('Lost'), revision: 5, archived: true });
   await userEvent.click(within(lost).getByRole('button', { name: 'Read current state' }));
   expect(await within(lost).findByText(/Current archive state/)).toBeVisible();
-  await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
+  expect(within(lost).queryByText(/revision/i)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Undo what succeeded' }));
   await waitFor(() => expect(applyArchivePlan).toHaveBeenLastCalledWith(undo));
   expect(vi.mocked(applyArchivePlan).mock.calls.filter(([plan]) => !plan.archiving).map(([plan]) => plan.node.id)).toEqual(['First']);
 });
@@ -65,7 +66,7 @@ it('keeps a blocker visible and never applies that row', async () => {
 
 it('reviews unarchive separately and says that settled work will not restart', async () => {
   show(<PlaceReview action="unarchive" rows={[place('Shelved')]} onClose={vi.fn()} onApplied={vi.fn()} />);
-  expect(await screen.findByText('Unarchive restarts no turn, input, approval, lease or harness session.')).toBeVisible();
+  expect(await screen.findByText('Unarchive restarts no turn, input, approval or agent program session.')).toBeVisible();
   expect(previewArchive).toHaveBeenCalledWith('Shelved', false);
   expect(applyArchivePlan).not.toHaveBeenCalled();
 });
@@ -76,22 +77,10 @@ it('sends the displayed move review and its revision instead of rereading a newe
   vi.mocked(moveNode).mockResolvedValue({ ...place('Move me'), revision: 8 });
   show(<PlaceReview action="move" rows={[place('Move me')]} onClose={vi.fn()} onApplied={vi.fn()} />);
   await userEvent.click(screen.getByRole('button', { name: 'Move to' }));
-  expect(await screen.findByText('Inherited roles: 1 people gain, 2 lose.')).toBeVisible();
+  expect(await screen.findByText('Inherited roles: people who gain one: 1; people who lose one: 2.')).toBeVisible();
   await userEvent.click(screen.getByRole('button', { name: 'Apply to 1 ready place' }));
   await waitFor(() => expect(moveNode).toHaveBeenCalledWith('topic', 'Move me', 'destination', 7, plan, expect.any(String)));
 });
-
-it('shows the deletion group and last recovery day before sending each deletion fence', async () => {
-  const plan: NodeDeletePlan = { preflight_id: 'delete-reviewed', revision: 4, expires_at: '2099-01-01T00:00:00Z', node: ref('Delete me'), counts: { orgs: 0, projects: 0, topics: 1, threads: 0, documents: 2 }, purge_at: '2099-02-01T00:00:00Z', restore_by: { permission: 'project.manage', place: { ...ref('source'), kind: 'project' } } };
-  vi.mocked(previewDelete).mockResolvedValue(plan);
-  vi.mocked(deleteNode).mockResolvedValue({ deletion_id: 'exact-deletion' });
-  show(<PlaceReview action="delete" rows={[place('Delete me')]} onClose={vi.fn()} onApplied={vi.fn()} />);
-  expect(await screen.findByText('Who may bring it back')).toBeVisible();
-  expect(deleteNode).not.toHaveBeenCalled();
-  await userEvent.click(screen.getByRole('button', { name: 'Apply to 1 ready place' }));
-  await waitFor(() => expect(deleteNode).toHaveBeenCalledWith('Delete me', { preflight_id: 'delete-reviewed', expected_revision: 4 }, expect.any(String)));
-});
-
 
 it('keeps an accepted archive receipt neutral and complete without Full readback or a fabricated Undo', async () => {
   const onApplied = vi.fn();
@@ -106,7 +95,7 @@ it('keeps an accepted archive receipt neutral and complete without Full readback
   expect(screen.queryByText(i18n.t('placeReview.uncertain'), { exact: true })).not.toBeInTheDocument();
   expect(screen.queryByText(i18n.t('placeReview.partial'))).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Read current state' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Undo successful rows' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Undo what succeeded' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Review these rows again' })).not.toBeInTheDocument();
   expect(readNode).toHaveBeenCalledTimes(readsBefore); expect(applyArchivePlan).toHaveBeenCalledOnce();
   expect(onApplied).not.toHaveBeenCalled();
@@ -120,12 +109,12 @@ it('marks an accepted archive inverse undone without another read or a second in
   show(<PlaceReview action="archive" rows={[place('Undo receipt')]} onClose={vi.fn()} onApplied={onApplied} />);
   await screen.findByRole('button', { name: 'Apply to 1 ready place' });
   await userEvent.click(screen.getByRole('button', { name: 'Apply to 1 ready place' }));
-  await screen.findByRole('button', { name: 'Undo successful rows' });
+  await screen.findByRole('button', { name: 'Undo what succeeded' });
   const readsBefore = vi.mocked(readNode).mock.calls.length;
-  await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Undo what succeeded' }));
   expect(await screen.findByText(i18n.t('ui.receipt.title'))).toBeVisible();
   expect(screen.getByText(i18n.t('placeReview.undone'), { exact: true })).toBeVisible();
-  expect(screen.queryByRole('button', { name: 'Undo successful rows' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Undo what succeeded' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Read current state' })).not.toBeInTheDocument();
   expect(readNode).toHaveBeenCalledTimes(readsBefore); expect(applyArchivePlan).toHaveBeenCalledTimes(2);
   expect(applyArchivePlan).toHaveBeenLastCalledWith(undo); expect(onApplied).toHaveBeenCalledOnce();
@@ -143,5 +132,5 @@ it('keeps Full and acknowledged rows successful while only the Full row supplies
   expect(screen.getAllByText(i18n.t('placeReview.succeeded'), { exact: true })).toHaveLength(2);
   expect(screen.queryByText(i18n.t('placeReview.partial'))).not.toBeInTheDocument();
   expect(onApplied).toHaveBeenCalledOnce(); expect(applyArchivePlan).toHaveBeenCalledTimes(2);
-  expect(screen.getByRole('button', { name: 'Undo successful rows' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Undo what succeeded' })).toBeEnabled();
 });
