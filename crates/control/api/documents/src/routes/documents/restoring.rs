@@ -227,12 +227,13 @@ impl effects::Effect for Restores {
                     request_ref: orch_types::new_id().to_string(),
                     version: None,
                 };
+                let options = crate::routes::document_tree::options(ctx, conn).await?;
                 let prepared = document_tree_domain::prepare_document_restoration_in(
                     conn,
                     document_tree_domain::Actor::Person(&principal),
                     &request,
                     principal.now(),
-                    crate::routes::document_tree::options(ctx),
+                    options,
                 )
                 .await;
                 let prepared = crate::routes::document_tree::result(conn, prepared).await?;
@@ -306,12 +307,13 @@ impl effects::ApplyOwned for Restores {
                 })?;
             let packet = Arc::try_unwrap(packet)
                 .map_err(|_| ApiError::internal("the native restoration packet is still in use"))?;
+            let options = crate::routes::document_tree::options(ctx, &mut tx).await?;
             let result = document_tree_domain::apply_document_restoration_in(
                 &mut tx,
                 document_tree_domain::Actor::Person(principal),
                 packet,
                 principal.now(),
-                crate::routes::document_tree::options(ctx),
+                options,
                 move || {
                     before.check()?;
                     if value

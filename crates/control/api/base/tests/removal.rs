@@ -188,6 +188,51 @@ async fn what_was_deleted_earlier_stays_deleted_when_the_node_above_it_is_brough
 }
 
 #[tokio::test]
+async fn a_deleted_node_can_be_brought_back_for_the_days_the_system_keeps_deleted_items() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let days = serde_json::json!(7);
+    orch_db::queries::settings::put(
+        &mut *world.conn().await,
+        None,
+        "retention.deleted_keep_days",
+        &orch_db::queries::settings::Stored {
+            value: &days,
+            locked: false,
+            by: None,
+            at: world.now(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    delete(&world, &s.boss, s.web).await.ok();
+    let listed = world
+        .app
+        .call(NodeDeletedList, &[&s.acme])
+        .token(&s.boss.token)
+        .query(&PageQuery::default())
+        .send()
+        .await
+        .ok();
+    let item = &listed.items[0];
+    assert_eq!(
+        item.purge_at.get() - item.deleted_at.get(),
+        Duration::days(7),
+        "the system's setting decides how long a deleted node can be brought back"
+    );
+    world.advance(Duration::days(8));
+    let gone = world
+        .app
+        .call(NodeRestore, &[&s.web])
+        .token(&s.boss.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(gone.code, ErrorCode::Gone);
+}
+
+#[tokio::test]
 async fn a_node_deleted_longer_ago_than_the_retention_is_gone_for_good() {
     let world = World::new().await;
     let s = setup(&world).await;

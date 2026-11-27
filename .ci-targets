@@ -1,0 +1,4 @@
+test -p orch-worker-core --test document_maintenance --test command_purge --test upkeep
+test -p orch-api-core --test settings --test removal --test kfix_upload -- --skip upgrading_old_drafts_does_not_release_the_pin_of_reuploaded_missing_bytes
+test -p orch-api-core --test resource_groups -- pools::
+test -p orch-api-core --lib -- key_operations::completed_projection_tests routes::resources::mounts::read::tests

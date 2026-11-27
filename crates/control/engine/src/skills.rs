@@ -12,6 +12,7 @@
 
 pub mod archive;
 pub mod front_matter;
+pub(crate) mod outcomes;
 pub mod resolve;
 pub mod versions;
 
