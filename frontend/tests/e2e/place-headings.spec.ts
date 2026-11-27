@@ -19,7 +19,11 @@ const PLACES = [
 ] as const;
 
 /** The acts of a place's menu that open a dialog about the place itself. */
-const ACTS = ['Rename…', 'Move to…', 'Colour…', 'Archive…', 'Delete…', 'Recently deleted…'] as const;
+// Archive is made at once when it stops nothing, and Delete moves the place to the Trash at once, so neither opens a
+// dialog to name the place in; only an org that lies in another keeps its Delete dialog (where its members and
+// resources go).
+const ACTS = ['Rename…', 'Move to…', 'Colour…', 'Trash…'] as const;
+const actsOf = (kind: string): readonly string[] => kind === 'department' ? [...ACTS, 'Delete'] : ACTS;
 
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -33,7 +37,7 @@ for (const place of PLACES) {
     await page.goto(place.screen);
     const named = new RegExp(`the ${place.kind} ${escaped(place.name)}, in ${escaped(place.above)}`);
     const opened: string[] = [];
-    for (const act of ACTS) {
+    for (const act of actsOf(place.kind)) {
       await page.getByRole('button', { name: new RegExp(`^Actions for ${escaped(place.name)}(?: · .+)?$`) }).first().click();
       // The menu says what may be done once it knows: until then it is checking.
       const menu = page.getByRole('menu');
@@ -56,8 +60,8 @@ for (const place of PLACES) {
       await page.keyboard.press('Escape');
       await expect(page.getByRole('dialog').or(page.getByRole('alertdialog'))).toHaveCount(0);
     }
-    // Every place offers at least its name, its place and its removal to whoever manages it.
-    expect(opened).toEqual(expect.arrayContaining(['Rename…', 'Delete…']));
+    // Every place offers at least its name to whoever manages it, and an org in another its Delete dialog.
+    expect(opened).toEqual(expect.arrayContaining(place.kind === 'department' ? ['Rename…', 'Delete'] : ['Rename…']));
   });
 }
 

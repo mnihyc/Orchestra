@@ -11,12 +11,13 @@
  *
  * Components read through the hooks at the end. The writers are for the live connection alone.
  */
+import { mergeStopping } from '@/lib/threadStopping';
 import { currentThreadDisplay } from '@/lib/threadDisplay';
-import type { ThreadDisplay } from '@/generated/api-types';
-import { useStore } from 'zustand';
+import type { ThreadDisplay, ThreadStopping } from '@/generated/api-types';
+import { useCallback, useSyncExternalStore } from 'react';
 import { create } from 'zustand';
 
-import type { Item, PresenceUser, Segment, Thread, ThreadContinuationProjection, ThreadInput, ThreadInputPage, ThreadPromptSummary, ThreadPromptVersion, Turn } from '@/generated/api-types';
+import type { Item, PresenceUser, RetainedInput, RetainedInputContinuation, Segment, Thread, ThreadContinuationProjection, ThreadInput, ThreadInputPage, ThreadPromptSummary, ThreadPromptVersion, Turn } from '@/generated/api-types';
 import { matchesThreadCapture, matchesThreadProjection, newThreadReadScope, planThreadOpening, projectionFitsSelection, promptReceipt, sameThreadProjection, stampThreadReceipt, threadReceipt, type ThreadReadCapture, type ThreadReadScope, type ThreadReadRef, type ThreadReadTarget, sameThreadRead, threadReadCacheKey, threadReadTarget } from '@/realtime/threadScope';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { newOutputCounts, observeOutput, type OutputCounts } from '@/realtime/outputCounts';
@@ -33,6 +34,8 @@ import {
 
 /** The rows of a thread as a sync answer or a frame carries them: each member there only when rows of its kind changed. */
 export interface ThreadRows {
+  retained_inputs?: readonly RetainedInput[] | null | undefined;
+  retained_inputs_next?: readonly RetainedInputContinuation[] | null | undefined;
   /** Sequence of the admitted opening or socket cut, independent of optional thread-row changes. */
   seq?: number | undefined;
   projection?: ThreadContinuationProjection | null | undefined;
@@ -46,6 +49,13 @@ export interface ThreadRows {
   turns?: readonly Turn[] | null | undefined;
   inputs?: readonly ThreadInput[] | null | undefined;
   segments?: readonly Segment[] | null | undefined;
+}
+
+type RetainedPage = Pick<ThreadRows, 'retained_inputs' | 'retained_inputs_next'>;
+
+function applyRetainedPage(view: ThreadView, page: RetainedPage): ThreadView {
+  if (!page.retained_inputs?.length && !page.retained_inputs_next?.length) return view;
+  return applyRows(view, { retained_inputs: page.retained_inputs, retained_inputs_next: page.retained_inputs_next });
 }
 
 export type Loaded = 'none' | 'tail' | 'window';
@@ -70,6 +80,8 @@ const EMPTY_QUEUE: QueuePageState = { nextAfter: null, headNextAfter: null, revi
   error: null, restartRequired: false, tail: new Set(), request: null };
 
 export interface ThreadView {
+  retainedInputs: ReadonlyMap<string, RetainedInput>;
+  retainedCursors: ReadonlyMap<string | null, string>;
   ref: ThreadReadRef | null;
   read: ThreadReadScope | null;
   promptSummaries: ReadonlyMap<string, ThreadPromptSummary>;
@@ -79,8 +91,12 @@ export interface ThreadView {
   viewedPromptSeq: number | null;
   queuePage: QueuePageState;
   thread: Thread | null;
+  /** Accepted Stop survives independently while the ordinary bootstrap row is still loading. */
+  stopping?: ThreadStopping | null;
   /** How much of the conversation is held: nothing, its newest part, or a window somewhere in it. */
   loaded: Loaded;
+  /** Last admitted feed cut; metadata rows alone never advance this cursor. */
+  lastSeq: number | null;
   /** Whether older items exist than the oldest held. */
   hasOlder: boolean;
   /** Whether newer items exist than the newest held; true only for a window that was read around an item. */
@@ -110,9 +126,16 @@ export interface ThreadView {
   error: unknown;
   /** The server ended the feed: the reader may no longer see the thread, or it is gone. */
   closed: 'revoked' | 'deleted' | null;
+  /**
+   * The rows are those of a read that was retired (a reload, a changed history, a gap): they stay on screen, read-only,
+   * until the next whole answer replaces them, so a reload never blanks the conversation. Nothing is merged into them.
+   */
+  retired?: boolean;
 }
 
 export const EMPTY_VIEW: ThreadView = {
+  retainedInputs: new Map(),
+  retainedCursors: new Map(),
   ref: null,
   read: null,
   promptSummaries: new Map(),
@@ -121,6 +144,7 @@ export const EMPTY_VIEW: ThreadView = {
   queuePage: EMPTY_QUEUE,
   thread: null,
   loaded: 'none',
+  lastSeq: null,
   hasOlder: false,
   hasNewer: false,
   items: new Map(),
@@ -144,8 +168,18 @@ export const EMPTY_VIEW: ThreadView = {
 
 const MAIN_STREAM = 'main';
 
-/** Orders two queue positions, which are decimal strings of any length. */
+/** Orders two queue positions, which are decimal strings of any length. A message put first takes the place one below the first that waits,
+ * so a position can be zero or negative: the sign is read before the length is, or the second message put first would stand last. */
 export function comparePositions(one: string, other: string): number {
+  const below = one.startsWith('-');
+  const otherBelow = other.startsWith('-');
+  if (below !== otherBelow) return below ? -1 : 1;
+  const order = comparePlaces(below ? one.slice(1) : one, otherBelow ? other.slice(1) : other);
+  return order === 0 || !below ? order : -order;
+}
+
+/** Orders two unsigned decimal strings. */
+function comparePlaces(one: string, other: string): number {
   const [wholeOne = '0', fractionOne = ''] = one.split('.');
   const [wholeOther = '0', fractionOther = ''] = other.split('.');
   const left = wholeOne.replace(/^0+(?=\d)/, '');
@@ -185,6 +219,9 @@ export function applyRows(view: ThreadView, rows: ThreadRows): ThreadView {
     }
   }
 
+  if (typeof rows.seq === 'number' && Number.isSafeInteger(rows.seq) && rows.seq >= 0
+    && (next.lastSeq === null || rows.seq > next.lastSeq)) update({ lastSeq: rows.seq });
+
   if (rows.viewed_prompt !== undefined && (rows.seq === undefined || next.viewedPromptSeq === null || rows.seq >= next.viewedPromptSeq)) {
     update({ viewedPrompt: rows.viewed_prompt, viewedPromptSeq: rows.seq ?? null });
   }
@@ -192,14 +229,33 @@ export function applyRows(view: ThreadView, rows: ThreadRows): ThreadView {
   if (rows.thread !== undefined && rows.thread !== null) {
     const held = next.thread;
     const newer = held === null || rows.thread.seq > held.seq || (rows.thread.seq === held.seq && rows.thread.revision > held.revision);
+    const stopping = mergeStopping(mergeStopping(next.stopping, held?.stopping), rows.thread.stopping);
+    if (stopping !== (next.stopping ?? null)) update({ stopping });
     if (newer) {
       const turnId = rows.thread.current_turn_id;
       const display = currentThreadDisplay(rows.thread.display, held?.display);
       update({
-        thread: display === undefined || display === rows.thread.display ? rows.thread : { ...rows.thread, display },
+        thread: stopping === (rows.thread.stopping ?? null) && (display === undefined || display === rows.thread.display)
+          ? rows.thread : { ...rows.thread, stopping, ...(display === undefined ? {} : { display }) },
         ...(next.outputCounts.turnId === turnId ? {} : { outputCounts: newOutputCounts(turnId) }),
       });
+    } else if (stopping !== (held.stopping ?? null)) {
+      update({ thread: { ...held, stopping } });
     }
+  }
+
+  if (rows.retained_inputs?.length) {
+    const records = new Map(next.retainedInputs);
+    for (const input of rows.retained_inputs) {
+      const held = records.get(input.id);
+      if (held === undefined || input.seq_updated >= held.seq_updated) records.set(input.id, input);
+    }
+    update({ retainedInputs: records });
+  }
+  if (rows.retained_inputs_next?.length) {
+    const cursors = new Map(next.retainedCursors);
+    for (const group of rows.retained_inputs_next) cursors.set(group.after_item, group.cursor);
+    update({ retainedCursors: cursors });
   }
 
   if (rows.turns !== undefined && rows.turns !== null && rows.turns.length > 0) {
@@ -477,7 +533,24 @@ interface ThreadStore {
 
 export const useThreadStore = create<ThreadStore>(() => ({ byThread: new Map() }));
 
-function update(threadId: ThreadReadTarget, change: (view: ThreadView) => ThreadView): void {
+// A text, reasoning or output delta changes a growing body. Controls that read metadata
+// can retain the same row frame until a non-delta publication, including a refusal or reset.
+const beforeStream = new WeakMap<ThreadView, { controls: ThreadView; timeline: ThreadView; agentItems: ThreadView['items'] }>();
+export function threadRowFrame(view: ThreadView): ThreadView {
+  return beforeStream.get(view)?.controls ?? view;
+}
+
+/** The list groups by row metadata, the first nonblank agent text and exact completed echoes. */
+export function threadTimelineFrame(view: ThreadView): ThreadView {
+  return beforeStream.get(view)?.timeline ?? view;
+}
+
+/** The Agents list shows live text from child streams. The main reply cannot change that list. */
+export function agentCatalogItems(view: ThreadView): ThreadView['items'] {
+  return beforeStream.get(view)?.agentItems ?? view.items;
+}
+
+function update(threadId: ThreadReadTarget, change: (view: ThreadView) => ThreadView, pieces?: readonly Delta[]): void {
   const ref = threadReadTarget(threadId);
   const key = threadReadCacheKey(ref);
   useThreadStore.setState((state) => {
@@ -485,7 +558,25 @@ function update(threadId: ThreadReadTarget, change: (view: ThreadView) => Thread
     const after = change(before);
     if (after === before) return state;
     const byThread = new Map(state.byThread);
-    byThread.set(key, { ...after,ref });
+    const published = { ...after, ref };
+    if (pieces !== undefined) {
+      const timeline = threadTimelineFrame(before);
+      const regroup = pieces.some((piece) => {
+        if (piece.field !== 'text') return false;
+        const item = after.items.get(piece.item_id);
+        if (item?.kind !== 'agent_message' || item === before.items.get(piece.item_id)) return false;
+        if (item.status === 'completed') return true;
+        const previous = timeline.items.get(item.id);
+        return previous?.kind !== 'agent_message' || !/\S/.test(previous.payload.text) && /\S/.test(item.payload.text);
+      });
+      const childUpdate = after.streams.size > 0 && pieces.some((piece) => {
+        const item = after.items.get(piece.item_id);
+        return item !== undefined && item.stream !== 'main' && item !== before.items.get(piece.item_id);
+      });
+      beforeStream.set(published, { controls: threadRowFrame(before), timeline: regroup ? published : timeline,
+        agentItems: childUpdate ? after.items : agentCatalogItems(before) });
+    }
+    byThread.set(key, published);
     return { byThread };
   });
 }
@@ -504,7 +595,24 @@ export function setThreadReadRetainer(handler: (threadId: string, ref: ThreadRea
 export function setThreadReadChangeHandler(handler: (threadId: string, ref: ThreadReadRef) => void): void { onReadChange = handler; }
 
 function withoutHistory(view: ThreadView, read: ThreadReadScope): ThreadView {
-  return { ...EMPTY_VIEW, thread: view.thread, presence: view.presence, read };
+  return { ...EMPTY_VIEW, thread: view.thread, presence: view.presence, read,
+    ...(read.reader === view.read?.reader ? { stopping: view.stopping ?? null } : {}) };
+}
+
+/**
+ * A retired read keeps what it showed until a whole answer replaces it: its tickets, waiting pieces and queue page are
+ * retired at once, its rows stay on screen read-only. A view that showed nothing, or that ended, has nothing to keep.
+ */
+function keptUntilReplaced(view: ThreadView, read: ThreadReadScope): ThreadView {
+  if (view.loaded === 'none' || view.closed !== null || read.reader !== view.read?.reader) return withoutHistory(view, read);
+  return { ...view, read, retired: true, held: new Map(), gaps: new Set(),
+    queuePage: { ...view.queuePage, loading: false, request: null } };
+}
+
+/** A refusal of the reader (gone, or no longer theirs) ends what a retired read kept; a failure of the line keeps it, greyed. */
+function refusesReader(error: unknown): boolean {
+  const status = typeof error === 'object' && error !== null && 'status' in error ? error.status : null;
+  return status === 403 || status === 404;
 }
 
 /** A requested locator is not authority: retain it while replacing every reader/content ticket. */
@@ -525,7 +633,7 @@ function accepts(view: ThreadView, threadId: ThreadReadTarget, rows: ThreadRows,
     && row.continuation_id !== projected.viewed_continuation_id)) return false;
   if (captured !== undefined) return sameThreadRead(captured.ref,threadId) && matchesThreadCapture(scope, captured)
     && scope !== null && matchesThreadProjection(scope, captured);
-  const objects: object[] = [...(rows.items ?? []), ...(rows.turns ?? []), ...(rows.inputs ?? []), ...(rows.segments ?? [])];
+  const objects: object[] = [...(rows.items ?? []), ...(rows.turns ?? []), ...(rows.inputs ?? []), ...(rows.segments ?? []), ...(rows.retained_inputs ?? []), ...(rows.retained_inputs_next ?? [])];
   if (rows.thread !== undefined && rows.thread !== null) objects.push(rows.thread);
   for (const row of objects) {
     const receipt = threadReceipt(row);
@@ -541,17 +649,37 @@ export function threadReadOnly(view: ThreadView): boolean {
     || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
 }
 
+/** Stop names current work and needs no history revision, even while that history reloads. */
+export function threadStopReadOnly(view: ThreadView): boolean {
+  return view.closed !== null || view.read !== null && (view.read.selection !== null
+    || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
+}
+
+/**
+ * The conversation of the active history is on screen while its read is being taken again (a reload, a reconnect, a
+ * changed history) or after taking it again failed: the page keeps showing it, read-only, and swaps in the new answer when
+ * it arrives. Only a first opening, an ended thread or an explicitly selected older version has nothing kept to show.
+ */
+export function threadKeepsContent(view: ThreadView): boolean {
+  const read = view.read;
+  return view.closed === null && view.loaded !== 'none' && view.thread !== null && read !== null
+    && (!read.ready || view.error !== null) && read.selection === null
+    && (read.projection === null || read.projection.viewed_continuation_id === read.projection.active_continuation_id);
+}
+
 /** Read readiness is not native preparation status; viewedPrompt supplies that independent fact. */
 export function threadReadState(view: ThreadView): {
   selection: string | null;
   projection: ThreadContinuationProjection | null;
   readiness: 'loading' | 'ready' | 'failed' | 'closed';
   readOnly: boolean;
+  /** What is shown stays shown while it is read again (`threadKeepsContent`); acts still wait for the fresh read. */
+  kept: boolean;
 } {
   const readiness = view.closed !== null ? 'closed' : view.error !== null ? 'failed'
     : view.loaded === 'none' || view.read?.ready === false ? 'loading' : 'ready';
   return { selection: view.read?.selection ?? null, projection: view.read?.projection ?? null,
-    readiness, readOnly: readiness !== 'ready' || threadReadOnly(view) };
+    readiness, readOnly: readiness !== 'ready' || threadReadOnly(view), kept: threadKeepsContent(view) };
 }
 
 /** Asked to read an item again, when a piece of its growing text began beyond what was held. */
@@ -586,7 +714,7 @@ export function flushDeltas(): void {
       const result = applyDeltas(view, batch.pieces);
       gaps.push(...result.gaps);
       return result.view;
-    });
+    }, batch.pieces);
     for (const itemId of gaps) onGap(batch.ref.threadId, itemId, batch.captured);
   }
 }
@@ -648,11 +776,11 @@ export const threadWriter = {
     onReadChange(threadReadTarget(threadId).threadId,threadReadTarget(threadId));
   },
 
-  /** A known gap/scope reset retires outstanding receipts before the new bounded opening. */
+  /** A known gap/scope reset retires outstanding receipts before the new bounded opening; what is shown stays until it arrives. */
   invalidate(threadId: ThreadReadTarget, notify = true): void {
     queued.delete(threadReadCacheKey(threadId));
     threadViewOf(threadId).read?.controller.abort();
-    update(threadId, (view) => view.read === null ? view : withoutHistory(view,
+    update(threadId, (view) => view.read === null ? view : keptUntilReplaced(view,
       { ...view.read, epoch: view.read.epoch + 1, projection: null, ready: false, switched: true,
         provisional: false, opening: false, controller: new AbortController() }));
     if (notify) onReadChange(threadReadTarget(threadId).threadId,threadReadTarget(threadId));
@@ -675,7 +803,8 @@ export const threadWriter = {
         const changed = next.epoch !== read.epoch;
         if (changed) read.controller.abort();
         read = next;
-        if (changed) base = withoutHistory(view, read);
+        // Rows kept from a retired read are replaced whole by this answer, never merged with it.
+        if (changed || view.retired === true) base = withoutHistory(view, read);
         accepted = { ref: read.ref,threadId: read.ref.threadId, scope: read };
       }
       return viewFromRows({ ...base, read }, rows, hasOlder);
@@ -697,6 +826,17 @@ export const threadWriter = {
       }
       const next = applyRows(view, admitted);
       return next.error === null || next.read?.ready === false ? next : { ...next, error: null };
+    });
+  },
+
+  /** Stop observations remain valid through a reload; a replacement reader or selected history cannot receive an old answer. */
+  stopping(threadId: ThreadReadTarget, state: ThreadStopping, captured?: ThreadReadCapture): void {
+    update(threadId, (view) => {
+      if (view.closed !== null || captured !== undefined && (!sameThreadRead(captured.ref, threadId)
+        || view.read === null || view.read.reader !== captured.scope.reader || view.read.selection !== captured.scope.selection)) return view;
+      const stopping = mergeStopping(mergeStopping(view.stopping, view.thread?.stopping), state);
+      if (stopping === (view.stopping ?? null) && (view.thread === null || stopping === (view.thread.stopping ?? null))) return view;
+      return { ...view, stopping, ...(view.thread === null ? {} : { thread: { ...view.thread, stopping } }) };
     });
   },
 
@@ -805,18 +945,42 @@ export const threadWriter = {
     });
   },
 
+  retainedPage(threadId: ThreadReadTarget, group: RetainedInputContinuation, page: RetainedPage, captured: ThreadReadCapture): void {
+    update(threadId, (view) => {
+      if (!accepts(view, threadId, page, captured) || view.retainedCursors.get(group.after_item) !== group.cursor) return view;
+      const cursors = new Map(view.retainedCursors);
+      cursors.delete(group.after_item);
+      return applyRetainedPage({ ...view, retainedCursors: cursors }, page);
+    });
+  },
+
   /** Older items, read when the reader came to the top. */
-  older(threadId: ThreadReadTarget, rows: readonly Item[], hasOlder: boolean, captured?: ThreadReadCapture): void {
-    update(threadId, (view) => accepts(view, threadId, { items: rows }, captured)
-      ? prunePromptMetadata({ ...applyItems(view, rows), hasOlder }) : view);
+  older(threadId: ThreadReadTarget, rows: readonly Item[], hasOlder: boolean, captured?: ThreadReadCapture, page?: RetainedPage): void {
+    update(threadId, (view) => {
+      if (!accepts(view, threadId, { items: rows }, captured)) return view;
+      const merged = applyItems(page === undefined ? view : applyRetainedPage(view, page), rows);
+      let order = merged.order;
+      if (view.loaded === 'window' && view.hasNewer) {
+        // Live rows outside an around-item window stay hidden. A requested history
+        // page belongs in that window, even if the live cache already knows its items.
+        const shown = new Set(order);
+        const page = rows.filter((row) => row.stream === MAIN_STREAM && !shown.has(row.id)).map((row) => row.id);
+        order = mergeOrder(order, page, merged.items);
+      }
+      return prunePromptMetadata({ ...merged, order, hasOlder });
+    });
   },
 
   /** A stretch around an item, read for a link to it: it takes the place of what was held, and is not the end. */
-  window(threadId: ThreadReadTarget, rows: readonly Item[], hasOlder: boolean, hasNewer: boolean, captured?: ThreadReadCapture): void {
+  window(threadId: ThreadReadTarget, rows: readonly Item[], hasOlder: boolean, hasNewer: boolean, captured?: ThreadReadCapture, page?: RetainedPage): void {
     update(threadId, (view) => {
       if (!accepts(view, threadId, { items: rows }, captured)) return view;
+      // Only the opening supplies the group before the first item. An item window supplies its other groups.
+      const initialCursor = view.retainedCursors.get(null);
       const base: ThreadView = {
         ...view,
+        retainedInputs: new Map([...view.retainedInputs].filter(([, input]) => input.after_item === null)),
+        retainedCursors: initialCursor === undefined ? EMPTY_VIEW.retainedCursors : new Map([[null, initialCursor]]),
         loaded: hasNewer ? 'window' : 'tail',
         hasOlder,
         hasNewer,
@@ -829,7 +993,7 @@ export const threadWriter = {
       };
       // A window shows its own items, whatever the stream says about being at the end.
       const filled = applyItems({ ...base, hasNewer: false, loaded: 'tail' }, rows);
-      return prunePromptMetadata({ ...filled, loaded: base.loaded, hasNewer, hasOlder });
+      return prunePromptMetadata({ ...applyRetainedPage(filled, page ?? {}), loaded: base.loaded, hasNewer, hasOlder });
     });
   },
 
@@ -837,9 +1001,13 @@ export const threadWriter = {
     update(threadId, (view) => ({ ...view, presence: users }));
   },
 
-  /** Records that the thread could not be loaded. What is held stays, to be read greyed. */
+  /** Records that the thread could not be loaded. What is held stays, to be read greyed; a refusal of the reader ends rows a retired read kept. */
   failed(threadId: ThreadReadTarget, error: unknown): void {
-    update(threadId, (view) => ({ ...view, error, read: view.read === null ? null : { ...view.read, opening: false } }));
+    update(threadId, (view) => {
+      const read = view.read === null ? null : { ...view.read, opening: false };
+      if (view.retired === true && read !== null && refusesReader(error)) return { ...withoutHistory(view, read), error };
+      return { ...view, error, read };
+    });
   },
 
   /** Losing the required protocol identity retires controls/tickets, without discarding greyed rows. */
@@ -936,18 +1104,41 @@ export const threadWriter = {
 
 // ---------------------------------------------------------------- reading
 
+/** A frame wakes readers of its own native window. Currently mounted windows share one subscription each. */
+const windowReaders = new Map<string, { listeners: Set<() => void>; stop: () => void }>();
+function subscribeWindow(key: string, notify: () => void): () => void {
+  let group = windowReaders.get(key);
+  if (group === undefined) {
+    const listeners = new Set<() => void>();
+    const stop = useThreadStore.subscribe((next, previous) => {
+      if (next.byThread.get(key) !== previous.byThread.get(key)) listeners.forEach((listener) => listener());
+    });
+    group = { listeners, stop };
+    windowReaders.set(key, group);
+  }
+  const { listeners, stop } = group;
+  listeners.add(notify);
+  return () => {
+    if (!listeners.delete(notify)) return;
+    if (listeners.size === 0) { stop(); windowReaders.delete(key); }
+  };
+}
+
+const wholeView = (view: ThreadView): ThreadView => view;
+
 /** A thread as far as it has arrived. */
 export function useThreadView(threadId: ThreadReadTarget): ThreadView {
-  const ref = useThreadReadRef(threadId);
-  const key = threadReadCacheKey(ref);
-  return useStore(useThreadStore, (state) => state.byThread.get(key) ?? EMPTY_VIEW);
+  return useThreadPart(threadId, wholeView);
 }
 
 /** One piece of a thread, by a selector; the component draws again only when that piece changes. */
 export function useThreadPart<Part>(threadId: ThreadReadTarget, select: (view: ThreadView) => Part): Part {
   const ref = useThreadReadRef(threadId);
   const key = threadReadCacheKey(ref);
-  return useStore(useThreadStore, (state) => select(state.byThread.get(key) ?? EMPTY_VIEW));
+  const subscribe = useCallback((notify: () => void) => subscribeWindow(key, notify), [key]);
+  const snapshot = useCallback(() => select(useThreadStore.getState().byThread.get(key) ?? EMPTY_VIEW), [key, select]);
+  const initial = useCallback(() => select(useThreadStore.getInitialState().byThread.get(key) ?? EMPTY_VIEW), [key, select]);
+  return useSyncExternalStore(subscribe, snapshot, initial);
 }
 
 /** The thread row itself. */

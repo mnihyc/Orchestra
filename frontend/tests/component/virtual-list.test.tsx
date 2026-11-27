@@ -11,7 +11,7 @@ const WINDOW_PX = 600;
  * The list as the page sees it, without a browser: a content that grows as its rows are measured, a position that cannot be further
  * than the end of it, and frames that come when the test says, each after the time that a machine takes for one.
  */
-function machine(owner?: HTMLElement) {
+function machine(owner?: HTMLElement, rowHeight?: number) {
   const content = { height: 2_000 };
   const observers = new Set<() => void>();
   let viewport = WINDOW_PX;
@@ -22,7 +22,7 @@ function machine(owner?: HTMLElement) {
   const furthest = () => Math.max(0, content.height - viewport);
   vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(() => content.height);
   vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(() => viewport);
-  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(() => viewport);
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.hasAttribute('data-index') && rowHeight !== undefined ? rowHeight : viewport; });
   vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) { return owner === undefined || this === owner ? top : 0; });
   vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, value: number) {
     if (owner !== undefined && this !== owner) return;
@@ -69,6 +69,19 @@ function drawn(startAtEnd = true) {
   render(<VirtualList count={40} keyOf={(index) => `row-${index}`} estimate={() => 50} render={(index) => <p>Row {index}</p>} label="Conversation" startAtEnd={startAtEnd} />);
   return screen.getByRole('log', { name: 'Conversation' });
 }
+
+it('keeps the body of a measured row as the list redraws and replaces it when the row renderer changes', () => {
+  machine();
+  const row = vi.fn((index: number) => <p>Row {index}</p>);
+  const props = { count: 20, keyOf: (index: number) => String(index), estimate: () => 50, label: 'Conversation', startAtEnd: false };
+  const list = render(<VirtualList {...props} render={row} />);
+  expect(screen.getByText('Row 0')).toBeVisible();
+  row.mockClear();
+  list.rerender(<VirtualList {...props} render={row} className="min-h-0" />);
+  expect(row).not.toHaveBeenCalled();
+  list.rerender(<VirtualList {...props} render={(index) => <p>Updated {index}</p>} />);
+  expect(screen.getByText('Updated 0')).toBeVisible();
+});
 
 it('keeps the first row in view when the list resizes before a scroll event', () => {
   const layout = machine();
@@ -134,4 +147,133 @@ it('follows measured growth in the containing view and lets its reader stop the 
     slow.grow(300); slow.frame(500); expect(slow.distanceFromEnd()).toBe(300);
     expect(log.scrollTop).toBe(0);
   } finally { view.unmount(); viewport.remove(); }
+});
+
+it('says it is at its end again when the rows under a view held still come to end in it, without a scroll event', () => {
+  const viewport = document.createElement('div'); document.body.appendChild(viewport);
+  machine(viewport, 50);
+  const ends: boolean[] = [];
+  // The same callbacks across renders, as the conversation gives them: nothing but the rows changes.
+  const onAtEnd = (at: boolean) => { ends.push(at); };
+  const keyOf = (index: number) => `row-${index}`;
+  const estimate = () => 50;
+  const row = (index: number) => <p>Row {index}</p>;
+  // A sent message is held at the top of the view: the list does not follow, and its rows go on below the view.
+  const list = (count: number) => <VirtualList viewport={viewport} count={count} keyOf={keyOf} estimate={estimate}
+    render={row} label="Held conversation" follow={false} startAtEnd={false} onAtEnd={onAtEnd} />;
+  const view = render(list(40), { container: viewport });
+  try {
+    expect(ends.at(-1)).toBe(false);
+    // What stood below comes to end inside the view (the rows are fewer or measured shorter), and nobody scrolls.
+    view.rerender(list(10));
+    expect(ends.at(-1)).toBe(true);
+  } finally { view.unmount(); viewport.remove(); }
+});
+
+it('puts a reader who followed the end back at it when the page moves the view and its scroll comes back at the top unsaid', async () => {
+  const viewport = document.createElement('div'); document.body.appendChild(viewport);
+  const layout = machine(viewport, 50);
+  const list = () => <VirtualList viewport={viewport} count={60} keyOf={(index) => `row-${index}`} estimate={() => 50}
+    render={(index) => <p>Row {index}</p>} label="Moved conversation" />;
+  const view = render(list(), { container: viewport });
+  try {
+    for (let frame = 0; frame < 12; frame += 1) act(() => { layout.frame(500); });
+    expect(layout.distanceFromEnd()).toBe(0);
+    // The layout of a desk holds the view elsewhere than a phone's: the element leaves the document and comes back with its
+    // scroll at the top, which no scroll event says, in a taller window, and the page draws again.
+    await act(async () => {
+      viewport.scrollTop = 0;
+      layout.resize(WINDOW_PX + 120);
+      view.rerender(list());
+      await Promise.resolve();
+    });
+    for (let frame = 0; frame < 12; frame += 1) act(() => { layout.frame(500); });
+    expect(layout.distanceFromEnd()).toBe(0);
+    // A reader who goes to the top is heard, and stays there.
+    await act(async () => {
+      viewport.scrollTop = 0;
+      viewport.dispatchEvent(new Event('scroll'));
+      layout.resize(WINDOW_PX);
+      view.rerender(list());
+      await Promise.resolve();
+    });
+    for (let frame = 0; frame < 12; frame += 1) act(() => { layout.frame(500); });
+    expect(viewport.scrollTop).toBe(0);
+  } finally { view.unmount(); viewport.remove(); }
+});
+
+it('mounts the latest rows before the browser reports the initial scroll of a shared viewport', () => {
+  const viewport = document.createElement('div');
+  document.body.appendChild(viewport);
+  machine(viewport, 20);
+  const row = vi.fn((index: number) => <p>Row {index}</p>);
+  const view = render(<VirtualList viewport={viewport} count={100} keyOf={String}
+    estimate={() => 20} render={row} label="History" />, { container: viewport });
+  try {
+    // The viewport is 600 px tall and each row is 20 px. The oldest row is far beyond the buffer.
+    expect(screen.getByText('Row 99')).toBeVisible();
+    expect(row).not.toHaveBeenCalledWith(0);
+  } finally { view.unmount(); viewport.remove(); }
+});
+
+it('pages from the newest of 400 items to the first turn while folded pages keep the reader at the upper edge', () => {
+  const viewport = document.createElement('div');
+  document.body.appendChild(viewport);
+  const layout = machine(viewport, 20);
+  viewport.scrollTo = (options?: ScrollToOptions | number) => { if (typeof options === 'object' && options.top !== undefined) viewport.scrollTop = options.top; };
+  const items = Array.from({ length: 400 }, (_, index) => index + 1);
+  let loaded = items.slice(-100);
+  const before: number[] = [];
+  const loadPage = () => {
+    const cursor = loaded[0]!;
+    if (cursor === 1 || before.at(-1) === cursor) return;
+    before.push(cursor);
+  };
+  const list = () => {
+    // The latest turn is expanded. Earlier work is folded into groups of 25 items.
+    const rows = loaded.filter((id) => id >= 301 || id % 25 === 1);
+    return <VirtualList viewport={viewport} count={rows.length} keyOf={(i) => String(rows[i])}
+      render={(i) => <span>History item {rows[i]}</span>} estimate={() => 20} label="History"
+      olderCursor={loaded[0] === 1 ? undefined : loaded[0]} onNearStart={loadPage} />;
+  };
+  const view = render(list(), { container: viewport });
+  try {
+    expect(before).toEqual([]);
+    act(() => {
+      viewport.dispatchEvent(new Event('wheel'));
+      viewport.scrollTop = 10;
+      viewport.dispatchEvent(new Event('scroll'));
+    });
+    for (const cursor of [301, 201, 101]) {
+      expect(before.at(-1)).toBe(cursor);
+      const page = items.slice(cursor - 101, cursor - 1);
+      loaded = [...page, ...loaded];
+      layout.grow(80);
+      view.rerender(list());
+      act(() => layout.frame(16));
+      // Each page adds four visible rows above item 301, at the same offset.
+      expect(viewport.scrollTop).toBe(10 + (301 - loaded[0]!) / 100 * 80);
+    }
+    expect(before).toEqual([301, 201, 101]);
+    act(() => { viewport.scrollTop = 0; viewport.dispatchEvent(new Event('scroll')); });
+    expect(screen.getByText('History item 1')).toBeVisible();
+  } finally { view.unmount(); viewport.remove(); }
+});
+
+it('reads an earlier page on a touch scroll at the physical top even without a scroll event', () => {
+  const owner = document.createElement('div');
+  document.body.appendChild(owner);
+  machine(owner);
+  const earlier = vi.fn();
+  const view = render(<VirtualList viewport={owner} count={1} keyOf={() => 'only'} render={() => 'Work'}
+    estimate={() => 40} label="History" startAtEnd={false} olderCursor={301} onNearStart={earlier} />, { container: owner });
+  try {
+    act(() => {
+      owner.dispatchEvent(Object.assign(new Event('touchstart'), { touches: [{ clientY: 20 }] }));
+      owner.dispatchEvent(Object.assign(new Event('touchmove'), { touches: [{ clientY: 10 }] }));
+    });
+    expect(earlier).not.toHaveBeenCalled();
+    act(() => { owner.dispatchEvent(Object.assign(new Event('touchmove'), { touches: [{ clientY: 30 }] })); });
+    expect(earlier).toHaveBeenCalledOnce();
+  } finally { view.unmount(); owner.remove(); }
 });

@@ -109,7 +109,7 @@ describe('a job under way', () => {
 
   it('says that it is waiting for its turn before it has begun, and that it is looking again when the line is lost', () => {
     show(<JobProgress job={job({ state: 'queued' })} heading="Switching" reconnecting />);
-    expect(screen.getByText('Waiting for its turn')).toBeVisible();
+    expect(screen.getByText('Waiting in line')).toBeVisible();
     expect(screen.getByText('Reconnecting…')).toBeVisible();
     expect(screen.getByText('The job goes on without this window. The bar stands where it was last seen.')).toBeVisible();
   });
@@ -148,7 +148,9 @@ describe('the end of a job', () => {
     // The safe cause is the status, without a second generic failed-phase heading.
     expect(screen.getAllByRole('alert')).toHaveLength(1);
     const alert = screen.getByRole('alert');
-    expect(within(alert).getByText(i18n.t('change.failure.verify_failed', { message: i18n.t('ui.error.operationFailed') }))).toBeVisible();
+    // The safe cause goes into the sentence without its own stop: one sentence, one stop.
+    expect(within(alert).getByText(i18n.t('change.failure.verify_failed', { message: i18n.t('ui.error.operationFailed').replace(/[.。]$/u, '') }))).toBeVisible();
+    expect(alert).not.toHaveTextContent('..');
     expect(within(alert).getByText('Everything it had made was removed. Main thread is as it was before.')).toBeVisible();
     expect(screen.queryByText(/^It did not work/)).toBeNull();
     expect(alert).not.toHaveTextContent('the tools could not reach it');
