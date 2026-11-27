@@ -31,6 +31,7 @@ import { ActionIcon } from '@/ui/actions';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
 import { UserChip } from '@/ui/UserChip';
+import { useShortcutActs } from '@/features/navigation/shortcuts';
 
 /** How many characters of the last message a row shows. */
 const PREVIEW_CHARS = 80;
@@ -96,7 +97,9 @@ export function ChatRow({
         },
         { id: 'hide', label: t('chat.row.hide'), icon: <EyeOff aria-hidden />, onSelect: () => change.mutate({ hidden: true }) },
     ];
-  const entries: MenuEntry[] = [...group.entries, ...personal];
+  // Starring a chat and keeping a shortcut to it are the person's own acts, as on any other row.
+  const shortcuts = useShortcutActs({ kind: 'chat', id: chat.id, name });
+  const entries: MenuEntry[] = [...group.entries, ...personal, ...(quiet ? [] : shortcuts)];
 
   return (
     <ContextMenu label={t('actions.actions.named', { name })} entries={entries} disabled={entries.length === 0}>

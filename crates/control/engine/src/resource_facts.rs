@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::EngineError;
 
 pub mod activity;
+pub mod applications;
 pub mod custody;
 pub mod library;
 
@@ -302,6 +303,7 @@ fn view(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpView,
         ObjectKind::Mount => Permission::MountView,
         ObjectKind::Skill => Permission::SkillView,
+        ObjectKind::Pool => Permission::PoolView,
         _ => return None,
     })
 }
@@ -317,6 +319,7 @@ fn manage(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpManage,
         ObjectKind::Mount => Permission::MountManage,
         ObjectKind::Skill => Permission::SkillManage,
+        ObjectKind::Pool => Permission::PoolManage,
         _ => return None,
     })
 }
@@ -615,6 +618,57 @@ pub async fn target_dependents(
     Ok(row)
 }
 
+async fn turn_uses(
+    conn: &mut Conn,
+    objects: &[ObjectRef],
+    at: Time,
+) -> Result<HashMap<(ObjectKind, Id), ResourceUses>, EngineError> {
+    let mut uses = HashMap::new();
+    for (kind, dimension) in [
+        (ObjectKind::Provider, ResourceTurnDimension::Provider),
+        (ObjectKind::Agent, ResourceTurnDimension::Agent),
+        (ObjectKind::Environment, ResourceTurnDimension::Environment),
+    ] {
+        let wanted: Vec<_> = objects
+            .iter()
+            .filter(|object| object.kind == kind)
+            .map(|object| object.id)
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        for id in &wanted {
+            uses.insert(
+                (kind, *id),
+                ResourceUses {
+                    kind: ResourceUseKind::Turn,
+                    coverage: UseCoverage::Complete,
+                    last_used_at: None,
+                    all_time: Some(0),
+                    last_30_days: Some(0),
+                    people: Some(0),
+                    people_30_days: Some(0),
+                },
+            );
+        }
+        for row in rollup::resource_turn_counts(conn, &wanted, dimension, at.get()).await? {
+            uses.insert(
+                (kind, row.id),
+                ResourceUses {
+                    kind: ResourceUseKind::Turn,
+                    coverage: UseCoverage::Complete,
+                    last_used_at: row.last_at.map(Time::new),
+                    all_time: Some(row.all_time),
+                    last_30_days: Some(row.last_30_days),
+                    people: row.people,
+                    people_30_days: row.people_30_days,
+                },
+            );
+        }
+    }
+    Ok(uses)
+}
+
 async fn read_inner(
     conn: &mut Conn,
     subjects: &[FactSubject],
@@ -631,7 +685,7 @@ async fn read_inner(
         .collect();
     let ids: Vec<_> = objects.iter().map(|object| object.id).collect();
     let mut edges = HashMap::<(String, Id), Vec<Dependent>>::new();
-    for edge in references(conn, &ids).await? {
+    for edge in references(conn, &ids, at).await? {
         edges
             .entry((edge.subject_kind.clone(), edge.subject_id))
             .or_default()
@@ -639,48 +693,7 @@ async fn read_inner(
     }
     let mut uses = HashMap::<(ObjectKind, Id), ResourceUses>::new();
     if include_uses {
-        for (kind, dimension) in [
-            (ObjectKind::Provider, ResourceTurnDimension::Provider),
-            (ObjectKind::Agent, ResourceTurnDimension::Agent),
-            (ObjectKind::Environment, ResourceTurnDimension::Environment),
-        ] {
-            let wanted: Vec<_> = objects
-                .iter()
-                .filter(|object| object.kind == kind)
-                .map(|object| object.id)
-                .collect();
-            if wanted.is_empty() {
-                continue;
-            }
-            for id in &wanted {
-                uses.insert(
-                    (kind, *id),
-                    ResourceUses {
-                        kind: ResourceUseKind::Turn,
-                        coverage: UseCoverage::Complete,
-                        last_used_at: None,
-                        all_time: Some(0),
-                        last_30_days: Some(0),
-                        people: Some(0),
-                        people_30_days: Some(0),
-                    },
-                );
-            }
-            for row in rollup::resource_turn_counts(conn, &wanted, dimension, at.get()).await? {
-                uses.insert(
-                    (kind, row.id),
-                    ResourceUses {
-                        kind: ResourceUseKind::Turn,
-                        coverage: UseCoverage::Complete,
-                        last_used_at: row.last_at.map(Time::new),
-                        all_time: Some(row.all_time),
-                        last_30_days: Some(row.last_30_days),
-                        people: row.people,
-                        people_30_days: row.people_30_days,
-                    },
-                );
-            }
-        }
+        uses = turn_uses(conn, &objects, at).await?;
         let templates: Vec<(Id, String)> =
             sqlx::query_as("SELECT id,kind FROM env_templates WHERE id=ANY($1)")
                 .bind(&ids)
@@ -1073,9 +1086,10 @@ impl EdgeRow {
     }
 }
 
-async fn references(conn: &mut Conn, ids: &[Id]) -> Result<Vec<EdgeRow>, EngineError> {
+async fn references(conn: &mut Conn, ids: &[Id], at: Time) -> Result<Vec<EdgeRow>, EngineError> {
     let mut rows: Vec<EdgeRow> = sqlx::query_as(include_str!("resource_facts.sql"))
         .bind(ids)
+        .bind(at.get())
         .fetch_all(&mut *conn)
         .await
         .map_err(DbError::from)?;

@@ -45,8 +45,6 @@ pub const DECISION_LOOKBACK: Duration = Duration::from_secs(15 * 60);
 /// How long the word of a plan of `manage_shared` is good for: ten minutes. Long enough to read a list and decide,
 /// and short enough that a word found in an old context is no longer one.
 pub const MANAGE_PLAN_KEPT: Duration = Duration::from_secs(10 * 60);
-/// The seconds of a day, for what the configuration says in days.
-const SECONDS_PER_DAY: u64 = 86_400;
 
 /// The moment from which the supervisor looks for decisions and closed
 /// leases that were not yet handed over.
@@ -61,8 +59,8 @@ pub fn decisions_since(now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<c
 pub struct Deployment {
     /// What the system calls itself (`[system] name`).
     pub name: String,
-    /// The origin a browser opens (`[system] public_url`).
-    pub url: String,
+    /// File addresses only seed the system store; export admission reads the effective revision.
+    pub address_seed: orch_api_contract::public_addresses::PublicAddresses,
     /// The version of the product that wrote the package.
     pub version: String,
 }
@@ -73,7 +71,7 @@ impl Deployment {
     pub fn of(config: &ServerConfig) -> Self {
         Self {
             name: config.system.name.clone(),
-            url: config.system.public_url.clone(),
+            address_seed: config.system.address_seed(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
         }
     }
@@ -107,9 +105,6 @@ pub struct EngineConfig {
     pub stream_flush: Duration,
     /// The provider-owned observation cadence, from the deployment.
     pub provider_facts: crate::provider_fact_reads::ReadConfig,
-    /// How long what was deleted can be brought back before the purge takes it (`[retention] soft_delete_days`):
-    /// what an agent that deletes a document is told the document can be brought back until.
-    pub soft_delete: Duration,
     /// How often the configured topic/node retention policy is examined (`[schedule] retention`).
     pub retention_every: Duration,
     /// Whether the engine measures and removes native history by itself: at the reaper's pace, for the sessions that
@@ -126,6 +121,8 @@ pub struct EngineConfig {
     pub project_depth: u32,
     /// What the deployment says of itself in the header of an Orch package it writes.
     pub deployment: Deployment,
+    /// Configured browser origins whose document links name this installation's shared objects.
+    pub public_origins: Vec<String>,
     /// The largest single file an archive takes in (`[limits] export_file_max_bytes`).
     pub export_file_max_bytes: i64,
     /// Where an archive is written before it is put in the store of content: the `tmp/` of the storage root, which
@@ -156,7 +153,6 @@ impl Default for EngineConfig {
                 orch_config::ServerConfig::default().engine.stream_flush_ms,
             ),
             provider_facts: crate::provider_fact_reads::ReadConfig::default(),
-            soft_delete: soft_delete_of(&orch_config::ServerConfig::default()),
             retention_every: Duration::from_secs(3600),
             agent_history_sweeps: true,
             manage_plan_kept: MANAGE_PLAN_KEPT,
@@ -164,6 +160,7 @@ impl Default for EngineConfig {
             imports_per_user: orch_config::ServerConfig::default().limits.imports_per_user,
             project_depth: orch_config::ServerConfig::default().limits.project_depth,
             deployment: Deployment::of(&orch_config::ServerConfig::default()),
+            public_origins: vec![orch_config::ServerConfig::default().system.public_url],
             export_file_max_bytes: i64::try_from(
                 orch_config::ServerConfig::default()
                     .limits
@@ -173,16 +170,6 @@ impl Default for EngineConfig {
             scratch: None,
         }
     }
-}
-
-/// The time something deleted is kept, as the configuration says it in days.
-fn soft_delete_of(config: &ServerConfig) -> Duration {
-    Duration::from_secs(
-        config
-            .retention
-            .soft_delete_days
-            .saturating_mul(SECONDS_PER_DAY),
-    )
 }
 
 impl EngineConfig {
@@ -195,7 +182,6 @@ impl EngineConfig {
             cap_check: Duration::from_secs(config.engine.cap_check_secs),
             stream_flush: Duration::from_millis(config.engine.stream_flush_ms),
             provider_facts: crate::provider_fact_reads::ReadConfig::from_server(config),
-            soft_delete: soft_delete_of(config),
             retention_every: Duration::from_secs(
                 config
                     .schedule
@@ -208,6 +194,10 @@ impl EngineConfig {
             imports_per_user: config.limits.imports_per_user,
             project_depth: config.limits.project_depth,
             deployment: Deployment::of(config),
+            public_origins: std::iter::once(config.system.public_url.clone())
+                .chain(config.system.alternate_urls.iter().cloned())
+                .filter(|address| !address.is_empty())
+                .collect(),
             export_file_max_bytes: i64::try_from(config.limits.export_file_max_bytes)
                 .unwrap_or(i64::MAX),
             scratch: Some(config.storage.scratch_dir()),
