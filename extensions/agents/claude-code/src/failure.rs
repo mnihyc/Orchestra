@@ -135,6 +135,20 @@ pub fn gave_up_waiting(silent_for_secs: u64) -> TurnError {
     ))
 }
 
+/// The harness went on with a turn it was asked to stop for longer than its grace, and its process was ended: the
+/// turn ends as stopped, with this to say why. Taking the session up again in a new process may well work.
+#[must_use]
+pub fn did_not_stop(waited_secs: u64) -> TurnError {
+    TurnError::new(
+        turn_error::HARNESS_ERROR,
+        "The harness did not stop when asked, so its process was ended.",
+        true,
+    )
+    .saying(&format!(
+        "the turn was still running {waited_secs} seconds after it was asked to stop"
+    ))
+}
+
 impl Retries {
     /// One more `api_retry` message.
     pub fn note(&mut self, frame: &Frame) {

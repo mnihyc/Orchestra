@@ -1,5 +1,6 @@
 /** Retained native MCP definitions list their actual machines and require a manager's act for a different definition. */
 import { Hint } from '@/features/help/Hint';
+import { Link } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { MoreHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -27,7 +28,7 @@ export function McpOfferings({ server }: { server: McpServer }) {
     <ul className="flex min-w-0 flex-col gap-2">{offers.map((offering) => {
       const entries: MenuEntry[] = offering.state === 'found'||offering.different_definition ? [{ id: offering.machine.id, label: t('mcpOffering.use', { name: offering.machine.name }), disabled: !offering.can_use_definition ? t('mcpOffering.noImportPermission') : select.isPending ? t('common.loading') : false, onSelect: () => select.mutate(offering.machine.id) }] : [];
       return <li key={offering.machine.id}><ContextMenu label={offering.machine.name} entries={entries}><div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Tooltip content={offering.machine.name}><a href={`/resources/machines/${offering.machine.id}`} className="min-w-0 truncate font-medium text-text hover:underline">{offering.machine.name}</a></Tooltip>
+        <Tooltip content={offering.machine.name}><Link to="/resources/machines/$id" params={{id:offering.machine.id}} className="min-w-0 truncate font-medium text-text hover:underline">{offering.machine.name}</Link></Tooltip>
         <StatusDot tone={offering.state === 'ready' ? 'success' : offering.state === 'pending' ? 'info' : 'warning'} label={t(offering.state==='found'&&offering.reason==='different_definition'?'mcpOffering.different':`mcpOffering.${offering.state}`,{name:offering.machine.name})} showLabel />
         {offering.state==='ready'&&offering.different_definition&&<span className="text-sm text-warning">{t(offering.reason==='different_definition'?'mcpOffering.different':'mcpOffering.unverified',{name:offering.machine.name})}</span>}
         {offering.offered_at !== null && offering.state === 'ready' && <RelativeTime at={offering.offered_at} />}

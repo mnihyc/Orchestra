@@ -73,47 +73,98 @@ where
     Ok(true)
 }
 
-/// A single EXISTING parser message. Zero-byte/pending work rechecks on each wake.
+/// Native capacity, separate from a wake hint or an authorization result. Returning
+/// Ready must leave room for this sole writer until it writes, or the original stream ends.
+pub(super) trait ReadyWrite: tokio::io::AsyncWrite + Unpin {
+    fn poll_write_ready(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>>;
+}
+impl ReadyWrite for orch_link::tunnels::channel::TunnelWriter {
+    fn poll_write_ready(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        orch_link::tunnels::channel::TunnelWriter::poll_write_ready(self.get_mut(), cx)
+    }
+}
+
+/// Keep the existing permission epoch and keeper cadence live while no byte has
+/// started. Positive checks during this wait are discarded, never saved for writing.
+pub(super) struct WriteWatch {
+    epoch: tokio::sync::watch::Receiver<i64>,
+    tick: tokio::time::Interval,
+}
+impl WriteWatch {
+    pub(super) fn new(
+        epoch: tokio::sync::watch::Receiver<i64>,
+        period: std::time::Duration,
+    ) -> Self {
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self { epoch, tick }
+    }
+    async fn changed(&mut self) -> bool {
+        tokio::select! {
+            changed = self.epoch.changed() => changed.is_ok(),
+            _ = self.tick.tick() => true,
+        }
+    }
+}
+
+/// A single existing parser message. Capacity comes before current authorization.
 /// Once actual bytes of this exact message enter the native buffer, completing only its
-/// remaining bytes preserves protocol framing/accepted work; no next message borrows it.
+/// remaining bytes preserves protocol framing; the next message obtains its own current check.
 pub(super) async fn write_message<W, Make, F>(
     writer: &mut W,
     bytes: &[u8],
     clock: &dyn Clock,
+    changes: &mut WriteWatch,
     mut prepare: Make,
 ) -> ApiResult<Option<std::io::Result<()>>>
 where
-    W: tokio::io::AsyncWrite + Unpin,
+    W: ReadyWrite,
     Make: FnMut() -> F,
     F: Future<Output = ApiResult<Option<CurrentCaller>>>,
 {
     use tokio::io::AsyncWriteExt;
-    let mut check = Box::pin(prepare());
-    let first = poll_fn(|cx| match check.as_mut().poll(cx) {
-        std::task::Poll::Pending => std::task::Poll::Pending,
-        std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
-        std::task::Poll::Ready(Ok(None)) => std::task::Poll::Ready(Ok(None)),
-        std::task::Poll::Ready(Ok(Some((caller, session)))) => {
-            if !deadline_allows(&caller, session, clock) {
-                return std::task::Poll::Ready(Ok(None));
+    loop {
+        let ready = tokio::select! {
+            ready = poll_fn(|cx| Pin::new(&mut *writer).poll_write_ready(cx)) => ready,
+            live = changes.changed() => {
+                if !live { return Ok(None); }
+                let Some((caller, session)) = prepare().await? else { return Ok(None); };
+                if !deadline_allows(&caller, session, clock) { return Ok(None); }
+                continue;
             }
-            match Pin::new(&mut *writer).poll_write(cx, bytes) {
-                std::task::Poll::Ready(result) => std::task::Poll::Ready(Ok(Some(result))),
-                std::task::Poll::Pending => {
-                    check = Box::pin(prepare());
-                    std::task::Poll::Pending
-                }
+        };
+        if let Err(error) = ready {
+            return Ok(Some(Err(error)));
+        }
+        let Some((caller, session)) = prepare().await? else {
+            return Ok(None);
+        };
+        if !deadline_allows(&caller, session, clock) {
+            return Ok(None);
+        }
+        // Poll the native first byte once. An unexpected Pending owns no bytes and
+        // returns to actual readiness plus fresh authorization, never a cached caller.
+        let first =
+            poll_fn(|cx| std::task::Poll::Ready(Pin::new(&mut *writer).poll_write(cx, bytes)))
+                .await;
+        match first {
+            std::task::Poll::Pending => continue,
+            std::task::Poll::Ready(Err(error)) => return Ok(Some(Err(error))),
+            std::task::Poll::Ready(Ok(0)) if !bytes.is_empty() => {
+                return Ok(Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "native stream accepted no bytes",
+                ))));
+            }
+            std::task::Poll::Ready(Ok(accepted)) => {
+                return Ok(Some(writer.write_all(&bytes[accepted..]).await));
             }
         }
-    })
-    .await?;
-    match first {
-        None => Ok(None),
-        Some(Err(error)) => Ok(Some(Err(error))),
-        Some(Ok(0)) if !bytes.is_empty() => Ok(Some(Err(std::io::Error::new(
-            std::io::ErrorKind::WriteZero,
-            "native stream accepted no bytes",
-        )))),
-        Some(Ok(accepted)) => Ok(Some(writer.write_all(&bytes[accepted..]).await)),
     }
 }

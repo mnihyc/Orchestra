@@ -51,6 +51,7 @@ pub async fn page(
     after: Option<AuditCursor>,
     legacy_offset: Option<i64>,
     take: i64,
+    patterns: &[String],
 ) -> Result<Page, Error> {
     let (batch, actor_kind, actor_id, paged, total): (String,String,Option<Id>,bool,i64) = sqlx::query_as(
         "SELECT details #>> '{upload,id}',actor_kind,actor_id,
@@ -79,11 +80,12 @@ pub async fn page(
              WHERE a.environment_id=$1 AND a.actor_kind=$3 AND a.actor_id IS NOT DISTINCT FROM $4::uuid
                AND a.action='workspace.file_written' AND a.details->>'upload_batch'=$2
                AND (a.details ? 'path' OR a.details ? 'upload_file') AND a.id<$7
+               AND concat_ws(' ',f.file->>'name',f.file->>'path') ILIKE ALL($8::text[])
                AND ($5::uuid IS NULL OR a.id<$5)
              ORDER BY a.id DESC LIMIT $6"
         ).bind(environment).bind(batch).bind(actor_kind).bind(actor_id)
             .bind(after.map(|cursor| cursor.id)).bind(take)
-            .bind(line)
+            .bind(line).bind(patterns)
             .fetch_all(conn).await.map_err(DbError::from)?;
         Ok(Page {
             rows,
@@ -98,18 +100,27 @@ pub async fn page(
         if offset < 0 {
             return Err(Error::Cursor);
         }
-        let mut row: AuditRow = sqlx::query_as(concat!(
-            "SELECT a.id,a.at,a.actor_kind,a.actor_id,a.action,a.history,a.override,a.object_kind,a.object_id,a.node_id,a.summary,",
-            details!("$3::integer", "$4::integer"),
-            " AS details,host(a.ip) AS ip FROM audit_log a WHERE a.id=$1 AND a.environment_id=$2"
-        )).bind(line).bind(environment).bind(i32::try_from(offset).map_err(|_| Error::Cursor)?)
-            .bind(i32::try_from(count).map_err(|_| Error::Cursor)?)
+        let row:AuditRow=sqlx::query_as("WITH chosen AS MATERIALIZED (
+            SELECT f.file,f.ordinality-1 AS file_position FROM audit_log a CROSS JOIN LATERAL
+              jsonb_array_elements(a.details#>'{upload,files}') WITH ORDINALITY f(file,ordinality)
+            WHERE a.id=$1 AND a.environment_id=$2 AND f.ordinality-1 >= $3
+              AND concat_ws(' ',f.file->>'name',f.file->>'path') ILIKE ALL($5::text[])
+            ORDER BY f.ordinality LIMIT $4::bigint+1),shown_files AS (
+              SELECT * FROM chosen ORDER BY file_position LIMIT $4::bigint),next_file AS (
+              SELECT file_position FROM chosen ORDER BY file_position OFFSET $4::bigint LIMIT 1)
+          SELECT a.id,a.at,a.actor_kind,a.actor_id,a.action,a.history,a.override,a.object_kind,a.object_id,a.node_id,a.summary,
+            jsonb_set(a.details-'upload_file_cursor','{upload}',(a.details->'upload') || jsonb_build_object(
+              'file_count',$6::bigint,'files_paged',true,'files',COALESCE((SELECT jsonb_agg(file ORDER BY file_position) FROM shown_files),'[]'::jsonb)))
+            || CASE WHEN EXISTS(SELECT 1 FROM next_file) THEN jsonb_build_object('upload_file_cursor','upload:'||(SELECT file_position::text FROM next_file)) ELSE '{}'::jsonb END AS details,
+            host(a.ip) AS ip FROM audit_log a WHERE a.id=$1 AND a.environment_id=$2")
+            .bind(line).bind(environment).bind(offset).bind(count).bind(patterns).bind(total)
             .fetch_one(conn).await.map_err(DbError::from)?;
-        let next = offset.saturating_add(count);
-        let legacy_next = (next < total).then_some(next);
-        if let Some(next) = legacy_next {
-            row.details["upload_file_cursor"] = serde_json::json!(format!("upload:{next}"));
-        }
+        let legacy_next = row
+            .details
+            .get("upload_file_cursor")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|cursor| cursor.strip_prefix("upload:"))
+            .and_then(|position| position.parse().ok());
         Ok(Page {
             rows: vec![row],
             legacy_next,

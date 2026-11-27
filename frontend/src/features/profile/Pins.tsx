@@ -7,7 +7,7 @@ import { favoritesQuery } from '@/api/personal';
 import { profileKey, replaceProfilePins } from '@/api/profile';
 import { namesQuery } from '@/api/search';
 import { AutoSaveFeedback, useAutoSave } from '@/features/settings/AutoSave';
-import type { NodeRef, ProfilePinInput, UserProfile } from '@/generated/api-types';
+import type { NodeRef, ProfilePinInput, Shortcut, UserProfile } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
 import type { Placed } from '@/lib/placeLabel';
 import { usePlaceLabels } from '@/features/navigation/placeLabels';
@@ -20,6 +20,15 @@ const PIN_LIMIT = 6; // The page and its wire contract permit six ordered pins.
 interface Choice { key: string; title: string; pin: ProfilePinInput; place: Placed }
 const placed = (id: string, name: string, path: readonly NodeRef[]): Placed => ({ id, name, above: path.filter((one) => one.id !== id).map((one) => ({ id: one.id, name: one.redacted ? null : one.name })) });
 const fromProfile = (profile: UserProfile): Choice[] => profile.pins.flatMap((pin): Choice[] => pin.node !== null ? [{ key: `node:${pin.node.id}`, title: pin.node.name, pin: { node_id: pin.node.id }, place: { ...placed(pin.node.id, pin.node.name, pin.node.path), ...(pin.node.kind === 'org' ? { address: pin.node.address } : {}) } }] : pin.document !== null ? [{ key: `document:${pin.document.id}`, title: pin.document.title, pin: { document_id: pin.document.id }, place: placed(pin.document.id, pin.document.title, [pin.document.node]) }] : []);
+
+/** The places and threads among a person's own shortcuts that open for them, named. */
+function starredPlaces(list: readonly Shortcut[] | undefined): { id: string; name: string; path: NodeRef[] }[] {
+  return (list ?? []).flatMap((entry) => {
+    const name = entry.item?.name;
+    const node = entry.target.kind === 'org' || entry.target.kind === 'project' || entry.target.kind === 'topic' || entry.target.kind === 'thread';
+    return entry.state !== 'open' || !node || name === null || name === undefined ? [] : [{ id: entry.target.id, name, path: entry.item?.path ?? [] }];
+  });
+}
 
 export function PinsEditor({ profile }: { profile: UserProfile }) {
   const { t } = useTranslation();
@@ -42,13 +51,13 @@ export function PinsEditor({ profile }: { profile: UserProfile }) {
   const current = term === rested && !names.isPlaceholderData ? names.data ?? [] : [];
   const labels = usePlaceLabels([
     ...pins.map((pin) => pin.place),
-    ...(favorite.data ?? []).flatMap((entry) => entry.node.name === null || entry.node.redacted ? [] : [placed(entry.node.id, entry.node.name, entry.path)]),
+    ...starredPlaces(favorite.data).map((entry) => placed(entry.id, entry.name, entry.path)),
     ...current.map((hit) => ({ ...placed(hit.id, hit.name, hit.path), ...(hit.address === null ? {} : { address: hit.address }) })),
   ], { trees: false });
   const titleOf = (choice: Choice) => labels.get(choice.place.id) ?? choice.title;
   const lookupError = term === rested ? names.error ?? (term === '' ? favorite.error : null) : null;
   const candidates = new Map<string, Choice>();
-  for (const entry of favorite.data ?? []) if (!entry.node.redacted && entry.node.name !== null && (term === '' || entry.node.name.toLocaleLowerCase().includes(term.toLocaleLowerCase()))) candidates.set(`node:${entry.node.id}`, { key: `node:${entry.node.id}`, title: entry.node.name, pin: { node_id: entry.node.id }, place: placed(entry.node.id, entry.node.name, entry.path) });
+  for (const entry of starredPlaces(favorite.data)) if (term === '' || entry.name.toLocaleLowerCase().includes(term.toLocaleLowerCase())) candidates.set(`node:${entry.id}`, { key: `node:${entry.id}`, title: entry.name, pin: { node_id: entry.id }, place: placed(entry.id, entry.name, entry.path) });
   for (const hit of current) {
     const document = hit.kind === 'document';
     const key = `${document ? 'document' : 'node'}:${hit.id}`;

@@ -2,6 +2,8 @@
 import { QueryObserver, type QueryClient, type QueryKey, type QueryObserverResult } from '@tanstack/react-query';
 import { applyRow, feedSequences, record } from '@/api/cache';
 import { ApiError } from '@/api/client';
+import { isReadCancelled } from '@/api/reads';
+import { NetworkError } from '@/lib/requests';
 import { pendingScheduleKey } from '@/api/inputSchedules';
 import { seedEnvironmentLibrary } from '@/api/resourceLibrary';
 import { isOver, jobQuery } from '@/api/forks';
@@ -21,6 +23,13 @@ interface Source {
 }
 
 const isQueryKey = (value: unknown): value is QueryKey => Array.isArray(value);
+
+/** Whether a re-read after a retired authority ends what its view kept: a refusal of the reader, or an answer that is not
+ *  one; a failure of the line (or a busy server) leaves the kept answer on screen, greyed. */
+function refusesKept(error: unknown): boolean {
+  if (error instanceof ApiError) return error.status === 401 || error.status === 403 || error.status === 404 || error.status === 410;
+  return !(error instanceof NetworkError) && !isReadCancelled(error);
+}
 
 /** Native feed names, shared with the server. A thread's door is retained for its access check. */
 export function queryFeed(key: QueryKey): Source | null {
@@ -168,13 +177,22 @@ export function installQueryFeeds(socket: RealtimeSocket, cache: QueryClient): (
         const source = queryFeed(query.queryKey);
         if (source?.feed !== feed) continue;
         if (full) {
+          // The former projection's reads are retired and unseen answers dropped. What a view shows stays on screen
+          // until its fresh baseline (the HTTP read below, or the next native snapshot) replaces it whole.
           void query.cancel({ revert: false, silent: true });
           if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); continue; }
-          query.setState({ data: undefined, dataUpdatedAt: 0, error: null, status: 'pending', fetchStatus: 'idle' });
+          query.setState({ dataUpdatedAt: 0, error: null, status: query.state.data === undefined ? 'pending' : 'success', fetchStatus: 'idle' });
         }
         if (query.isActive() && (query.queryKey[0] === 'environment' || full && source.merge === true)) {
-          reads.push(!full && query.state.fetchStatus === 'fetching' && query.promise !== undefined
-            ? query.promise : cache.refetchQueries({ queryKey: query.queryKey, exact: true }, { throwOnError: true }));
+          const read = !full && query.state.fetchStatus === 'fetching' && query.promise !== undefined
+            ? query.promise : cache.refetchQueries({ queryKey: query.queryKey, exact: true }, { throwOnError: true });
+          // A baseline the new authority refuses ends what was kept; a failure of the line keeps it, greyed.
+          reads.push(full ? read.catch((error: unknown) => {
+            if (error instanceof Error && refusesKept(error) && cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) === query) {
+              query.setState({ data: undefined, error, status: 'error', fetchStatus: 'idle' });
+            }
+            throw error;
+          }) : read);
         }
       }
       // Fetch notifications can retire an earlier repair; this cut owns the reads just started.

@@ -4,15 +4,22 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
 use futures::future::join_all;
+use orch_agent_programs::manifest::{InterfaceProbe, Printed};
+use orch_api_contract::admin::HarnessBuildStatus;
+use orch_api_contract::machine_programs::InstalledProgramCheck;
+use orch_link_contract::commands::ToolInterface;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 /// A probe should finish quickly enough for an interactive machine refresh.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// The file in the connector's data directory that keeps its programs' own checks across starts.
+pub(crate) const PROGRAM_CHECKS_FILE: &str = "program-checks.json";
 /// A version or npm prefix is one short line; bound output from an unexpected program.
 const OUTPUT_LIMIT: u64 = 4096;
 
@@ -29,12 +36,79 @@ struct Snapshot {
     kinds: Vec<String>,
     configured: BTreeMap<String, String>,
     found: Vec<Found>,
+    fingerprints: BTreeMap<PathBuf, Arc<OnceLock<Fingerprint>>>,
+}
+
+/// The file identity at observation time. A replacement invalidates the digest until the next refresh.
+#[derive(Debug)]
+struct Fingerprint {
+    metadata: std::fs::Metadata,
+    sha256: String,
+}
+
+impl Fingerprint {
+    fn read(path: &Path) -> Option<Self> {
+        use sha2::{Digest, Sha256};
+        use std::io::BufRead;
+        let file = std::fs::File::open(path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        let mut reader = std::io::BufReader::new(file);
+        loop {
+            let chunk = reader.fill_buf().ok()?;
+            if chunk.is_empty() {
+                break;
+            }
+            digest.update(chunk);
+            let count = chunk.len();
+            reader.consume(count);
+        }
+        let result = Self {
+            metadata: meta,
+            sha256: hex::encode(digest.finalize()),
+        };
+        result.matches(path).then_some(result)
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        let Ok(meta) = path.metadata() else {
+            return false;
+        };
+        let Ok(modified) = self.metadata.modified() else {
+            return false;
+        };
+        if meta.len() != self.metadata.len() || meta.modified().ok() != Some(modified) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.dev() == self.metadata.dev()
+                && meta.ino() == self.metadata.ino()
+                && meta.ctime() == self.metadata.ctime()
+                && meta.ctime_nsec() == self.metadata.ctime_nsec()
+        }
+        #[cfg(not(unix))]
+        {
+            meta.created().ok() == self.metadata.created().ok()
+        }
+    }
 }
 
 /// The latest local observations, kept separate from the local authorization policy.
 #[derive(Debug)]
 pub(crate) struct Discovery {
     programs: BTreeMap<String, Vec<String>>,
+    /// What each adapter that needs a program asks of its interface, from the program's manifest, by kind.
+    interfaces: BTreeMap<String, Option<InterfaceProbe>>,
+    /// The kinds whose adapter is part of the connector and needs no program beside it.
+    builtin: Vec<String>,
+    /// The last own check of each kind's program, and the file that keeps them across starts.
+    checks: RwLock<BTreeMap<String, InstalledProgramCheck>>,
+    checks_file: Option<PathBuf>,
     snapshot: RwLock<Snapshot>,
     refresh: tokio::sync::Mutex<()>,
     changes: tokio::sync::watch::Sender<()>,
@@ -45,7 +119,30 @@ pub(crate) struct Discovery {
 impl Discovery {
     /// Creates a cache for the adapter registry on this connector.
     pub(crate) fn new(registry: Arc<crate::harnesses::AdapterRegistry>) -> Self {
+        let adapters = registry.facts();
+        let shipped = orch_agent_programs::Programs::builtin();
         Self {
+            interfaces: adapters
+                .iter()
+                .filter(|adapter| adapter.needs_binary != Some(false))
+                .map(|adapter| {
+                    let manifest = adapter
+                        .manifest
+                        .as_ref()
+                        .or_else(|| shipped.program(&adapter.kind));
+                    (
+                        adapter.kind.clone(),
+                        manifest.and_then(|manifest| manifest.checks.interface.clone()),
+                    )
+                })
+                .collect(),
+            builtin: adapters
+                .iter()
+                .filter(|adapter| adapter.builtin && adapter.needs_binary == Some(false))
+                .map(|adapter| adapter.kind.clone())
+                .collect(),
+            checks: RwLock::new(BTreeMap::new()),
+            checks_file: None,
             programs: registry
                 .kinds_with_a_program()
                 .into_iter()
@@ -76,6 +173,97 @@ impl Discovery {
 
     pub(crate) fn supports(&self, kind: &str) -> bool {
         self.programs.contains_key(kind)
+    }
+
+    /// Keeps the programs' own checks in `file`, and takes up those an earlier start kept there.
+    #[must_use]
+    pub(crate) fn with_checks_file(mut self, file: PathBuf) -> Self {
+        if let Ok(bytes) = std::fs::read(&file)
+            && let Ok(kept) =
+                serde_json::from_slice::<BTreeMap<String, InstalledProgramCheck>>(&bytes)
+        {
+            *self
+                .checks
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner) = kept;
+        }
+        self.checks_file = Some(file);
+        self
+    }
+
+    /// Runs the own check of the program selected for `kind`, at `path`: the version it prints, then the interface
+    /// its adapter needs, as a host checks a catalogue build. An adapter built into the connector has no program of
+    /// its own, and is checked with the connector. What it found is kept and reported with the machine's facts.
+    pub(crate) async fn check(
+        &self,
+        kind: &str,
+        path: &str,
+        at: orch_types::Time,
+        timeout: Duration,
+    ) -> InstalledProgramCheck {
+        let check = if self.builtin.iter().any(|builtin| builtin == kind) {
+            InstalledProgramCheck {
+                kind: kind.to_owned(),
+                path: path.to_owned(),
+                sha256: None,
+                builtin: true,
+                at,
+                status: HarnessBuildStatus::Checked,
+                version: None,
+                missing: Vec::new(),
+                off: Vec::new(),
+                error: None,
+            }
+        } else if let Some(interface) = self.interfaces.get(kind) {
+            let scratch = self
+                .checks_file
+                .as_deref()
+                .and_then(Path::parent)
+                .map_or_else(std::env::temp_dir, Path::to_path_buf);
+            let search = self.search_inputs();
+            own_check(
+                kind,
+                Path::new(path),
+                interface.as_ref(),
+                at,
+                timeout,
+                &scratch,
+                search.path.as_deref(),
+            )
+            .await
+        } else {
+            InstalledProgramCheck {
+                kind: kind.to_owned(),
+                path: path.to_owned(),
+                sha256: None,
+                builtin: false,
+                at,
+                status: HarnessBuildStatus::Untested,
+                version: None,
+                missing: Vec::new(),
+                off: Vec::new(),
+                error: Some(
+                    "This connector started without an adapter for this program; restart it to check it."
+                        .to_owned(),
+                ),
+            }
+        };
+        self.keep(check.clone());
+        check
+    }
+
+    fn keep(&self, check: InstalledProgramCheck) {
+        let mut checks = self.checks.write().unwrap_or_else(PoisonError::into_inner);
+        checks.insert(check.kind.clone(), check);
+        let Some(file) = &self.checks_file else {
+            return;
+        };
+        let kept = serde_json::to_vec(&*checks)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| crate::policy::write_atomically(file, &bytes));
+        if let Err(error) = kept {
+            tracing::warn!(%error, "a program's own check could not be kept for the next start");
+        }
     }
 
     /// A completed refresh may change the version at a selected path without changing policy.
@@ -127,7 +315,7 @@ impl Discovery {
         };
         #[cfg(not(test))]
         let directories = search_directories(&search, configured.len() < kinds.len()).await;
-        let found = join_all(kinds.iter().map(|kind| {
+        let found: Vec<Found> = join_all(kinds.iter().map(|kind| {
             let names = self.programs[kind].iter().map(String::as_str).collect();
             discover_in(
                 kind,
@@ -143,6 +331,23 @@ impl Discovery {
         .into_iter()
         .flatten()
         .collect();
+        let fingerprints = found
+            .iter()
+            .filter(|f| configured.contains_key(&f.kind))
+            .map(|f| {
+                let path = f.path.clone();
+                let slot = Arc::new(OnceLock::new());
+                let pending = Arc::clone(&slot);
+                let changes = self.changes.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(fingerprint) = Fingerprint::read(&path) {
+                        let _ = pending.set(fingerprint);
+                        changes.send_replace(());
+                    }
+                });
+                (f.path.clone(), slot)
+            })
+            .collect();
         *self
             .snapshot
             .write()
@@ -151,6 +356,7 @@ impl Discovery {
             kinds,
             configured,
             found,
+            fingerprints,
         };
         self.changes.send_replace(());
     }
@@ -160,6 +366,14 @@ impl Discovery {
         let Some(policy) = facts.policy.as_ref() else {
             return;
         };
+        facts.program_checks = self
+            .checks
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|check| policy.harness(&check.kind).is_some())
+            .cloned()
+            .collect();
         let snapshot = self.snapshot.read().unwrap_or_else(PoisonError::into_inner);
         if !snapshot.observed {
             return;
@@ -193,6 +407,12 @@ impl Discovery {
                             version: selected
                                 .map_or("unknown", |found| found.version.as_str())
                                 .into(),
+                            sha256: selected.and_then(|found| {
+                                let fingerprint = snapshot.fingerprints.get(&found.path)?.get()?;
+                                fingerprint
+                                    .matches(&found.path)
+                                    .then(|| fingerprint.sha256.clone())
+                            }),
                             daemon: false,
                         });
                 }
@@ -206,6 +426,7 @@ impl Discovery {
                             kind: kind.clone(),
                             path: found.path.to_string_lossy().into_owned(),
                             version: found.version.clone(),
+                            sha256: None,
                             daemon: false,
                         }),
                 );
@@ -280,6 +501,91 @@ async fn output(
             None
         }
     }
+}
+
+/// The own check of one program: its file's checksum, the version it prints and the names of `interface` it lacks.
+/// A program its adapter can use is checked; one that lacks what the adapter needs as a whole failed; one that could
+/// not be read or run is untested, with the reason.
+async fn own_check(
+    kind: &str,
+    program: &Path,
+    interface: Option<&InterfaceProbe>,
+    at: orch_types::Time,
+    timeout: Duration,
+    scratch: &Path,
+    path: Option<&OsStr>,
+) -> InstalledProgramCheck {
+    let mut check = InstalledProgramCheck {
+        kind: kind.to_owned(),
+        path: program.display().to_string(),
+        sha256: None,
+        builtin: false,
+        at,
+        status: HarnessBuildStatus::Untested,
+        version: None,
+        missing: Vec::new(),
+        off: Vec::new(),
+        error: None,
+    };
+    let file = program.to_path_buf();
+    let fingerprint = tokio::task::spawn_blocking(move || Fingerprint::read(&file))
+        .await
+        .ok()
+        .flatten();
+    let Some(fingerprint) = fingerprint else {
+        check.error = Some(format!(
+            "{} could not be read as a program file.",
+            program.display()
+        ));
+        return check;
+    };
+    check.sha256 = Some(fingerprint.sha256);
+    check.version = output(program, &["--version"], path, PROBE_TIMEOUT, &[])
+        .await
+        .as_deref()
+        .and_then(version);
+    let Some(interface) = interface else {
+        // Its manifest names no interface to look at: that it runs and says its version is what can be known.
+        if check.version.is_some() {
+            check.status = HarnessBuildStatus::Checked;
+        } else {
+            check.error = Some("The program did not print its version when asked.".to_owned());
+        }
+        return check;
+    };
+    let names: Vec<String> = interface
+        .needs
+        .iter()
+        .map(|need| need.name.clone())
+        .collect();
+    let probe = crate::interface_probe::Probe {
+        args: &interface.args,
+        printed: match interface.printed {
+            Printed::Text => ToolInterface::Text,
+            Printed::Schema => ToolInterface::Schema,
+        },
+        names: &names,
+        timeout,
+    };
+    match crate::interface_probe::missing(program, &probe, scratch, &CancellationToken::new()).await
+    {
+        Ok(missing) => {
+            let (usable, off) = interface.verdict(&missing);
+            check.status = if usable {
+                HarnessBuildStatus::Checked
+            } else {
+                HarnessBuildStatus::Failed
+            };
+            check.missing = missing;
+            check.off = off;
+        }
+        Err(error) => {
+            check.error = Some(format!(
+                "The program could not be asked for its interface: {error}."
+            ));
+        }
+    }
+    check
 }
 
 fn version(text: &str) -> Option<String> {
@@ -513,6 +819,29 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("executable");
         path
+    }
+
+    #[test]
+    fn replacing_a_selected_program_invalidates_its_check_even_when_size_and_modification_time_match()
+     {
+        use std::fs::{File, FileTimes};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected");
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&path, b"abc").unwrap();
+        let first = Fingerprint::read(&path).unwrap();
+        assert_eq!(
+            first.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::write(&replacement, b"xyz").unwrap();
+        let modified = path.metadata().unwrap().modified().unwrap();
+        File::open(&replacement)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(!first.matches(&path));
     }
 
     fn quoted(path: &Path) -> String {
@@ -863,6 +1192,10 @@ mod tests {
         let selected = codex.display().to_string();
         *discovery.snapshot.write().unwrap() = Snapshot {
             observed: true,
+            fingerprints: BTreeMap::from([(
+                codex.clone(),
+                Arc::new(OnceLock::from(Fingerprint::read(&codex).unwrap())),
+            )]),
             kinds: vec!["codex".into(), "claude-code".into()],
             configured: BTreeMap::from([("codex".into(), selected.clone())]),
             found: vec![
@@ -884,6 +1217,7 @@ mod tests {
             .push(orch_link_contract::policy::PolicyHarness {
                 kind: "codex".into(),
                 path: selected,
+                confirmation: None,
             });
         let machine = |policy| {
             crate::facts::machine_facts(
@@ -901,6 +1235,12 @@ mod tests {
         };
         let mut facts = machine(policy.clone());
         discovery.apply(&mut facts);
+        assert!(facts.harnesses[0].sha256.is_some());
+        assert!(
+            facts.discovered_harnesses.as_ref().unwrap()[0]
+                .sha256
+                .is_none()
+        );
         assert_eq!(
             facts
                 .harnesses

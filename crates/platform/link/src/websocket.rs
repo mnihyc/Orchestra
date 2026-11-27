@@ -176,7 +176,7 @@ where
         } else {
             return Err(refuse(
                 StatusCode::BAD_REQUEST,
-                "the subprotocol orch-link.v1 is required",
+                &format!("the subprotocol {SUBPROTOCOL} is required"),
             ));
         };
         response
@@ -356,9 +356,9 @@ impl TlsDialer {
             .and_then(|value| value.to_str().ok())
             == Some(protocol);
         if !agreed {
-            return Err(DialError::Upgrade(
-                "the gateway does not speak orch-link.v1".to_owned(),
-            ));
+            return Err(DialError::Upgrade(format!(
+                "the gateway does not speak {protocol}"
+            )));
         }
         Ok(connection_of(
             websocket,

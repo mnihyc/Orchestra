@@ -577,6 +577,93 @@ async fn deletion_preview_is_complete_and_restore_preserves_independent_deletion
 }
 
 #[tokio::test]
+async fn deletion_moves_a_selection_to_the_trash_at_once_and_its_roots_undo_exactly_it()
+-> TestResult {
+    let desk = Desk::new().await;
+    let parent = folder(&desk, None, "Drafts").await?;
+    let inside = desk.make(&desk.ada, "Inside").await.base.id;
+    let earlier = desk.make(&desk.ada, "Earlier").await.base.id;
+    let beside = desk.make(&desk.ada, "Beside").await.base.id;
+    place(&desk, inside, parent).await;
+    place(&desk, earlier, parent).await;
+    delete(&desk, DocumentTreeItem::Document(earlier)).await;
+    let request = operation(
+        DocumentTreeCommand::Delete,
+        vec![
+            DocumentTreeItem::Container(parent),
+            DocumentTreeItem::Document(beside),
+        ],
+        None,
+    );
+    let removed = act(&desk, &desk.ada, &request).await.ok();
+    assert_eq!(
+        removed.entries.len(),
+        3,
+        "the folder, its live child and the document beside it go to the trash without a preview"
+    );
+    assert!(removed.entries.iter().all(|entry| entry.deleted_at.is_some()));
+    assert!(removed.restore_until.is_some());
+    assert_eq!(
+        act(&desk, &desk.ada, &request).await.ok().operation,
+        removed.operation,
+        "a retry of the same act is the same deletion"
+    );
+    let restored = act(
+        &desk,
+        &desk.ada,
+        &operation(DocumentTreeCommand::Restore, request.items.clone(), None),
+    )
+    .await
+    .ok();
+    assert_eq!(restored.entries.len(), 3);
+    assert!(restored.entries.iter().all(|entry| entry.deleted_at.is_none()));
+    let still_deleted: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM documents WHERE id=$1")
+            .bind(earlier)
+            .fetch_one(&desk.world.db.pool)
+            .await?;
+    assert!(still_deleted, "an earlier independent deletion stays in the trash");
+    let moved_out = act(
+        &desk,
+        &desk.ada,
+        &operation(
+            DocumentTreeCommand::MoveOut,
+            vec![DocumentTreeItem::Document(beside)],
+            Some(DocumentDirectory::NodeDocs(desk.project)),
+        ),
+    )
+    .await
+    .problem();
+    assert_eq!(
+        moved_out.code,
+        ErrorCode::RequestInvalid,
+        "Move to another org still carries its complete plan"
+    );
+    let mut copy = operation(
+        DocumentTreeCommand::Copy,
+        vec![DocumentTreeItem::Document(beside)],
+        Some(DocumentDirectory::NodeDocs(desk.project)),
+    );
+    let plan = preview(
+        &desk,
+        &desk.ada,
+        &operation(
+            DocumentTreeCommand::Delete,
+            vec![DocumentTreeItem::Document(beside)],
+            None,
+        ),
+    )
+    .await;
+    copy.deletion_plan = Some(plan.stamp.into());
+    assert_eq!(
+        act(&desk, &desk.ada, &copy).await.problem().code,
+        ErrorCode::RequestInvalid,
+        "no other act carries a deletion plan"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn ordinary_copy_keeps_raw_title_private_choice_provenance_and_current_authorized_replay()
 -> TestResult {
     let desk = Desk::new().await;

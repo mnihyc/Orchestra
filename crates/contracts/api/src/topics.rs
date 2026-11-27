@@ -305,7 +305,7 @@ crate::endpoints! {
             Facet::response_content(&[IdentityTarget(Identity::Schedule)], Target::ResolvedCollection("topic_schedules")),
         ]);
     /// Lists the environments that a topic's threads run in and those whose home it is, the default first, each as far as the caller may see it.
-    TopicEnvironmentList: GET "/topics/{id}/environments", Permission("node.view"), none, none, json Vec<Environment>, 200,
+    TopicEnvironmentList: GET "/topics/{id}/environments", Permission("node.view"), query crate::common::CollectionQuery, none, json crate::common::Page<Environment>, 200,
         operation Op::facets(&[
             Facet::required(Read,&[Object(K::Environment)],Target::ResolvedCollection("results")),
             Facet::required(Read,&[Object(K::Template),Object(K::Host),Object(K::Machine),Object(K::Mount)],Target::ResolvedCollection("resources")),
