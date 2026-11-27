@@ -275,17 +275,31 @@ async fn accessible(
         .await?
         .is_allowed(),
         SummaryTarget::Chat { id } | SummaryTarget::ChatTitle { id } => {
-            let origin = orch_db::audit::current_origin();
-            let act = orch_chat::Acting {
-                principal,
-                now: principal.now().get(),
-                origin: &origin,
+            // Whether the chat opens, and whether only as an inspection: once in a read deciding once.
+            let opened = match super::once::chat(principal.caller(), id) {
+                Some(opened) => opened,
+                None => {
+                    let origin = orch_db::audit::current_origin();
+                    let act = orch_chat::Acting {
+                        principal,
+                        now: principal.now().get(),
+                        origin: &origin,
+                    };
+                    let opened =
+                        match orch_chat::chats::load(conn, &act, id, orch_chat::chats::Mode::Read)
+                            .await
+                        {
+                            Ok(loaded) => Some(loaded.standing.inspects()),
+                            Err(orch_chat::Error::NotFound | orch_chat::Error::Lacks { .. }) => {
+                                None
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                    super::once::keep_chat(principal.caller(), id, opened);
+                    opened
+                }
             };
-            match orch_chat::chats::load(conn, &act, id, orch_chat::chats::Mode::Read).await {
-                Ok(loaded) => matches!(kind, ReadKind::Stored) || !loaded.standing.inspects(),
-                Err(orch_chat::Error::NotFound | orch_chat::Error::Lacks { .. }) => false,
-                Err(error) => return Err(error.into()),
-            }
+            opened.is_some_and(|inspects| matches!(kind, ReadKind::Stored) || !inspects)
         }
     })
 }

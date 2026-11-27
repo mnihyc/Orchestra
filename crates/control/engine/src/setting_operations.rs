@@ -723,6 +723,9 @@ impl crate::Engine {
                     .await?;
                 }
             }
+            key if crate::environments::is_workspace_setting(key) => {
+                self.workspace_scope_changed(change.node).await?;
+            }
             keys::AUTH_SECOND_STEP => {
                 let mut conn = self.db().acquire().await?;
                 let held = orch_db::queries::threads::threads_held_for_second_step(&mut conn, None)
@@ -759,6 +762,31 @@ impl crate::Engine {
                 }
             }
             _ => {}
+        }
+        if crate::resolved::runs_with(&change.key) {
+            self.admission_scope_changed(change.node).await?;
+        }
+        Ok(())
+    }
+
+    /// After a setting the threads run with changed at `node` (the system's at [`orch_db::queries::access::SYSTEM_ID`]):
+    /// the threads at or under it that are blocked by a cause of their own (a tool access their tools cannot enforce,
+    /// a model the place no longer allows) are looked at again at once, as a change the engine hears of is. The
+    /// supervisor's recheck finds the same threads later; this is so that the change is seen in a moment. A wake is a
+    /// hint: the thread's pre-flight decides with the settings as they now are.
+    pub async fn admission_scope_changed(&self, node: Id) -> Result<(), EngineError> {
+        let blocked = {
+            let mut conn = self.db().acquire().await?;
+            orch_db::queries::threads::threads_blocked_by_their_own_cause_under(
+                &mut conn,
+                (node != orch_db::queries::access::SYSTEM_ID).then_some(node),
+                crate::preflight::CAUSES_OF_THE_THREAD,
+                self.inner.config.sweep_batch,
+            )
+            .await?
+        };
+        for thread in blocked {
+            self.wake(thread);
         }
         Ok(())
     }

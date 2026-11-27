@@ -632,7 +632,7 @@ async fn check_current_sources(
     )
     .await;
     let read = super::result(conn, read).await?;
-    let available = metadata::available_entries(conn, &read.entries, super::options(ctx)).await?;
+    let available = metadata::available_entries(ctx, conn, &read.entries).await?;
     if ready
         .selected
         .iter()

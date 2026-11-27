@@ -1,0 +1,2 @@
+# firstday-2: lint of the whole workspace with all targets
+clippy

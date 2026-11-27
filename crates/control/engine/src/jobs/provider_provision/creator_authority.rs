@@ -29,7 +29,7 @@ struct Authority {
     home: Id,
     job: Id,
     template: Id,
-    named_host: Option<Id>,
+    named_host: Option<orch_provider_contract::pools::Target>,
     key_machine: Option<Id>,
     agent: Option<Id>,
     kind: String,
@@ -37,6 +37,18 @@ struct Authority {
     runtime_config_hash: Hash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duplicate: Option<duplicate::Origin>,
+    /// The provider's first owner where its creator made it from outside the org it is at home in (a system admin
+    /// acting as one): the nearest org's first owner who is a member, as for anything an outsider makes. None where
+    /// the creator owns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<Id>,
+}
+
+impl Authority {
+    /// Whose the provider is while its first Make is pending: its creator's, or the first owner its home gave it.
+    fn owner(&self) -> Id {
+        self.owner.unwrap_or_else(|| self.origin.user())
+    }
 }
 
 fn read(row: &JobRow) -> Result<Option<Authority>, EngineError> {
@@ -73,13 +85,16 @@ fn unavailable(error: &orch_authz::Error) -> bool {
     )
 }
 
-fn body_hash(body: &Json) -> Result<Hash, serde_json::Error> {
+pub(super) fn body_hash(body: &Json) -> Result<Hash, serde_json::Error> {
     let mut body = body.clone();
     body.sort_all_objects();
     Ok(Hash::of(&serde_json::to_vec(&body)?))
 }
 
-async fn template_and_host(conn: &mut Conn, provider: Id) -> Result<(Id, Option<Id>), EngineError> {
+async fn template_and_host(
+    conn: &mut Conn,
+    provider: Id,
+) -> Result<(Id, Option<orch_provider_contract::pools::Target>), EngineError> {
     let template = setting::<Id>(
         conn,
         SettingsPlace::Provider(provider),
@@ -87,7 +102,7 @@ async fn template_and_host(conn: &mut Conn, provider: Id) -> Result<(Id, Option<
     )
     .await?
     .unwrap_or(orch_db::seeds::PROVIDER_RUNTIME_TEMPLATE_ID);
-    let host = setting::<Id>(
+    let host = setting::<orch_provider_contract::pools::Target>(
         conn,
         SettingsPlace::Provider(provider),
         keys::RUNTIME_HOST_ID,
@@ -289,6 +304,10 @@ async fn retain_inner(
     let current = rows::state(conn, provider)
         .await?
         .ok_or_else(|| EngineError::unreadable("The new provider disappeared."))?;
+    // The creation gave the provider this first owner: its creator, or for a creator from outside the home's org the
+    // nearest org's first owner who is a member, with Manage for the creator.
+    let owner =
+        orch_authz::ownership::owner_of_new(conn, origin.user(), Some(current.home_id)).await?;
     if !matches!(
         (origin.operation(), duplicate.is_some()),
         ("ProviderCreate", false) | ("ProviderDuplicate" | "ProviderMoveOut", true)
@@ -306,7 +325,7 @@ async fn retain_inner(
         || row.plan.get("provider_recovery").is_some()
         || row.plan.get("target").is_some()
         || current.deleted_at.is_some()
-        || current.owner_id != origin.user()
+        || current.owner_id != owner
         || current.home_id != home
         || current.machine_id.is_some()
         || !matches!(current.kind.as_str(), "api" | "subscription")
@@ -330,6 +349,7 @@ async fn retain_inner(
         harness: current.harness_kind,
         runtime_config_hash: body_hash(&current.runtime_config)?,
         duplicate,
+        owner: (owner != origin.user()).then_some(owner),
     };
     if let Some(previous) = read(&row)? {
         if previous != authority {
@@ -553,7 +573,7 @@ pub(super) async fn principal(
             state.deleted_at.is_none()
                 && state.status != "disabled"
                 && state.machine_id.is_none()
-                && state.owner_id == authority.origin.user()
+                && state.owner_id == authority.owner()
                 && state.home_id == authority.home
                 && state.key_machine_id == authority.key_machine
                 && state.agent_id == authority.agent
@@ -562,7 +582,8 @@ pub(super) async fn principal(
         })
         .ok_or_else(|| EngineError::unreadable("The accepted provider binding changed."))?;
     if body_hash(&current.runtime_config)? != authority.runtime_config_hash
-        || template_and_host(conn, current.id).await? != (authority.template, authority.named_host)
+        || template_and_host(conn, current.id).await?
+            != (authority.template, authority.named_host.clone())
     {
         return Err(EngineError::unreadable(
             "The accepted provider runtime choice changed.",
@@ -633,6 +654,27 @@ pub(super) async fn principal(
                     "The provider creator host binding changed.",
                 ));
             }
+            let template = host_rows::template(conn, authority.template)
+                .await?
+                .ok_or_else(|| EngineError::unreadable("the provider creation template is gone"))?;
+            let pooled = super::placement_pool::current(
+                conn,
+                &principal,
+                &current,
+                &template,
+                row,
+                candidate.host_id,
+            )
+            .await?;
+            if matches!(
+                authority.named_host,
+                Some(orch_provider_contract::pools::Target::Pool { .. })
+            ) && !pooled
+            {
+                return Err(EngineError::unreadable(
+                    "the provider's admitted host pool source is no longer available",
+                ));
+            }
             let host = host_rows::host(conn, candidate.host_id)
                 .await?
                 .filter(|host| {
@@ -640,12 +682,19 @@ pub(super) async fn principal(
                         && host.machine_status == "active"
                         && (host.owner_id.is_none()
                             || host.owner_id == Some(current.owner_id)
-                            || authority.named_host == Some(host.id))
+                            || authority
+                                .named_host
+                                .as_ref()
+                                .and_then(orch_provider_contract::pools::Target::single_host)
+                                == Some(host.id)
+                            || pooled)
                 })
                 .ok_or_else(|| {
                     EngineError::unreadable("The provider creator host is unavailable.")
                 })?;
-            if !resources::provider_creation_host_use(conn, &principal, current.id, host.id).await?
+            if !pooled
+                && !resources::provider_creation_host_use(conn, &principal, current.id, host.id)
+                    .await?
             {
                 tracing::debug!(target: "orch_api::native_operations", phase = "provider.creator.require",
                     reason = "host_use", operation = authority.origin.operation(),
@@ -954,23 +1003,21 @@ pub async fn command_current_callers(
     if transfer::inverse(body) {
         return Ok(Some(Vec::new()));
     }
-    if let Some(duplicate) = authority.duplicate {
+    let Some(actor) = principal(conn, &owner, clock).await? else {
+        return Ok(None);
+    };
+    let until = if let Some(duplicate) = authority.duplicate {
         let current = duplicate
             .raw
             .current(conn, clock)
             .await
             .map_err(duplicate::error)?;
         current.check(clock).map_err(duplicate::error)?;
-        return Ok(Some(vec![(
-            Some(current.caller().clone()),
-            current.until(),
-        )]));
-    }
-    Ok(authority
-        .origin
-        .restore_current(conn, clock)
-        .await?
-        .map(|caller| vec![(Some(caller), None)]))
+        current.until()
+    } else {
+        None
+    };
+    Ok(Some(vec![(Some(actor.caller().clone()), until)]))
 }
 
 /// The source ending changes authority; take its native global lock before any row lock.

@@ -7,7 +7,7 @@
  * says what undoing means. When the link is lost the bar stays where it was seen, and says that it is looking again.
  */
 import { Check, Circle, LoaderCircle } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { transferCleanup, type TransferFacts } from '@/features/change/environmentTransfer';
 import { Hint } from '@/features/help/Hint';
 
@@ -20,6 +20,8 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
 import { CallRecoveryStatus } from '@/features/calls/Status';
 import { CallHelp } from '@/features/calls/Help';
+import { RelativeTime } from '@/ui/RelativeTime';
+import { JobFacts } from './JobFacts';
 
 /** Whether a job is past the point after which nothing is undone: its commit has happened. */
 export function committed(job: Job): boolean {
@@ -38,13 +40,37 @@ export function checksOf(job: Job): string[] {
 const COPY_PHASES = new Set(['copy', 'files', 'upload', 'download', 'materialize', 'restore', 'apply', 'write', 'volumes', 'hash']);
 const SEPARATOR = ' · ';
 
+const SERVER_UPDATE_STAGES: Record<string, string | undefined> = {
+  queued: 'serverUpdate.stages.queued',
+  fetching: 'serverUpdate.stages.fetching',
+  verifying: 'serverUpdate.stages.verifying',
+  applying: 'serverUpdate.stages.applying',
+  stopping: 'serverUpdate.stages.stopping',
+  dumping: 'serverUpdate.stages.dumping',
+  activating: 'serverUpdate.stages.activating',
+  starting: 'serverUpdate.stages.starting',
+  checking: 'serverUpdate.stages.checking',
+  rolling_back: 'serverUpdate.stages.rolling_back',
+  recovering: 'serverUpdate.stages.recovering',
+  updated: 'serverUpdate.stages.updated',
+  rolled_back: 'serverUpdate.stages.rolled_back',
+  failed: 'serverUpdate.stages.failed',
+};
+
+function copyCustodyPending(message: string | null): boolean {
+  return message === 'mount_copy_custody_pending';
+}
+
 /** The running phase and its live counters, as compact fragments. */
 export function useLine(job: Job, transfer?: TransferFacts): string {
   const { t } = useTranslation();
   const format = useFormatContext();
   const { locale } = format;
   const progress = job.progress;
+  const serverStage = progress.message === null ? undefined : SERVER_UPDATE_STAGES[progress.message];
+  if (job.kind === 'server_update' && serverStage !== undefined) return t(serverStage);
   if (job.state === 'cancelled' || job.state === 'failed' || job.state === 'succeeded' || job.state === 'lost') return t(`source.job.${job.state}`);
+  if (copyCustodyPending(progress.message)) return t('liveWork.keepingCopies');
   if (progress.activity?.stopping === true) return t('liveWork.stopping');
   if (job.state === 'queued') return t('change.progress.queued');
   if (progress.activity?.waiting_for?.type === 'environment_change') return t('liveWork.queuedChange');
@@ -90,13 +116,20 @@ export function JobActivityLine({ job, transfer }: { job: Job; transfer?: Transf
   const stalled = active && !recovering && threshold !== undefined && threshold > 0 && now - Date.parse(updated) >= threshold * 1000;
   const elapsed = (active ? now : Date.parse(job.finished_at ?? updated)) - Date.parse(job.started_at ?? job.created_at);
   const directories = job.progress.activity?.directories_done;
-  const title = [directories === null || directories === undefined ? null : t('liveWork.directories', { count: directories, value: formatNumber(directories, format.locale) }), job.progress.message].filter((part) => part !== null && part !== '').join(SEPARATOR);
+  const title = [directories === null || directories === undefined ? null : t('liveWork.directories', { count: directories, value: formatNumber(directories, format.locale) }), copyCustodyPending(job.progress.message) ? t('liveWork.keepingCopies') : job.progress.message].filter((part) => part !== null && part !== '').join(SEPARATOR);
   const delayedStop = stopping && stalled && waiting?.type === 'machine';
+  const eligible = job.lifecycle_wait?.retry_eligible_at;
+  const phase = job.lifecycle_wait?.phase;
+  const retryPhase = phase === 'cleanup' ? t('placeFacts.cleanup') : phase === undefined ? t('factDisclosure.notReported') : t(`change.phase.${phase}.short`, { defaultValue: t('factDisclosure.notReported') });
+  const coordination = active && eligible?.state === 'at' ? <Trans i18nKey="placeFacts.phaseRetry" values={{ phase: retryPhase }} components={{ when: <RelativeTime at={eligible.at} /> }} />
+    : active && job.lifecycle_wait?.phase === 'cleanup' && job.lifecycle_wait.recovering === true ? t('placeFacts.recoveringCleanup') : line;
   return <p className="text-sm text-text-muted tabular-nums" aria-live="polite" title={title || undefined} data-job-activity>
-    <span data-job-line className={delayedStop ? 'text-warning-text' : undefined}>{delayedStop ? t('liveWork.stoppingOn', { machine: waiting.name }) : job.call_recovery === null || job.call_recovery === undefined ? line : <CallRecoveryStatus recovery={job.call_recovery} service />}</span>
-    {Number.isFinite(elapsed) && <span data-job-elapsed className="inline-block min-w-[11ch]">{SEPARATOR}{formatSpan(elapsed, format, 'clock')}</span>}
+    <span data-job-line className={delayedStop ? 'text-warning-text' : undefined}>{delayedStop ? t('liveWork.stoppingOn', { machine: waiting.name }) : job.call_recovery === null || job.call_recovery === undefined ? coordination : <CallRecoveryStatus recovery={job.call_recovery} service />}</span>
+    {/* A job that is over and has no start time (one that never started, or a reader's progress-only view) has no length to give. */}
+    {Number.isFinite(elapsed) && (active || job.started_at !== null) && <span data-job-elapsed className="inline-block min-w-[11ch]">{SEPARATOR}{formatSpan(elapsed, format, 'clock')}</span>}
     {recovering && <CallHelp section="services" />}
     {stalled && !stopping && <span className="text-warning-text" data-job-stalled>{SEPARATOR}{t('liveWork.unchanged', { time: formatTimeOfDay(updated, format, now) })}</span>}
+    {' '}<JobFacts job={job} />
   </p>;
 }
 
@@ -120,6 +153,7 @@ export interface ProgressProps {
 
 export function JobProgress({ job, heading, reconnecting, className, phaseLabel, transfer }: ProgressProps) {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const checks = checksOf(job);
   const verifying = job.progress.phase === 'verify' && job.state === 'running';
   return (
@@ -127,7 +161,7 @@ export function JobProgress({ job, heading, reconnecting, className, phaseLabel,
       <div className="flex items-baseline justify-between gap-3">
         <div className="flex min-w-0 items-center gap-1"><h3 className="text-base font-semibold text-text">{heading}</h3><Hint id="live-work" popover /></div>
         <span className="text-base font-medium text-text tabular-nums" data-job-percent>
-          {job.progress.percent} %
+          {formatNumber(job.progress.percent, locale)} %
         </span>
       </div>
       <Meter look="progress" value={job.progress.percent} label={heading} />

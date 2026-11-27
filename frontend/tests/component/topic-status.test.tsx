@@ -12,17 +12,17 @@ import { TopicStatusChip } from '@/features/topic/Status';
 import type { Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import { toast } from '@/ui/Toast';
+import { toast, toastActs } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { org } from '../doubles/fixtures';
 import { ADA } from '../unit/general-access-fixtures';
 
 vi.mock('@/api/day100', () => ({ changeTopicStatus: vi.fn() }));
-vi.mock('@/ui/Toast', () => ({ toast: vi.fn(() => vi.fn()) }));
-vi.mock('@/features/navigation/NodeMenu', async () => {
+vi.mock('@/ui/Toast', async (loadOriginal) => ({ ...await loadOriginal<object>(), toast: vi.fn(() => vi.fn()) }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => {
   const { create } = await import('zustand');
   const pending = create<{ ids: ReadonlySet<string> }>(() => ({ ids: new Set() }));
-  return {
+  return { ...await loadOriginal<object>(),
     usePendingPlaces: pending,
     useIsPending: (id: string) => pending((state) => state.ids.has(id)),
   };
@@ -120,12 +120,12 @@ describe('the topic status chip', () => {
     await act(() => Promise.resolve(finish?.(done)));
     view.rerender(<TopicStatusChip topic={done} allowed />);
     await waitFor(() => expect(screen.getByRole('button', { name: statusName('done') })).toBeEnabled());
-    const notice = vi.mocked(toast).mock.calls.find(([entry]) => entry.tone === 'success')?.[0];
-    expect(notice?.action?.label).toBe('Undo');
+    const [undo] = toastActs(vi.mocked(toast).mock.calls.find(([entry]) => entry.tone === 'success')?.[0].action);
+    expect(undo?.label).toBe('Undo');
     vi.mocked(changeTopicStatus).mockResolvedValue({ ...topic, revision: 9 });
-    await act(() => Promise.resolve(notice?.action?.run()));
+    await act(() => Promise.resolve(undo?.run()));
     await waitFor(() => expect(changeTopicStatus).toHaveBeenLastCalledWith(topic.id, 'open', 8));
-    notice?.action?.run();
+    undo?.run();
     expect(changeTopicStatus).toHaveBeenCalledTimes(2);
   });
 

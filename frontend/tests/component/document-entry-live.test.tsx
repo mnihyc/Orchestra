@@ -12,7 +12,7 @@ vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: async (request: Promise<unknown>) => request };
 });
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: calls.subscribe } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: calls.subscribe } }));
 const item = { kind: 'document' as const, id: 'document' };
 const read = (name: string): DocumentTreeRead => ({ feed: 'entry-feed', ancestors: [], entries: [{
   entry: { item, parent: { kind: 'container', id: 'parent' }, node: 'node', root: 'org', basename: name, title: name,
@@ -28,6 +28,8 @@ function Harness() {
 }
 const mount = () => render(<QueryClientProvider client={cache}><Harness /></QueryClientProvider>);
 const deliver = (data: DocumentTreeRead, at = 0) => act(() => listeners[at]?.onFrame({ op: 'event', feed: 'entry-feed', id: at + 1, data: { entry: data } }));
+/** The query cache tells its observers after a zero-delay timer: what a frame wrote to the cache is drawn after it. */
+const drawn = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 beforeEach(() => {
   cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   calls.get.mockReset(); calls.subscribe.mockReset(); listeners.length = 0;
@@ -92,22 +94,38 @@ it('a cache-only page shares its frame owner’s read and restarts that owner on
 });
 
 
-it('retires old authority content and delayed reads while the same reader retains only its feed locator', async () => {
-  calls.get.mockResolvedValueOnce(read('Private entry')); mount(); await screen.findByText('Private entry');
+it('keeps the shown entry through a reload until the current snapshot replaces it, retiring delayed reads, while the same reader retains only its feed locator', async () => {
+  calls.get.mockResolvedValueOnce(read('Shown entry')); mount(); await screen.findByText('Shown entry');
   let finish!: (value: DocumentTreeRead) => void;
   calls.get.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
   await waitFor(() => expect(calls.get).toHaveBeenCalledTimes(2));
   act(() => listeners[0]?.onFrame({ op: 'resync', id: 1, feed: 'entry-feed', reload: true }));
-  expect(cache.getQueryData(documentTreeEntryKey(item))).toBeUndefined();
-  await screen.findByText('No entry');
+  // What is shown stays, never replaced by an empty entry, until the new subscription's snapshot replaces it.
+  expect(cache.getQueryData(documentTreeEntryKey(item))).toMatchObject({ entries: [{ entry: { title: 'Shown entry' } }] });
+  await drawn();
+  expect(screen.getByText('Shown entry')).toBeVisible(); expect(screen.queryByText('No entry')).toBeNull();
   expect(listeners).toHaveLength(2);
   expect(listeners[1]?.unsubscribe).not.toHaveBeenCalled();
   deliver(read('Obsolete frame'), 0);
   await act(async () => { finish(read('Obsolete HTTP')); await Promise.resolve(); });
+  await drawn();
   expect(screen.queryByText('Obsolete frame')).toBeNull();
   expect(screen.queryByText('Obsolete HTTP')).toBeNull();
+  expect(screen.getByText('Shown entry')).toBeVisible();
   deliver(read('Current authority'), 1); await screen.findByText('Current authority');
+  expect(screen.queryByText('Shown entry')).toBeNull();
   expect(calls.get).toHaveBeenCalledTimes(2);
   expect(listeners).toHaveLength(2);
+});
+
+it('ends the entry kept through a reload when the reader is refused', async () => {
+  calls.get.mockResolvedValueOnce(read('Kept entry')); mount(); await screen.findByText('Kept entry');
+  await waitFor(() => expect(listeners).toHaveLength(1));
+  act(() => listeners[0]?.onFrame({ op: 'resync', id: 1, feed: 'entry-feed', reload: true }));
+  await drawn();
+  expect(screen.getByText('Kept entry')).toBeVisible(); expect(listeners).toHaveLength(2);
+  act(() => listeners[1]?.onFrame({ op: 'closed', feed: 'entry-feed', id: 2, reason: 'revoked' }));
+  expect(cache.getQueryData(documentTreeEntryKey(item))).toBeUndefined();
+  expect(await screen.findByText('Entry refused')).toBeVisible(); expect(screen.queryByText('Kept entry')).toBeNull();
 });
