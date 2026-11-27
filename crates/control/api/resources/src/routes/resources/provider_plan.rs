@@ -245,7 +245,8 @@ async fn window_page(
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
-    let (facts, _) = super::providers::facts_shown(&row.facts, &row.facts_overrides)?;
+    let (facts, _) =
+        super::providers::facts_shown(&row.facts, &row.facts_overrides, row.listed_models)?;
     let from = date("from", &query.from)?;
     let to = date("to", &query.to)?
         .checked_add_signed(Duration::days(1))

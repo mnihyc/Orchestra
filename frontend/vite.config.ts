@@ -14,7 +14,7 @@ import tailwindcss from '@tailwindcss/vite';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
-import { firstWavePlugin, threadShellWorkerPlugin } from './build/first-wave';
+import { firstWavePlugin, shellWorkerPlugin } from './build/first-wave';
 import { staticChunkGroup } from './build/frame-chunks';
 import { assetFileName, inlineAsset } from './build/fonts';
 import { vocabularyPlugin } from './build/vocabulary';
@@ -31,7 +31,7 @@ export default defineConfig({
     helpContentPlugin(),
     releaseNoticesPlugin(),
     // The frame is known before the verified reader selects the first vocabulary.
-    firstWavePlugin(),
+    firstWavePlugin(vocabulary.api.loginWordParts),
     {
       name: 'preview-built-assets',
       configurePreviewServer(server) {
@@ -53,7 +53,7 @@ export default defineConfig({
         });
       },
     },
-    threadShellWorkerPlugin(vocabulary.api.loginWordParts),
+    shellWorkerPlugin(vocabulary.api.loginWordParts),
     // The route tree is generated from the files under `src/routes`; every route is its own chunk.
     tanstackRouter({
       target: 'react',

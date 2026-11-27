@@ -101,6 +101,17 @@ impl Address {
         format!("{}{path}", self.base)
     }
 
+    /// Whether it names the machine it is read on: `localhost`, a name below it, or a loopback address.
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        let name = self.host.to_ascii_lowercase();
+        name == "localhost"
+            || name.ends_with(".localhost")
+            || name
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.to_canonical().is_loopback())
+    }
+
     /// The `Host` header of a request to this address.
     #[must_use]
     pub fn authority(&self) -> String {
@@ -254,6 +265,33 @@ mod tests {
             local.websocket("/api/v1/ws"),
             "ws://127.0.0.1:41201/api/v1/ws"
         );
+    }
+
+    #[test]
+    fn a_loopback_address_is_one_that_names_the_machine_it_is_read_on() {
+        for local in [
+            "http://127.0.0.1:41450",
+            "http://127.1.2.3",
+            "http://localhost:5180",
+            "http://LOCALHOST",
+            "http://orch.localhost:8080",
+            "http://[::1]:5180",
+            "http://[::ffff:127.0.0.1]",
+        ] {
+            assert!(Address::parse(local).unwrap().is_loopback(), "{local}");
+        }
+        for elsewhere in [
+            "https://orch.example.com",
+            "http://10.0.0.5:5180",
+            "http://172.17.0.1:9443",
+            "http://[2001:db8::1]",
+            "http://localhost.example.com",
+        ] {
+            assert!(
+                !Address::parse(elsewhere).unwrap().is_loopback(),
+                "{elsewhere}"
+            );
+        }
     }
 
     #[test]

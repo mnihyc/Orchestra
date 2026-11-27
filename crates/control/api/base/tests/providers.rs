@@ -22,7 +22,7 @@ use orch_db::queries::hierarchy::testing::insert_node;
 use orch_db::secrets::MasterKey;
 use orch_settings::Target;
 use orch_types::{Id, Json};
-use places::{Who, make_department, make_project, make_topic, missing_permissions};
+use places::{Who, admin_mode, make_department, make_project, make_topic, missing_permissions};
 use resources::{Company, company, name_on_page, name_person};
 use serde_json::json;
 use support::{Statements, World};
@@ -64,6 +64,58 @@ fn api_body(name: &str, home: Id) -> CreateProvider {
 async fn world() -> World {
     install_master_key(MasterKey::new(MASTER));
     World::new().await
+}
+
+/// A system admin acting as one adds a provider in an org he is not a member of. As anything an outsider makes, it is
+/// the org's first owner's, and so is its first Make, as every later one is. The creator's authority used to require
+/// the creator to be the owner: the request ended in a 500 and nothing was made.
+#[tokio::test]
+async fn a_system_admin_adds_a_provider_in_an_org_he_is_no_member_of() {
+    let world = world().await;
+    let c = company(&world).await;
+    world.make_admin(&c.stranger.person).await;
+    admin_mode(&world, &c.stranger, true).await;
+    let made = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&c.stranger.token)
+        .body(&api_body("Made from outside", c.acme))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .provider;
+    assert_eq!(made.owner.username, c.boss.person.username);
+    let plan: Json = sqlx::query_scalar(
+        "SELECT plan FROM jobs WHERE provider_id = $1 AND kind = 'provider_provision' ORDER BY created_at LIMIT 1",
+    )
+    .bind(made.base.id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(plan["mode"], json!("make"));
+    assert!(plan.get("provider_creator").is_none(), "{plan}");
+    // Its owner has it as her own.
+    let read = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await;
+    assert!(read.status.is_success(), "{}", read.status);
+    admin_mode(&world, &c.stranger, false).await;
+    // A member makes hers as before: she owns it, and its first Make keeps her own authority.
+    let own = make(&world, &c.admin, &api_body("Made from inside", c.acme)).await;
+    assert_eq!(own.owner.username, c.admin.person.username);
+    let plan: Json = sqlx::query_scalar(
+        "SELECT plan FROM jobs WHERE provider_id = $1 AND kind = 'provider_provision' ORDER BY created_at LIMIT 1",
+    )
+    .bind(own.base.id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!(plan.get("provider_creator").is_some(), "{plan}");
 }
 
 #[tokio::test]

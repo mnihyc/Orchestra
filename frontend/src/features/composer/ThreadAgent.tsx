@@ -30,7 +30,7 @@ export function ThreadAgentChip({ thread, canBind, reason, onSetUp }: { thread: 
   const application = binding.configuration_application;
   const fragment = application?.deferred_by_background === true ? t('placeFacts.backgroundDefers') : (application?.pending_kinds?.length ?? 0) > 0 ? t('placeFacts.nextSession') : null;
   return <><AgentChip choices={choices} value={binding.agent.id} name={fragment === null || !canBind ? binding.agent.name : `${binding.agent.name} · ${fragment}`} provider={binding.provider.name} disabled={!canBind} reason={reason}
-    below={canBind ? <ConfigurationFacts application={application} inline /> : undefined}
+    facts={canBind ? <ConfigurationFacts application={application} inline /> : undefined}
     pending={opened && options.isPending} loaded={options.data !== undefined} onOpenChange={(next) => { if (next) setOpened(true); }}
     onChoose={(choice) => openChange({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'provider', agent: choice.id })} />
     {!canBind && <ConfigurationFacts application={application} />}

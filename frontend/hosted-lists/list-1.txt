@@ -1,0 +1,79 @@
+[chromium] › tests/e2e/change.spec.ts › a switch of a blocked thread: planned, a blocker resolved in the dialog, carried out with the thread locked, and the thread on its new side
+[chromium] › tests/e2e/change.spec.ts › a switch that fails in its checks says where, why, and what was undone, and is tried again
+[chromium] › tests/e2e/change.spec.ts › a plan that is more than fifteen minutes old is not carried out: it is made again, by the page when it knows and by the server when it says so
+[chromium] › tests/e2e/change.spec.ts › an environment that is behind is brought up to date: its thread is told and held, and says the environment was made again
+[chromium] › tests/e2e/change.spec.ts › a move of an environment to another host is cancelled before its commit: what it made is removed and the environment stays where it was
+[chromium] › tests/e2e/change.spec.ts › the threads of a topic are switched together: the one that cannot be is named with what stops it, and the others go
+[chromium] › tests/e2e/change.spec.ts › a batch is watched while it runs, counts the threads that its reader cannot see, and is cancelled and undone
+[chromium] › tests/e2e/change.spec.ts › what is idle on a host is listed exactly as it will be stopped, and stopped
+[chromium] › tests/e2e/change.spec.ts › a switch is planned, confirmed and hidden from the keyboard alone, and Escape leaves a plan without doing it
+[chromium] › tests/e2e/change.spec.ts › a composer aside with a lost reply retries its original act after navigation and leaves newer words alone
+[chromium] › tests/e2e/change.spec.ts › a refusal of Switch and its wizard survive the page reading the thread again after a reconnect, after the answer (1440)
+[chromium] › tests/e2e/change.spec.ts › a refusal of Switch and its wizard survive the page reading the thread again after a reconnect, while the answer (1440)
+[chromium] › tests/e2e/change.spec.ts › a switch under way and the failure it comes to are kept when the page reads the thread again after a reconnect (1440)
+[chromium] › tests/e2e/access.spec.ts › a person is added to a line, shows as pending until the server answers, and is taken out again after being told whom that reaches
+[chromium] › tests/e2e/access.spec.ts › a page stops following its place for one row and follows it again, and the whole page is made private and put back
+[chromium] › tests/e2e/access.spec.ts › a row that a lock above decides shows the lock and where it was set, and has no menu
+[chromium] › tests/e2e/access.spec.ts › a change made against a page that somebody else changed is not made: the newer page is shown, and the change can be made again against it
+[chromium] › tests/e2e/access.spec.ts › the full form lays every row out by area, with the advanced rows and Administration under it
+[chromium] › tests/e2e/access.spec.ts › somebody from outside the org is named by whoever may, with who they are marked, and shown disabled with who can for everybody else
+[chromium] › tests/e2e/access.spec.ts › an address nobody is registered with is invited to this one place, and the link is shown to copy
+[chromium] › tests/e2e/access.spec.ts › the Share action of each kind of resource opens the permission page of that resource
+[chromium] › tests/accessibility/resources.spec.ts › machines: the list, the dialog that adds one, a machine with its tabs, and what registers on it
+[chromium] › tests/accessibility/resources.spec.ts › providers: the list, both stages of adding one, and a provider with each of its tabs
+[chromium] › tests/accessibility/resources.spec.ts › agent profiles: the list, the dialog that adds one, and a profile with each of its tabs
+[chromium] › tests/accessibility/resources.spec.ts › environments: the list, a directory on a machine, one that Orch made, and what opens above them
+[chromium] › tests/accessibility/resources.spec.ts › templates: the list, the dialog that makes one, and a template with each of its tabs
+[chromium] › tests/accessibility/resources.spec.ts › hosts: the list, the dialog that enrolls one, and a host with each of its tabs
+[chromium] › tests/accessibility/resources.spec.ts › somebody who may only read sees the lists and the pages with what they may not do kept from them
+[chromium] › tests/e2e/chat.spec.ts › a direct chat is made from New message, opens empty, and shows up for the other person with its first line
+[chromium] › tests/e2e/chat.spec.ts › several people make a group with a name; an admin who leaves reads on, read-only, and a developer who leaves reads no more
+[chromium] › tests/e2e/chat.spec.ts › messages are picked, with a range by Shift, and forwarded to a group chat and to a person in one act
+[chromium] › tests/e2e/chat.spec.ts › one destination that refuses stops the whole forward, and the dialog says which and why
+[chromium] › tests/e2e/chat.spec.ts › items picked in the conversation are forwarded to the thread’s chat in one act, as copies that say where they came from
+[chromium] › tests/accessibility/chat.spec.ts › the people of a group, and adding somebody from outside the org as a guest
+[chromium] › tests/accessibility/chat.spec.ts › New message: choosing people for a direct chat, and for a group with its name
+[chromium] › tests/accessibility/chat.spec.ts › messages picked in a selection, and the dialog that forwards them
+[chromium] › tests/accessibility/chat.spec.ts › a thread’s chat beside it with its three segments, and the same on a small screen
+[chromium] › tests/e2e/start-help-switch.spec.ts › start/help/switch 1440/en/light › four choices, optional setup and one help view retain the original draft
+[chromium] › tests/e2e/start-help-switch.spec.ts › start/help/switch 1440/en/light › an impossible new-environment setup is disabled before any creation request
+[chromium] › tests/e2e/start-help-switch.spec.ts › start/help/switch 1440/en/light › a disabled Switch explains the wait beside ordinary action buttons
+[chromium] › tests/e2e/start-help-switch.spec.ts › opens complete reference documentation from the Arrangement heading (en/light/1440)
+[chromium] › tests/e2e/custody-resource-plans.spec.ts › delete agent 1440px light en
+[chromium] › tests/e2e/custody-resource-plans.spec.ts › disable agent 1440px light en
+[chromium] › tests/e2e/custody-resource-plans.spec.ts › disable environment 1440px light en
+[chromium] › tests/e2e/org-home-work.spec.ts › daily work leads the org at 1440 and 400 in both themes (en)
+[chromium] › tests/e2e/org-home-work.spec.ts › a viewer is not told that another person’s approval or question awaits them
+[chromium] › tests/e2e/org-home-work.spec.ts › a decision, rename and removal update the existing home without detail or list refetches
+[chromium] › tests/e2e/thread-read-windows.spec.ts › two histories of the same item use one socket and never replace the route’s rows, tool expansion or draft
+[chromium] › tests/e2e/thread-read-windows.spec.ts › two windows of the same continuation keep independent anchors when the preview jumps to its tail
+[chromium] › tests/e2e/thread-read-windows.spec.ts › version arrows retain a prompt outside the 200-item tail and restore keyboard focus
+[chromium] › tests/accessibility/inspector.spec.ts › the tree, a file in the code view, the search and the menu of a row
+[chromium] › tests/accessibility/inspector.spec.ts › a shell with something printed in it, in both themes
+[chromium] › tests/e2e/adopt.spec.ts › a session is adopted after its plan is read, and its row then leads to the thread with its history
+[chromium] › tests/e2e/adopt.spec.ts › a session whose folder none of the person’s environments holds names the folder to register first and adopts nothing
+[chromium] › tests/e2e/file-media.spec.ts › a returned MCP image opens through the common image item at 1440px in light/en
+[chromium] › tests/e2e/file-media.spec.ts › file previews at 1440px in light and en
+[chromium] › tests/e2e/invitation-creation-replay.spec.ts › invitation resend and deliberate replacement in org/email/en/1440/light
+[chromium] › tests/e2e/invitation-creation-replay.spec.ts › invitation resend and deliberate replacement in org/link/en/1440/light
+[chromium] › tests/e2e/notification-exceptions.spec.ts › notification exceptions en/light
+[chromium] › tests/e2e/notification-exceptions.spec.ts › a project default and a thread exception can both be changed on the screens, and Default names the ancestor
+[chromium] › tests/e2e/workbench-files.spec.ts › a desktop file tab keeps its source URL, peers and drafts through normal navigation and refresh
+[chromium] › tests/e2e/workbench-files.spec.ts › opening the same file line twice moves the existing editor cursor while preserving unsaved text
+[chromium] › tests/e2e/acp-capability-routes.spec.ts › ACP shared search choice save and unavailable route en/light/400
+[chromium] › tests/e2e/background-overlap.spec.ts › background sharing remains visible on the thread click path (en/light)
+[chromium] › tests/e2e/chat-avatar-choices.spec.ts › chat scopes and avatar rings stay visible at 400px in en/light
+[chromium] › tests/e2e/coherence.spec.ts › a role given in the permission page and taken away in its People shows at once in the People and in the page, without a reload
+[chromium] › tests/e2e/directory-transfer-words.spec.ts › calls a native directory transfer a switch with a copy en/light/1440
+[chromium] › tests/e2e/environment-placement-gate.spec.ts › native environment placement remains available without thread management en/light/1440
+[chromium] › tests/e2e/finder-acts.spec.ts › native acts and a searchable shortcut table at 1440px, light, en
+[chromium] › tests/e2e/home-locator.spec.ts › home locators preserve hierarchy, help and explicit creation in en/light/1440
+[chromium] › tests/e2e/library.spec.ts › library controls, figures and requests (en/light/1440)
+[chromium] › tests/e2e/mount-plans.spec.ts › the reviewed change says the target has no location for a mount
+[chromium] › tests/e2e/page-fetch-settings.spec.ts › page fetch stays independent until explicitly saved en/light/1440
+[chromium] › tests/e2e/profile.spec.ts › private inspection has its band, and Only me explains the member managers exception
+[chromium] › tests/e2e/resource-landing.spec.ts › resource landing and request isolation at 1440/en/light
+[chromium] › tests/e2e/shared.spec.ts › the rail opens Shared with me and the list keeps a private ancestor unnamed
+[chromium] › tests/e2e/temporary-environments.spec.ts › a new thread can choose disposable work without changing the topics lasting default
+[chromium] › tests/e2e/trace-corrections.spec.ts › the person entry includes their frozen agent acts and the direct-only choice survives reload
+[chromium] › tests/e2e/walk-thread-layout.spec.ts › thread and Ask keep their layout through resize en/1440/light

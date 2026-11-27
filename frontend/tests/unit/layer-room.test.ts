@@ -1,6 +1,6 @@
 /** The rule for where a floating layer above or below what opened it stands: the side that holds it, kept while it shows enough, left for the roomier one when it cannot. */
 import { expect, it } from 'vitest';
-import { layerRoom, floatingRoom } from '@/ui/floating';
+import { layerRise, layerRoom, floatingRoom } from '@/ui/floating';
 
 // A 900 px screen; a field whose bottom edge sits at `bottom`. The gap is 4 px and the screen's edge 8 px.
 const viewport = { top: 0, bottom: 900 };
@@ -57,4 +57,20 @@ it('opens a list below whenever below shows the rows it promises, even where all
   expect(layerRoom({ anchor: field(800), viewport, natural: 470, least: 160, gap: 4, list: true })).toEqual({ above: true, height: 752 });
   // A card has no rows to scroll to: it still opens where it is seen whole.
   expect(layerRoom({ anchor: field(530), viewport, natural: 470, least: 128, gap: 4 })).toEqual({ above: true, height: 482 });
+});
+
+it('raises a field in the area that scrolls it just as far as its list then shows its rows below, and not at all where that cannot', () => {
+  // A phone's 860 px screen; a dialog's body whose view starts 96 px down and still scrolls 300 px; four rows promise 170 px.
+  const screen = { top: 0, bottom: 860 };
+  const rise = (bottom: number, area: { top: number; scroll: number }, least = 170) => layerRise({ anchor: field(bottom), viewport: screen, area, least, gap: 4 });
+  // 860 - 700 - 4 - 8 = 148 px below the field: it rises the 22 px its rows lack.
+  expect(rise(700, { top: 96, scroll: 300 })).toBe(22);
+  // Enough room below already: it stays where it is.
+  expect(rise(500, { top: 96, scroll: 300 })).toBe(0);
+  // The body scrolls only 10 px further: rising would not give the rows, so the field is not moved for nothing.
+  expect(rise(700, { top: 96, scroll: 10 })).toBe(0);
+  // Never past the top of the body's view: a field 8 px under it cannot rise 22.
+  expect(rise(700, { top: 656, scroll: 300 })).toBe(0);
+  // As far as the top of the view, and no further: a field 22 px under it rises exactly that.
+  expect(rise(700, { top: 642, scroll: 300 })).toBe(22);
 });

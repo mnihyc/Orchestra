@@ -224,7 +224,21 @@ async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<Resol
     {
         tracing::warn!(%error, "system workspace changes remain pending");
     }
+    system_admission_changed(&ctx, &key).await;
     Ok(reply)
+}
+
+/// After a system setting the threads run with changed: the threads it blocked are looked at again at once.
+async fn system_admission_changed(ctx: &Ctx, key: &str) {
+    if orch_engine::resolved::runs_with(key)
+        && let Err(error) = ctx
+            .app
+            .engine
+            .admission_scope_changed(orch_db::queries::access::SYSTEM_ID)
+            .await
+    {
+        tracing::warn!(%error, "blocked threads see the changed system setting at the next recheck");
+    }
 }
 
 /// Takes a key at system scope back to what Orch ships.
@@ -274,5 +288,6 @@ async fn delete(
     {
         tracing::warn!(%error, "system workspace changes remain pending");
     }
+    system_admission_changed(&ctx, &key).await;
     Ok(reply)
 }
