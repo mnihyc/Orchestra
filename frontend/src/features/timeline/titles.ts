@@ -8,7 +8,7 @@
 import type { TFunction } from 'i18next';
 
 import type { Item } from '@/generated/api-types';
-import { approvalReview, reviewOutcome } from './tools/reviewFacts';
+import { approvalReview, reviewFailed, reviewOutcome } from './tools/reviewFacts';
 import { webAction } from './tools/webAction';
 
 export type ToolItem = Extract<Item, { kind: 'tool_call' }>;
@@ -85,6 +85,8 @@ export function describeStep(item: ToolItem, t: TFunction): StepTitle {
                 : t('timeline.step.search', { query: action.query, path: action.path });
         return { text, command: false, result, tone, hint: tool.command };
       }
+      // A command whose line has not arrived yet (its program is still writing the call) is told by the title its program gave it.
+      if (tool.command.trim() === '') return { text: item.payload.title.trim() === '' ? t('timeline.step.commandPending') : item.payload.title, command: false, result, tone, hint: null };
       return { text: oneLine(tool.command, COMMAND_SHOWN_CHARS), command: true, result, tone, hint: tool.cwd === '' ? tool.command : `${tool.command}\n${tool.cwd}` };
     }
     case 'file_change': {
@@ -153,7 +155,7 @@ export function describeStep(item: ToolItem, t: TFunction): StepTitle {
         : item.payload.title === '' ? t('timeline.step.orch', { tool: tool.tool }) : item.payload.title };
     case 'other': {
       const review=tool.name==='harness/approvalReview' ? approvalReview(tool.result) : null;
-      if(review!==null) return {...none,text:t('timeline.permissionReview.title'),result:reviewOutcome(review.outcome,t),tone:item.payload.raw.is_error?'danger':'muted'};
+      if(review!==null) return {...none,text:t('timeline.permissionReview.title'),result:reviewOutcome(review.outcome,t),tone:reviewFailed(review.outcome)?'danger':'muted'};
       return { ...none, text: item.payload.title === '' ? tool.name : item.payload.title };
     }
   }

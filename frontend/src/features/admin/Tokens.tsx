@@ -1,4 +1,5 @@
 /** System and per-person credential views share the existing scope/activity readers. */
+import { CopyId } from '@/ui/CopyId';
 import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -16,6 +17,8 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { useCollectionSearch } from '@/lib/collectionSearch';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -42,10 +45,11 @@ function TokenReview({ token, onClose }: { token: AdminToken; onClose: () => voi
 }
 function TokenReader({ person }: { person: string | undefined }) {
   const { t } = useTranslation();
-  const list = useInfiniteQuery(adminTokensQuery(person));
+  const search = useCollectionSearch('admin-tokens:' + (person ?? 'all'));
+  const list = useInfiniteQuery(adminTokensQuery(person, search.q));
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
-  const [reviewId, setReviewId] = useState<string | null>(null);
-  const review = list.isError && !list.isFetchNextPageError ? undefined : rows.find((row) => row.info.id === reviewId);
+  const [reviewed, setReviewed] = useState<AdminToken | null>(null);
+  const review = list.isError && !list.isFetchNextPageError ? null : rows.find((row) => row.info.id === reviewed?.info.id) ?? reviewed;
   const [ending, setEnding] = useState<AdminToken | null>(null);
   const revoke = useMutation({
     mutationFn: ({ token }: { token: AdminToken; reader: ReturnType<typeof libraryReader> }) => revokeAdminToken(token.info.id, person),
@@ -66,7 +70,7 @@ function TokenReader({ person }: { person: string | undefined }) {
       const ownerShown = shown.has('owner'), scopeShown = shown.has('scope'), placeShown = shown.has('place');
       const showTimes = !shown.has('created') || !shown.has('used') || !shown.has('expires');
       return <div className="flex min-w-0 flex-col items-start gap-1">
-      <div className="flex max-w-full items-center gap-1"><Button variant="ghost" size="sm" className="max-w-full" title={row.info.name} onClick={() => setReviewId(row.info.id)}><span className="truncate">{row.info.name}</span></Button>{row.admin_access && <AsAdminMark of="system" />}</div>
+      <div className="flex max-w-full items-center gap-1"><Button variant="ghost" size="sm" className="max-w-full" title={row.info.name} onClick={() => setReviewed(row)}><span className="truncate">{row.info.name}</span></Button><CopyId value={row.info.id} />{row.admin_access && <AsAdminMark of="system" />}</div>
       {!ownerShown && <UserChip user={row.owner} />}
       {!scopeShown && <ScopesCell token={row.info} compact />}
       {!placeShown && <TokenPlace node={row.info.node} />}
@@ -82,10 +86,11 @@ function TokenReader({ person }: { person: string | undefined }) {
   ];
   return <div className="flex min-w-0 flex-col gap-4">
     <div className="flex justify-end"><Button size="sm" disabled={list.isFetching} onClick={() => void list.refetch()}>{t('operationKeys.activity.refresh')}</Button></div>
+    <CollectionSearch name={t('admin.sections.tokens.title')} {...search} />
     {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && !list.isFetchNextPageError ? <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-      : rows.length === 0 ? <EmptyState compact title={t('adminCredentials.noTokens')} /> : <Table label={t('admin.sections.tokens.title')} rows={rows} rowKey={(row) => row.info.id} columns={columns} />}
+      : rows.length === 0 ? <EmptyState compact title={t('adminCredentials.noTokens')} /> : <Table key={search.q} virtual label={t('admin.sections.tokens.title')} rows={rows} rowKey={(row) => row.info.id} columns={columns} />}
     <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
-    {review !== undefined && <TokenReview token={review} onClose={() => setReviewId(null)} />}
+    {review !== null && <TokenReview token={review} onClose={() => setReviewed(null)} />}
     <ConfirmDialog open={ending !== null} onOpenChange={(open) => { if (!open && !revoke.isPending) setEnding(null); }} title={t('tokens.revokeTitle', { name: ending?.info.name ?? '' })}
       confirmLabel={t('tokens.revokeConfirm', { name: ending?.info.name ?? '' })} danger pending={revoke.isPending} error={revoke.error ?? undefined}
       onConfirm={() => { if (ending !== null) revoke.mutate({ token: ending, reader: libraryReader() }); }}>

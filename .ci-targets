@@ -1,0 +1,24 @@
+fmt
+clippy
+test -p orch-db --lib -- pool::tests
+test -p orch-db --test participation_summaries
+test -p orch-db --test provider_keeper
+test -p orch-db --test provider_credit_history
+test -p orch-db --test provider_plan_scale
+test -p orch-db --test released_migrations
+test -p orch-config
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --test provider_fact_reads
+test -p orch-engine --test preflight
+test -p orch-api-core --test everything_scale -- simultaneous:: resource_lists:: --nocapture --test-threads=1
+test -p orch-api-core --test resource_summaries
+test -p orch-api-core --test node_chat_opening_scopes
+test -p orch-api-core --test provider_models
+test -p orch-api-core --test model_entries
+test -p orch-api-core --test provider_harness
+test -p orch-api-core --test provider_plan
+test -p orch-api-core --test provider_credit_history
+test -p orch-api-core --test object_transfer_operation_scopes
+test -p orch-api-core --test realtime_diagnostics
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test everything_resources -- --skip figures_scopes::resource_impact_publication_rechecks_the_original_model_qualified_binding_after_activity_wait

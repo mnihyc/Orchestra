@@ -12,7 +12,7 @@ import { show, skipOverflowFallback } from './support';
 
 skipOverflowFallback();
 
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Harness' }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => () => 'Harness' }));
 afterEach(async () => { await setLocale('en'); });
 
 const model: ModelParameters = { offered: { web_search: ['live'] } };

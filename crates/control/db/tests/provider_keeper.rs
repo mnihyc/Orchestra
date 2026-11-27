@@ -354,6 +354,144 @@ async fn standing(conn: &mut Conn, provider: Id) -> (String, Option<String>, i64
 }
 
 #[tokio::test]
+async fn a_provider_report_does_not_wait_for_a_thread_that_only_references_its_identity() {
+    let (_fixture, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let home = home(&mut conn).await;
+    let provider = api(
+        &mut conn,
+        &home,
+        Api {
+            machine: None,
+            key_machine: None,
+            status: "ready",
+        },
+    )
+    .await;
+    let before = standing(&mut conn, provider).await.2;
+    let mut reference = db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM providers WHERE id=$1 FOR KEY SHARE")
+        .bind(provider)
+        .fetch_one(&mut *reference)
+        .await
+        .unwrap();
+    sqlx::query("SET lock_timeout='1s'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        set_facts(
+            &mut conn,
+            provider,
+            &json!({"identity":"A new observation"}),
+            now()
+        )
+        .await
+        .expect(
+            "facts serialize with other facts, independently of a thread's foreign-key reference"
+        )
+    );
+    assert_eq!(standing(&mut conn, provider).await.2, before);
+    reference.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_provider_edit_keeps_its_revision_while_the_system_refreshes_its_facts() {
+    use orch_db::queries::resources::{
+        provider_runtime,
+        routes::{ProviderChange, change_provider},
+    };
+    let (_fixture, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let home = home(&mut conn).await;
+    let provider = api(
+        &mut conn,
+        &home,
+        Api {
+            machine: None,
+            key_machine: None,
+            status: "ready",
+        },
+    )
+    .await;
+    let before = standing(&mut conn, provider).await.2;
+    let at = now();
+    set_facts(
+        &mut conn,
+        provider,
+        &json!({"identity":"Observed account"}),
+        at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before,
+        "a fact refresh does not stale a person's form"
+    );
+    move_status(
+        &mut conn,
+        provider,
+        &["ready"],
+        "error",
+        Some("A temporary upstream error"),
+        at,
+    )
+    .await
+    .unwrap();
+    provider_runtime::set_login_state(&mut conn, provider, &json!({"state":"signed_in"}), at)
+        .await
+        .unwrap();
+    orch_db::queries::provider_facts::source_observed(
+        &mut conn,
+        provider,
+        "facts",
+        &json!({}),
+        Some(&json!({"name":"adapter"})),
+        None,
+        at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before,
+        "status, login reports and learned source metadata are observations too"
+    );
+    sqlx::query("UPDATE providers SET sources=$2 WHERE id=$1")
+        .bind(provider).bind(json!({
+            "facts":{"by":"default","name":null,"address":null,"config":{},"secrets":[],"descriptor":null,"described_at":null,"last_error":null},
+            "models":{"by":"default","name":"endpoints","address":null,"config":{},"secrets":[],"descriptor":{"name":"endpoints"},"described_at":null,"last_error":null},
+            "presenter":null
+        })).execute(&mut *conn).await.unwrap();
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before,
+        "learning the implementation of a default source leaves pending edits current"
+    );
+    let change = ProviderChange {
+        name: Some("A chosen name"),
+        ..Default::default()
+    };
+    assert!(
+        change_provider(&mut conn, provider, before, &change, at)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before + 1,
+        "a person's edit moves the configuration revision"
+    );
+    assert!(
+        !change_provider(&mut conn, provider, before, &change, at)
+            .await
+            .unwrap(),
+        "an actually stale human edit is still refused"
+    );
+}
+
+#[tokio::test]
 async fn a_provider_is_read_for_its_start_also_when_deleted_and_its_secrets_come_without_values() {
     let (_db, pool) = world().await;
     let mut conn = pool.acquire().await.unwrap();
@@ -486,7 +624,10 @@ async fn a_status_moves_only_from_the_states_named_and_only_when_it_changes() {
         (status.as_str(), detail.as_deref()),
         ("error", Some("the key was refused"))
     );
-    assert_eq!(after, revision + 1);
+    assert_eq!(
+        after, revision,
+        "a status observation leaves pending edits current"
+    );
 
     // Saying the same again changes nothing, not even the revision.
     assert!(
@@ -561,6 +702,11 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
     let now = now();
     let facts = json!({ "models": ["mock-large"], "protocols": ["openai-responses"] });
     let before = standing(&mut conn, provider).await.2;
+    let accepted =
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap()
+            .unwrap();
 
     assert!(set_facts(&mut conn, provider, &facts, now).await.unwrap());
     assert!(!set_facts(&mut conn, provider, &facts, now).await.unwrap());
@@ -570,18 +716,123 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
             .fetch_one(&mut *conn)
             .await
             .unwrap();
-    assert_eq!(stored.0, facts);
+    // The model list is kept in its own row; the provider's facts keep every other member.
+    assert_eq!(stored.0, json!({ "protocols": ["openai-responses"] }));
+    assert_eq!(
+        listed(&mut conn, provider).await,
+        Some(json!(["mock-large"]))
+    );
     assert_eq!(stored.1, Some(now));
-    assert_eq!(stored.2, before + 1, "the second report was not a change");
+    assert_eq!(
+        stored.2, before,
+        "neither report changes editable configuration"
+    );
+    assert_eq!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, None)
+            .await
+            .unwrap(),
+        Some(accepted.clone()),
+        "a model or facts observation does not revoke another accepted observation"
+    );
+    assert_eq!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap(),
+        Some(accepted.clone()),
+        "the same configuration snapshot remains current after an observation"
+    );
     assert!(
         set_facts(&mut conn, provider, &json!({ "models": [] }), now)
             .await
             .unwrap()
     );
 
+    sqlx::query(
+        "UPDATE providers SET name='A changed configuration',revision=revision+1 WHERE id=$1",
+    )
+    .bind(provider)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    assert_ne!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, None)
+            .await
+            .unwrap(),
+        Some(accepted),
+        "a configuration change still revokes the accepted observation"
+    );
+    assert!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap()
+            .is_none()
+    );
     // A deleted provider takes no more reports.
     delete_provider(&mut conn, provider, now).await.unwrap();
     assert!(!set_facts(&mut conn, provider, &facts, now).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_keeper_reconnecting_during_the_presence_check_keeps_its_new_session() {
+    let (_fixture, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let home = home(&mut conn).await;
+    let machine = machine(&mut conn, "keeper", true).await;
+    let provider = api(
+        &mut conn,
+        &home,
+        Api {
+            machine: Some(machine),
+            key_machine: Some(machine),
+            status: "ready",
+        },
+    )
+    .await;
+    let at = now();
+    let session = new_id();
+    let mut reconnect = db.begin().await.unwrap();
+    orch_db::queries::resources::set_session_presence(
+        &mut reconnect,
+        machine,
+        true,
+        None,
+        Some(session),
+        at,
+    )
+    .await
+    .unwrap();
+
+    {
+        let observed = tokio::sync::Notify::new();
+        let check = keeper::reconcile_keeper_sessions(&mut conn, at, |id| {
+            assert_eq!(id, machine);
+            observed.notify_one();
+            false
+        });
+        tokio::pin!(check);
+        tokio::select! {
+            result = &mut check => panic!("the held reconnect was never observed: {result:?}"),
+            () = observed.notified() => {}
+        }
+        reconnect.commit().await.unwrap();
+        check.await.unwrap();
+    }
+    let presence: (bool, Option<Id>) =
+        sqlx::query_as("SELECT online, current_session_id FROM machines WHERE id=$1")
+            .bind(machine)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(presence, (true, Some(session)));
+    assert_eq!(
+        sync_presence(&mut conn, at).await.unwrap(),
+        PresenceMoves::default()
+    );
+
+    keeper::reconcile_keeper_sessions(&mut conn, at, |_| false)
+        .await
+        .unwrap();
+    assert_eq!(sync_presence(&mut conn, at).await.unwrap().away, [provider]);
 }
 
 #[tokio::test]
@@ -887,4 +1138,101 @@ async fn the_rate_catalogue_is_read_as_it_was_last_loaded_and_is_none_before() {
     .await
     .unwrap();
     assert_eq!(rate_catalogue(&mut conn).await.unwrap(), Some(doc));
+}
+
+/// The model list kept for the provider, as its own row holds it.
+async fn listed(conn: &mut Conn, provider: Id) -> Option<Json> {
+    sqlx::query_scalar("SELECT models FROM provider_model_lists WHERE provider_id = $1")
+        .bind(provider)
+        .fetch_optional(conn)
+        .await
+        .unwrap()
+}
+
+/// The provider's stored facts and its observation counter.
+async fn stored_facts(conn: &mut Conn, provider: Id) -> (Json, i64) {
+    sqlx::query_as("SELECT facts, observation_revision FROM providers WHERE id = $1")
+        .bind(provider)
+        .fetch_one(conn)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_reported_model_list_is_kept_in_its_own_row_and_the_facts_hold_the_rest() {
+    let (_db, pool) = world().await;
+    let mut conn = pool.acquire().await.unwrap();
+    let home = home(&mut conn).await;
+    let there = machine(&mut conn, "keeper", true).await;
+    let provider = api(
+        &mut conn,
+        &home,
+        Api {
+            machine: Some(there),
+            key_machine: None,
+            status: "ready",
+        },
+    )
+    .await;
+    let catalogue: Vec<_> = (0..300)
+        .map(|n| json!({"model_name": format!("listed-{n}"), "description": "x".repeat(400)}))
+        .collect();
+    let at = now();
+    let report = json!({"plan": "pro", "models": catalogue});
+    assert!(set_facts(&mut conn, provider, &report, at).await.unwrap());
+    let (facts, observed) = stored_facts(&mut conn, provider).await;
+    assert_eq!(
+        facts,
+        json!({"plan": "pro"}),
+        "the row keeps every member but the list"
+    );
+    assert_eq!(listed(&mut conn, provider).await, Some(json!(catalogue)));
+    let count: i32 =
+        sqlx::query_scalar("SELECT listed FROM provider_model_lists WHERE provider_id = $1")
+            .bind(provider)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(count, 300);
+
+    // A report without a list keeps the stored one.
+    let later = at + Duration::seconds(1);
+    assert!(
+        set_facts(&mut conn, provider, &json!({"plan": "max"}), later)
+            .await
+            .unwrap()
+    );
+    let (facts, before) = stored_facts(&mut conn, provider).await;
+    assert_eq!(facts, json!({"plan": "max"}));
+    assert!(before > observed);
+    assert_eq!(listed(&mut conn, provider).await, Some(json!(catalogue)));
+
+    // A new list alone is an observation of the provider too, and the same report again writes nothing.
+    let shorter = json!({"plan": "max", "models": [{"model_name": "only"}]});
+    assert!(
+        set_facts(&mut conn, provider, &shorter, later)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        listed(&mut conn, provider).await,
+        Some(json!([{"model_name": "only"}]))
+    );
+    assert!(stored_facts(&mut conn, provider).await.1 > before);
+    assert!(
+        !set_facts(&mut conn, provider, &shorter, later)
+            .await
+            .unwrap(),
+        "the same report writes nothing"
+    );
+
+    // A report that says there is no list removes it.
+    let last = later + Duration::seconds(1);
+    let none = json!({"plan": "max", "models": null});
+    assert!(set_facts(&mut conn, provider, &none, last).await.unwrap());
+    assert_eq!(listed(&mut conn, provider).await, None);
+    assert_eq!(
+        stored_facts(&mut conn, provider).await.0,
+        json!({"plan": "max"})
+    );
 }

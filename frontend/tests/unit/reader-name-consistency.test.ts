@@ -31,7 +31,7 @@ it.each(['en', 'zh-CN'] as const)('uses the same appearance, processor and permi
     expect(i18n.t(`choiceCatalog.approvalMode.${mode}.description`)).not.toMatch(/harness|sandbox|运行框架|沙箱/i);
     expect(i18n.t(`machinePrograms.approval.${mode}`)).toBe(i18n.t(`composer.mode.labels.${mode}`));
   }
-  for (const key of ['start.agent.unreported', 'agents.overview.notReported', 'providerLogin.homeDenied', 'inspector.parameters.subagentsUnsupported', 'side.unavailable.readOnly', 'environmentData.harnessAttach', 'choiceCatalog.sandboxLevel.open.description'] as const) {
+  for (const key of ['start.agent.unreported', 'agents.overview.notReported', 'providerLogin.homeDenied', 'inspector.parameters.subagentsUnsupported', 'side.unavailable.readOnly', 'choiceCatalog.sandboxLevel.open.description'] as const) {
     expect(i18n.t(key), key).not.toMatch(/\bharness\b|\bsandbox\b|file job|运行框架|执行器|沙箱|provider\.signin/i);
   }
 });

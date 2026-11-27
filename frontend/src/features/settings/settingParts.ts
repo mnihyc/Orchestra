@@ -1,4 +1,6 @@
 /** Chooses the stored part a setting field edits, separately from inherited contributions and the resolved result. */
+import type { TFunction } from 'i18next';
+import { isRecord } from './draftChecks';
 import type { SettingsTarget } from '@/api/settings';
 import { emptyOf, type Shape } from '@/features/settings/settingsModel';
 import type { SettingDef, SettingPart, SettingSource, ResolvedSetting as SettingWithParts } from '@/generated/api-types';
@@ -32,4 +34,66 @@ export function inheritedParts(setting: SettingWithParts, target: SettingsTarget
 /** Text and structured values are displayed without changing or translating the user's content. */
 export function valueText(value: unknown): string {
   return typeof value === 'string' ? value : value === undefined ? '' : JSON.stringify(value, null, 2);
+}
+
+/** What the places above set for a map keyed by name, member by member as the map is joined: a later place replaces the same member of an earlier one. */
+export function inheritedTargets(setting: SettingWithParts, target: SettingsTarget): Record<string, unknown> {
+  const joined: Record<string, unknown> = {};
+  for (const part of inheritedParts(setting, target)) {
+    if (part.source.scope === 'default' || part.ignored) continue;
+    if (typeof part.value === 'object' && part.value !== null && !Array.isArray(part.value)) Object.assign(joined, part.value);
+  }
+  return joined;
+}
+
+/** The stored contributions above the target that bound a narrowing policy: neither a shipped nor a supplied default, nor one a lock passes over. */
+function boundingParts(setting: SettingWithParts, target: SettingsTarget): SettingPart[] {
+  return inheritedParts(setting, target).filter((part) => !part.ignored && !['default', 'environment'].includes(part.source.scope));
+}
+
+/** The name of the place whose stored value holds a bound, as far as the reader may see it. */
+function boundPlaceName(source: SettingSource, t: TFunction): string {
+  return source.scope === 'system' ? t('settings.editor.from.system')
+    : source.node?.redacted === false && source.node.name !== null ? source.node.name : t('settings.compact.hiddenSource');
+}
+
+/** The strictest choice stored above a whole-value policy that keeps the strictest (`stricter`): a place below is
+ * offered only that choice and those listed after it. Later contributors win ties, as in the resolver. */
+export function strictestAbove(setting: SettingWithParts, target: SettingsTarget, t: TFunction) {
+  const ancestors = boundingParts(setting, target);
+  return (path: readonly string[], order: readonly (string | boolean)[]) => {
+    if (path.length > 0) return undefined;
+    let bound: { rank: number; place: string } | undefined;
+    for (const { value, source } of ancestors) {
+      const rank = order.findIndex((choice) => choice === value);
+      if (rank < 0 || (bound !== undefined && bound.rank > rank)) continue;
+      bound = { rank, place: boundPlaceName(source, t) };
+    }
+    return bound;
+  };
+}
+
+/** The strongest stored ancestor for this field. Later contributors win ties, as in the resolver. */
+export function memberPolicy(setting: SettingWithParts, target: SettingsTarget, t: TFunction) {
+  const ancestors = boundingParts(setting, target);
+  return (path: readonly string[], order: readonly (string | boolean)[]) => {
+    const [name, field] = path;
+    if (name === undefined) return undefined;
+    let bound: { rank: number; place: string } | undefined;
+    for (const { value, source } of ancestors) {
+      if (!isRecord(value)) continue;
+      let rule = Object.hasOwn(value, name) ? value[name] : undefined;
+      if (setting.key === 'environments.runtimes') {
+        const required = Object.entries(value).some(([key, decision]) => key !== '*' && decision === 'require');
+        rule ??= value['*'];
+        if (required && rule !== 'require') rule = 'forbid';
+        if (!required && rule === 'require') rule = 'allow';
+      }
+      if (field !== undefined) rule = isRecord(rule) ? rule[field] : undefined;
+      const rank = order.findIndex((choice) => choice === rule);
+      if (rank < 0 || (bound !== undefined && bound.rank > rank)) continue;
+      bound = { rank, place: boundPlaceName(source, t) };
+    }
+    return bound;
+  };
 }

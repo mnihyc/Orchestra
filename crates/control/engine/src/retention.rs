@@ -10,10 +10,74 @@ use orch_settings::{Place, resolve};
 use orch_settings_contract::{provenance::SourceScope, registry::keys};
 use orch_types::Id;
 
-/// Seconds in one UTC retention day.
-const SECONDS_PER_DAY: u64 = 86_400;
+/// The default follows the deployment window; explicit overlong values are refused.
+pub(crate) fn bounded_days(
+    requested: i64,
+    is_default: bool,
+    maximum: i64,
+) -> Result<i32, EngineError> {
+    let days = if is_default {
+        requested.min(maximum)
+    } else {
+        requested
+    };
+    if days < 0 || days > maximum {
+        return Err(EngineError::unreadable(
+            "removed-file retention exceeds the system retention window",
+        ));
+    }
+    i32::try_from(days).map_err(EngineError::unreadable)
+}
 
 impl Engine {
+    /// The same current window used at acceptance, without changing any binding or file.
+    pub async fn environment_removed_keep_days(
+        &self,
+        conn: &mut Conn,
+        environment: Id,
+        config: &orch_types::Json,
+    ) -> Result<i64, EngineError> {
+        if let Some(kept) = retained::removal(conn, environment).await?
+            && kept.removal_phase.is_some()
+        {
+            return kept.removed_keep_days.map(i64::from).ok_or_else(|| {
+                EngineError::unreadable("the accepted removal has no recovery window")
+            });
+        }
+        self.removal_days(conn, environment, config, None)
+            .await
+            .map(i64::from)
+    }
+
+    async fn removal_days(
+        &self,
+        conn: &mut Conn,
+        environment: Id,
+        config: &orch_types::Json,
+        recovery_days: Option<i64>,
+    ) -> Result<i32, EngineError> {
+        if retained::is_scratch(conn, environment).await?
+            || orch_db::queries::environments::temporary::mode(config).is_some()
+        {
+            return Ok(0);
+        }
+        let policy = resolve(
+            conn,
+            Place::Environment(environment),
+            keys::ENV_REMOVED_KEEP_DAYS,
+        )
+        .await?;
+        let maximum = i64::try_from(orch_settings::retention::deleted_keep_days(conn).await?)
+            .unwrap_or(i64::MAX);
+        let requested = recovery_days
+            .or_else(|| policy.value().and_then(orch_types::Json::as_i64))
+            .ok_or_else(|| EngineError::unreadable("removed-file retention is not a number"))?;
+        bounded_days(
+            requested,
+            policy.resolved.source.scope == SourceScope::Default,
+            maximum,
+        )
+    }
     /// Removes a lost registration without reopening a closed physical cleanup promise or contacting its source.
     pub async fn remove_lost_environment_in(
         &self,
@@ -30,7 +94,7 @@ impl Engine {
         }
         self.remove_bindings_in(conn, environment, by, orch_types::Time::new(now))
             .await?;
-        sqlx::query("UPDATE environments SET status='removed',deleted_at=$2,remove_at=$2,remove_reason='request',removal_phase='lost',volumes_purge_at=NULL,revision=revision+1,env_seq=env_seq+1,updated_at=$2 WHERE id=$1")
+        sqlx::query("UPDATE environments SET status='removed',deleted_at=$2,remove_at=$2,removal_phase='lost',volumes_purge_at=NULL,revision=revision+1,env_seq=env_seq+1,updated_at=$2 WHERE id=$1")
             .bind(environment).bind(now).execute(conn).await.map_err(orch_db::DbError::from)?;
         Ok(true)
     }
@@ -67,40 +131,9 @@ impl Engine {
         if existing.as_ref().is_some_and(|r| r.removal_phase.is_some()) {
             return Ok(false);
         }
-        let days = if retained::is_scratch(conn, environment).await?
-            || orch_db::queries::environments::temporary::mode(&row.config).is_some()
-        {
-            0
-        } else {
-            let policy = resolve(
-                conn,
-                Place::Environment(environment),
-                keys::ENV_REMOVED_KEEP_DAYS,
-            )
+        let days = self
+            .removal_days(conn, environment, &row.config, recovery_days)
             .await?;
-            let maximum = i64::try_from(self.inner.config.soft_delete.as_secs() / SECONDS_PER_DAY)
-                .unwrap_or(i64::MAX);
-            let requested = match recovery_days {
-                Some(days) => days,
-                None => policy
-                    .value()
-                    .and_then(orch_types::Json::as_i64)
-                    .ok_or_else(|| {
-                        EngineError::unreadable("removed-file retention is not a number")
-                    })?,
-            };
-            let days = if policy.resolved.source.scope == SourceScope::Default {
-                requested.min(maximum)
-            } else {
-                requested
-            };
-            if days < 0 || days > maximum {
-                return Err(EngineError::unreadable(
-                    "removed-file retention exceeds the system retention window",
-                ));
-            }
-            i32::try_from(days).map_err(EngineError::unreadable)?
-        };
         let refs = retained::references(conn, environment).await?;
         if days > 0 {
             for reference in &refs {
