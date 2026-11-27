@@ -142,13 +142,30 @@ for (const { name, address, content } of PAGES.filter((entry) => entry.name !== 
     await longLine((await watch(page)).cdp);
     await page.goto(address, { waitUntil: 'commit' });
     await page.locator('main h1, main h2, [data-main-area] h1').first().waitFor();
+    const registration = await page.evaluate(async () => { const r = await navigator.serviceWorker.getRegistration(); return r ? { installing: r.installing?.state ?? null, waiting: r.waiting?.state ?? null, active: r.active?.state ?? null } : null; });
+    const firstMarks = await page.evaluate(() => performance.getEntriesByType('mark').filter((e) => /orch\/(page\/content|start\/render)/.test(e.name)).map((e) => `${Math.round(e.startTime)} ${e.name}`));
     await page.close();
+    await new Promise((done) => setTimeout(done, 0));
 
     const returning = await context.newPage();
+    await returning.addInitScript(() => {
+      const seen = window as Window & { __orchHead?: number };
+      const check = () => { if (seen.__orchHead === undefined && document.querySelector('main h1, main h2, [data-main-area] h1') !== null) seen.__orchHead = performance.now(); else requestAnimationFrame(check); };
+      requestAnimationFrame(check);
+    });
     const { cdp, sent } = await watch(returning);
     await longLine(cdp);
     await returning.goto(address, { waitUntil: 'commit' });
     const drawn = await contentShown(returning, content ?? /^\/org\/[^/]+\/?$/);
+    const detail = await returning.evaluate(() => {
+      const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+      const heads = [...document.querySelectorAll('main h1, main h2, [data-main-area] h1')].length;
+      return { nav: nav ? { proto: nav.nextHopProtocol, worker: Math.round(nav.workerStart), response: Math.round(nav.responseStart), end: Math.round(nav.responseEnd), dcl: Math.round(nav.domContentLoadedEventEnd) } : null,
+        controlled: navigator.serviceWorker?.controller?.state ?? null, heads, head: Math.round((window as Window & { __orchHead?: number }).__orchHead ?? -1),
+        marks: performance.getEntriesByType('mark').filter((e) => e.name.startsWith('orch/')).map((e) => `${Math.round(e.startTime)} ${e.name.slice(5)}`),
+        files: performance.getEntriesByType('resource').map((e) => e as PerformanceResourceTiming).filter((e) => e.startTime < 3000).map((e) => `${Math.round(e.startTime)}-${Math.round(e.responseEnd)} ${e.transferSize > 0 ? 'net' : 'cache'} ${e.initiatorType} ${new URL(e.name).pathname.replace(/-[A-Za-z0-9_-]{8,}(\.[a-z0-9]+)$/, '$1').slice(0, 50)}`) };
+    });
+    process.stdout.write(`DIAG ${name} first: ${JSON.stringify({ registration, firstMarks })}\nDIAG ${name} returning: ${JSON.stringify(detail)}\n`);
     const before = sent.filter((one) => one.wall <= drawn.wall);
     process.stdout.write(`${name} after closing at the heading, ${ROUND_TRIP_MS} ms RTT: content ${Math.round(drawn.ms)} ms; requests ${JSON.stringify(shown(before))}\n`);
     expect(shown(before)).toEqual([expect.stringMatching(/^POST \/api\/v1\/auth\/session\/open\?read=%2Fme%2Fbootstrap/)]);
