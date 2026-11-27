@@ -70,6 +70,7 @@ impl Engine {
         lease.release(&self.inner.db).await?;
         let result = retained?;
         self.keep_file_states().await?;
+        self.keep_pool_choice_details().await?;
         self.schedule_agent_history(true);
         if result != Retained::default() {
             self.kick();
@@ -123,41 +124,10 @@ impl Engine {
             return Ok(Retained::default());
         }
         hierarchy::lock_tree_for_moves(&mut tx, node.org_id).await?;
-        let archived_def = registry::get(keys::RETENTION_ARCHIVE_IDLE_DAYS)
-            .ok_or_else(|| EngineError::unreadable("the archive retention setting is absent"))?;
-        let deleted_def = registry::get(keys::RETENTION_DELETE_ARCHIVED_DAYS)
-            .ok_or_else(|| EngineError::unreadable("the deletion retention setting is absent"))?;
-        let defs = if node.kind == "topic" {
-            vec![archived_def, deleted_def]
-        } else {
-            vec![deleted_def]
-        };
-        let settings = Snapshot::load(&mut tx, Place::Node(id), Wanted::Keys(&defs))
-            .await
-            .map_err(|error| EngineError::unreadable(error.to_string()))?;
         let now = self.inner.clock.now();
-        let deletion_days = settings
-            .resolve(deleted_def)
-            .value
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0);
-        let delete = node
-            .archived_at
-            .is_some_and(|at| old_enough(at, now, deletion_days));
-        let archive = if !delete
-            && node.kind == "topic"
-            && rows.iter().all(|row| row.archived_at.is_none())
-        {
-            let days = settings
-                .resolve(archived_def)
-                .value
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0);
-            let (activity, active) = hierarchy::retention_activity(&mut tx, id).await?;
-            !active && old_enough(activity, now, days)
-        } else {
-            false
-        };
+        let assessment = retention_assessment(&mut tx, &node, &rows, now).await?;
+        let archive = assessment.archive;
+        let delete = assessment.delete;
         if !archive && !delete {
             return Ok(Retained::default());
         }
@@ -216,9 +186,8 @@ impl Engine {
         entry.history = true;
         entry.node_id = Some(id);
         entry.org_id = Some(node.org_id);
-        let purge_at = chrono::Duration::from_std(self.inner.config.soft_delete)
-            .ok()
-            .and_then(|age| now.checked_add_signed(age));
+        let days = orch_settings::retention::deleted_keep_days(&mut tx).await?;
+        let purge_at = orch_settings::retention::purge_at(now, days);
         entry.details = json!({"retention":true,"archived_first":marked,"threads":settled.threads,"turns":settled.turns,
             "inputs":settled.inputs,"approvals":settled.approvals,"deleted_nodes":deleted_nodes,"purge_at":purge_at});
         audit::append(&mut tx, &entry, &Origin::default(), now).await?;
@@ -235,4 +204,127 @@ impl Engine {
             }
         })
     }
+}
+
+struct RetentionAssessment {
+    facts: orch_api_contract::nodes::NodeRetention,
+    archive: bool,
+    delete: bool,
+}
+
+/// The native scheduler's present policy and conditions for one authorized node review.
+pub async fn node_retention(
+    conn: &mut orch_db::Conn,
+    id: Id,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<orch_api_contract::nodes::NodeRetention>, EngineError> {
+    let rows = hierarchy::with_ancestors(conn, &[id]).await?;
+    let Some(node) = rows
+        .iter()
+        .find(|row| row.id == id && row.deleted_at.is_none())
+    else {
+        return Ok(None);
+    };
+    if rows.iter().any(|row| row.deleted_at.is_some()) {
+        return Ok(None);
+    }
+    Ok(Some(
+        retention_assessment(conn, node, &rows, now).await?.facts,
+    ))
+}
+
+async fn retention_assessment(
+    conn: &mut orch_db::Conn,
+    node: &hierarchy::NodeRow,
+    ancestors: &[hierarchy::NodeRow],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<RetentionAssessment, EngineError> {
+    use orch_api_contract::nodes::{NodeRetention, NodeRetentionHold, NodeRetentionPolicy};
+    use orch_api_contract::workspace::JobWaitTime;
+    let archive_def = registry::get(keys::RETENTION_ARCHIVE_IDLE_DAYS)
+        .ok_or_else(|| EngineError::unreadable("the archive retention setting is absent"))?;
+    let delete_def = registry::get(keys::RETENTION_DELETE_ARCHIVED_DAYS)
+        .ok_or_else(|| EngineError::unreadable("the deletion retention setting is absent"))?;
+    let defs = if node.kind == "topic" {
+        vec![archive_def, delete_def]
+    } else {
+        vec![delete_def]
+    };
+    let settings = Snapshot::load(conn, Place::Node(node.id), Wanted::Keys(&defs))
+        .await
+        .map_err(|error| EngineError::unreadable(error.to_string()))?;
+    let boundary = |def,
+                    applies: bool,
+                    from: Option<chrono::DateTime<chrono::Utc>>,
+                    hold|
+     -> Result<NodeRetentionPolicy, EngineError> {
+        if !applies {
+            return Ok(NodeRetentionPolicy {
+                days: None,
+                source: None,
+                eligible_at: JobWaitTime::NotApplicable,
+                hold_reason: None,
+            });
+        }
+        let resolved = settings.resolve(def);
+        let days = resolved.value.and_then(|value| value.as_i64()).unwrap_or(0);
+        let eligible_at = if days == 0 || from.is_none() {
+            JobWaitTime::NotApplicable
+        } else {
+            from.and_then(|at| {
+                chrono::Duration::try_days(days).and_then(|age| at.checked_add_signed(age))
+            })
+            .map_or(JobWaitTime::Unreported, |at| JobWaitTime::At {
+                at: Time::new(at),
+            })
+        };
+        Ok(NodeRetentionPolicy {
+            days: Some(days),
+            source: Some(serde_json::from_value(serde_json::to_value(
+                resolved.source.scope,
+            )?)?),
+            eligible_at,
+            hold_reason: if days == 0 { None } else { hold },
+        })
+    };
+    let (activity, active) =
+        if node.kind == "topic" && ancestors.iter().all(|row| row.archived_at.is_none()) {
+            let (at, active) = hierarchy::retention_activity(conn, node.id).await?;
+            (Some(at), active)
+        } else {
+            (None, false)
+        };
+    let archive_hold = if node.archived_at.is_some() {
+        Some(NodeRetentionHold::AlreadyArchived)
+    } else if ancestors.iter().any(|row| row.archived_at.is_some()) {
+        Some(NodeRetentionHold::AncestorArchived)
+    } else if active {
+        Some(NodeRetentionHold::ActiveWork)
+    } else {
+        None
+    };
+    let archive = boundary(archive_def, node.kind == "topic", activity, archive_hold)?;
+    let delete = boundary(
+        delete_def,
+        node.kind != "org",
+        node.archived_at,
+        node.archived_at
+            .is_none()
+            .then_some(NodeRetentionHold::NotArchived),
+    )?;
+    let deleting = node
+        .archived_at
+        .is_some_and(|at| old_enough(at, now, delete.days.unwrap_or(0)));
+    let archiving = !deleting
+        && archive.hold_reason.is_none()
+        && activity.is_some_and(|at| old_enough(at, now, archive.days.unwrap_or(0)));
+    Ok(RetentionAssessment {
+        facts: NodeRetention {
+            archive,
+            delete,
+            measured_at: Time::new(now),
+        },
+        archive: archiving,
+        delete: deleting,
+    })
 }

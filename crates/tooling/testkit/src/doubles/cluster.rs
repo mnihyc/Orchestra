@@ -506,7 +506,13 @@ impl ClusterDriver {
                 resource: Self::resource_ref(ResourceKind::Unit, identity),
                 name: unit.unit.name.clone(),
                 size_bytes: None,
-                labels: unit.spec.labels.clone(),
+                labels: unit
+                    .spec
+                    .labels
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != orch_driver_contract::runtime::LABEL_BIRTH)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
                 depends_on,
                 aliases: Vec::new(),
                 last_used_at: None,
@@ -886,6 +892,13 @@ impl EnvironmentDriver for ClusterDriver {
 
     async fn create(&self, spec: &RuntimeSpec) -> Result<UnitRef, DriverError> {
         let _held = self.lifecycle.lock().await;
+        if spec
+            .labels
+            .contains_key(orch_driver_contract::runtime::LABEL_BIRTH)
+            && self.memory.unit(&spec.name).is_some()
+        {
+            return Err(DriverError::InvalidSpec("the requested birth requires a new unit; the existing pool unit was left unchanged".into()));
+        }
         self.validate(spec.kind, &spec.spec).await?;
         if spec
             .volumes
@@ -904,7 +917,12 @@ impl EnvironmentDriver for ClusterDriver {
             self.ensure_volume_inner(&VolumeRequest {
                 name: volume.name.clone(),
                 storage: volume.storage.clone(),
-                labels: spec.labels.clone(),
+                labels: spec
+                    .labels
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != orch_driver_contract::runtime::LABEL_BIRTH)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
             })
             .await?;
         }

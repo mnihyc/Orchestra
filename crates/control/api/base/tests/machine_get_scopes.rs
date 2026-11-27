@@ -13,7 +13,7 @@ use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::key_scope::KeyScope;
 use orch_access_contract::permissions::ObjectKind;
 use orch_api_contract::resources::{Machine, MachineGet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::token_hash;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity::{self, NewApiToken};
@@ -43,9 +43,10 @@ async fn issue(world: &World, owner: Id, rules: Option<Vec<Json>>) -> Key {
     } else {
         Vec::new()
     };
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *world.conn().await,
@@ -567,5 +568,58 @@ async fn machine_get_publication_rechecks_the_current_governor_of_the_same_regis
             .environment
             .id,
         environment
+    );
+}
+
+#[tokio::test]
+async fn registered_profiles_are_found_before_the_machines_child_page() {
+    let world = World::new().await;
+    let owner = places::person(&world, "child-reader").await;
+    let machine = machine(&world, &owner, "Child collection machine").await;
+    for index in 0..13 {
+        let id = fixtures::insert_resource(
+            &mut *world.conn().await,
+            "agent",
+            Some(owner.id()),
+            Some(owner.person.personal_org),
+            &format!("Research profile {index:02}"),
+        )
+        .await
+        .unwrap();
+        own(&world, ObjectKind::Agent, id, owner.id()).await;
+        fixtures::register_on(&mut *world.conn().await, "agent", id, machine)
+            .await
+            .unwrap();
+    }
+    let all = shown(get(&world, &owner.token, machine).await);
+    assert_eq!(all.agents.len(), 13);
+    let reply = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .query(&json!({"collection":"agents","q":"Research profile 12","limit":1}))
+        .send_bytes()
+        .await;
+    let page = shown(reply);
+    assert_eq!(page.agents.len(), 1);
+    assert_eq!(page.agents[0].name, "Research profile 12");
+    let restricted = key(
+        &world,
+        owner.id(),
+        vec![rule("MachineGet", "machine", machine)],
+    )
+    .await;
+    let page = shown(
+        world
+            .app
+            .call(MachineGet, &[&machine])
+            .token(&restricted.secret)
+            .query(&json!({"collection":"agents","q":"Research profile 12","limit":1}))
+            .send_bytes()
+            .await,
+    );
+    assert!(
+        page.agents.is_empty(),
+        "search does not lend a foreign source's Read"
     );
 }

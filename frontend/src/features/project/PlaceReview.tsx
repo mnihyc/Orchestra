@@ -3,9 +3,9 @@ import { useQueries } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ReceiptAcknowledged } from '@/api/client';
-import { previewArchive, previewDelete, previewMove, readNode } from '@/api/nodes';
+import { previewArchive, previewMove, readNode } from '@/api/nodes';
 import { useNodeLabel, usePlaceLabels } from '@/features/navigation/placeLabels';
-import { ArchiveConsequences, DeleteConsequences, MoveConsequences } from '@/features/project/ReviewConsequences';
+import { ArchiveConsequences, MoveConsequences } from '@/features/project/ReviewConsequences';
 import { applyRows, canUndo, undoPlace, type PlacePlan, type ReviewAction, type RowResult } from '@/features/project/reviewBatch';
 import { PlacePicker, type PickedPlace } from '@/features/settings/PlacePicker';
 import type { Node } from '@/generated/api-types';
@@ -21,7 +21,6 @@ function PlanBody({ review }: { review: PlacePlan }) {
   switch (review.kind) {
     case 'archive': case 'unarchive': return <ArchiveConsequences plan={review.plan} />;
     case 'move': return <MoveConsequences plan={review.plan} />;
-    case 'delete': return <DeleteConsequences plan={review.plan} />;
   }
 }
 
@@ -31,8 +30,7 @@ function Observation({ result }: { result: RowResult }) {
   const parent = current?.path.at(-2);
   const parentName = useNodeLabel(parent?.id ?? '', parent?.redacted === true ? undefined : parent?.name ?? undefined);
   if (current === undefined) return null;
-  if (result.review.kind === 'delete' && current.inspection !== undefined && current.inspection !== null) return <p>{t('placeReview.observedDeleted', { revision: current.revision })}</p>;
-  return <p>{result.review.kind === 'move' ? t('placeReview.observedParent', { parent: parentName ?? t('placeReview.private'), revision: current.revision }) : t('placeReview.observedArchive', { state: current.archived ? t('placeReview.readOnly') : t('placeReview.ordinaryRights'), revision: current.revision })}</p>;
+  return <p>{result.review.kind === 'move' ? t('placeReview.observedParent', { parent: parentName ?? t('placeReview.private') }) : t('placeReview.observedArchive', { state: current.archived ? t('placeReview.readOnly') : t('placeReview.ordinaryRights') })}</p>;
 }
 
 export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readonly Node[]; action: ReviewAction; onClose: () => void; onApplied: () => void }) {
@@ -54,14 +52,13 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
     queryFn: async (): Promise<PlacePlan> => {
       const before = await readNode(row.id);
       if (action === 'archive' || action === 'unarchive') return { kind: action, before, plan: await previewArchive(row.id, action === 'archive') };
-      if (action === 'delete') return { kind: action, before, plan: await previewDelete(row.id) };
       if (destination === null || before.kind === 'thread') throw new Error(t('placeReview.destinationFirst'));
       return { kind: 'move', before, plan: await previewMove(before.kind, before.id, destination.id) };
     },
-    enabled: action !== 'move' || destination !== null, retry: false, staleTime: 0,
+    enabled: action !== 'move' || destination !== null, retry: false,
   })) });
   const plans = query.flatMap((entry) => entry.isError || entry.data === undefined ? [] : [entry.data]);
-  const ready = plans.filter((plan) => plan.kind === 'delete' || plan.plan.blockers.length === 0);
+  const ready = plans.filter((plan) => plan.plan.blockers.length === 0);
   const unplanned = active.filter((_row, index) => query[index]?.isError === true);
   const loaded = query.every((entry) => !entry.isPending && !entry.isFetching);
   const combined = [...kept, ...(results ?? [])];
@@ -93,7 +90,7 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
   };
   const reconcile = async (result: RowResult) => {
     setReading(result.review.before.id); setReadError(null);
-    try { const observed = await readNode(result.review.before.id, result.review.kind === 'delete'); update({ ...result, state: result.state === 'succeeded' ? 'succeeded' : 'observed', observed }); }
+    try { const observed = await readNode(result.review.before.id); update({ ...result, state: result.state === 'succeeded' ? 'succeeded' : 'observed', observed }); }
     catch (error) { setReadError(error); } finally { setReading(null); }
   };
   const again = () => {
@@ -103,7 +100,7 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
   };
   return <Dialog open size="lg" dismissible={!busy} onOpenChange={(open) => { if (!open && !busy) onClose(); }} title={t(results === null ? 'placeReview.title' : 'placeReview.resultTitle')} footer={<>
     <Button disabled={busy} onClick={onClose}>{t('common.close')}</Button>
-    {results === null ? <Button variant={action === 'delete' ? 'danger' : 'primary'} disabled={!loaded || ready.length === 0} pending={busy} onClick={() => void confirm()}>{t('placeReview.apply', { count: ready.length })}</Button> : <>
+    {results === null ? <Button variant="primary" disabled={!loaded || ready.length === 0} pending={busy} onClick={() => void confirm()}>{t('placeReview.apply', { count: ready.length })}</Button> : <>
       {combined.some(canUndo) && <Button pending={busy} onClick={() => void undo()}>{t('placeReview.undo')}</Button>}
       {(unplanned.length > 0 || results.some((row) => row.state === 'refused' || row.state === 'skipped' || row.state === 'observed')) && <Button disabled={busy} onClick={again}>{t('placeReview.reviewAgain')}</Button>}
     </>}

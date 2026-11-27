@@ -35,7 +35,7 @@ function Activity({ job }: { job: Job }) {
     ? t(`importWizard.run.${job.progress.phase}` as 'importWizard.run.validate') : t('importWizard.run.working');
   return <p role="status" className="text-sm text-text-muted tabular-nums" aria-live="polite">
     {t('importWizard.run.line', {
-      phase, done: formatNumber(job.progress.files_done, format.locale), total: job.progress.files_total === null ? '–' : formatNumber(job.progress.files_total, format.locale),
+      count: job.progress.files_total ?? 0, phase, done: formatNumber(job.progress.files_done, format.locale), total: job.progress.files_total === null ? '–' : formatNumber(job.progress.files_total, format.locale),
       bytes: formatBytes(job.progress.bytes_done, format.locale), elapsed: Number.isFinite(elapsed) ? formatSpan(elapsed, format, 'clock') : '–',
     })}
     {stalled && <span className="text-warning-text"> · {t('importWizard.run.stalled')}</span>}

@@ -6,7 +6,7 @@
  * it. Enter chooses the one in front, Escape puts the list away, and the field keeps the keyboard
  * throughout.
  */
-import { LoaderCircle } from 'lucide-react';
+import { Check, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Popover as Primitive } from 'radix-ui';
 import { usePromptCovered } from '@/ui/PromptScope';
@@ -14,13 +14,17 @@ import { type ComponentProps, type KeyboardEvent, type ReactNode, useCallback, u
 
 import { Choice, type ChoiceHelp } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
+import { isComposing } from '@/lib/shortcuts';
+import { useReadProgress } from '@/lib/useReadProgress';
 import { ChoiceCard, ChoiceInspection, type CardController, type CardPreview } from '@/ui/DetailCard';
 import { EmptyState } from '@/ui/EmptyState';
 import { Field, type FieldSlots } from '@/ui/Field';
+import { InheritedChoiceLabel, type ChoiceInheritance } from '@/ui/InheritedChoice';
 import { fieldBoxClasses } from '@/ui/Input';
 import { FLOATING_MIN_ROWS } from '@/ui/floating';
 import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
+import { AUTOMATIC_FOCUS } from '@/ui/focus';
 
 export interface ComboboxOption<Value extends string> {
   value: Value;
@@ -55,23 +59,34 @@ export interface ComboboxGroup<Value extends string> {
 }
 
 export interface ComboboxProps<Value extends string> extends FieldSlots {
+  inheritance?: ChoiceInheritance | undefined;
   /** An action inside the input's end, using the same placement as Input.trailing. */
   trailing?: ReactNode;
   /** Caller-owned paging/recovery actions; never selectable entity options. */
   footer?: ReactNode;
+  /** Read-only facts share this opening and its available scrolling room. */
+  facts?: ReactNode;
   /** What is typed. */
   query: string;
   onQueryChange: (query: string) => void;
+  /** A native address can be confirmed even when this page offers no matching option. */
+  onConfirmQuery?: (() => void) | undefined;
   /** The chosen name while the list is closed; opening leaves the search free to type into. */
   displayValue?: string;
+  /** A styled committed label; the input retains its plain accessible value. */
+  displayContent?: ReactNode;
   /** Full text behind an explicitly shortened committed label, for the existing overflow tooltip. */
   displayFullValue?: string;
   /** Complete-choice fields start on the committed choice; typing still starts at the first match. */
   initialActiveValue?: Value;
   groups: readonly ComboboxGroup<Value>[];
   onSelect: (option: ComboboxOption<Value>) => void;
+  /** Folder fields complete the highlighted child with Tab or Right while retaining input focus. */
+  onComplete?: (option: ComboboxOption<Value>) => void;
   /** Lazy readers run only while the input's suggestion list is open. */
   onOpenChange?: (open: boolean) => void;
+  /** Place related controls on a second line spanning the option width. */
+  accessoryBelow?: boolean;
   /** A complete-choice field can reopen after a refused write. Omitted keeps ordinary focus-owned behavior. */
   open?: boolean;
   /** Navigation can move focus to the chosen destination after the list has closed. */
@@ -97,28 +112,53 @@ export interface ComboboxProps<Value extends string> extends FieldSlots {
 const POPUP_GAP = 4;
 
 /** Change only the measured popup viewport; no ancestor scrolling or React state mutation. */
-function revealOption(viewport: HTMLElement, option: HTMLElement) {
+function revealOption(viewport: HTMLElement, option: HTMLElement, secondary: HTMLElement | null) {
   const frame = viewport.getBoundingClientRect(), row = option.getBoundingClientRect();
   // The existing rise-in animation scales the popup. Scroll offsets stay in unscaled CSS pixels.
   const scale = frame.height / viewport.offsetHeight;
   if (scale <= 0) return;
   const top = frame.top + viewport.clientTop * scale, bottom = top + viewport.clientHeight * scale;
+  const rowBottom = secondary?.getBoundingClientRect().bottom ?? row.bottom;
   if (row.top < top) viewport.scrollTop += (row.top - top) / scale;
-  else if (row.bottom > bottom) viewport.scrollTop += Math.min(row.top - top, row.bottom - bottom) / scale;
+  else if (rowBottom > bottom) viewport.scrollTop += Math.min(row.top - top, rowBottom - bottom) / scale;
 }
 
-export function Combobox<Value extends string>({
+export function Combobox<Value extends string>({ inheritance, ...props }: ComboboxProps<Value>) {
+  if (inheritance === undefined) return <ComboboxField {...props} />;
+  // Encode only popup identities; neither this choice nor these identities reach a value writer.
+  const options = new Map<string, ComboboxOption<Value>>(props.groups.flatMap((group) => group.options.map((option) => [`value:${option.value}`, option] as const)));
+  const inherited: ComboboxOption<string> = { value: 'inherit', text: inheritance.label, label: <InheritedChoiceLabel choice={inheritance} />,
+    icon: <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{inheritance.selected && <Check aria-hidden />}</span> };
+  return <ComboboxField<string> {...props}
+    knownChoice={inherited}
+    displayValue={inheritance.selected ? inheritance.label : props.displayValue}
+    displayContent={inheritance.selected ? <InheritedChoiceLabel choice={inheritance} /> : props.displayContent}
+    initialActiveValue={inheritance.selected ? 'inherit' : props.initialActiveValue === undefined ? undefined : `value:${props.initialActiveValue}`}
+    groups={[{ id: 'inherit', label: '', options: [inherited] }, ...props.groups.map((group) => ({ ...group, options: group.options.map((option) => ({ ...option, value: `value:${option.value}` })) }))]}
+    onComplete={props.onComplete === undefined ? undefined : (option) => { const current = options.get(option.value); if (current !== undefined) props.onComplete?.(current); }}
+    onSelect={(option) => {
+      if (option.value === 'inherit') { inheritance.onSelect(); props.onQueryChange(''); }
+      else { const current = options.get(option.value); if (current !== undefined) props.onSelect(current); }
+    }} />;
+}
+
+function ComboboxField<Value extends string>({
   trailing,
   footer,
+  facts,
   query,
   onQueryChange,
+  onConfirmQuery,
   displayValue,
+  displayContent,
   displayFullValue,
   initialActiveValue,
   groups,
   onSelect,
+  onComplete,
   onOpenChange,
   open: requestedOpen,
+  accessoryBelow = false,
   onCloseAutoFocus,
   loading = false,
   empty,
@@ -137,7 +177,9 @@ export function Combobox<Value extends string>({
   id,
   fieldClassName,
   className,
-}: ComboboxProps<Value>) {
+  knownChoice,
+}: ComboboxProps<Value> & { knownChoice?: ComboboxOption<Value> }) {
+  const slow = useReadProgress(loading);
   const { t } = useTranslation();
   const covered = usePromptCovered();
   const listId = useId();
@@ -168,7 +210,9 @@ export function Combobox<Value extends string>({
   const current = Math.min(active ?? initial, Math.max(0, flat.length - 1));
   const activeHelp = flat[current]?.help;
   const hasGuides = flat.some((option) => option.help !== undefined);
-  const hasFooter = asked && footer !== undefined && footer !== null && footer !== false;
+  const hasActions = asked && footer !== undefined && footer !== null && footer !== false;
+  const hasFacts = asked && facts !== undefined && facts !== null && facts !== false;
+  const hasFooter = hasActions || hasFacts;
   const hasPreviews = flat.some((option) => option.preview !== undefined);
   const hasGroupControls = offered.some((group) => group.heading !== undefined);
   const hasAccessories = flat.some((option) => option.accessory !== undefined);
@@ -205,8 +249,9 @@ export function Combobox<Value extends string>({
     const option = list?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
     const viewport = hasFooter ? list : popup;
     if (option === null || option === undefined || viewport === null || viewport.clientHeight === 0 || viewport.offsetHeight === 0) return;
-    revealOption(viewport, option);
-  }, [open, covered, hasFooter, hasControls]);
+    const secondary = accessoryBelow ? option.ownerDocument.getElementById(`${option.id}-secondary`) : null;
+    revealOption(viewport, option, secondary);
+  }, [open, covered, hasFooter, hasControls, accessoryBelow]);
 
   // Portal mount and Popper's available-height constraint settle after the input opens.
   // Observe the actual local viewport/list, including later wrapping or paging, without moving ancestors.
@@ -227,12 +272,22 @@ export function Combobox<Value extends string>({
     return () => { live = false; observer?.disconnect(); };
   }, [open, covered, contentVersion, hasFooter, hasControls, current, query, groups, revealCurrent]);
 
+  // Finishing or restarting a page can remove its focused footer action.
+  useLayoutEffect(()=>{
+    const popup=content.current;
+    if(!open||covered||!footerFocus.current||popup===null)return;
+    const foot=popup.querySelector('[data-combobox-footer]');
+    if(foot?.contains(popup.ownerDocument.activeElement))return;
+    restoringInput.current=true;input.current?.focus();restoringInput.current=false;
+    footerFocus.current=false;
+  },[open,covered,footer,contentVersion]);
+
   // The side and the height follow the room for the content the popup has now, not the content it opened with.
   const { place, attach: attachRoom } = useLayerRoom({ shown: open && !covered, anchor, watch: groups, gap: POPUP_GAP, rows: minRows });
   const attachPopup = useCallback((node: HTMLDivElement | null) => { attachContent(node); attachRoom(node); }, [attachContent, attachRoom]);
 
   const choose = (option: ComboboxOption<Value>) => {
-    if (disabled || loading) return;
+    if (disabled || loading && option !== knownChoice) return;
     if (option.disabled === true || typeof option.disabled === 'string') return;
     onSelect(option);
     requestOpen(false);
@@ -250,8 +305,8 @@ export function Combobox<Value extends string>({
     if (event.key === 'Tab' && (guides.length > 0 || hasFooter || hasPreviews || hasGroupControls || hasAccessories)) {
       // Paging and guidance keep their existing Tab order. Right Arrow always reaches inspection;
       // a picker without those controls also exposes the highlighted row's inspector through Tab.
-      const buttons = Array.from(content.current?.querySelectorAll<HTMLElement>(hasGroupControls || hasAccessories ? `[data-combobox-group-heading] button:not([disabled]), [data-combobox-group-heading] a[href], [data-choice-help], [data-choice-accessory] button:not([disabled]), [data-choice-accessory] a[href], [data-choice-description] a[href], [data-choice-description] button:not([disabled]), [data-choice-for="${optionId(current)}"], [data-combobox-footer] button:not([disabled]), [data-combobox-footer] a[href], [data-combobox-footer] [tabindex="0"]` : hasFooter
-        ? '[data-choice-help], [data-combobox-footer] button:not([disabled]), [data-combobox-footer] a[href], [data-combobox-footer] [tabindex="0"]'
+      const buttons = Array.from(content.current?.querySelectorAll<HTMLElement>(hasGroupControls || hasAccessories ? `[data-combobox-group-heading] button:not([disabled]), [data-combobox-group-heading] a[href], [data-choice-help], [data-choice-accessory] button:not([disabled]), [data-choice-accessory] a[href], [data-choice-description] a[href], [data-choice-description] button:not([disabled]), [data-choice-for="${optionId(current)}"], :is([data-combobox-footer],[data-combobox-facts]) button:not([disabled]), :is([data-combobox-footer],[data-combobox-facts]) a[href], :is([data-combobox-footer],[data-combobox-facts]) [tabindex="0"]` : hasFooter
+        ? '[data-choice-help], :is([data-combobox-footer],[data-combobox-facts]) button:not([disabled]), :is([data-combobox-footer],[data-combobox-facts]) a[href], :is([data-combobox-footer],[data-combobox-facts]) [tabindex="0"]'
         : guides.length > 0 ? '[data-choice-help]' : `[data-choice-for="${optionId(current)}"]`) ?? []);
       if (buttons.length === 0) return false;
       const at = buttons.findIndex((button) => button === event.target);
@@ -263,6 +318,15 @@ export function Combobox<Value extends string>({
     return false;
   };
   const press = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (isComposing(event.nativeEvent)) return;
+    const complete = onComplete !== undefined && open && !loading && !event.shiftKey
+      && !event.ctrlKey && !event.altKey && !event.metaKey && (event.key === 'Tab' || event.key === 'ArrowRight')
+      && event.currentTarget.selectionStart === event.currentTarget.value.length
+      && event.currentTarget.selectionEnd === event.currentTarget.value.length;
+    const option = flat[current];
+    if (complete && option !== undefined && option.disabled !== true && typeof option.disabled !== 'string') {
+      event.preventDefault(); event.stopPropagation(); onComplete(option); setActive(0); requestOpen(true); return;
+    }
     if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'ArrowRight'].includes(event.key)) setTouchPreview(false);
     if (guideKey(event)) return;
     switch (event.key) {
@@ -284,6 +348,7 @@ export function Combobox<Value extends string>({
         if (open) {
           event.preventDefault();
           if (option !== undefined) choose(option);
+          else if (!event.nativeEvent.isComposing) onConfirmQuery?.();
         }
         break;
       }
@@ -332,6 +397,7 @@ export function Combobox<Value extends string>({
                 value={open ? query : displayValue ?? query}
                 data-overflow-text={open ? undefined : displayFullValue}
                 className={cx(fieldBoxClasses, !open && 'truncate', size === 'sm' && 'h-(--control-sm) px-2 text-sm',
+                  !open && displayContent !== undefined && 'text-transparent!',
                   (loading || trailing !== undefined) && 'pr-10',
                   loading && trailing !== undefined && 'pr-[calc(var(--control-sm)+2.5rem)]', className)}
                 onChange={(event) => {
@@ -339,10 +405,11 @@ export function Combobox<Value extends string>({
                   requestOpen(true);
                   setActive(0);
                 }}
-                onFocus={() => {
+                onFocus={(event) => {
                   footerFocus.current = false;
                   setFocused(true);
-                  if (!restoringInput.current) requestOpen(true);
+                  if (event.currentTarget.hasAttribute(AUTOMATIC_FOCUS)) requestOpen(false);
+                  else if (!restoringInput.current) requestOpen(true);
                   revealCurrent();
                 }}
                 onBlur={(event) => {
@@ -354,7 +421,8 @@ export function Combobox<Value extends string>({
                 onPointerDown={(event) => setTouchPreview(event.pointerType === 'touch')}
                 onKeyDown={press}
               />
-              {loading && <LoaderCircle className={cx('absolute top-1/2 -translate-y-1/2 animate-spin text-text-subtle',
+              {!open && displayContent !== undefined && <span aria-hidden className={cx('pointer-events-none absolute inset-y-0 left-3 right-3 flex min-w-0 items-center overflow-hidden text-base text-text', size === 'sm' && 'left-2 right-2 text-sm')}>{displayContent}</span>}
+              {slow && <LoaderCircle className={cx('absolute top-1/2 -translate-y-1/2 animate-spin text-text-subtle',
                 // Shift the existing spinner slot by the trailing action's standard control width.
                 trailing === undefined ? 'right-3' : 'right-[calc(var(--control-sm)+0.75rem)]')} aria-hidden />}
               {trailing !== undefined && <div className="absolute inset-y-0 right-1 flex items-center">{trailing}</div>}
@@ -385,7 +453,7 @@ export function Combobox<Value extends string>({
                 footerFocus.current = false;
               }}
               onFocusCapture={(event) => {
-                if (hasFooter) footerFocus.current = event.target instanceof Element && event.target.closest('[data-combobox-footer]') !== null;
+                if (hasFooter) footerFocus.current = event.target instanceof Element && event.target.closest('[data-combobox-footer], [data-combobox-facts]') !== null;
               }}
               onBlur={(event) => {
                 if (!hasControls || inPreview(event.relatedTarget) || event.relatedTarget === input.current || event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
@@ -409,7 +477,8 @@ export function Combobox<Value extends string>({
                 else footerFocus.current = false;
               }}
               className={cx(
-                'relative z-(--layer-dropdown) [--floating-width:var(--menu-max-width)] w-(--menu-max-width) min-w-[min(var(--radix-popper-anchor-width),var(--menu-max-width),calc(100dvw-var(--spacing-4)))] animate-rise-in p-1 text-base text-text',
+                // At least as wide as its field, as a quick pick is, so that a row of a wide field does not wrap over lines; never wider than the screen.
+                'relative z-(--layer-dropdown) [--floating-width:max(var(--menu-max-width),var(--radix-popper-anchor-width))] w-(--floating-width) min-w-[min(var(--radix-popper-anchor-width),calc(100dvw-var(--spacing-4)))] animate-rise-in p-1 text-base text-text',
                 floatingClasses,
                 hasFooter ? 'flex flex-col overflow-hidden' : 'overflow-y-auto',
                 cardClasses,
@@ -422,6 +491,9 @@ export function Combobox<Value extends string>({
                   if (group.options.length === 0 && group.heading === undefined) return null;
                   const options = group.collapsed === true ? [] : group.options;
                   const rowActions = options.some((option) => option.accessory !== undefined);
+                  const stacked = rowActions && accessoryBelow;
+                  const tracks = stacked ? 2 : 1;
+                  const nameRow = (position: number) => position * tracks + 1;
                   const list = (hasGroupControls || hasAccessories) && group.collapsed !== true;
                   return <div key={group.id} {...(group.label === '' ? {} : { role: 'group', 'aria-label': group.label })}>
                     {group.heading !== undefined ? <div data-combobox-group-heading className="px-1">{group.heading}</div> : group.label !== '' && <div aria-hidden className="px-2 py-1 text-xs font-medium text-text-subtle">
@@ -429,17 +501,20 @@ export function Combobox<Value extends string>({
                     </div>}
                     {/* Native descendants keep every listbox reader on the same option tree.
                         A shared subgrid aligns sibling actions without putting controls in that tree. */}
-                    <div className={rowActions ? 'grid grid-cols-[minmax(0,1fr)_auto] gap-x-1.5' : undefined}
-                      style={rowActions ? { gridTemplateRows: `repeat(${options.length}, auto)` } : undefined}>
+                    <div className={rowActions ? cx('grid', stacked ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_auto] gap-x-1.5') : undefined}
+                      style={rowActions ? { gridTemplateRows: `repeat(${options.length * tracks}, auto)` } : undefined}>
                       <div {...(list ? { role: 'listbox', 'aria-label': typeof label !== 'string' ? group.label : offered.length === 1 || group.label === '' ? label : `${label} · ${group.label}`, 'aria-busy': loading || undefined } : {})}
-                        className={rowActions ? 'col-span-2 grid min-w-0 grid-cols-subgrid grid-rows-subgrid' : undefined}
-                        style={rowActions ? { gridRow: `1 / span ${options.length}` } : undefined}>
+                        className={rowActions ? cx('grid min-w-0 grid-cols-subgrid grid-rows-subgrid', stacked ? 'col-start-1' : 'col-span-2') : undefined}
+                        /* A definite column: auto-placed, the list would skip the accessories' cells and start after them. */
+                        style={rowActions ? { gridRow: `1 / span ${options.length * tracks}`, gridColumn: stacked ? '1' : '1 / span 2' } : undefined}>
                         {options.map((option, position) => {
                           const mine = (starts[at] ?? 0) + position;
                           const off = loading || option.disabled === true || typeof option.disabled === 'string';
                           const row = <Choice presentation="picker" key={option.value} name={option.preview?.renderName === undefined ? option.fullLabel === undefined ? option.label : <span data-overflow-text={option.fullLabel}>{option.label}</span> : option.preview.renderName(option.label)} description={typeof option.disabled === 'string' ? option.disabled : option.description} compact>
                             {(content, words) => <ChoiceCard preview={option.preview} active={mine === current && open && !touchPreview} controller={mine === current ? previewCard : undefined} owner={listId} returnFocus={() => { restoringInput.current = true; input.current?.focus(); restoringInput.current = false; }}><div
                               {...words}
+                              aria-describedby={stacked && option.accessory !== undefined
+                                ? [`${optionId(mine)}-secondary`, words['aria-describedby']].filter(Boolean).join(' ') : words['aria-describedby']}
                               id={optionId(mine)}
                               role="option"
                               aria-selected={mine === current}
@@ -458,11 +533,13 @@ export function Combobox<Value extends string>({
                               {content}
                             </div></ChoiceCard>}
                           </Choice>;
-                          return rowActions ? <div key={option.value} className="min-w-0 self-center" style={{ gridColumn: 1, gridRow: position + 1 }}>{row}</div> : row;
+                          return rowActions ? <div key={option.value} className="min-w-0 self-center" style={{ gridColumn: 1, gridRow: nameRow(position) }}>{row}</div> : row;
                         })}
                       </div>
                       {rowActions && options.map((option, position) => option.accessory === undefined ? null : <span key={option.value} data-choice-accessory
-                        className="inline-flex min-w-0 max-w-32 self-center" style={{ gridColumn: 2, gridRow: position + 1 }}>{option.accessory}</span>)}
+                        id={stacked ? `${optionId((starts[at] ?? 0) + position)}-secondary` : undefined}
+                        className={cx('inline-flex min-w-0 self-center', stacked ? 'ps-8 pe-2 pb-1' : 'max-w-32')}
+                        style={{ gridColumn: stacked ? 1 : 2, gridRow: nameRow(position) + (stacked ? 1 : 0) }}>{option.accessory}</span>)}
                     </div>
                   </div>;
                 })}
@@ -472,7 +549,8 @@ export function Combobox<Value extends string>({
                 {guides.map(({ option, help: guide }) => <Choice presentation="picker" key={option.value} name={option.label} compact
                   help={{ ...guide, onOpen: () => openGuide(guide) }} />)}
               </div>}
-              {hasFooter && <div data-combobox-footer className="shrink-0 border-t border-border p-2">{footer}</div>}
+              {hasActions && <div data-combobox-footer className="shrink-0 border-t border-border p-2">{footer}</div>}
+              {hasFacts && <div data-combobox-facts className="min-h-0 shrink overflow-y-auto border-t border-border p-2">{facts}</div>}
               </ChoiceInspection>
             </Primitive.Content>
           </Primitive.Portal>

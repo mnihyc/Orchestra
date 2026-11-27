@@ -7,6 +7,7 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
+import { collectionQuery, readAllPages } from '@/api/collection';
 import type {
   ApiTokenCreateBody,
   ApiTokenActivityPage,
@@ -74,7 +75,7 @@ export const suspensionsKey = (orgId: string) => ['suspensions', orgId] as const
 export const suspensionsQuery = (orgId: string) =>
   queryOptions({
     queryKey: suspensionsKey(orgId),
-    queryFn: ({ signal }): Promise<Suspension[]> => ok(api.GET('/orgs/{id}/suspensions', { params: { path: { id: orgId } }, signal })),
+    queryFn: ({ signal }): Promise<Suspension[]> => readAllPages((cursor) => ok(api.GET('/orgs/{id}/suspensions', { params: { path: { id: orgId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /** Holds a member out of an org, and everything inside it, until it is lifted. What they own stays theirs. */
@@ -122,7 +123,6 @@ export const holdingsQuery = (orgId: string, userId: string) =>
     queryFn: ({ signal }): Promise<Holdings> =>
       ok(api.GET('/orgs/{id}/members/{user_id}/holdings', { params: { path: { id: orgId, user_id: userId } }, signal })),
     // What a person owns changes while another screen is open; a dialog about it must not show an old answer.
-    staleTime: 0,
   });
 
 /** Ends the membership of the root org with everything it holds; `fates` say what becomes of each managed resource. */
@@ -144,8 +144,15 @@ export const groupsQuery = (orgId: string, under: boolean) =>
   queryOptions({
     queryKey: [...groupsKey(orgId), under] as const,
     queryFn: ({ signal }): Promise<Group[]> =>
-      ok(api.GET('/orgs/{id}/groups', { params: { path: { id: orgId }, query: under ? { under: true } : {} }, signal })),
+      readAllPages((cursor) => ok(api.GET('/orgs/{id}/groups', { params: { path: { id: orgId }, query: { under, limit: PAGE_SIZE, ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
+
+export const groupsPageQuery = (orgId: string, under: boolean, q: string) => infiniteQueryOptions({
+  queryKey: [...groupsKey(orgId), 'pages', under, q] as const,
+  initialPageParam: null as string | null,
+  queryFn: ({ pageParam, signal }) => ok(api.GET('/orgs/{id}/groups', { params: { path: { id: orgId }, query: { under, q, limit: PAGE_SIZE, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal })),
+  getNextPageParam: (last) => last.next_cursor,
+});
 
 export function createGroup(orgId: string, body: { name: string; description?: string }, key: string): Promise<Group> {
   return ok(api.POST('/orgs/{id}/groups', { params: { path: { id: orgId } }, body, ...repeatable(key) }));
@@ -162,7 +169,7 @@ export function deleteGroup(id: string): Promise<void> {
 export const groupMembersKey = (groupId: string) => ['group-members', groupId] as const;
 export const groupHoldersKey = (groupId: string) => ['group-holders', groupId] as const;
 export const groupHoldersQuery = (groupId: string) => queryOptions({ queryKey: groupHoldersKey(groupId),
-  queryFn: ({ signal }): Promise<Holder[]> => ok(api.GET('/groups/{id}/holders', { params: { path: { id: groupId } }, signal })) });
+  queryFn: ({ signal }): Promise<Holder[]> => readAllPages((cursor) => ok(api.GET('/groups/{id}/holders', { params: { path: { id: groupId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal) });
 export function addGroupHolder(groupId: string, holder: HolderInput, expectedRevision?: number): Promise<void> {
   return done(api.PUT('/groups/{id}/holders', { params: { path: { id: groupId } }, body: {
     ...holder, ...(expectedRevision === undefined ? {} : { expected_revision: expectedRevision }),
@@ -175,7 +182,7 @@ export function removeGroupHolder(groupId: string, body: HolderInput): Promise<v
 export const groupMembersQuery = (groupId: string) =>
   queryOptions({
     queryKey: groupMembersKey(groupId),
-    queryFn: ({ signal }): Promise<UserRef[]> => ok(api.GET('/groups/{id}/members', { params: { path: { id: groupId } }, signal })),
+    queryFn: ({ signal }): Promise<UserRef[]> => readAllPages((cursor) => ok(api.GET('/groups/{id}/members', { params: { path: { id: groupId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 export function addGroupMember(groupId: string, userId: string): Promise<void> {
@@ -210,7 +217,7 @@ export const serviceAccountsQuery = (orgId: string) =>
   queryOptions({
     queryKey: serviceAccountsKey(orgId),
     queryFn: ({ signal }): Promise<ServiceAccount[]> =>
-      ok(api.GET('/orgs/{id}/service-accounts', { params: { path: { id: orgId } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/orgs/{id}/service-accounts', { params: { path: { id: orgId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 export function createServiceAccount(orgId: string, body: { username: string; display_name: string }, key: string): Promise<ServiceAccount> {
@@ -226,7 +233,7 @@ export const serviceTokensKey = (id: string) => ['service-tokens', id] as const;
 export const serviceTokensQuery = (id: string) =>
   queryOptions({
     queryKey: serviceTokensKey(id),
-    queryFn: ({ signal }): Promise<ApiTokenInfo[]> => ok(api.GET('/service-accounts/{id}/tokens', { params: { path: { id } }, signal })),
+    queryFn: ({ signal }): Promise<ApiTokenInfo[]> => readAllPages((cursor) => ok(api.GET('/service-accounts/{id}/tokens', { params: { path: { id }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 export async function createServiceToken(id: string, body: ApiTokenCreateBody, key: string): Promise<TokenCreateResponse> {
@@ -248,7 +255,7 @@ export function orgTokenActivityQuery(orgId: string, tokenId: string, query: Api
   return queryOptions<ApiTokenActivityPage>({
     queryKey: ['token-activity', 'org', orgId, tokenId, query.limit ?? null, query.cursor ?? null] as const,
     queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/orgs/{id}/tokens/{token_id}/activity', { params: { path: { id: orgId, token_id: tokenId }, query }, signal })),
-    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
 }
 
@@ -341,3 +348,9 @@ export function removeOutsider(orgId: string, userId: string, plan: OutsideRemov
     }),
   );
 }
+
+export const groupHoldersPageQuery = (id: string, q: string) => collectionQuery(groupHoldersKey(id), q, (query, signal) => ok(api.GET('/groups/{id}/holders', { params: { path: { id }, query }, signal })));
+
+export const serviceAccountsPageQuery = (id: string, q: string) => collectionQuery(serviceAccountsKey(id), q, (query, signal) => ok(api.GET('/orgs/{id}/service-accounts', { params: { path: { id }, query }, signal })));
+
+export const serviceTokensPageQuery = (id: string, q: string) => collectionQuery(serviceTokensKey(id), q, (query, signal) => ok(api.GET('/service-accounts/{id}/tokens', { params: { path: { id }, query }, signal })));

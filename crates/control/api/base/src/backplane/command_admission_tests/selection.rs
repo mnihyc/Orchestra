@@ -271,8 +271,21 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
     let directory = Arc::new(tempfile::tempdir()?);
     tokio::fs::create_dir(directory.path().join("web")).await?;
     let store = Arc::new(LocalBlobStore::open(directory.path().join("blobs")).await?);
-    let mut config = ServerConfig::default();
-    config.retention.blob_grace_hours = 0;
+    let config = ServerConfig::default();
+    orch_db::queries::settings::put(
+        &mut *world.pool.acquire().await?,
+        None,
+        "retention.blob_grace_hours",
+        &orch_db::queries::settings::Stored {
+            value: &serde_json::json!(0),
+            locked: false,
+            by: None,
+            at: world.clock.now(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let link = Link::detached(world.pool.clone(), world.clock.clone(), Arc::new(config))?;
     let dispatcher = link.dispatcher();
     let machine = resources::testing::insert_machine(
@@ -417,6 +430,7 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
         .running_turn(thread, "Original actual authored input")
         .await;
     let segment = world.segment_of(thread).await;
+    let opening = world.opening_of(thread).await;
     let native_ref: String = world
         .scalar(
             "SELECT native_session_ref FROM segments WHERE id=$1",
@@ -446,7 +460,7 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
         thread_id: thread,
         segment_id: segment,
     };
-    world.machine.publish(&stream,&Event::OrchToolCall(OrchToolCall {
+    world.machine.publish_from(Some(opening),&stream,&Event::OrchToolCall(OrchToolCall {
                     deadline: None,turn_id:start.turn_id,call_ref:"create-dispatch-source".into(),attempt:None,
         tool:OrchTool::EditDocument,arguments:json!({"command":"create","path":"docs/dispatcher.md","markdown":"Original source material."})})).await;
     let created = answer(&world, thread, "create-dispatch-source").await?;
@@ -479,7 +493,8 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
     let arguments = json!({"path":format!("id:{document}"),"save_to":"copied-doc.md"});
     world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &Event::OrchToolCall(OrchToolCall {
                 deadline: None,
@@ -659,7 +674,10 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
     assert!(
         storage::forget_blob(&mut *world.pool.acquire().await?, &blob, world.clock.now()).await?
     );
-    assert!(store.delete(&blob).await?);
+    assert!(
+        within(store.delete(&blob)).await??,
+        "the released command's bytes can retire while its old issuer is still paused"
+    );
     let before = selected_snapshot(&world, thread, document).await?;
     release
         .send(())
@@ -712,7 +730,8 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
     let attempt = new_id();
     world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &Event::OrchToolCall(OrchToolCall {
                 deadline: None,

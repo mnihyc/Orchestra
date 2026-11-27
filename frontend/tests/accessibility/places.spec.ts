@@ -1,7 +1,7 @@
 /** Every screen of places, asked in both themes whether anything on it is a serious barrier: with what opens above it open, for somebody who may do everything and for somebody who may only read. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, expectAccessibleInBothThemes, PEOPLE, scenario, signIn, mainArea } from '../e2e/support.ts';
+import { ACME, expectAccessibleInBothThemes, PEOPLE, scenario, signIn, mainArea, openTopicTab } from '../e2e/support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -85,13 +85,14 @@ test('a topic’s tabs, one after the other', async ({ page }) => {
 
   // The tabs of the topic, not the ones of the right bar that have names of their own.
   const tabs = mainArea(page);
+  // Each from the row, or from More where it waits; once chosen it is in the row.
   for (const tab of ['Threads', 'Environments', 'Documents', 'Activity']) {
-    await tabs.getByRole('tab', { name: new RegExp(`^${tab}`) }).click();
+    await openTopicTab(page, tab);
     await expect(tabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute('aria-selected', 'true');
     await expectAccessibleInBothThemes(page);
   }
   // Settings opens the topic's own settings screen, in the place of its tabs.
-  await tabs.getByRole('tab', { name: /^Settings/ }).click();
+  await openTopicTab(page, 'Settings');
   await expect(page.getByRole('tab', { name: 'General · Fix login' })).toHaveAttribute('aria-selected', 'true');
   await expectAccessibleInBothThemes(page);
 });
@@ -132,16 +133,11 @@ test('the dialogs that make and change places, open', async ({ page }) => {
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
+  // Delete asks nothing (it moves the place to the Trash with one line and Undo): the Trash is the dialog left to check.
   await page.goto(`/topic/${ACME.upgradeDeps}`);
   await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
-  await page.getByRole('menuitem', { name: 'Delete…' }).click();
-  await expect(page.getByRole('alertdialog', { name: /^Delete the topic Upgrade deps, in .+\?$/ })).toBeVisible();
-  await expectAccessibleInBothThemes(page);
-  await page.keyboard.press('Escape');
-
-  await page.getByRole('button', { name: 'Actions for Upgrade deps' }).first().click();
-  await page.getByRole('menuitem', { name: 'Recently deleted…' }).click();
-  await expect(page.getByRole('dialog', { name: /^Recently deleted in the topic Upgrade deps, in / })).toBeVisible();
+  await page.getByRole('menuitem', { name: 'Trash…' }).click();
+  await expect(page.getByRole('dialog', { name: /^Trash in the topic Upgrade deps, in / })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
