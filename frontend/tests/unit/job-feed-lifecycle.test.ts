@@ -42,16 +42,17 @@ it('uses one native subscription for both the pending act and a visible job pane
   expect(test.cache.getQueryData(['job', job.id])).toEqual(ended);
 });
 
-it('retires authority content and old callbacks, rejoins the native snapshot, and completes without a second writer', async () => {
+it('retires old callbacks, keeps the shown progress until the native snapshot rejoins, and completes without a second writer', async () => {
   const test = rig(), waiting = test.wait(); await settle();
   test.event(job);
   test.send({ op: 'resync', id: 1, feed, reload: true });
-  expect(test.cache.getQueryData(['job', job.id])).toBeUndefined();
+  // The progress shown stays until the rejoined snapshot replaces it; nothing of the retired subscription is written.
+  expect(test.cache.getQueryData(['job', job.id])).toEqual(job);
   expect(test.subscribe).toHaveBeenCalledTimes(2);
   expect(test.listeners[0]?.unsubscribe).toHaveBeenCalledTimes(1);
   expect(test.listeners[1]?.since()).toBeNull();
   test.event(ended, 0);
-  expect(test.cache.getQueryData(['job', job.id])).toBeUndefined();
+  expect(test.cache.getQueryData(['job', job.id])).toEqual(job);
   test.event(ended, 1); await expect(waiting).resolves.toEqual(ended); await settle();
   expect(test.listeners[1]?.unsubscribe).toHaveBeenCalledTimes(1);
   test.event(job, 1);

@@ -62,6 +62,7 @@ mod tests {
             reuse_unsupported: false,
         };
         let reference = Measurement {
+            timing: None,
             job_id: new_id(),
             measured_at: None,
         };

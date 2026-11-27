@@ -104,7 +104,7 @@ pub(crate) async fn run_due(app: &crate::state::App) -> ApiResult<usize> {
         let seq = orch_db::sequences::next(&mut tx, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
-        let error = json!({"code":"ask_controller_unavailable","message":"The Ask controller became unavailable. Send a follow-up to continue."});
+        let error = json!({"code":"ask_controller_unavailable","message":"The Ask controller became unavailable. Send a follow-up to continue.","retryable":true});
         threads::finish_turn(&mut tx, turn, "interrupted", Some(&error), now, seq).await?;
         threads::settle_items_of_turn(&mut tx, turn, "cancelled", now, seq).await?;
         rows::finish(&mut tx, id, turn).await?;
@@ -120,6 +120,10 @@ pub(crate) async fn run_due(app: &crate::state::App) -> ApiResult<usize> {
     tx.commit().await.map_err(orch_db::DbError::from)?;
     app.engine
         .cancel_ask_calls(&calls)
+        .await
+        .map_err(ApiError::engine)?;
+    app.engine
+        .retire_deleted_ask_helpers()
         .await
         .map_err(ApiError::engine)?;
     Ok(closed)

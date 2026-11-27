@@ -70,7 +70,7 @@ it('keeps the unsaved file entrance across an immediate reset and reload', () =>
   const view = render(<Frame shown />);
   fireEvent.change(screen.getByRole('textbox', { name: 'Draft' }), { target: { value: 'Keep after reset' } });
   act(() => { useWorkbench.getState().reset(); });
-  const saved = loadWorkspace('layout-recovery-reader', 'thread').kept;
+  const saved = loadWorkspace('layout-recovery-reader').kept;
   expect(saved).not.toBeNull();
   expect(allTabs(saved!.layout)).toContainEqual(tab);
   view.unmount();
