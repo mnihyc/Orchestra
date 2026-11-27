@@ -25,6 +25,65 @@ pub struct ManualDefault {
     pub problem: Option<SummaryManualProblem>,
 }
 
+/// What a place's default is chosen from: its candidates (every enabled model of every API provider, the place's
+/// ordinary provider first, then by provider and model name), each provider's interface and endpoint defaults and
+/// each model's row, read in four statements for all of them. In a read that decides once they are read once: a
+/// chat's opening asks for the default of its catch-up, its title and its place's summary.
+pub(crate) struct Candidates {
+    list: Vec<(Id, String)>,
+    interfaces: HashMap<Id, Option<(String, Json)>>,
+    models: HashMap<(Id, String), resources::ModelRow>,
+}
+
+async fn candidates(conn: &mut Conn, place: Id) -> Result<std::sync::Arc<Candidates>, EngineError> {
+    crate::summaries::once::candidates(place, async {
+        let preferred = orch_settings::get::<Id>(
+            conn,
+            orch_settings::Place::Node(place),
+            orch_settings_contract::registry::keys::AGENT_DEFAULT_PROVIDER_ID,
+        )
+        .await?;
+        let list = resources::default_api_models(conn, preferred).await?;
+        let mut ids: Vec<Id> = Vec::new();
+        for (provider, _) in &list {
+            if !ids.contains(provider) {
+                ids.push(*provider);
+            }
+        }
+        let rows = resources::providers(conn, &ids).await?;
+        let endpoints = resources::provider_request_defaults_among(conn, &ids).await?;
+        let mut interfaces: HashMap<Id, Option<(String, Json)>> =
+            ids.iter().map(|id| (*id, None)).collect();
+        for row in &rows {
+            let interface = completion_protocol(&row.protocols)?.map(|protocol| {
+                let endpoint = endpoints
+                    .get(&(row.id, protocol.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                (protocol, endpoint)
+            });
+            interfaces.insert(row.id, interface);
+        }
+        let models: HashMap<_, _> = resources::models_named(conn, &list)
+            .await?
+            .into_iter()
+            .collect();
+        // The judgments of these models read the same rows.
+        crate::summaries::once::keep_rows(
+            ids.iter()
+                .map(|id| (*id, rows.iter().find(|row| row.id == *id).cloned())),
+            list.iter()
+                .map(|key| (key.clone(), models.get(key).cloned())),
+        );
+        Ok::<_, EngineError>(std::sync::Arc::new(Candidates {
+            list,
+            interfaces,
+            models,
+        }))
+    })
+    .await
+}
+
 /// Prefer the place's ordinary provider, then stable provider/model names. Every proposed
 /// option uses the existing parameter resolver, model Use/allowlists and summary cap matcher.
 pub async fn manual_default(
@@ -34,43 +93,24 @@ pub async fn manual_default(
     field: orch_summarizer_contract::descriptor::SummaryField,
     now: Time,
 ) -> Result<ManualDefault, EngineError> {
-    let preferred = orch_settings::get::<Id>(
-        conn,
-        orch_settings::Place::Node(place),
-        orch_settings_contract::registry::keys::AGENT_DEFAULT_PROVIDER_ID,
-    )
-    .await?;
     let mut capped = false;
-    // Each provider's interface and endpoint defaults, read once for all of its models.
-    let mut interfaces: HashMap<Id, Option<(String, Json)>> = HashMap::new();
+    let candidates = candidates(conn, place).await?;
     // A provider that refuses this reader at this place (gone, not ready, forbidden there, not usable, no keeper)
     // refuses every model it offers: the rest of its models are not judged.
     let mut refusing: HashSet<Id> = HashSet::new();
-    for (provider_id, model_name) in resources::default_api_models(conn, preferred).await? {
+    for (provider_id, model_name) in &candidates.list {
+        let provider_id = *provider_id;
         if refusing.contains(&provider_id) {
             continue;
         }
-        if let std::collections::hash_map::Entry::Vacant(unread) = interfaces.entry(provider_id) {
-            let interface = match resources::provider(conn, provider_id).await? {
-                Some(provider) => match completion_protocol(&provider.protocols)? {
-                    Some(protocol) => {
-                        let endpoint =
-                            resources::provider_request_defaults(conn, provider_id, &protocol)
-                                .await?;
-                        Some((protocol, endpoint))
-                    }
-                    None => None,
-                },
-                None => None,
-            };
-            unread.insert(interface);
-        }
-        let Some((protocol, endpoint)) = interfaces.get(&provider_id).cloned().flatten() else {
+        let Some((protocol, endpoint)) = candidates.interfaces.get(&provider_id).cloned().flatten()
+        else {
             continue;
         };
-        let Some(model) = resources::model(conn, provider_id, &model_name).await? else {
+        let Some(model) = candidates.models.get(&(provider_id, model_name.clone())) else {
             continue;
         };
+        let model_name = model_name.clone();
         let parameters = orch_provider_contract::models::composed_model_parameters(
             &model.parameters,
             &model.groups,

@@ -716,7 +716,12 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
             .fetch_one(&mut *conn)
             .await
             .unwrap();
-    assert_eq!(stored.0, facts);
+    // The model list is kept in its own row; the provider's facts keep every other member.
+    assert_eq!(stored.0, json!({ "protocols": ["openai-responses"] }));
+    assert_eq!(
+        listed(&mut conn, provider).await,
+        Some(json!(["mock-large"]))
+    );
     assert_eq!(stored.1, Some(now));
     assert_eq!(
         stored.2, before,
@@ -1133,4 +1138,101 @@ async fn the_rate_catalogue_is_read_as_it_was_last_loaded_and_is_none_before() {
     .await
     .unwrap();
     assert_eq!(rate_catalogue(&mut conn).await.unwrap(), Some(doc));
+}
+
+/// The model list kept for the provider, as its own row holds it.
+async fn listed(conn: &mut Conn, provider: Id) -> Option<Json> {
+    sqlx::query_scalar("SELECT models FROM provider_model_lists WHERE provider_id = $1")
+        .bind(provider)
+        .fetch_optional(conn)
+        .await
+        .unwrap()
+}
+
+/// The provider's stored facts and its observation counter.
+async fn stored_facts(conn: &mut Conn, provider: Id) -> (Json, i64) {
+    sqlx::query_as("SELECT facts, observation_revision FROM providers WHERE id = $1")
+        .bind(provider)
+        .fetch_one(conn)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_reported_model_list_is_kept_in_its_own_row_and_the_facts_hold_the_rest() {
+    let (_db, pool) = world().await;
+    let mut conn = pool.acquire().await.unwrap();
+    let home = home(&mut conn).await;
+    let there = machine(&mut conn, "keeper", true).await;
+    let provider = api(
+        &mut conn,
+        &home,
+        Api {
+            machine: Some(there),
+            key_machine: None,
+            status: "ready",
+        },
+    )
+    .await;
+    let catalogue: Vec<_> = (0..300)
+        .map(|n| json!({"model_name": format!("listed-{n}"), "description": "x".repeat(400)}))
+        .collect();
+    let at = now();
+    let report = json!({"plan": "pro", "models": catalogue});
+    assert!(set_facts(&mut conn, provider, &report, at).await.unwrap());
+    let (facts, observed) = stored_facts(&mut conn, provider).await;
+    assert_eq!(
+        facts,
+        json!({"plan": "pro"}),
+        "the row keeps every member but the list"
+    );
+    assert_eq!(listed(&mut conn, provider).await, Some(json!(catalogue)));
+    let count: i32 =
+        sqlx::query_scalar("SELECT listed FROM provider_model_lists WHERE provider_id = $1")
+            .bind(provider)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(count, 300);
+
+    // A report without a list keeps the stored one.
+    let later = at + Duration::seconds(1);
+    assert!(
+        set_facts(&mut conn, provider, &json!({"plan": "max"}), later)
+            .await
+            .unwrap()
+    );
+    let (facts, before) = stored_facts(&mut conn, provider).await;
+    assert_eq!(facts, json!({"plan": "max"}));
+    assert!(before > observed);
+    assert_eq!(listed(&mut conn, provider).await, Some(json!(catalogue)));
+
+    // A new list alone is an observation of the provider too, and the same report again writes nothing.
+    let shorter = json!({"plan": "max", "models": [{"model_name": "only"}]});
+    assert!(
+        set_facts(&mut conn, provider, &shorter, later)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        listed(&mut conn, provider).await,
+        Some(json!([{"model_name": "only"}]))
+    );
+    assert!(stored_facts(&mut conn, provider).await.1 > before);
+    assert!(
+        !set_facts(&mut conn, provider, &shorter, later)
+            .await
+            .unwrap(),
+        "the same report writes nothing"
+    );
+
+    // A report that says there is no list removes it.
+    let last = later + Duration::seconds(1);
+    let none = json!({"plan": "max", "models": null});
+    assert!(set_facts(&mut conn, provider, &none, last).await.unwrap());
+    assert_eq!(listed(&mut conn, provider).await, None);
+    assert_eq!(
+        stored_facts(&mut conn, provider).await.0,
+        json!({"plan": "max"})
+    );
 }
