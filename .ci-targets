@@ -1,0 +1,1 @@
+web-e2e tests/e2e/floating-layers.spec.ts tests/e2e/thread-start.spec.ts --project=chromium --grep "host inspection stays inside|defaults of its place|provider that is not ready"

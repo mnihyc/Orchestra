@@ -89,9 +89,48 @@ pub struct MachineProgramCapability {
     pub reason: Option<String>,
 }
 
+/// A manager's recorded execution decision, projected using the ordinary people reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutionApproval {
+    /// The actual manager, including the historical reference when their name is unavailable.
+    pub by: crate::users::UserRef,
+    /// When the manager made this decision.
+    pub at: orch_types::Time,
+}
+
+/// The factual subject of a machine manager's execution decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MachineExecutionSubject {
+    /// The native system and exact connector executable reviewed by the machine manager.
+    System {
+        build: orch_agent_programs::confirmation::PlatformBuild,
+    },
+    /// A currently selected machine program.
+    Program {
+        /// The harness whose program was selected.
+        harness_kind: String,
+        /// The selected program's path.
+        path: String,
+    },
+}
+
+/// One current machine execution decision with its server-recorded author.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineExecutionApproval {
+    /// The exact currently selected subject.
+    pub subject: MachineExecutionSubject,
+    /// The shared manager and moment.
+    #[serde(flatten)]
+    pub approval: ExecutionApproval,
+}
+
 /// One whole projection: initial reported state and every mutation's acknowledgement have this shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachinePrograms {
+    /// Filled by the API from its own decision records; native reports supply no people.
+    #[serde(default)]
+    pub approvals: Vec<MachineExecutionApproval>,
     /// The changed machine's authorized view on HTTP mutation acknowledgement; absent in native reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_view: Option<crate::resources::Machine>,
@@ -139,8 +178,50 @@ pub enum MachineProgramsCommand {
     ConfirmHarness { kind: String, path: String },
     /// Unconfirm the currently selected path without changing any other harness kind.
     RemoveHarness { kind: String, path: String },
+    /// Run the selected program's own check on its machine: the version it reports and the interface its adapter
+    /// needs, for a program that no catalogue build is matched to.
+    CheckHarness { kind: String, path: String },
     /// Reload operator configuration and the connector's persisted registrations.
     Reload,
+}
+
+/// What a machine found when it ran its own check of the agent program installed on it: the version the program
+/// reports and what its adapter needs of it. It holds while the file is the bytes it checked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstalledProgramCheck {
+    /// The program kind.
+    pub kind: String,
+    /// The executable checked, as the machine reports it.
+    pub path: String,
+    /// SHA-256 of the executable checked; none for an adapter built into the connector.
+    pub sha256: Option<String>,
+    /// Whether the adapter is built into the connector, so that there was no program of its own to run.
+    pub builtin: bool,
+    /// When it ran.
+    pub at: orch_types::Time,
+    /// Checked; failed when its adapter cannot use the program; untested when the program could not be run.
+    pub status: crate::admin::HarnessBuildStatus,
+    /// The version the program printed, when it printed one.
+    pub version: Option<String>,
+    /// What the adapter uses that the program lacks: protocol methods, members or flags, by name.
+    pub missing: Vec<String>,
+    /// Features switched off because something they need is missing.
+    pub off: Vec<String>,
+    /// Why it could not run, in a sentence, when it could not.
+    pub error: Option<String>,
+}
+
+/// A program installed on a machine a person connected, which its own check runs on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstalledProgram {
+    /// The machine it is installed on.
+    pub machine_id: orch_types::Id,
+    /// The executable, as the machine reports it.
+    pub path: String,
+    /// Whether the reader may run its check: they manage the machine.
+    pub can_check: bool,
+    /// Its last own check, while the program is still the bytes it checked.
+    pub check: Option<InstalledProgramCheck>,
 }
 
 /// How this physical program is installed; it is independent of machine placement.
