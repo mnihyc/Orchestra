@@ -962,7 +962,7 @@ async fn the_upstream_lists_96_models(world: &World, id: Id) {
         })
         .collect();
     sqlx::query(
-        "UPDATE providers SET facts = facts || jsonb_build_object('models', $2::jsonb) WHERE id = $1",
+        "INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2) ON CONFLICT (provider_id) DO UPDATE SET models = EXCLUDED.models",
     )
     .bind(id)
     .bind(serde_json::Value::Array(listing))

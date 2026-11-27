@@ -254,7 +254,7 @@ async fn read(
                     "SELECT jsonb_build_object('name',p.name,'status',p.status,'revision',p.revision,
                        'facts',p.facts-ARRAY['models','spend','available_resets','extra_usage']::text[],
                        'facts_overrides',p.facts_overrides-ARRAY['models','spend','available_resets','extra_usage']::text[],
-                       'listed',CASE WHEN jsonb_typeof(p.facts->'models')='array' THEN jsonb_array_length(p.facts->'models') ELSE NULL END,
+                       'listed',(SELECT catalogue.listed FROM provider_model_lists catalogue WHERE catalogue.provider_id=p.id),
                        'models',(SELECT COUNT(*) FROM provider_models m WHERE m.provider_id=p.id),
                        'enabled',(SELECT COUNT(*) FROM provider_models m WHERE m.provider_id=p.id AND m.enabled),
                        'running',(SELECT COUNT(*) FROM threads t JOIN nodes n ON n.id=t.node_id WHERE t.provider_id=p.id AND t.state='running' AND n.deleted_at IS NULL))

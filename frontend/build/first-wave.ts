@@ -58,6 +58,8 @@ export interface FirstScreenPlan {
   entry: string[]; entryStyles: string[]; entryGzipBytes: number; common: string[];
   application?: { file: string; styles: string[]; initializers: string[] };
   pages: { pattern: string; files: string[] }[];
+  /** The part of the frame's words (`assets/words/<locale>-<part>.json`): the first the application draws with. */
+  words?: string;
 }
 
 /** Recognize only imports, module markers and direct imported initializer calls, preserving call order. */
@@ -162,7 +164,8 @@ export function firstScreenPlan(bundle: Readonly<Record<string, BuiltChunk>>): F
     .map(([pattern, files]) => ({ pattern, files: dependencyFiles(bundle, [...files]) })) };
 }
 
-export function firstWavePlugin(): Plugin {
+/** `wordParts` names the frame's words part first (the vocabulary plugin's `loginWordParts`). */
+export function firstWavePlugin(wordParts?: () => readonly string[]): Plugin {
   let root = process.cwd();
   return {
     name: 'first-wave',
@@ -216,6 +219,8 @@ export function firstWavePlugin(): Plugin {
           return `<script type="module" nonce="__ORCH_CSP_NONCE__" data-orch-entry>await import(${JSON.stringify(src)});</script>`;
         });
         plan.entry = dependencyFiles(bundle, plan.entry);
+        const words = wordParts?.()[0];
+        if (words !== undefined && words !== '') plan.words = words;
         const starter = `<script nonce="__ORCH_CSP_NONCE__" data-orch-startup>${program}(window,${JSON.stringify(plan)});</script>`;
         const fonts = Object.values(bundle).filter((item) => item.type === 'asset'
           && /^fonts\/(?:inter|jetbrains-mono)-latin-wght-normal-[^/]+\.woff2$/.test(item.fileName))
@@ -228,11 +233,17 @@ export function firstWavePlugin(): Plugin {
   };
 }
 
-/** Pin a public copy of the finished document to this release of the browser worker. */
-export function threadShellWorkerPlugin(loginWordParts: () => readonly string[]): Plugin {
+/** The screens a returning visit opens from the worker's copy of the document: every route but sign-in, whose document
+ * (`login.html`) carries the installation's sign-in policy, as the edge's SSI puts it in. */
+export function shellScreens(bundle: Readonly<Record<string, BuiltChunk>>): string[] {
+  return firstScreenPlan(bundle).pages.map((page) => page.pattern).filter((pattern) => !new RegExp(pattern).test('/login'));
+}
+
+/** Pin a public copy of the finished document to this release of the browser worker, with the screens it opens. */
+export function shellWorkerPlugin(loginWordParts: () => readonly string[]): Plugin {
   let root = process.cwd();
   return {
-    name: 'cached-thread-document',
+    name: 'cached-document',
     apply: 'build',
     enforce: 'post',
     configResolved(config) { root = config.root; },
@@ -249,11 +260,12 @@ export function threadShellWorkerPlugin(loginWordParts: () => readonly string[])
         this.emitFile({ type: 'asset', fileName: 'login.html', source: html.replace(starter, (tag) => words + policy + tag) });
         const source = JSON.stringify(html);
         const digest = createHash('sha256').update(source).digest();
-        const fileName = `assets/thread-shell-${digest.toString('hex')}.json`;
+        const fileName = `assets/shell-${digest.toString('hex')}.json`;
         this.emitFile({ type: 'asset', fileName, source });
         const worker = readFileSync(resolve(root, 'public/sw.js'), 'utf8');
-        const asset = JSON.stringify({ url: '/' + fileName, integrity: 'sha256-' + digest.toString('base64') });
-        this.emitFile({ type: 'asset', fileName: 'sw.js', source: worker.replace('const threadShell = null;', () => `const threadShell = ${asset};`) });
+        const asset = JSON.stringify({ url: '/' + fileName, integrity: 'sha256-' + digest.toString('base64'),
+          screens: shellScreens(bundle) });
+        this.emitFile({ type: 'asset', fileName: 'sw.js', source: worker.replace('const shell = null;', () => `const shell = ${asset};`) });
       },
     },
   };
