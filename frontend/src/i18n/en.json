@@ -5803,6 +5803,8 @@
     "noneMoved": "Nothing was moved to Trash",
     "stopped_one": "{{count}} running thread stopped",
     "stopped_other": "{{count}} running threads stopped",
+    "environments_one": "{{count}} environment stopped",
+    "environments_other": "{{count}} environments stopped",
     "refused": "Not moved: {{names}}",
     "because": "{{name}} ({{reason}})",
     "show": "Show",
@@ -6549,6 +6551,15 @@
       "failed": "Failed",
       "cancelled": "Cancelled",
       "lost": "Lost"
+    },
+    "step": {
+      "validate": "Checking access",
+      "apply": "Preparing the files",
+      "verify": "Checking the result",
+      "files": "Writing the starting files",
+      "commit": "Finishing",
+      "other": "A step",
+      "line": "{{step}} · {{why}}"
     },
     "git": {
       "commit": "Commit…",
@@ -9078,6 +9089,9 @@
     "open": "Open"
   },
   "ui": {
+    "tabs": {
+      "more": "More"
+    },
     "sectionNav": {
       "search": "Find a section"
     },
@@ -15443,6 +15457,7 @@
       "delete": "Delete…",
       "enable": "Enable",
       "disable": "Disable…",
+      "disableNow": "Disable",
       "start": "Start",
       "stop": "Stop",
       "refresh": "Refresh",
@@ -17483,6 +17498,9 @@
       "disableTitle": "Disable {{name}}?",
       "disableConfirm": "Disable {{name}}",
       "disabled": "{{name}} was disabled",
+      "enabledAgain": "{{name}} is on again",
+      "notEnabled": "{{name}} was not switched on again",
+      "notDisabled": "{{name}} was not disabled",
       "enableSection": "Enable",
       "enable": "Enable",
       "deleteSection": "Delete",
@@ -17524,11 +17542,6 @@
       "disabled_other": "Disabled {{count}} providers",
       "deleted_one": "Deleted {{count}} provider",
       "deleted_other": "Deleted {{count}} providers",
-      "disableTitle_one": "Disable {{count}} provider?",
-      "disableTitle_other": "Disable {{count}} providers?",
-      "disableBody": "No thread can start a turn on them until they are enabled again. Turns that are running go on to their end.",
-      "disableConfirm_one": "Disable {{count}} provider",
-      "disableConfirm_other": "Disable {{count}} providers",
       "deleteTitle_one": "Delete {{count}} provider?",
       "deleteTitle_other": "Delete {{count}} providers?",
       "deleteConfirm_one": "Delete {{count}} provider",
@@ -17888,7 +17901,6 @@
     "title": "Storage",
     "lead": "Named places where this machine makes owned data. Choose these names in environment or managed provider container configuration.",
     "default": "{{name}} (default)",
-    "space": "{{free}} GB free of {{capacity}} GB",
     "none": "This machine has not reported any available storage."
   },
   "templates": {
@@ -18843,7 +18855,7 @@
       "over": "More is declared than the host has.",
       "unknown": "The host reports no capacity.",
       "measuredMemory": "{{used}} used · {{free}} free of {{capacity}}",
-      "measuredStorage": "{{name}} · {{free}} free of {{capacity}}"
+      "measuredStorage": "{{name}} · {{free}} free of {{capacity}} disk"
     },
     "storages": {
       "title": "Storage",
@@ -18936,6 +18948,21 @@
       "grantConfirm": "Grant Host Use",
       "grantNotice_one": "{{number}} host installed with the server may share its kernel",
       "grantNotice_other": "{{number}} hosts installed with the server may share its kernel"
+    },
+    "noneFor": {
+      "environment": {
+        "admin": "No host you may use can make a new environment: turn on As admin, or add yourself to Use in a host's Access.",
+        "adminOn": "No host you may use can make a new environment: add yourself to Use in a host's Access.",
+        "owner": "No host you may use can make a new environment: ask <person/> for Use of {{host}}.",
+        "ask": "No host you may use can make a new environment: ask a host's owner or an administrator for Use."
+      },
+      "provider": {
+        "admin": "No host of yours can run it: with As admin on, add yourself to Use in a host's Access, or choose an environment.",
+        "adminOn": "No host of yours can run it: add yourself to Use in a host's Access, or choose an environment.",
+        "owner": "No host of yours can run it: ask <person/> for Use of {{host}}, or choose an environment.",
+        "ask": "No host of yours can run it: ask a host's owner or an administrator for Use, or choose an environment."
+      },
+      "access": "{{host}} · Access"
     }
   },
   "help": {
@@ -25721,7 +25748,6 @@
     "offline": "Offline",
     "offlineSince": "Offline since {{time}}",
     "full": "Full",
-    "free": "{{size}} free",
     "hostOffline": "Host offline",
     "idleFor": "idle {{time}}",
     "status": "Status",
@@ -25807,7 +25833,7 @@
     "environmentState": "Environment · {{state}}",
     "memoryFree": "{{free}} free of {{total}} memory",
     "memoryTotal": "{{total}} memory",
-    "diskFree": "{{free}} of {{total}} GB disk free"
+    "diskFree": "{{free}} free of {{total}} disk"
   },
   "statusItems": {
     "textEstimateHint": "Estimated from text length until the provider reports usage",
@@ -27924,8 +27950,6 @@
     "resultsRootPending": "The results’ organization cannot be opened yet. Try again in a moment.",
     "model": "Model summarizer",
     "details": "Summary details",
-    "hide": "Hide summary",
-    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
@@ -29558,7 +29582,8 @@
     "notRemoved": "Shortcut “{{name}}” could not be removed",
     "state": {
       "unavailable": "Unavailable",
-      "deleted": "Deleted"
+      "deleted": "Deleted",
+      "deletedNamed": "{{name}} · Deleted"
     },
     "of": "shortcut to a {{kind}}",
     "loading": "Loading shortcuts…",

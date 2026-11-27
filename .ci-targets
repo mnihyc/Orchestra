@@ -1,0 +1,2 @@
+# The retained-environment cluster case again (a restore met the removal job still open once).
+test -p orch-api-core --test cluster_retained

@@ -282,24 +282,44 @@ async fn checks(options: &Options) -> Result<(), String> {
     let automatic = options.url.is_none();
     if let Some(url) = options.url.as_ref().or(effective_url.as_ref()) {
         let address = Address::parse(url)?;
-        let wanted = |id: &str| {
-            options.wanted(id)
-                && (!automatic
-                    || !options.only.is_empty()
-                    || matches!(id, "edge-page" | "edge-api"))
-        };
-        let edge = edge::Edge {
-            address,
-            resolve: &resolve,
-            secrets_dir: &options.secrets_dir,
-            access_token: options.access_token.as_deref(),
-            idle: Duration::from_secs(options.idle_secs),
-            wanted: &wanted,
-            ports_domain: orch_config::load::<ServerConfig>(&options.config)
-                .ok()
-                .and_then(|config| config.edge.ports_domain),
-        };
-        show(edge::checks(&edge).await, &mut lines);
+        if automatic && options.only.is_empty() && address.is_loopback() {
+            // Read in the API's container, a loopback address is that container, not the edge people open: the
+            // checks nobody named are not tried there, and the updater tries them from the host right after.
+            let skipped: Vec<Line> = ["edge-page", "edge-api"]
+                .into_iter()
+                .filter(|id| options.wanted(id))
+                .map(|id| {
+                    line(
+                        id,
+                        Status::Skip,
+                        format!(
+                            "{url} is a loopback address, which inside the stack is this container and not the edge: \
+                             ./update.sh doctor tries it from the host (there: orchctl doctor --url {url})"
+                        ),
+                    )
+                })
+                .collect();
+            show(skipped, &mut lines);
+        } else {
+            let wanted = |id: &str| {
+                options.wanted(id)
+                    && (!automatic
+                        || !options.only.is_empty()
+                        || matches!(id, "edge-page" | "edge-api"))
+            };
+            let edge = edge::Edge {
+                address,
+                resolve: &resolve,
+                secrets_dir: &options.secrets_dir,
+                access_token: options.access_token.as_deref(),
+                idle: Duration::from_secs(options.idle_secs),
+                wanted: &wanted,
+                ports_domain: orch_config::load::<ServerConfig>(&options.config)
+                    .ok()
+                    .and_then(|config| config.edge.ports_domain),
+            };
+            show(edge::checks(&edge).await, &mut lines);
+        }
     }
 
     let failed = lines

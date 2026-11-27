@@ -12,8 +12,9 @@ import { poolQuery } from '@/api/pools';
 import { usePoolTargetChoices } from '@/features/resources/pools/targetChoices';
 import { HOST_POOL_PREFIX, hostChoiceTarget, hostPoolId, singleHostId } from '@/features/resources/pools/hostTarget';
 import { ResourceHint } from '@/features/resource-facts/ResourceFacts';
-import { hostUnavailable, templateUnavailable } from '@/features/resources/choiceAvailability';
+import { hostUnavailable, mayUseAnyHost, templateUnavailable } from '@/features/resources/choiceAvailability';
 import { HostCapacityLine } from '@/features/start/PlaceCapacity';
+import { NoHostLine } from '@/features/resources/hosts/NoHostLine';
 import { hostNotes } from '@/features/resources/hosts/words';
 import { NewAccess } from '@/features/resources/NewAccess';
 import type { PlaceRef } from '@/features/navigation/places';
@@ -145,8 +146,10 @@ export function PlacementFields({ hosts, value, onChange, kind = 'environment', 
       hostId !== undefined && chosenHost === undefined && !pending && !failed ? t('start.where.hostGone') : null,
       missingTemplate && templates.isSuccess ? t('start.where.templateGone') : null,
     ].filter((reason) => reason !== null).join(' · ')}</span>}
-    {host === undefined && !pending && !failed && !defaultWorks && <span role="status" className="text-sm text-warning-text" data-default-host="none">
-      {t(kind === 'provider' ? 'start.where.hostDefaultNoneProvider' : 'start.where.hostDefaultNone')}</span>}
+    {host === undefined && !pending && !failed && !defaultWorks && (mayUseAnyHost(hosts, kind)
+      ? <span role="status" className="text-sm text-warning-text" data-default-host="none">
+        {t(kind === 'provider' ? 'start.where.hostDefaultNoneProvider' : 'start.where.hostDefaultNone')}</span>
+      : <NoHostLine kind={kind} hosts={hosts} />)}
     {failed !== undefined && failed !== null && <ErrorAlert error={failed} action={onRetry === undefined ? undefined : <Button size="sm" onClick={onRetry}>{t('common.tryAgain')}</Button>} />}
     {templates.isError && <ErrorAlert error={templates.error} action={<Button size="sm" onClick={() => void templates.refetch()}>{t('common.tryAgain')}</Button>} />}
   </div>;

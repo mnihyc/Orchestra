@@ -160,6 +160,12 @@ section! {
         /// Database connections. Thirty-two serve a few hundred people at
         /// once with room for the engine's own work.
         db_pool: u32 = 32,
+        /// Database connections kept open and ready while nobody is asking: a page's first reads run at once on
+        /// several, and a connection the database has served answers faster than a new one. A connection beyond
+        /// them that sits idle is closed, one a minute; zero keeps none.
+        db_pool_warm: u32 = 8,
+        /// How long a database connection serves before it is replaced, in seconds; zero for no bound.
+        db_pool_lifetime_secs: u64 = 14_400,
         /// Proxy ranges allowed to describe caller addresses for the API and gateway edge.
         /// Empty trusts only the socket peer; a deployment names its proxy network.
         trusted_proxy_cidrs: Vec<String> = Vec::new(),

@@ -379,11 +379,19 @@ async fn model_source_errors_keep_the_previous_list_while_unsupported_and_empty_
             world.provider,
         )
         .await;
-    let known = json!({"models":[{"model_name":"kept","display_name":"Kept","parameters":null}],"field_times":{"models":clock.time()}});
+    // The list a source reported is kept beside the provider's facts, in a row of its own.
+    let known = json!({"field_times":{"models":clock.time()}});
+    let kept = json!([{"model_name":"kept","display_name":"Kept","parameters":null}]);
     sqlx::query("UPDATE providers SET sources=$2,facts=$3 WHERE id=$1")
         .bind(world.provider)
         .bind(json!({"models":{"by":"program","name":"plan"}}))
         .bind(&known)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2)")
+        .bind(world.provider)
+        .bind(&kept)
         .execute(world.pool.pool())
         .await
         .unwrap();
@@ -424,6 +432,11 @@ async fn model_source_errors_keep_the_previous_list_while_unsupported_and_empty_
         .scalar("SELECT facts FROM providers WHERE id=$1", world.provider)
         .await;
     assert_eq!(facts, known);
+    assert_eq!(
+        listed(&world).await,
+        Some(kept),
+        "a failed read keeps the list"
+    );
     world
         .machine
         .handler
@@ -451,6 +464,7 @@ async fn model_source_errors_keep_the_previous_list_while_unsupported_and_empty_
         .scalar("SELECT facts FROM providers WHERE id=$1", world.provider)
         .await;
     assert!(facts["models"].is_null());
+    assert_eq!(listed(&world).await, None, "an unsupported list is none");
     let mut descriptor = source_descriptor();
     descriptor.models = Some(orch_provider_contract::source::SourceDescriptorModels {});
     world
@@ -476,10 +490,11 @@ async fn model_source_errors_keep_the_previous_list_while_unsupported_and_empty_
             .unwrap(),
         Some(Vec::new())
     );
-    let facts: Json = world
-        .scalar("SELECT facts FROM providers WHERE id=$1", world.provider)
-        .await;
-    assert_eq!(facts["models"], json!([]));
+    assert_eq!(
+        listed(&world).await,
+        Some(json!([])),
+        "an empty list is a list"
+    );
     assert_eq!(
         world
             .count(
@@ -1035,6 +1050,15 @@ async fn a_read_that_tells_nothing_retains_the_facts_their_time_and_the_provider
     assert_eq!(status, "error");
     assert_eq!(facts, old);
     assert_eq!(at, before);
+}
+
+/// The model list the provider's source last reported, kept beside its facts; none where it reported none.
+async fn listed(world: &World) -> Option<Json> {
+    sqlx::query_scalar("SELECT models FROM provider_model_lists WHERE provider_id = $1")
+        .bind(world.provider)
+        .fetch_optional(world.pool.pool())
+        .await
+        .unwrap()
 }
 
 async fn notices(world: &World) -> i64 {

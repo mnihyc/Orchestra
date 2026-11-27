@@ -101,6 +101,7 @@ case $url in */version.json) cp "$TEST_MANIFEST" "$out";; *) cp "$TEST_CONNECTOR
                         self.assertEqual(values["http_proxy"], "http://other.example:8080")
                         self.assertEqual(values["NO_PROXY"], ".internal.example,.example&suffix")
                     self.assertTrue(any("__record-installation\t--service" in line for line in lines), lines)
+                    self.assertIn("Done: this machine is connected to https://orch.example", result.stderr)
 
     def test_missing_user_manager_and_foreground_leave_starting_to_the_person(self):
         for manager, service in ((False, True), (True, False)):
@@ -108,7 +109,14 @@ case $url in */version.json) cp "$TEST_MANIFEST" "$out";; *) cp "$TEST_CONNECTOR
                 result, _, contents, _ = self.run_installer("Linux", manager=manager, service=service)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIsNone(contents)
-                self.assertIn("Start the connector", result.stderr)
+                # Nothing runs the connector yet, as in a container without systemd: the last line says what to start,
+                # and nothing says the machine is connected.
+                self.assertNotIn("connected to", result.stderr)
+                last = result.stderr.strip().splitlines()[-1]
+                self.assertIn("enrolled with https://orch.example", last)
+                self.assertIn("Start the connector", last)
+                self.assertIn("orch-connector --data-dir '", last)
+                self.assertTrue(last.endswith("' run"), last)
 
 
 if __name__ == "__main__":

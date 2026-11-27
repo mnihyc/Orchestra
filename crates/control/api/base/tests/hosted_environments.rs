@@ -65,6 +65,14 @@ async fn a_host(world: &World, owner: &Who, home: Id, name: &str, memory_mb: i64
     )
     .await
     .unwrap();
+    drop(conn);
+    reports_docker(world, id, memory_mb).await;
+    id
+}
+
+/// What the node of the host `id` reports once its session stands: a Docker driver and `memory_mb`.
+async fn reports_docker(world: &World, id: Id, memory_mb: i64) {
+    let mut conn = world.conn().await;
     sqlx::query(
         "UPDATE hosts SET drivers = $2, capacity = $3, storages = $4 WHERE id = $1",
     )
@@ -93,7 +101,6 @@ async fn a_host(world: &World, owner: &Who, home: Id, name: &str, memory_mb: i64
     .execute(&mut *conn)
     .await
     .unwrap();
-    id
 }
 
 /// A template of environments that a Docker host makes from a small image.
@@ -154,6 +161,61 @@ fn wanted(team: &Team, name: &str) -> NewEnvironment {
         template_id: Some(team.template),
         ..NewEnvironment::default()
     }
+}
+
+/// The plan of the job that makes the environment `id` the first time.
+async fn first_make_plan(world: &World, id: Id) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT plan FROM jobs WHERE environment_id = $1 AND kind = 'environment_provision' ORDER BY created_at LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap()
+}
+
+/// A system admin acting as one makes an environment in an org he is not a member of. As anything an outsider makes,
+/// it is the org's first owner's, and so is its first Make, as every later one is. The creator's authority used to
+/// require the creator to be its owner: the request ended in a 500 and nothing was made.
+#[tokio::test]
+async fn a_system_admin_makes_an_environment_in_an_org_he_is_no_member_of() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    world.make_admin(&t.c.stranger.person).await;
+    places::admin_mode(&world, &t.c.stranger, true).await;
+    let made = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.stranger.token)
+        .body(&wanted(&t, "Made from outside"))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(made.base.owner.id, t.c.boss.id());
+    let plan = first_make_plan(&world, made.base.id).await;
+    assert_eq!(plan["mode"], json!("make"));
+    assert!(plan.get("creator_provision").is_none(), "{plan}");
+    places::admin_mode(&world, &t.c.stranger, false).await;
+    // A member makes hers as before: she owns it, and its first Make keeps her own authority.
+    let own = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.admin.token)
+        .body(&wanted(&t, "Made from inside"))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(own.base.owner.id, t.c.admin.id());
+    let plan = first_make_plan(&world, own.base.id).await;
+    assert_eq!(
+        plan["creator_provision"]["standalone"],
+        json!(true),
+        "{plan}"
+    );
 }
 
 #[tokio::test]
@@ -1640,6 +1702,163 @@ async fn a_person_makes_an_environment_on_a_host_they_may_use_and_is_given_the_j
             .iter()
             .any(|word| word == "environment.manage")
     );
+}
+
+/// The first day of an install made as its README says: the stack starts with no account, and the token its own node
+/// enrolls with waits for the first administrator, who is made at setup. The host the node enrolls then is that
+/// administrator's to use as themself, with As admin off: Add environment with its defaults (a template, the host with
+/// the most room) makes the environment there. Nobody else may use the host until its page says so.
+#[tokio::test]
+async fn the_administrator_made_at_setup_makes_an_environment_on_the_bundled_host_with_as_admin_off()
+ {
+    use orch_api_base::certificates::Adopted;
+    use orch_api_contract::auth::{SetupCreate, SetupCreateBody};
+    use orch_api_contract::binding::NewEnvironmentAccess;
+    use orch_api_contract::resources::HostGet;
+    use orch_link_contract::enrollment::EnrollRequest;
+    use orch_link_contract::session::{Arch, Os, Platform, Role};
+    let world = World::new().await;
+    let certificates = world.app.app.link.certificates();
+    // The first start writes the bundled node's token, and there is nobody yet to register it in the name of.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("node_enrollment_token");
+    let issued = orch_pki::enrollment::issue_token(
+        certificates.authority(),
+        std::time::Duration::ZERO,
+        &world.app.clock,
+    );
+    std::fs::write(&file, format!("{}\n", issued.token)).unwrap();
+    assert_eq!(
+        certificates.adopt_token_file(&file).await.unwrap(),
+        Adopted::WaitingForAdministrator
+    );
+    // Setup makes the first administrator, whose session starts with As admin off.
+    let first = world
+        .app
+        .call(SetupCreate, &[])
+        .body(&SetupCreateBody {
+            username: "owner".to_owned(),
+            display_name: "Owner".to_owned(),
+            password: support::PASSWORD.to_owned(),
+            email: None,
+            timezone: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("setup returns its first session");
+    let owner = Who {
+        person: support::Person {
+            id: first.user.user.id,
+            username: "owner".to_owned(),
+            email: String::new(),
+            personal_org: first
+                .user
+                .personal_org_id
+                .expect("the first administrator has a place of their own"),
+        },
+        token: first.access_token,
+    };
+    // The token is registered in their name, the node enrolls with it, and its session reports what it offers.
+    assert_eq!(
+        certificates.adopt_token_file(&file).await.unwrap(),
+        Adopted::Registered
+    );
+    let enrolled = certificates
+        .enroll(
+            &EnrollRequest {
+                machine_id: None,
+                token: issued.token.to_string(),
+                csr_pem: orch_pki::enrollment::PendingEnrollment::start()
+                    .unwrap()
+                    .csr_pem()
+                    .to_owned(),
+                name: "orch-node".to_owned(),
+                platform: Platform {
+                    os: Os::Linux,
+                    arch: Arch::X86_64,
+                },
+                connector_version: "0.1.0".to_owned(),
+                protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
+                roles: vec![Role::Node],
+            },
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .unwrap();
+    let host: Id =
+        sqlx::query_scalar("SELECT id FROM hosts WHERE machine_id = $1 AND bundled_with_server")
+            .bind(enrolled.machine_id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    reports_docker(&world, host, 16_384).await;
+    let seen: orch_api_contract::resources::Host = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        seen.access
+            .permissions
+            .iter()
+            .any(|permission| permission == "host.use"),
+        "the first administrator uses the bundled host as themself: {:?}",
+        seen.access.permissions
+    );
+    // Add environment, as its dialog sends it by default: in their own place, Host Automatic, Only me.
+    let template = a_template(&world, &owner, owner.person.personal_org, "Default").await;
+    let asked = |home: Id, template: Id| NewEnvironment {
+        name: Some("Mine".to_owned()),
+        home_node_id: Some(home),
+        template_id: Some(template),
+        host_id: Some(None),
+        access: Some(NewEnvironmentAccess::OnlyMe),
+        ..NewEnvironment::default()
+    };
+    let made: Environment = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&owner.token)
+        .body(&asked(owner.person.personal_org, template))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary standalone creation remains full");
+    // Its unit is not there yet, so the host it goes to is the one its job was admitted on.
+    let job = made.job.expect("the job that makes its unit");
+    let admitted: Option<Id> =
+        sqlx::query_scalar("SELECT (plan->>'admitted_host')::uuid FROM jobs WHERE id = $1")
+            .bind(job.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(admitted, Some(host), "Automatic chose the bundled host");
+    // Another member neither sees the host nor has an environment made on it.
+    let member = places::person(&world, "member").await;
+    let hidden = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&member.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(hidden.code, ErrorCode::AuthzDenied);
+    let theirs = a_template(&world, &member, member.person.personal_org, "Theirs").await;
+    let blocked = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&member.token)
+        .body(&asked(member.person.personal_org, theirs))
+        .send()
+        .await
+        .problem();
+    assert_eq!(blocked.code, ErrorCode::PlanBlocked);
+    assert_eq!(blocked.extra["reason"], "no_host");
 }
 
 #[tokio::test]
