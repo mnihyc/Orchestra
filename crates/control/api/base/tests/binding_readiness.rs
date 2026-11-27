@@ -264,6 +264,7 @@ async fn resource_pages_use_stored_reports_on_one_connection_without_asking_the_
         live: Arc::new(orch_engine::live::Discard),
     });
     let app = Arc::new(AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: db.clone(),
@@ -421,6 +422,7 @@ async fn a_reported_program_failure_is_not_an_unreported_harness() {
         s.on.agent,
         s.rig.machine_id,
         &orch_db::queries::resources::thread_engine::HarnessReport {
+            home: None,
             status: "error",
             detail: Some("The selected executable was not found."),
             version: None,

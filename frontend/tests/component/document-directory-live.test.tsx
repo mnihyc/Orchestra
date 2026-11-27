@@ -15,8 +15,8 @@ vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: async (request: Promise<unknown>) => request };
 });
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: calls.subscribe,
-  status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, build: null, outdated: false })) } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: calls.subscribe,
+  status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, usualRoundTripMs: null, slow: false, build: null, outdated: false })) } }));
 const request = { node: 'node-a', at: { kind: 'container' as const, id: 'folder' } };
 const page = (name: string, node = 'node-a', feed = 'opaque-first'): DocumentTreePage => ({
   items: [], next_cursor: 'next', feed, ancestors: [],
@@ -44,6 +44,8 @@ const frame = (at: number, data: DocumentTreePage, restart = false) => act(() =>
   if (subscription === undefined) throw new Error('The directory page must be subscribed');
   subscription.onFrame({ op: 'event', id: at + 1, feed: subscription.feed, data: { directory: data, restart } });
 });
+/** The query cache tells its observers after a zero-delay timer: what a frame wrote to the cache is drawn after it. */
+const drawn = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
 beforeEach(() => {
   cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -196,26 +198,43 @@ it('a newer typed entry anchor supersedes an older live reanchor and its cursor'
 });
 
 
-it('retires the authority cursor family without losing the same reader’s replacement feed locator', async () => {
-  calls.get.mockResolvedValueOnce(page('Private first page')); mount(); await screen.findByText('Private first page');
-  calls.get.mockResolvedValueOnce(page('Private second page', 'node-a', 'opaque-second'));
-  fireEvent.click(screen.getByRole('button', { name: 'Next' })); await screen.findByText('Private second page');
+it('keeps the shown page through a reload, retires the unseen cursor family and delayed reads, and keeps the same reader’s replacement feed locator', async () => {
+  calls.get.mockResolvedValueOnce(page('First page')); mount(); await screen.findByText('First page');
+  calls.get.mockResolvedValueOnce(page('Shown second page', 'node-a', 'opaque-second'));
+  fireEvent.click(screen.getByRole('button', { name: 'Next' })); await screen.findByText('Shown second page');
   await waitFor(() => expect(subscriptions).toHaveLength(2));
   let finish!: (value: DocumentTreePage) => void;
   calls.get.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
   await waitFor(() => expect(calls.get).toHaveBeenCalledTimes(3));
   act(() => subscriptions[1]?.onFrame({ op: 'resync', id: 2, feed: 'opaque-second', reload: true }));
+  // The page nobody shows is let go; the shown page stays until the new subscription's snapshot replaces it.
   expect(cache.getQueryData(documentDirectoryKey(request))).toBeUndefined();
-  expect(cache.getQueryData(documentDirectoryKey({ ...request, cursor: 'next' }))).toBeUndefined();
-  await screen.findByText('No data');
+  expect(cache.getQueryData(documentDirectoryKey({ ...request, cursor: 'next' }))).toMatchObject({ directory: { folder: { entry: { title: 'Shown second page' } } } });
+  await drawn();
+  expect(screen.getByText('Shown second page')).toBeVisible(); expect(screen.queryByText('No data')).toBeNull();
   expect(subscriptions).toHaveLength(3);
   expect(subscriptions[2]?.unsubscribe).not.toHaveBeenCalled();
   frame(1, page('Obsolete frame', 'node-a', 'opaque-second'));
   await act(async () => { finish(page('Obsolete HTTP', 'node-a', 'opaque-second')); await Promise.resolve(); });
+  await drawn();
   expect(screen.queryByText('Obsolete frame')).toBeNull();
   expect(screen.queryByText('Obsolete HTTP')).toBeNull();
+  expect(screen.getByText('Shown second page')).toBeVisible();
   frame(2, page('Current authority', 'node-a', 'opaque-second')); await screen.findByText('Current authority');
+  expect(screen.queryByText('Shown second page')).toBeNull();
   expect(calls.get).toHaveBeenCalledTimes(3);
   expect(subscriptions).toHaveLength(3);
+});
+
+it('ends the page kept through a reload when the reader is refused', async () => {
+  calls.get.mockResolvedValueOnce(page('Kept page')); mount(); await screen.findByText('Kept page');
+  await waitFor(() => expect(subscriptions).toHaveLength(1));
+  act(() => subscriptions[0]?.onFrame({ op: 'resync', id: 1, feed: 'opaque-first', reload: true }));
+  await drawn();
+  expect(screen.getByText('Kept page')).toBeVisible();
+  expect(subscriptions).toHaveLength(2);
+  act(() => subscriptions[1]?.onFrame({ op: 'error', id: 2, code: 'forbidden', detail: 'No longer yours' }));
+  expect(cache.getQueryData(documentDirectoryKey(request))).toBeUndefined();
+  await waitFor(() => expect(screen.queryByText('Kept page')).toBeNull());
 });

@@ -35,7 +35,6 @@ export function ProviderHome({ provider, setting }: { provider: Provider; settin
     <DataSourcesEditor machine={provider.runtime_support?.machine_id ?? undefined} driver={provider.runtime_support?.driver ?? undefined}
       dataStorage={provider.runtime_support?.data_storage}
       roles={homeRoles} value={value} onChange={(next) => { setValue(next); save.reset(); }} onReady={setReady} disabled={!setting.writable || save.isPending} />
-    <p className="text-sm text-text-muted">{t(provider.runtime_support?.lifecycle === 'unit' ? 'environmentData.update' : 'environmentData.harnessAttach')}</p>
     {setting.writable && <Button pending={save.isPending} disabled={!ready} onClick={() => save.mutate()}>{t('resources.edit.save')}</Button>}
     {save.error && <ErrorAlert error={save.error} />}
     {save.isSuccess && <InlineAlert tone="info">{t('unitConfiguration.saved')}</InlineAlert>}

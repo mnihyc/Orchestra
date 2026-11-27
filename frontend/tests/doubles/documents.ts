@@ -461,8 +461,10 @@ export class Documents implements Part {
     const nodes = new Set([nodeId]);
     if (under) for (const doc of this.docs.values()) if (this.world.places.pathTo(doc.nodeId).some((row) => row.id === nodeId)) nodes.add(doc.nodeId);
     const onlyDeleted = query.get('deleted') === 'only';
+    const title = (query.get('q') ?? '').toLowerCase();
     const rows = [...this.docs.values()]
       .filter((doc) => nodes.has(doc.nodeId) && doc.deleted === onlyDeleted && this.holdings(person, doc).permissions.includes('doc.view'))
+      .filter((doc) => doc.title.toLowerCase().includes(title))
       .sort((one, other) => (one.updatedAt < other.updatedAt ? 1 : one.updatedAt > other.updatedAt ? -1 : one.id < other.id ? 1 : -1));
     const limit = Math.min(200, Number(query.get('limit') ?? 50));
     const start = Number(query.get('cursor') ?? 0);
@@ -514,8 +516,31 @@ export class Documents implements Part {
     }
     if (method !== 'POST' || path !== '/document-tree/operations' && path !== '/document-tree/delete/preview') return null;
     const request = body as unknown as DocumentTreeOperationBody;
-    if (request.items.length !== 1 || request.items[0]?.kind !== 'document') throw new Refusal(400, 'request.invalid', 'this fixture operation requires one text document');
-    const doc = this.find(person, request.items[0].id, request.command === 'restore');
+    // As the server: deletion and restoration take several entries in one act; this fixture's entries are text documents.
+    const several = (request.command === 'delete' || request.command === 'restore') && !path.endsWith('/preview');
+    if (request.items.length === 0 || request.items.some((item) => item.kind !== 'document') || (!several && request.items.length !== 1)) throw new Refusal(400, 'request.invalid', 'this fixture operation requires one text document, or several to delete or restore');
+    if (several && request.items.length > 1) {
+      if (request.deletion_plan !== null) throw new Refusal(400, 'request.invalid', 'this fixture checks a deletion plan of one document only');
+      const docs = request.items.map((item) => this.find(person, item.id, request.command === 'restore'));
+      for (const one of docs) this.need(person, one, 'doc.manage');
+      const until = '2026-11-11T12:00:00.000Z';
+      const entries = docs.map((one) => {
+        if (request.command === 'delete') {
+          const snapshot = this.sync(person, one, null);
+          this.handle(person, 'DELETE', `/documents/${one.id}`, query, {}); one.updatedAt = now();
+          this.world.trace.retained.set(one.id, { kind: 'document', name: one.title, home: one.nodeId, state: 'deleted', document: snapshot,
+            inspection: { deleted_at: one.updatedAt, deleted_by: userRef(person.me), purge_at: until, readonly: true } });
+        } else this.handle(person, 'POST', `/documents/${one.id}/restore`, query, {});
+        return this.treeRow(person, one).entry;
+      });
+      const first = docs[0] ?? this.find(person, request.items[0]?.id ?? '');
+      const receipt: DocumentTreeReceipt = { operation: randomUUID(), entries, view: { entries: docs.map((one) => this.treeRow(person, one)), ancestors: [], place: { node: this.nodeRef(first.nodeId), path: this.path(first.nodeId) } },
+        copied: [], gaining: 0, losing: 0, restore_until: request.command === 'delete' ? until : null };
+      return { status: 200, body: receipt };
+    }
+    const only = request.items[0];
+    if (only === undefined) throw new Refusal(400, 'request.invalid', 'select a text document');
+    const doc = this.find(person, only.id, request.command === 'restore');
     this.need(person, doc, request.command === 'copy' ? 'doc.view' : request.command === 'rename' ? 'doc.edit' : 'doc.manage');
     const row = this.treeRow(person, doc);
     // The fixed promise is scenario data, as in the retained-content browser fixture.
@@ -526,10 +551,11 @@ export class Documents implements Part {
     }
     let current = doc;
     if (request.command === 'delete') {
+      // A deletion goes to the trash at once; a plan it carries is still checked.
       const supplied = request.deletion_plan;
       const kept = supplied !== null && 'confirmation' in supplied ? this.deletionConfirmations.get(supplied.confirmation) : undefined;
       const stamp = supplied !== null && 'entries' in supplied ? supplied : kept?.reader === person.me.id ? kept.stamp : undefined;
-      if (!isDeepStrictEqual(stamp, this.deletionMembership(person, doc))) throw new Refusal(409, 'conflict.stale_revision', 'read the changed deletion preview again');
+      if (supplied !== null && !isDeepStrictEqual(stamp, this.deletionMembership(person, doc))) throw new Refusal(409, 'conflict.stale_revision', 'read the changed deletion preview again');
       const snapshot = this.sync(person, doc, null);
       this.handle(person, 'DELETE', `/documents/${doc.id}`, query, {}); doc.updatedAt = now();
       this.world.trace.retained.set(doc.id, { kind: 'document', name: doc.title, home: doc.nodeId, state: 'deleted', document: snapshot,

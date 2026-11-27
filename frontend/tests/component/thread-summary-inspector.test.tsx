@@ -1,7 +1,9 @@
 /** A retained source explains its live-summary boundary without loading another continuation. */
 import { act, cleanup, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
+import { meStateKey } from '@/api/personal';
 import { captureThreadRead, selectThreadContinuation } from '@/api/threadRead';
 import type * as Live from '@/realtime/live';
 import type { ResourceSummaryProps } from '@/features/summaries/ResourceSummary';
@@ -14,7 +16,7 @@ import { A, B, projection, snapshot } from '../unit/continuation-fixtures';
 import { show } from './support';
 
 const host = vi.hoisted(() => ({ live: vi.fn<(props: ResourceSummaryProps) => void>(), retry: vi.fn<typeof Live.reloadThread>() }));
-vi.mock('@/realtime/live', () => ({ reloadThread: host.retry }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), reloadThread: host.retry }));
 vi.mock('@/features/summaries/ResourceSummary', () => ({ ResourceSummary: (props: ResourceSummaryProps) => {
   host.live(props); return <span>Live paragraph canary</span>;
 } }));
@@ -51,6 +53,26 @@ for (const locale of ['en', 'zh-CN'] as const) {
     act(() => threadWriter.closed(read, 'revoked'));
     expect(screen.getByText(i18n.t('summaryBox.viewUnavailable'))).toBeVisible();
     expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
+    expect(host.live).not.toHaveBeenCalled();
+  });
+  it(`folds an empty summary to one row, and keeps the person's choice to show or put away one with words (${locale})`, async () => {
+    await setLocale(locale);
+    const sync = snapshot(projection(A, A, 4, true)), id = sync.thread.id;
+    threadWriter.reset(id, sync, false, captureThreadRead(id));
+    // No choice kept: shown, read, and folded while it has nothing yet.
+    const fresh = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    fresh.setQueryData(meStateKey, {});
+    const first = show(<ThreadSummaryInspector threadId={id} />, fresh);
+    expect(await screen.findByText('Live paragraph canary')).toBeVisible();
+    expect(host.live.mock.lastCall?.[0].foldWhenEmpty).toBe(true);
+    expect(host.live.mock.lastCall?.[0].fold?.open).toBe(true);
+    first.unmount(); host.live.mockClear();
+    // Put away by the person: its row alone, and nothing is read until it is shown again.
+    const putAway = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    putAway.setQueryData(meStateKey, { timeline: { summary_hidden: true } });
+    show(<ThreadSummaryInspector threadId={id} />, putAway);
+    const row = await screen.findByRole('button', { name: i18n.t('summaryBox.title') });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
     expect(host.live).not.toHaveBeenCalled();
   });
   it(`keeps the existing live summary for a ready current continuation (${locale})`, async () => {
