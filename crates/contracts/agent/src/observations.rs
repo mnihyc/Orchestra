@@ -70,6 +70,7 @@ pub fn generic_approval(
             style: OptionStyle::Deny,
             scope: None,
             rule: None,
+            note: false,
         });
     }
     HarnessRequest {
@@ -116,6 +117,7 @@ mod tests {
             style: OptionStyle::Allow,
             scope: None,
             rule: None,
+            note: false,
         };
         let request = generic_approval(
             "Future permission".into(),

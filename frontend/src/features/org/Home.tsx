@@ -12,7 +12,7 @@
 import { useContentFocused } from '@/features/workbench/instance';
 import { OutsideOpenings } from '@/features/ports/Outside';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { BriefcasePlus, FolderOpen, LayoutGrid } from 'lucide-react';
+import { BriefcasePlus, FolderOpen, LayoutGrid, Trash2 } from 'lucide-react';
 import { Activity, useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ParticipationFilter } from '@/features/access/ParticipationFilter';
@@ -24,7 +24,8 @@ import { orgOverviewQuery } from '@/api/orgOverview';
 import { childrenQuery, orgBySlugQuery } from '@/api/nodes';
 import { PlaceReadme } from '@/features/documents/Readme';
 import { ActivityFeed, OrgActivity } from '@/features/org/Activity';
-import { UsageSection, useUsageBoardParams } from '@/features/usage/Board';
+import { UsageSection } from '@/features/usage/Board';
+import { useUsageBoardParams } from '@/features/usage/useBoardParams';
 import { Members } from '@/features/settings/org/Members';
 import { DepartmentCard, ProjectCard } from '@/features/org/ProjectCards';
 import { OrgWork } from '@/features/org/Work';
@@ -41,12 +42,15 @@ import type { Org, Project } from '@/generated/api-types';
 import { denial, holds } from '@/lib/permissions';
 import { useOrgTreeFeed } from '@/realtime/live';
 import { useOrgTree } from '@/realtime/stores/tree';
+import { useNavigationReadsReady } from '@/shell/useThreadOpeningPaint';
 import { selectOrg } from '@/shell/org';
 import { boxClasses, Page, PageHeader, PageSectionContext, Section } from '@/shell/Page';
 import { useScreenHeading } from '@/shell/screen';
 import { Avatar } from '@/ui/Avatar';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
+import { RowBox, SelectedBar, useRowSelection } from '@/ui/RowSelection';
+import { usePlaceTrash } from '@/features/trash/usePlaceTrash';
 import { NodeFailure } from '@/features/access/NoAccess';
 import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -93,7 +97,7 @@ function Overview({ org, onTab }: { org: Org; onTab: (tab: OrgTab) => void }) {
     <OrgWork key={org.id} org={org} />
     <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} />
     <OverviewRows org={org} onTab={onTab} participating={participating} />
-    {org.readme !== null && <PlaceReadme readme={org.readme} />}
+    {org.readme !== null && <PlaceReadme readme={org.readme} nodeId={org.id} />}
   </div>;
 }
 
@@ -107,6 +111,16 @@ function OverviewRows({ org, onTab, participating }: { org: Org; onTab: (tab: Or
   const departments = items.filter((node): node is Org => node.kind === 'org');
   const projects = items.filter((node): node is Project => node.kind === 'project');
   const mayMakeProject = holds(org.access, 'org.interact');
+  const selection = useRowSelection(projects, (project) => project.id);
+  const trash = usePlaceTrash();
+  const [trashing, setTrashing] = useState(false);
+  const trashSelected = async () => {
+    setTrashing(true);
+    try {
+      const result = await trash(selection.selected.map(placeOfNode));
+      if (result.done.length > 0) selection.clear();
+    } finally { setTrashing(false); }
+  };
   const pagination = <Pagination hasMore={children.hasNextPage} loading={children.isFetchingNextPage} error={children.isFetchNextPageError ? children.error : undefined} onMore={() => void children.fetchNextPage()} />;
 
   if (children.isPending) return <SkeletonRows read={children} rows={4} />;
@@ -153,11 +167,18 @@ function OverviewRows({ org, onTab, participating }: { org: Org; onTab: (tab: Or
         {projects.length === 0 ? (
           <EmptyState compact title={t('places.org.noProjects')} />
         ) : (
-          <ul data-places-list aria-label={t('places.org.projects')} className={`${boxClasses} divide-y divide-border`}>
-            {projects.map((project) => (
-              <li key={project.id} className="min-w-0"><ProjectCard project={project} stats={placeStats(tree.nodes, project.id)} /></li>
-            ))}
-          </ul>
+          <div className="flex flex-col gap-2">
+            {selection.selected.length > 0 && <SelectedBar count={selection.selected.length} total={projects.length} onSelectAll={() => selection.toggleAll(true)} busy={trashing} onClear={selection.clear}>
+              <Button size="sm" variant="danger-ghost" icon={<Trash2 aria-hidden />} pending={trashing} onClick={() => void trashSelected()}>{t('trash.delete')}</Button>
+            </SelectedBar>}
+            <ul data-places-list aria-label={t('places.org.projects')} className={`${boxClasses} divide-y divide-border`}>
+              {projects.map((project) => (
+                <li key={project.id} className="min-w-0"><ProjectCard project={project} stats={placeStats(tree.nodes, project.id)}
+                  select={<RowBox name={project.name} checked={selection.isTicked(project)} onChange={(on, range) => selection.toggle(project, on, range)} />}
+                  onPick={(event) => { selection.click(project, event); }} /></li>
+              ))}
+            </ul>
+          </div>
         )}
       </Section>
 
@@ -201,7 +222,9 @@ export function OrgHome({ slug, tab, onTab }: OrgHomeProps) {
   useEffect(() => {
     if (focusedContent && org !== undefined) selectOrg(userId, org.org_id);
   }, [org, userId, focusedContent]);
-  useOrgTreeFeed(org?.org_id ?? null);
+  const navigationReady = useNavigationReadsReady();
+  // The overview needs the root tree to show recent work before the sidebar starts.
+  useOrgTreeFeed(tab === 'overview' || navigationReady ? org?.org_id ?? null : null);
   useScreenHeading({ title: org === undefined ? t('screens.org.title') : orgPageTitle(org, t), icon: LayoutGrid, nodeId: org?.id, views: { ready: org !== undefined, chat: org?.org_kind !== 'personal' } });
 
   const failure = query.isError ? <NodeFailure className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : null;

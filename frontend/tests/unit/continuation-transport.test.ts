@@ -94,7 +94,7 @@ it('loads once, follows active without an explicit id, and makes no idle/per-pro
   expect(http.calls.every((call) => !new URL(call.url).pathname.endsWith('/versions'))).toBe(true);
 });
 
-it('clears and reloads a changed follow-active projection even when its item sequence moves backward', async () => {
+it('keeps the shown rows without merging and reloads a changed follow-active projection even when its item sequence moves backward', async () => {
   let sync = { ...snapshot(), items: [answer('a', 'Active A')] };
   const id = sync.thread.id; const http = transport(() => Promise.resolve(Response.json(opening(sync))));
   const { socket, wire } = connection(); const follower = follow(socket, id);
@@ -102,7 +102,8 @@ it('clears and reloads a changed follow-active projection even when its item seq
   sync = { ...snapshot(projection(B, B, 2), 5), items: [answer('b', 'Active B', B, 5)] };
   wire.say({ op: 'sync', id: first.id, feed: first.feed, prev: 10, seq: 11,
     data: { projection: projection(B, B, 2), items: [answer('wrong', 'Must not merge', B)] } });
-  expect(threadViewOf(id).items.size).toBe(0);
+  // What was shown stays, read-only, until the fresh opening replaces it whole; the frame's rows are never merged into it.
+  expect([...threadViewOf(id).items.keys()]).toEqual(['a']); expect(threadViewOf(id).retired).toBe(true);
   const next = await wire.subscriptions.next(); ack(wire, next, projection(B, B, 2));
   expect(http.calls).toHaveLength(2); expect(follower.lastSeq()).toBe(5);
   expect(threadViewOf(id).order).toEqual(['b']);

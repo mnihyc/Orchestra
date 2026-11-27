@@ -62,7 +62,7 @@ function Row({ consent, ticked, disabled, onToggle }: { consent: ArrangementCons
             <span>{t(`providers.arrangements.types.${type}.what`)}</span>
             {form !== null && (
               <span>
-                {form.lifetime_secs === null
+                {form.expires === true && form.lifetime_secs === null ? t('providers.arrangements.copyExpiry') : form.lifetime_secs === null
                   ? t('providers.arrangements.copy', { title: form.title })
                   : t('providers.arrangements.copyLasting', { title: form.title, time: lasts(t, form.lifetime_secs) })}
               </span>

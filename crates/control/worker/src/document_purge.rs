@@ -1,7 +1,6 @@
 //! Pruning document history and expired editing records while retaining every referenced file pin.
 
 use crate::schedule::{self, Job};
-use crate::spans;
 use orch_config::ServerConfig;
 use orch_db::queries::{
     documents::{self, history},
@@ -35,7 +34,7 @@ pub struct Done {
 pub async fn run(
     db: &Db,
     clock: &dyn Clock,
-    config: &ServerConfig,
+    _config: &ServerConfig,
     stop: &CancellationToken,
 ) -> Result<Option<Done>, Error> {
     // A lease, not a transaction held open across the pages: each page commits on its own.
@@ -61,9 +60,10 @@ pub async fn run(
             break;
         }
         let ids: Vec<_> = candidates.iter().map(|(id, _)| *id).collect();
+        let days = orch_settings::retention::deleted_keep_days(&mut tx).await?;
         page.block_documents += documents::purge_removed_blocks_among(
             &mut tx,
-            now - spans::days(config.retention.soft_delete_days),
+            orch_settings::retention::deleted_before(now, days),
             &ids,
         )
         .await?;
@@ -137,22 +137,15 @@ pub async fn run(
             return Ok(Some(done));
         }
         let mut page = Done::default();
-        let mut files =
-            documents::unnamed_files(&mut tx, now - chrono::Duration::days(1), BATCH).await?;
+        let hours = orch_settings::retention::blob_grace_hours(&mut tx).await?;
+        let files_before = orch_settings::retention::unreferenced_before(now, hours);
+        let mut files = documents::unnamed_files(&mut tx, files_before, BATCH).await?;
         if files.is_empty() {
             break;
         }
         files.sort_unstable();
         for (document, file) in files {
-            if documents::release_unnamed_file(
-                &mut tx,
-                document,
-                file,
-                now - chrono::Duration::days(1),
-                now,
-            )
-            .await?
-            {
+            if documents::release_unnamed_file(&mut tx, document, file, files_before, now).await? {
                 page.files += 1;
             }
         }

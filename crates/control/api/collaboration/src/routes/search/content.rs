@@ -417,6 +417,22 @@ pub(super) async fn prepare(
         .or_else(|| selected_chat.as_ref().map(|chat| chat.home()));
     let advanced = super::advanced_selection(conn, principal, query, ctx.now).await?;
     let mut candidate_grants = serde_json::json!({"search_advanced": advanced});
+    if query.scope.is_none()
+        && query.document_id.is_none()
+        && query.chat_id.is_none()
+        && !principal.is_system_admin()
+    {
+        // Exclude unrelated teams' places before candidate limits, not after reading
+        // page after page of their matches. These are a superset of possible source roots;
+        // each selected result still passes the same complete native access frame below.
+        let held = orch_authz::holders::held(conn, principal.user(), Time::new(ctx.now))
+            .await
+            .map_err(ApiError::internal)?;
+        candidate_grants["search_roots"] = serde_json::to_value(
+            rows::name_roots(conn, principal.user(), false, ctx.now, Some(&held.held)).await?,
+        )
+        .map_err(ApiError::internal)?;
+    }
     if let Some(boundary) = boundary {
         candidate_grants["search_readable"] = boundary.scopes.clone();
     }

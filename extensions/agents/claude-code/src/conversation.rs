@@ -38,7 +38,9 @@ use crate::events::{EventMapper, MapperSettings};
 use crate::failure;
 use crate::process::{ExitInfo, Launcher, ProcessEvent, Running, spawn};
 use crate::provider::LOGIN_FILE;
-use crate::sessions::{HarnessSetup, Launch, Origin, TurnSettings, launch, through_executor};
+use crate::sessions::{
+    HarnessSetup, Launch, Origin, TurnSettings, launch_with_mcp, through_executor,
+};
 use crate::stream::{
     ControlOutcome, Frame, FrameKind, control_error, control_request, control_success, encode_line,
     text_block, user_message,
@@ -284,6 +286,7 @@ pub fn start_with_settler(
         },
         Arc::clone(&params.clock),
     );
+    mapper.set_output_capture_bytes(params.spec.settings.output_capture_bytes);
     mapper.set_retry_notice_attempt(params.setup.config.retry_notice_attempt);
     mapper.configure_native_counters(&params.spec.provider);
     if let Some(directory) = params.setup.outputs_directory() {
@@ -303,6 +306,7 @@ pub fn start_with_settler(
     );
     let failing = settling.clone();
     let conversation = Conversation {
+        physical_opening: params.spec.opening_id,
         params,
         mapper,
         settling,
@@ -338,6 +342,7 @@ pub fn start_with_settler(
         last_exit: None,
         heard_at: Instant::now(),
         retrying_since: None,
+        stop_asked: None,
         reported_permission_mode: None,
         plan_proceeded: None,
         instruction_sources: Vec::new(),
@@ -422,12 +427,19 @@ impl UnadmittedReply {
 /// lane holds. While a gate is shut nothing is sent, and the program is slowed as a slow sink would slow it.
 const OUTBOX_MAX: usize = flow::QUEUE_ITEMS;
 
+/// The physical producer at the time an observation enters the outbox.
+#[derive(Clone, Copy)]
+struct Source {
+    opening_id: Id,
+    segment_id: Id,
+}
+
 /// What waits to go to the host, in the order it happened.
 enum Out {
     /// An event of the session, with the segment it was made in.
-    Event(Id, Box<SessionEvent>),
+    Event(Source, Box<SessionEvent>),
     /// A request report: the segment, the turn and the request.
-    Request(Id, TurnId, Box<UsageRequest>),
+    Request(Source, TurnId, Box<UsageRequest>),
     /// The use of a turn that ends, with the window of totals its result closed, and what the rows of the main
     /// conversation's own requests of the turn, reported before the result, carry of that use (`MainRows::carried`: the
     /// requests that ended with their stop reason in full, the others as far as the result's own tally of the main
@@ -435,7 +447,7 @@ enum Out {
     /// states the figure that and the sub-agents' requests named for the window carry of it, and what the requests of
     /// other turns' sub-agents added to the totals in that window is left out of it: the engine closes a turn as its use
     /// less the stated figure, and counts the rows whenever they come.
-    Usage(Id, Box<UsageUpdated>, u64, TokenUsage),
+    Usage(Source, Box<UsageUpdated>, u64, TokenUsage),
     /// The gate holds a turn's use, up to the configured wait, until the figures of the rows inside that use are final,
     /// so that the stated figure and the rows agree. Only the settler opens it.
     Gate(u64),
@@ -646,6 +658,8 @@ struct Conversation {
     next_gate: u64,
     outbox: Mutex<Outbox>,
     process: Option<Running>,
+    /// Captured by this native process generation, independently of a later logical reconfiguration.
+    physical_opening: Id,
     process_tx: flow::Sender<(u64, ProcessEvent)>,
     process_rx: flow::Receiver<(u64, ProcessEvent)>,
     generation: u64,
@@ -680,6 +694,8 @@ struct Conversation {
     heard_at: Instant,
     /// Since when the harness has been announcing that it tries again, with nothing else between.
     retrying_since: Option<Instant>,
+    /// When the running turn was first asked to stop: the profile's stop grace counts from then.
+    stop_asked: Option<Instant>,
     /// The native permission mode confirmed by this process's system/init.
     reported_permission_mode: Option<String>,
     instruction_sources: Vec<orch_agent_contract::session::InstructionFile>,
@@ -782,10 +798,25 @@ impl Conversation {
             .settings_ask
             .as_ref()
             .map(|(_, _, at)| *at + READY_TIMEOUT);
-        [idle, steer, self.impatience_due(), settings]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            idle,
+            steer,
+            self.impatience_due(),
+            self.stop_due(),
+            settings,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// The moment a turn that was asked to stop runs out of the grace the profile gives it, if it was asked and one
+    /// is given: its process is then ended and the turn with it.
+    fn stop_due(&self) -> Option<Instant> {
+        self.turn.as_ref()?;
+        self.process.as_ref()?;
+        let grace = self.params.setup.config.stop_grace()?;
+        self.stop_asked.map(|asked| asked + grace)
     }
 
     /// The moment a turn runs out of the patience it is given, if one does: it has heard nothing for too long
@@ -823,6 +854,9 @@ impl Conversation {
                 let _ = reply.send(Ok(()));
             }
         }
+        if self.stop_due().is_some_and(|due| due <= now) {
+            self.end_after_stop(now).await;
+        }
         if self.impatience_due().is_some_and(|due| due <= now) {
             self.give_up_on_the_harness(now).await;
             return;
@@ -855,36 +889,38 @@ impl Conversation {
             match next {
                 None => return,
                 Some(Out::Gate(..)) => {}
-                Some(Out::Usage(segment, mut usage, window, main)) => {
+                Some(Out::Usage(source, mut usage, window, main)) => {
                     let carried = self.settling.take_window(window, usage.turn_id);
                     crate::child_usage::leave_out(&mut usage, &carried.others);
                     if let Some(report) = usage.report.as_mut() {
                         report.carried_by_rows = Some(carried.own.plus(main));
                     }
                     self.lock_outbox().remember(&usage);
-                    self.send_event(segment, SessionEvent::UsageUpdated(*usage))
+                    self.send_event(source, SessionEvent::UsageUpdated(*usage))
                         .await;
                 }
-                Some(Out::Event(segment, mut event)) => {
+                Some(Out::Event(source, mut event)) => {
                     self.lock_outbox().as_sent(&mut event);
-                    self.send_event(segment, *event).await;
+                    self.send_event(source, *event).await;
                 }
-                Some(Out::Request(segment, turn, request)) => {
+                Some(Out::Request(source, turn, request)) => {
                     let _ = self
                         .params
                         .sink
-                        .request(self.params.thread_id, segment, turn, *request)
+                        .for_opening(source.opening_id)
+                        .request(self.params.thread_id, source.segment_id, turn, *request)
                         .await;
                 }
             }
         }
     }
 
-    async fn send_event(&self, segment: Id, event: SessionEvent) {
+    async fn send_event(&self, source: Source, event: SessionEvent) {
         if self
             .params
             .sink
-            .session(self.params.thread_id, segment, event)
+            .for_opening(source.opening_id)
+            .session(self.params.thread_id, source.segment_id, event)
             .await
             .is_err()
             && let Some(kill) = self.process.as_ref().and_then(Running::kill_handle)
@@ -893,9 +929,16 @@ impl Conversation {
         }
     }
 
+    fn source(&self, segment_id: Id) -> Source {
+        Source {
+            opening_id: self.physical_opening,
+            segment_id,
+        }
+    }
+
     async fn emit(&self, event: SessionEvent) {
         self.put(Out::Event(
-            self.params.spec.settings.segment_id,
+            self.source(self.params.spec.settings.segment_id),
             Box::new(event),
         ));
         self.drain().await;
@@ -906,7 +949,10 @@ impl Conversation {
         let segment = self.params.spec.settings.segment_id;
         for heard in self.mapper.take_child_heard() {
             match heard {
-                Heard::Printed { turn, printed } => self.settling.printed(segment, turn, *printed),
+                Heard::Printed { turn, printed } => {
+                    self.settling
+                        .printed(self.physical_opening, segment, turn, *printed)
+                }
                 Heard::Placed(placement) => self.settling.placed(placement),
                 Heard::Dropped(keys) => self.settling.dropped(keys),
             }
@@ -960,13 +1006,13 @@ impl Conversation {
                         .get(&usage.turn_id)
                         .map_or_else(TokenUsage::default, |rows| rows.carried(main_use));
                     self.put(Out::Usage(
-                        segment,
+                        self.source(segment),
                         Box::new(usage),
                         window.unwrap_or_default(),
                         main,
                     ));
                 }
-                event => self.put(Out::Event(segment, Box::new(event))),
+                event => self.put(Out::Event(self.source(segment), Box::new(event))),
             }
         }
         for (turn, request) in requests.take().unwrap_or_default() {
@@ -984,7 +1030,7 @@ impl Conversation {
     /// (`MainRows::carried`).
     fn put_request(&mut self, segment: Id, turn: TurnId, request: UsageRequest) {
         self.main_rows.entry(turn).or_default().add(&request);
-        self.put(Out::Request(segment, turn, Box::new(request)));
+        self.put(Out::Request(self.source(segment), turn, Box::new(request)));
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -1098,7 +1144,6 @@ impl Conversation {
         let total = tasks.len();
         let items = tasks
             .into_iter()
-            .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
             .map(|task| NativeBackgroundCommand {
                 id: background_command_id(&task),
                 native_item_ref: Some(task.native_item_ref),
@@ -1116,12 +1161,10 @@ impl Conversation {
             supported: true,
             as_of: Some(self.params.clock.time()),
             state: BackgroundState::Live,
-            reason: (total > orch_agent_contract::background::SNAPSHOT_COMMANDS)
-                .then(|| "the owned native task list is partial".to_owned()),
+            reason: None,
             items,
             next_cursor: None,
-            total: (total <= orch_agent_contract::background::SNAPSHOT_COMMANDS)
-                .then(|| i64::try_from(total).unwrap_or(i64::MAX)),
+            total: Some(i64::try_from(total).unwrap_or(i64::MAX)),
         }
     }
 
@@ -1224,7 +1267,9 @@ impl Conversation {
                 &self.params.spec.settings.model,
             )
             .unwrap_or(true);
-        let changed = spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
+        let changed = spec.opening_id != self.params.spec.opening_id
+            || spec.settings.side_reading != self.params.spec.settings.side_reading
+            || spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
             || page_reader_changed
             || spec.settings.background_wake != self.params.spec.settings.background_wake
             || spec.mcp != self.params.spec.mcp
@@ -1254,6 +1299,7 @@ impl Conversation {
         if self.process.is_some() {
             mapper.inherit_process_report(&self.mapper);
         }
+        mapper.set_output_capture_bytes(spec.settings.output_capture_bytes);
         mapper.set_retry_notice_attempt(self.params.setup.config.retry_notice_attempt);
         mapper.configure_native_counters(&spec.provider);
         if let Some(directory) = self.params.setup.outputs_directory() {
@@ -1270,6 +1316,10 @@ impl Conversation {
 
     fn turn_settings(turn: &TurnStart) -> TurnSettings {
         TurnSettings {
+            program_output: crate::sessions::native_program_output(
+                turn.native_model.as_deref(),
+                &turn.model,
+            ),
             cache_lifetimes: crate::sessions::native_cache_lifetimes(
                 turn.native_model.as_deref(),
                 &turn.model,
@@ -1562,7 +1612,7 @@ impl Conversation {
         if settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
             if !crate::descriptor::auto_proven() {
                 return Err(AdapterError::Unsupported(
-                    "Auto is unavailable until the integrator's real trial".to_owned(),
+                    "This program declares no Auto approval check.".to_owned(),
                 ));
             }
             if self.params.spec.settings.approval_mode != settings.approval_mode {
@@ -1578,6 +1628,7 @@ impl Conversation {
         self.idle_since = None;
         self.heard_at = Instant::now();
         self.retrying_since = None;
+        self.stop_asked = None;
         let model_events = self.mapper.begin_turn_with_model(
             turn.turn_id,
             &settings.model,
@@ -1624,6 +1675,7 @@ impl Conversation {
         let must_restart = self.needs_restart
             || live.model != wanted.model
             || live.effort != wanted.effort
+            || live.program_output != wanted.program_output
             || live.sandbox_mode != wanted.sandbox_mode
             || page_reader_changed
             || (live.approval_mode == ApprovalMode::Bypass)
@@ -1751,7 +1803,7 @@ impl Conversation {
         }
         let reviewer =
             crate::sessions::approval_reviewer(&self.params.setup, &self.params.spec, settings)?;
-        let spec = launch(&Launch {
+        let (spec, definitions) = launch_with_mcp(&Launch {
             setup: &self.params.setup,
             spec: &self.params.spec,
             session_id: &session_id,
@@ -1759,7 +1811,7 @@ impl Conversation {
             turn: settings,
             oauth_token: token.as_deref(),
         })?;
-        if through_executor(&self.params.spec)
+        if (through_executor(&self.params.spec) || crate::confinement::no_tools(&self.params.spec))
             && let Err(error) = tokio::fs::create_dir_all(&spec.cwd).await
         {
             return Err(AdapterError::HarnessError(format!(
@@ -1776,11 +1828,16 @@ impl Conversation {
             Ok(running) => running,
             Err(error) => return Err(AdapterError::HarnessUnavailable(error.to_string())),
         };
+        self.physical_opening = self.params.spec.opening_id;
         self.process = Some(running);
         self.settings_ask = None;
         // A process that begins the conversation counts its use from nothing; one that resumes or forks it
         // starts from what the harness restored.
         self.mapper.process_started(matches!(origin, Origin::New));
+        let configured = self
+            .mapper
+            .configure_mcp(definitions, self.params.spec.opening_command);
+        self.emit_all(configured).await;
         self.unadmitted_reply = UnadmittedReply::default();
         self.mapper
             .expect_process_resume(matches!(origin, Origin::Resume));
@@ -1854,6 +1911,9 @@ impl Conversation {
             .unwrap_or_else(|| "the harness process ended".to_owned());
         if said.contains("No conversation found") {
             AdapterError::SessionNotFound(self.params.session_id.clone())
+        } else if let Some(words) = crate::sandbox::refusal_in_words(&said) {
+            // The harness's own words lead with unrelated warnings; the cause and the way on are said plainly.
+            AdapterError::HarnessError(words)
         } else {
             AdapterError::HarnessError(said)
         }
@@ -2069,6 +2129,8 @@ impl Conversation {
         let id = self.next_request_id();
         let line = control_request(&id, json!({ "subtype": "interrupt" }));
         if self.write(&line).await {
+            // A harness that goes on working past the grace has its process ended (see `end_after_stop`).
+            self.stop_asked.get_or_insert_with(Instant::now);
             Ok(())
         } else {
             Err(AdapterError::HarnessError(
@@ -2432,6 +2494,15 @@ impl Conversation {
                 .await;
             return;
         };
+        if crate::confinement::no_tools(&self.params.spec) {
+            let _ = self
+                .write(&control_success(
+                    &ask.control_id,
+                    ask.refusal("This conversation has no callable tools."),
+                ))
+                .await;
+            return;
+        }
         let turn_id = self
             .turn
             .as_ref()
@@ -2468,6 +2539,8 @@ impl Conversation {
             return;
         }
         let ctx = ToolContext {
+            outputs: None,
+            output_capture_bytes: self.params.spec.settings.output_capture_bytes,
             directory: &self.params.spec.settings.directory,
             cwd: &self.params.spec.settings.cwd,
         };
@@ -2618,12 +2691,39 @@ impl Conversation {
         self.on_turn_over().await;
     }
 
+    /// A turn that was asked to stop and still runs when its grace is out: the process is ended, so that nothing of
+    /// the turn (a tool, a question, a background command of the process) goes on after Stop, and the turn ends as
+    /// stopped, saying why. The next turn starts a process of its own that takes the session up where its transcript is.
+    async fn end_after_stop(&mut self, now: Instant) {
+        let waited = self
+            .stop_asked
+            .map_or(0, |asked| now.saturating_duration_since(asked).as_secs());
+        tracing::warn!(
+            waited,
+            "the harness did not end its turn when asked to stop; its process is ended"
+        );
+        if let Some(mut process) = self.process.take() {
+            self.settling.lost(Some(process.exit_watch()));
+            process.kill();
+        }
+        self.live = None;
+        self.live_reviewer = None;
+        self.retrying_since = None;
+        self.stop_asked = None;
+        let events = self
+            .mapper
+            .interrupt_turn_with(failure::did_not_stop(waited));
+        self.emit_all(events).await;
+        self.on_turn_over().await;
+    }
+
     /// The turn is over: whatever was still waiting on a person or on the turn is let go. A question is the turn's, as
     /// the engine's approval of it is (the engine cancels what is pending when a turn ends), whoever asked it: that of
     /// a sub-agent that goes on in the background is refused with the turn like the rest, and an answer that was on
     /// its way finds nothing to answer.
     async fn on_turn_over(&mut self) {
         self.turn = None;
+        self.stop_asked = None;
         let open: Vec<_> = self.asks.drain().collect();
         for (request_ref, ask) in open {
             let _ = self
@@ -2679,6 +2779,9 @@ impl Conversation {
         self.lose_session(&info.describe()).await;
         if !expected && !had_turn && was_live {
             self.emit(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.physical_opening,
+                uncertain: false,
                 reason: format!("the harness process ended: {}", info.describe()),
             }))
             .await;
@@ -2715,6 +2818,9 @@ impl Conversation {
             let events = self.mapper.abandon_turn();
             self.emit_all(events).await;
             self.emit(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.physical_opening,
+                uncertain: false,
                 reason: format!("the harness process ended: {why}"),
             }))
             .await;
@@ -2749,7 +2855,14 @@ mod outbox_tests {
     use super::*;
 
     fn request() -> Out {
-        Out::Request(orch_types::new_id(), orch_types::new_id(), Box::default())
+        Out::Request(
+            Source {
+                opening_id: orch_types::new_id(),
+                segment_id: orch_types::new_id(),
+            },
+            orch_types::new_id(),
+            Box::default(),
+        )
     }
 
     fn kinds(outbox: &mut Outbox) -> Vec<&'static str> {
@@ -2804,7 +2917,13 @@ mod outbox_tests {
     }
 
     fn event(event: SessionEvent) -> Out {
-        Out::Event(orch_types::new_id(), Box::new(event))
+        Out::Event(
+            Source {
+                opening_id: orch_types::new_id(),
+                segment_id: orch_types::new_id(),
+            },
+            Box::new(event),
+        )
     }
 
     fn closed(request_ref: &str) -> SessionEvent {
@@ -2891,6 +3010,9 @@ mod outbox_tests {
     fn what_asks_or_takes_an_ask_back_passes_a_shut_gate_in_its_order_and_the_rest_waits() {
         let lost = || {
             event(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: orch_types::new_id(),
+                uncertain: false,
                 reason: "gone".to_owned(),
             }))
         };

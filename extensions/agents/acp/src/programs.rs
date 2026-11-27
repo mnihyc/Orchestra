@@ -35,6 +35,7 @@ pub fn plugin_bundle(kind: &str) -> Option<&'static [u8]> {
 fn data_of(kind: &str) -> Option<&'static str> {
     match kind {
         DSH_KIND => Some(DSH),
+        "antigravity" => Some(include_str!("../programs/antigravity.json")),
         _ => None,
     }
 }

@@ -1,0 +1,10 @@
+# the final assembly: contracts, fmt, clippy, the whole web suite, and the crates the second window joined
+contracts
+fmt
+clippy
+web typecheck
+web lint
+web test
+test -p orch-api-threads --lib
+test -p orch-api-core --test shortcuts --test bootstrap --test provider_setup
+test -p orch-engine --lib

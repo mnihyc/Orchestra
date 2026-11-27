@@ -95,7 +95,9 @@ async function painted(canvas: Locator) {
 }
 
 function tick(locale: string, bucket: 'day' | 'hour', stamp: number): string {
-  return new Intl.DateTimeFormat(locale, { ...(bucket === 'hour' ? { hour: 'numeric', minute: '2-digit' } as const : { month: 'short', day: 'numeric' } as const), timeZone: 'UTC' }).format(new Date(stamp));
+  // An hour that starts a day is named by its day, as the chart names it.
+  const time = bucket === 'hour' && stamp % 86_400_000 !== 0;
+  return new Intl.DateTimeFormat(locale, { ...(time ? { hour: 'numeric', minute: '2-digit' } as const : { month: 'short', day: 'numeric' } as const), timeZone: 'UTC' }).format(new Date(stamp));
 }
 
 function reading(locale: string, bucket: 'day' | 'hour', stamp: string): string {
@@ -259,4 +261,30 @@ for (const mode of modes) test.describe(`${mode.locale}/${mode.theme}/DPR ${mode
       await info.attach('usage-axis-native-calls', { body: JSON.stringify(calls, null, 2), contentType: 'application/json' });
     }
   });
+});
+
+for (const credits of [0.0046, 4_600_000]) test(`the credit axis paints distinct values at a peak of ${credits}`, async ({ page }) => {
+  await scenario();
+  await observeCanvas(page);
+  await signIn(page);
+  await page.route(/\/api\/v1\/usage\?/, async (route) => {
+    const response = await route.fetch();
+    const report = await response.json() as UsageAnalytics;
+    await route.fulfill({ response, json: { ...report, series: report.series.map((point) => ({
+      ...point, by: [], figures: { ...point.figures, credits: String(credits) },
+    })) } });
+  });
+  await page.goto('/usage?show=credits&series=none&range=7d');
+  const canvas = page.getByRole('region', { name: english.usage.sections.overTime, exact: true }).locator('canvas');
+  await expect(canvas).toBeVisible();
+  await settled(page);
+  const values = async () => (await painted(canvas)).labels
+    .filter((label) => label.align === 'right' && label.baseline === 'middle' && label.text !== '')
+    .map((label) => Number(label.text.replaceAll(',', '')));
+  await expect.poll(async () => new Set(await values()).size).toBeGreaterThan(1);
+  const ticks = await values();
+  expect(ticks).toEqual([...new Set(ticks)]);
+  expect(ticks).toContain(0);
+  expect(Math.max(...ticks)).toBeGreaterThanOrEqual(credits / 2);
+  expect(Math.max(...ticks)).toBeLessThan(credits * 2);
 });
