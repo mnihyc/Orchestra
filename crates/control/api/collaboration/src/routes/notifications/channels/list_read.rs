@@ -197,7 +197,7 @@ impl native::Selected for Channels {
     type Source = Source;
     type Query = NotificationChannelListQuery;
     type Value = Selected;
-    type Reply = Vec<NotificationChannel>;
+    type Reply = Vec<(chrono::DateTime<chrono::Utc>, NotificationChannel)>;
     const DECLARATION: &'static Declaration<Source> = &sources::CHANNEL_LIST_AVAILABLE;
     fn declaration(_query: &Self::Query, value: &Selected) -> &'static Declaration<Source> {
         value.intent.declaration()
@@ -320,7 +320,13 @@ impl native::Selected for Channels {
     ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
         Box::pin(async move {
             value.intent.require(ctx, conn, principal).await?;
-            Ok(value.views.render())
+            Ok(value
+                .views
+                .rows
+                .iter()
+                .zip(value.views.render())
+                .map(|(native, shown)| (native.row.created_at, shown))
+                .collect())
         })
     }
     fn check_opened<'a>(

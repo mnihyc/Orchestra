@@ -19,12 +19,13 @@ export interface CopyPlacePickerProps extends Omit<PlacePickerProps, 'refusal' |
   subject: CopySubject;
   sourceName?: string;
   intent: CopyIntent;
+  refusal?: ((place: PickedPlace) => string | false) | undefined;
   onStanding: (judgement: CopyDestinationJudgement | null) => void;
   /** Same-root identity moves retain their existing native Manage operation. */
   homeMoveRoot?: string;
   homeMoveRefusal?: (place: PickedPlace) => string | false;
 }
-export function CopyPlacePicker({ subject, sourceName, intent, onStanding, homeMoveRoot, homeMoveRefusal, ...props }: CopyPlacePickerProps) {
+export function CopyPlacePicker({ subject, sourceName, intent, onStanding, homeMoveRoot, homeMoveRefusal, refusal: localRefusal, ...props }: CopyPlacePickerProps) {
   const { t } = useTranslation();
   const reader = useStore(client.session, () => JSON.stringify(libraryReader()));
   const [candidates, setCandidates] = useState<readonly PickedPlace[]>([]);
@@ -48,6 +49,8 @@ export function CopyPlacePicker({ subject, sourceName, intent, onStanding, homeM
     return undefined;
   };
   const refusal = (place: PickedPlace): string | false => {
+    const why = localRefusal?.(place);
+    if (why) return why;
     if (nativeHome(place)) return homeMoveRefusal?.(place) ?? false;
     if (read.isError) return t('duplicate.judgeFailed');
     if (!read.isSuccess || read.isFetching) return t('duplicate.checking');

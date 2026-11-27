@@ -8,12 +8,19 @@
  * - takes a frame whose "before" is where the page stands, drops one that brings nothing new, and
  *   on any other asks HTTP for what changed since where it stands, before going on;
  * - loads everything again when the server says that the gap is too large to fill;
- * - after a reconnect, subscribes again from where it stands.
+ * - after a reconnect, subscribes again from where it stands;
+ * - after a load that failed for what passes by itself (the line, the server's own trouble), loads again with the shared
+ *   read pauses for as long as it is followed, and at once when the socket is back: what is held stays meanwhile, under
+ *   the view's failure line. A refusal waits for the reader.
  *
  * What the rows are, and where they are kept, is the feed's own business: this module is given the
  * request that loads them and the store that takes them.
  */
-import { retryPause, retryRead } from '@/lib/requests';
+import { NetworkError, retryPause, retryRead } from '@/lib/requests';
+import { isReadCancelled } from '@/api/reads';
+import { ApiError, client } from '@/api/client';
+import { beginReadAttempt, failReadAttempt, noteReadError, requestReader, retireReadAttempt,
+  scheduleReadRetry, waitForReadRetry, watchReadAbort } from '@/lib/readAttempts';
 import type { FeedFrame, RealtimeSocket, Subscription } from '@/realtime/socket';
 
 /** An answer of a feed's HTTP request. */
@@ -43,7 +50,7 @@ export interface DurableFeed<Data> {
   /** A native full resync also retires dependent projections not carried by this feed. */
   invalidated?: () => void;
   /** An authoritative bootstrap already loaded this cursor; subscribe without reading it twice. */
-  initial?: () => Loaded<Data> | null;
+  initial?: () => (Loaded<Data> & { alreadyApplied?: true }) | null;
   /** Asks HTTP for the whole state (`since` is `null`) or for what changed after `since`. */
   load: (since: number | null, signal: AbortSignal) => Promise<Loaded<Data>>;
   /** Takes a whole state in place of what was held. */
@@ -62,6 +69,20 @@ export interface DurableFeed<Data> {
   other?: (frame: Extract<FeedFrame, { op: 'delta' | 'presence' | 'event' }>) => void;
   /** The server took the subscription: what only a subscribed feed can be told (that it is on screen) can be said now. */
   subscribed?: (frame: Extract<FeedFrame, { op: 'subscribed' }>) => void;
+}
+
+/**
+ * Whether a read ended because it was cancelled or overtaken (its history was replaced, its view left), and not because
+ * anything went wrong: such a read has no answer and no fault, and a reader who scrolls quickly makes many of them.
+ */
+export function isCancellation(error: unknown): boolean {
+  return isReadCancelled(error);
+}
+
+/** Whether a load's failure passes by itself: no answer came, or the server answered that it could not serve it now. */
+function passes(error: unknown): boolean {
+  if (error instanceof NetworkError) return error.transient;
+  return error instanceof ApiError && (error.status >= 500 || error.status === 408 || error.status === 429);
 }
 
 export interface FeedFollower {
@@ -87,23 +108,99 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
   let socketGeneration = 0;
   let abort = new AbortController();
   let busy: Promise<void> = Promise.resolve();
+  let queuedRepair: object | null = null;
+  /** The catch-up read on its way, if one is: a frame that continues the page does not wait for it. */
+  let catchingUp: object | null = null;
   const current = (version: number): boolean => !stoppedNow && version === generation;
 
+  /** How many reads in a row were cancelled while this follower still stood: they are asked for again, not reported. */
+  let cancelled = 0;
+  let cancellationRetry: ReturnType<typeof setTimeout> | undefined;
+  /** How many loads in a row failed for what passes by itself, and the next attempt that waits out its pause. */
+  let failures = 0;
+  let recovery: ReturnType<typeof setTimeout> | undefined;
   const run = (work: (version: number) => Promise<void>): void => {
     const version = generation;
     busy = busy.then(async () => {
       if (!current(version)) return;
-      try { await work(version); }
-      catch (error) { if (current(version)) feed.failed?.(error); }
+      try {
+        await work(version);
+        if (!current(version)) return;
+        cancelled = 0;
+        clearTimeout(cancellationRetry);
+        cancellationRetry = undefined;
+      }
+      catch (error) {
+        if (!current(version)) return;
+        // Supersession retires this demand, not the chat. Fence its queued work and subscription before asking for
+        // the current opening with the shared backoff, however often the reader changes history.
+        if (isCancellation(error)) {
+          const pause = retryPause(cancelled);
+          cancelled += 1;
+          socketGeneration += 1;
+          subscription?.unsubscribe(); subscription = null;
+          retireLoads('keep');
+          const retryVersion = generation;
+          cancellationRetry = setTimeout(() => {
+            if (!current(retryVersion)) return;
+            run(async (version) => {
+              await repair(version);
+              if (current(version) && subscription === null) subscribe();
+            });
+          }, pause);
+          return;
+        }
+        feed.failed?.(error);
+        // Nothing else would ask again: a reload that failed has no subscription, and a quiet feed sends no frame.
+        if (passes(error)) recoverLater();
+      }
     });
   };
 
+  function recoverLater(): void {
+    clearTimeout(recovery);
+    const version = generation;
+    const pause = retryPause(failures);
+    failures += 1;
+    recovery = setTimeout(() => { recover(version); }, pause);
+  }
+
+  /** Loads what the feed lacks now: the whole state where it holds none, else what changed since where it stands. */
+  function recover(version: number): void {
+    clearTimeout(recovery);
+    recovery = undefined;
+    if (!current(version)) return;
+    run(async (version) => {
+      await repair(version);
+      if (current(version) && subscription === null) subscribe();
+    });
+  }
+
+  /** A load that came through ends the wait for the next attempt. */
+  function recovered(): void {
+    failures = 0;
+    clearTimeout(recovery);
+    recovery = undefined;
+  }
+
+  // The socket back is the moment to try, not the end of the pause. A transport made for a test may have no status.
+  const unwatchSocket = (socket as Partial<Pick<RealtimeSocket, 'status'>>).status?.subscribe((now, before) => {
+    if (now.phase === 'ready' && before.phase !== 'ready' && recovery !== undefined) recover(generation);
+  });
+
   /** A former authority's work cannot publish rows, errors or cursors into its replacement. */
-  function retireLoads(): void {
+  function retireLoads(cursor: 'clear' | 'keep' = 'clear'): void {
+    clearTimeout(cancellationRetry);
+    cancellationRetry = undefined;
+    failures = 0;
+    clearTimeout(recovery);
+    recovery = undefined;
     generation += 1;
+    queuedRepair = null;
+    catchingUp = null;
     abort.abort();
     abort = new AbortController();
-    lastSeq = null;
+    if (cursor === 'clear') lastSeq = null;
     // A cancelled transport may ignore abort. Its completion is fenced, and cannot hold up the new reader.
     busy = Promise.resolve();
   }
@@ -114,6 +211,7 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
     if (!loaded.complete) throw new Error('The full feed opening was incomplete');
     feed.reset(loaded.data, loaded.seq);
     lastSeq = loaded.seq;
+    recovered();
   }
 
   async function repair(version: number): Promise<void> {
@@ -122,15 +220,39 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
       if (current(version) && feed.scope !== undefined) subscribe();
       return;
     }
-    const loaded = await feed.load(lastSeq, abort.signal);
+    const ticket = {};
+    catchingUp = ticket;
+    let loaded: Loaded<Data>;
+    try {
+      loaded = await feed.load(lastSeq, abort.signal);
+    } finally {
+      if (catchingUp === ticket) catchingUp = null;
+    }
     if (!current(version)) return;
     if (!loaded.complete) {
       await loadWhole(version);
       if (current(version) && feed.scope !== undefined) subscribe();
       return;
     }
+    recovered();
+    // Frames that continued the page while this read was on its way may have brought it further than the answer: an
+    // older answer is let go. One as new as the page is taken, as always (it ends a failure the page shows).
+    if (loaded.seq < lastSeq) return;
     feed.apply(loaded.data, loaded.seq);
-    lastSeq = Math.max(lastSeq, loaded.seq);
+    lastSeq = loaded.seq;
+  }
+
+  // Concurrent hints before a read starts share that read. A hint received during transport
+  // still queues a new catch-up, since it may describe a write after the current snapshot.
+  function requestRepair(): void {
+    if (stoppedNow || queuedRepair !== null) return;
+    const ticket = {};
+    queuedRepair = ticket;
+    run(async (version) => {
+      if (queuedRepair === ticket) queuedRepair = null;
+      await repair(version);
+      if (current(version) && subscription === null) subscribe();
+    });
   }
 
   function subscribe(): void {
@@ -164,6 +286,13 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
         if (frame.mode === 'reload') restart();
         return;
       case 'sync':
+        // A frame that continues where the page stands is shown at once, not after a catch-up read that is on its
+        // way (the page's own read-again while a turn runs): that read's answer is taken only if it is newer.
+        if (catchingUp !== null && lastSeq !== null && frame.prev <= lastSeq && frame.seq > lastSeq) {
+          feed.apply(feed.read(frame.data), frame.seq);
+          lastSeq = frame.seq;
+          return;
+        }
         run(async (version) => {
           if (!accepts()) return;
           if (lastSeq !== null && frame.seq <= lastSeq) return;
@@ -179,7 +308,7 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
         if (frame.reload === true) {
           feed.invalidated?.();
           restart();
-        } else run(repair);
+        } else requestRepair();
         return;
       case 'closed':
         subscription = null;
@@ -192,7 +321,10 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
           feed.closed?.(frame.code === 'forbidden' ? 'revoked' : 'deleted');
         } else {
           if (frame.code !== 'too_many_subscriptions') subscription = null;
-          feed.failed?.(new Error(`${feed.feed}: ${frame.code}: ${frame.detail}`));
+          const error = new Error(`${feed.feed}: ${frame.code}: ${frame.detail}`);
+          // Keep the refusal's reason for the view's existing failure line, without changing its lifecycle.
+          if (frame.code === 'too_many_subscriptions') Object.defineProperty(error, 'code', { value: frame.code });
+          feed.failed?.(error);
         }
         return;
       default:
@@ -212,7 +344,7 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
   function begin(useInitial = false): void {
     run(async (version) => {
       const initial = useInitial ? feed.initial?.() : null;
-      if (initial?.complete === true) { feed.apply(initial.data, initial.seq); lastSeq = initial.seq; }
+      if (initial?.complete === true) { if (initial.alreadyApplied !== true) feed.apply(initial.data, initial.seq); lastSeq = initial.seq; }
       else await loadWhole(version);
       if (current(version)) subscribe();
     });
@@ -222,11 +354,12 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
   return {
     lastSeq: () => lastSeq,
     reload: restart,
-    refresh() { if (!stoppedNow) run(repair); },
+    refresh: requestRepair,
     stop() {
       stoppedNow = true;
       socketGeneration += 1;
       retireLoads();
+      unwatchSocket?.();
       subscription?.unsubscribe(); subscription = null;
     },
   };
@@ -237,12 +370,17 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
  * four seconds. An answer of the API is an answer, and is not asked for again.
  */
 export async function loadWithRetries<Result>(load: () => Promise<Result>, signal: AbortSignal): Promise<Result> {
+  const source = client.session.getState(), reader = requestReader(source.userId, source.readerVersion), flight = Symbol('read');
   for (let failures = 0; ; failures += 1) {
+    signal.throwIfAborted(); beginReadAttempt(signal, flight, reader); watchReadAbort(signal, flight); signal.throwIfAborted();
     try {
-      return await load();
+      const answer = await load(); retireReadAttempt(signal, flight); return answer;
     } catch (error) {
-      if (signal.aborted || !retryRead(failures, error)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, retryPause(failures)));
+      if (signal.aborted || isCancellation(error)) { retireReadAttempt(signal, flight); throw error; }
+      noteReadError(signal, flight, error);
+      if (!retryRead(failures, error)) { failReadAttempt(signal, error); throw error; }
+      const pause = retryPause(failures); scheduleReadRetry(signal, error, pause);
+      await waitForReadRetry(signal, pause);
     }
   }
 }
@@ -315,13 +453,13 @@ export class FeedRegistry {
    * Uses a feed. `make` is called when nobody follows it yet; `evict` forgets what it delivered.
    * What is returned says that this user is done with it.
    */
-  use(key: string, make: () => FeedFollower, evict: () => void, rebase?: () => void): () => void {
+  use(key: string, make: () => FeedFollower, evict: () => void, rebase?: () => void, stopWhenUnused = false): () => void {
     let entry = this.shared.get(key);
     if (entry === undefined) {
       entry = { follower: make(), users: 0, cacheUsers: 0, evict, rebase };
       this.shared.set(key, entry);
     } else if (entry.follower === null || entry.evicting !== undefined && entry.leaving === undefined && entry.users === 0) {
-      // Its rows are still held but nobody follows it any more: follow it again from nothing.
+      // Its rows are still held; the feed decides whether their admitted cursor can be resumed.
       clearTimeout(entry.evicting);
       entry.evicting = undefined;
       entry.reading?.abort(); entry.reading = undefined;
@@ -341,7 +479,7 @@ export class FeedRegistry {
       released = true;
       held.users -= 1;
       if (this.shared.get(key) !== held || held.users > 0) return;
-      held.leaving = setTimeout(() => {
+      const leave = () => {
         if (this.shared.get(key) !== held || held.users > 0) return;
         held.leaving = undefined;
         held.follower?.stop();
@@ -352,7 +490,8 @@ export class FeedRegistry {
           this.shared.delete(key);
           held.evict();
         }, EVICT_AFTER_MS);
-      }, UNSUBSCRIBE_AFTER_MS);
+      };
+      if (stopWhenUnused) leave(); else held.leaving = setTimeout(leave, UNSUBSCRIBE_AFTER_MS);
     };
   }
 
@@ -361,11 +500,11 @@ export class FeedRegistry {
   reload(key: string, whenHeld?: {
     load: (signal: AbortSignal) => Promise<void>;
     failed: (error: unknown) => void;
-  }): void {
+  }, keepCursor = false): void {
     const entry = this.shared.get(key);
     if (entry === undefined) return;
     entry.reading?.abort(); entry.reading = undefined;
-    if (entry.follower !== null) { entry.follower.reload(); return; }
+    if (entry.follower !== null) { if (keepCursor) entry.follower.refresh(); else entry.follower.reload(); return; }
     if (entry.cacheUsers === 0 || whenHeld === undefined) return;
     const reading = new AbortController();
     entry.reading = reading;

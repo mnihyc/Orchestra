@@ -23,7 +23,9 @@ export function EnvironmentStartRecovery({ thread }: { thread: Thread }) {
   const off=environment?.status==='disabled';
   const retry = useMutation({ mutationFn: async (id: string) => { if(off) return enableEnvironment(id); return startEnvironment(id); } });
   const requested = t(off?'resourceImpact.enabling':'startRecovery.retrying', { environment: environment?.name ?? t('source.prepare.workspace') });
-  const line = environment?.status === 'lost' ? t('loss.blocked') : retry.isPending ? thread.pending_inputs > 0 ? `${requested} ${t('startRecovery.held')}` : requested : waitingWords(thread, t);
+  // A thread that has not asked for a turn yet is not blocked: its failed environment is said as the line a turn would get.
+  const line = environment?.status === 'lost' ? t('loss.blocked') : retry.isPending ? thread.pending_inputs > 0 ? `${requested} ${t('startRecovery.held')}` : requested
+    : waitingWords(thread, t) ?? (environment?.status === 'failed' ? t('startRecovery.failed', { environment: environment.name }) : null);
   return <div className="flex min-w-0 flex-col gap-2" data-environment-start-recovery>
     <Banner tone="warning" className="rounded-md border" actionBelowOnMobile action={mayRetry || mayChoose ? <span className="flex flex-wrap items-center gap-2">
       {mayRetry && <Button {...(off?{}:{action:'retry' as const})} size="sm" pending={retry.isPending} onClick={() => retry.mutate(environment.id)}>{t(off?'resources.act.enable':'startRecovery.retry')}</Button>}
