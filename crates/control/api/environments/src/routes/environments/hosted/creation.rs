@@ -51,6 +51,7 @@ pub(super) struct Created {
     template: Id,
     host: Id,
     mounts: Vec<Id>,
+    pools: Vec<Id>,
     initial: Option<(Option<Id>, Id)>,
 }
 
@@ -124,6 +125,7 @@ pub(super) async fn complete(
     template: Id,
     host: Id,
     mounts: &[Id],
+    pools: &[Id],
     initial: Option<(Option<Id>, Id)>,
 ) -> ApiResult<Vec<native::Facts<Source>>> {
     let mut facts = prefix(conn, home, initial).await?;
@@ -156,6 +158,27 @@ pub(super) async fn complete(
             Vec::new()
         } else {
             vec![(KeyTargetKind::Object(ObjectKind::Mount), actual)]
+        },
+    ));
+    let mut actual = Vec::new();
+    for id in pools {
+        actual.push(
+            targets::resource_identity(
+                conn,
+                ObjectRef {
+                    kind: ObjectKind::Pool,
+                    id: *id,
+                },
+            )
+            .await?,
+        );
+    }
+    facts.push(native::Facts::collection(
+        Source::Pools,
+        if actual.is_empty() {
+            vec![]
+        } else {
+            vec![(KeyTargetKind::Object(ObjectKind::Pool), actual)]
         },
     ));
     Ok(facts)
@@ -221,6 +244,7 @@ impl effects::Effect for Create {
                 native.template(),
                 native.host(),
                 native.mounts(),
+                &native.pools(),
                 source,
             )
             .await?;
@@ -325,6 +349,7 @@ impl effects::Apply for Create {
                 template: value.native.template(),
                 host: value.native.host(),
                 mounts: value.native.mounts().to_vec(),
+                pools: value.native.pools(),
                 initial: value
                     .input
                     .initial
@@ -480,6 +505,7 @@ impl ResourceProjection for Create {
                     input.template,
                     input.host,
                     &input.mounts,
+                    &input.pools,
                     input.initial,
                 )
                 .await?

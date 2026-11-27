@@ -151,6 +151,7 @@ async fn a_delivery_that_is_applied_again_makes_no_second_row_even_when_the_upst
     let lease = world.open_lease_of(thread).await;
     let event = request(lease, MODEL, (10, 0, 5), None);
     let delivered = DeliveredEvent {
+        native_opening_id: None,
         seq: 90,
         at: Time::new(world.clock.now()),
         kind: event.kind().as_str().to_owned(),

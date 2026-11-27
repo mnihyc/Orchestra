@@ -81,7 +81,7 @@ const SYSTEM: KeyTargetKind = KeyTargetKind::Identity(KeyIdentityKind::System);
 enum Part<T> {
     Ready(T),
     Failed {
-        problem: Problem,
+        problem: Box<Problem>,
         retry_after: Option<u64>,
     },
 }
@@ -91,7 +91,7 @@ impl<T> Part<T> {
         let failed = error(ctx, conn, caller, failed).await;
         let (problem, retry_after) = failed.into_parts_for(&ctx.request_id);
         Self::Failed {
-            problem,
+            problem: Box::new(problem),
             retry_after,
         }
     }
@@ -100,7 +100,7 @@ impl<T> Part<T> {
             Self::Failed {
                 problem,
                 retry_after,
-            } => Some((None, Some(problem.clone()), *retry_after)),
+            } => Some((None, Some(problem.as_ref().clone()), *retry_after)),
             Self::Ready(_) => None,
         }
     }
@@ -322,7 +322,7 @@ pub(super) async fn prepare(
         "opening_registry",
         &registry_target,
     )? {
-        match crate::routes::settings::registry_definitions() {
+        match crate::routes::settings::registry_definitions(Some(&ctx.app.engine)) {
             Ok(registry) => (Some(Part::Ready(registry)), vec![registry_target]),
             Err(failed) => (
                 Some(Part::failed(ctx, conn, principal.caller(), failed).await),
@@ -524,4 +524,23 @@ pub(super) async fn show(
         secrets_retry_after,
         providers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_small_defaults_section_keeps_its_native_problem_and_retry_delay() {
+        let problem = Problem::not_found();
+        let section = Part::<()>::Failed {
+            problem: problem.clone().into(),
+            retry_after: Some(5),
+        };
+        assert!(std::mem::size_of_val(&section) < std::mem::size_of_val(&problem));
+        assert_eq!(
+            section.failure::<()>(),
+            Some((None, Some(problem), Some(5)))
+        );
+    }
 }

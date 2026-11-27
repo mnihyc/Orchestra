@@ -15,7 +15,7 @@ use orch_api_contract::documents::{
 use orch_api_contract::imports::{ImportAction, ImportOutcome};
 use orch_api_contract::package::PackageKind;
 use orch_authz::Policy;
-use orch_blob_contract::store::{BlobError, ByteStream};
+use orch_blob_contract::store::{BlobError, ByteStream, Stored};
 use orch_db::audit::{Actor as AuditActor, Entry as AuditEntry, append};
 use orch_db::queries::documents::{self as rows, batch, history};
 use orch_db::queries::storage;
@@ -384,7 +384,7 @@ async fn put_embedded(
     document: Id,
     embedded: &[Embedded],
     made: &mut Made,
-    prepared: Option<&HashMap<Hash, Result<(), String>>>,
+    prepared: Option<&HashMap<Hash, Result<Stored, String>>>,
 ) -> Result<(), MakeError> {
     if embedded.is_empty() {
         return Ok(());
@@ -410,7 +410,6 @@ async fn put_embedded(
                 store
                     .put(&hash, Some(size), content)
                     .await
-                    .map(|_| ())
                     .map_err(|error| error.to_string())
             }
         };
@@ -509,7 +508,7 @@ pub(super) async fn make_document(
 /// One native document body opened before its action transaction.
 pub struct PreparedDocument {
     read: Read,
-    embedded: HashMap<Hash, Result<(), String>>,
+    embedded: HashMap<Hash, Result<Stored, String>>,
 }
 pub(super) async fn prepare_document(
     batch: &Batch<'_>,
@@ -542,7 +541,6 @@ pub(super) async fn prepare_document(
             let stored = store
                 .put(&hash, Some(size), content)
                 .await
-                .map(|_| ())
                 .map_err(|error| error.to_string());
             if stored.is_ok() {
                 // Exact owned preparation remains collectible even if later source admission closes.

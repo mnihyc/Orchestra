@@ -175,7 +175,9 @@ pub fn widest_sandbox(
     sandbox_ceiling(environment, template).0
 }
 
-/// One truthful capability/ceiling comparison for turn admission and resource readiness.
+/// One truthful capability/ceiling comparison for turn admission and resource readiness. `agent_reason` is the
+/// program's own sentence on why its sandbox enforces no more where it runs ([`AgentDescriptor::sandbox_reason`]),
+/// the reason of a turn on its own tools, as an executor's report is the reason of a turn on that executor's.
 pub fn sandbox_readiness(
     requested: SandboxMode,
     agent_modes: Option<&[SandboxMode]>,
@@ -183,6 +185,7 @@ pub fn sandbox_readiness(
     machine: &orch_db::queries::environment_facts::EnvironmentMachine,
     template: Option<&Json>,
     executor: Option<&str>,
+    agent_reason: Option<&str>,
 ) -> orch_api_contract::environment::SandboxReadiness {
     let (widest, source, machine_limit, template_limit) = sandbox_ceiling(machine, template);
     let (enforceable, reason) = if let Some(kind) = executor {
@@ -221,7 +224,10 @@ pub fn sandbox_readiness(
             ),
         }
     } else {
-        (agent_modes.unwrap_or_default().to_vec(), None)
+        (
+            agent_modes.unwrap_or_default().to_vec(),
+            agent_reason.map(str::to_owned),
+        )
     };
     let usable: Vec<_> = enforceable
         .iter()
@@ -343,45 +349,82 @@ pub fn is_sandbox_refusal(detail: &str) -> bool {
 }
 
 /// Fixed product explanations, mirrored by the catalogues; never inferred from a vendor's words.
-pub const APPROVAL_NOT_ALLOWED: &str = "This approval mode is not allowed here. Choose a mode permitted by approval.allowed_modes, or ask a manager to change that setting.";
+pub const APPROVAL_NOT_ALLOWED: &str = "This approval mode is not allowed here";
 /// The selected adapter cannot use the requested approval mode.
-pub const APPROVAL_UNSUPPORTED: &str = "This agent does not support the selected approval.mode. Choose another approval mode or agent.";
+pub const APPROVAL_UNSUPPORTED: &str = "This approval mode is not supported by this agent";
+pub const AUTO_NOT_PROVEN: &str = "Auto: Not proven on this machine yet.";
+pub const AUTO_CHECK_NEEDS_HOST: &str = "No build host is online to run the Auto approval check.";
+pub const AUTO_CHECK_FAILED: &str = "Auto: Failed its check on this machine.";
+pub const AUTO_CHECK_UNAVAILABLE: &str = "Auto: No Auto check is available for this program.";
 /// No supported sandbox fits all the current ceilings.
-pub const SANDBOX_UNSUPPORTED: &str = "This agent and environment cannot provide the requested tool access. Choose another agent or environment, or ask a manager to change sandbox.mode and the sandbox.max or agent.max_sandbox limits.";
+pub const SANDBOX_UNSUPPORTED: &str =
+    "The requested tool access is not available with this agent and environment";
 
 /// Names the requested mode while preserving its catalogued unsupported explanation.
 #[must_use]
 pub fn unsupported_approval_detail(mode: ApprovalMode) -> String {
-    approval_mode_detail(mode, APPROVAL_UNSUPPORTED)
+    format!(
+        "Approval mode “{}” is not supported by this agent",
+        approval_mode_name(mode)
+    )
+}
+
+/// The same current proof reason used by the dim native choice.
+#[must_use]
+pub fn unavailable_approval_detail(mode: ApprovalMode, descriptor: &AgentDescriptor) -> String {
+    use orch_agent_contract::descriptor::AutoApprovalState as State;
+    if mode == ApprovalMode::Auto {
+        return match descriptor.approval_auto.as_ref().map(|proof| proof.state) {
+            Some(State::NeedsHost) => AUTO_CHECK_NEEDS_HOST,
+            Some(State::Failed) => AUTO_CHECK_FAILED,
+            Some(State::Unavailable) => AUTO_CHECK_UNAVAILABLE,
+            Some(State::Passed) => return unsupported_approval_detail(mode),
+            Some(State::NotProven) | None => AUTO_NOT_PROVEN,
+        }
+        .to_owned();
+    }
+    unsupported_approval_detail(mode)
 }
 
 /// Names the requested mode while preserving its catalogued policy explanation.
 #[must_use]
 pub fn disallowed_approval_detail(mode: ApprovalMode) -> String {
-    approval_mode_detail(mode, APPROVAL_NOT_ALLOWED)
+    format!(
+        "Approval mode “{}” is not allowed here",
+        approval_mode_name(mode)
+    )
 }
 
-fn approval_mode_detail(mode: ApprovalMode, explanation: &'static str) -> String {
-    let name = match mode {
+fn approval_mode_name(mode: ApprovalMode) -> &'static str {
+    match mode {
         ApprovalMode::Ask => "Ask",
         ApprovalMode::OnRequest => "On request",
         ApprovalMode::Auto => "Auto",
         ApprovalMode::Bypass => "Bypass",
-    };
-    format!("{name}: {explanation}")
+    }
 }
 
-/// Recognizes only current and retained product explanations for approval-mode recovery.
+/// Recognizes only complete product explanations for approval-mode recovery.
 #[must_use]
 pub fn is_approval_mode_refusal(detail: &str) -> bool {
-    matches!(detail, APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED)
-        || matches!(
-            detail.split_once(": "),
-            Some((
-                "Ask" | "On request" | "Auto" | "Bypass",
-                APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED
-            ))
-        )
+    matches!(
+        detail,
+        APPROVAL_NOT_ALLOWED
+            | APPROVAL_UNSUPPORTED
+            | AUTO_NOT_PROVEN
+            | AUTO_CHECK_NEEDS_HOST
+            | AUTO_CHECK_FAILED
+            | AUTO_CHECK_UNAVAILABLE
+    ) || detail
+        .strip_prefix("Approval mode “")
+        .and_then(|named| named.split_once("” "))
+        .is_some_and(|(mode, reason)| {
+            matches!(mode, "Ask" | "On request" | "Auto" | "Bypass")
+                && matches!(
+                    reason,
+                    "is not supported by this agent" | "is not allowed here"
+                )
+        })
 }
 
 /// How the harness is confined for a turn: the approval mode and the sandbox
@@ -399,7 +442,7 @@ pub fn confinement(
         return Err(APPROVAL_NOT_ALLOWED.into());
     }
     if !descriptor.approval_modes.contains(&mode) {
-        return Err(APPROVAL_UNSUPPORTED.into());
+        return Err(unavailable_approval_detail(mode, descriptor));
     }
     let report = sandbox_readiness(
         settings.sandbox_mode,
@@ -408,6 +451,7 @@ pub fn confinement(
         machine,
         template,
         executor,
+        descriptor.sandbox_reason.as_deref(),
     );
     // Pre-flight must let an unmade/detached environment start and probe its tools. This
     // provisional comparison does not start a turn: session admission repeats it with the
@@ -500,10 +544,13 @@ pub struct StartSnapshot {
     pub authors: i64,
     /// The tools of the `orch` server the session is opened with.
     pub tools: Vec<orch_agent_contract::events::OrchTool>,
+    pub orch_tools_offer: crate::tools::catalogue::AcceptedOrchTools,
     /// What the environment has and can be given, where capabilities apply to it.
     pub capabilities: Option<instructions::CapabilityLine>,
     /// What it runs on and under, with the limits that touch what it has or can be given.
     pub isolation: Option<orch_driver_contract::isolation::RuntimeIsolation>,
+    /// The environment's current attachment projection, with the machine's observed state.
+    pub mounts: Vec<orch_api_contract::mounts::EnvMount>,
     /// What was found to run a browser and where its profiles are kept.
     pub browser_line: String,
     /// What the people who manage the environment answered about a configuration of the harness's own in its
@@ -576,12 +623,15 @@ impl StartSnapshot {
     #[must_use]
     pub fn session_configuration(&self) -> harnesses::SessionConfiguration {
         harnesses::SessionConfiguration {
+            output_capture_bytes: self.settings.output_capture_bytes,
             cwd: self.cwd(),
+            workspace_configuration: self.workspace_configuration.clone(),
             prompt_cache_ttl: self
                 .settings
                 .prompt_cache_ttl
                 .filter(|_| self.descriptor.capabilities.prompt_cache_ttl),
             background_wake: self.settings.background_wake,
+            web_action_wait_secs: self.settings.web_action_wait_secs,
             image_generation: self.settings.image_generation,
             native_configuration: self
                 .native_model
@@ -657,6 +707,7 @@ impl StartSnapshot {
                 .map(|memory| memory.kept_by),
             capabilities: self.capabilities.as_ref(),
             isolation: self.isolation.as_ref(),
+            mounts: &self.mounts,
             tools: &self.tools,
             browsers: &self.browser_line,
             rates: instructions::ToolRates {
@@ -842,7 +893,8 @@ pub async fn standing_of(
             | SourceScope::System
             | SourceScope::EnvironmentOwn
             | SourceScope::ProviderOwn
-            | SourceScope::HostOwn => continue,
+            | SourceScope::HostOwn
+            | SourceScope::PoolOwn => continue,
         };
         let name = match (kind, part.node) {
             (Some(_), Some(node)) => threads::node_name(conn, node).await?.unwrap_or_default(),
@@ -1054,6 +1106,8 @@ pub fn session_open_body_importing(
         _ => serde_json::Map::new(),
     };
     Ok(link::SessionOpen {
+        program_work: None,
+        output_capture_bytes: snapshot.settings.output_capture_bytes,
         native_model: snapshot.native_model.clone(),
         transport_only: false,
         turn_changes_require_restart: snapshot
@@ -1087,6 +1141,7 @@ pub fn session_open_body_importing(
         subagent_limits: snapshot.settings.subagent_limits,
         prompt_cache_ttl: configuration.prompt_cache_ttl,
         background_wake: snapshot.settings.background_wake,
+        web_action_wait_secs: configuration.web_action_wait_secs,
         image_generation: configuration.image_generation,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
@@ -1106,14 +1161,22 @@ pub fn session_open_body_importing(
         // Diagnostics are kept for as long as `diagnostics.retention_days` says (`raw_events`).
         raw_events: true,
         raw_after: 0,
-        // A side thread reads by the mechanism chosen when it was made; the adapter enforces it at every open
-        // and resume, or refuses the session.
-        side_reading: snapshot
-            .thread
-            .side_reading
+        // Program model steps request their declared tool-free session on every open.
+        side_reading: if snapshot
+            .native_model
             .as_deref()
-            .map(|word| convert(&Json::String(word.to_owned())))
-            .transpose()?,
+            .map(|model| model.program_output())
+            .transpose()
+            .map_err(EngineError::unreadable)?
+            .flatten()
+            .is_some()
+        {
+            Some(link::SideReading::NoTools)
+        } else {
+            crate::tools::side_reading(&snapshot.thread)
+                .map(|reading| convert(&reading))
+                .transpose()?
+        },
         // The environment's answer about the workspace's own harness configuration: without one, an adapter that
         // finds such a configuration refuses, and the people who manage the environment are asked.
         workspace_configuration: snapshot.workspace_configuration.clone(),
@@ -1338,7 +1401,9 @@ impl Engine {
         ) else {
             return Ok(StartLoad::Unstartable(turn.id));
         };
-        let Some(descriptor) = harnesses::descriptor_of(&agent)? else {
+        let Some(descriptor) =
+            harnesses::descriptor_for_thread(conn, &agent, &provider, &thread).await?
+        else {
             return Ok(StartLoad::Unstartable(turn.id));
         };
         let settings = crate::resolved::load(conn, thread_id).await?;
@@ -1402,7 +1467,7 @@ impl Engine {
         let path = binding::selected_path(&arrangement, &provider, &agent);
         if crate::approval_review::reviewer_allowed_for(
             approval,
-            harnesses::descriptor_of(&agent)?.as_ref(),
+            Some(&descriptor),
             &available_models,
             path,
             &turn.model,
@@ -1458,8 +1523,8 @@ impl Engine {
             agent: agent.id,
             machine: machine_id,
         };
-        let tools = self
-            .offered_tools_for_session(
+        let (tools, orch_tools_offer) = self
+            .offered_tools_with_facts(
                 conn,
                 &thread,
                 descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
@@ -1498,6 +1563,7 @@ impl Engine {
         let context_sent = threads::context_sent(conn, segment.id).await?;
         // Keep the shared-material future out of the snapshot's accumulated state.
         let material = Box::pin(self.topic_material(conn, thread_id)).await?;
+        let mounts = crate::mounts::views(conn, environment.id, self.inner.clock.now()).await?;
         let mut snapshot = StartSnapshot {
             native_model: None,
             material,
@@ -1528,17 +1594,31 @@ impl Engine {
             author_name,
             authors,
             tools,
+            orch_tools_offer,
             capabilities,
             isolation,
+            mounts,
             browser_line,
             workspace_configuration,
             cut,
             unnamed_before,
             context_sent,
         };
-        let allowed = Box::pin(self.native_model_use_preview(conn, &snapshot)).await?;
-        snapshot.native_model =
-            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
+        // A delegated input reopens its source while projecting its model. Keep the source
+        // and caller checks together, and release them before issuing any native command.
+        snapshot.native_model = if !orch_db::queries::transaction_guard::in_transaction(conn)
+            && crate::tools::capability_service::delegation::ParentLink::of_input(&snapshot.input)?
+                .is_some()
+        {
+            let mut tx = sqlx::Connection::begin(conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+            let model = Box::pin(self.preview_turn_model(&mut tx, &mut snapshot)).await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            model
+        } else {
+            Box::pin(self.preview_turn_model(conn, &mut snapshot)).await?
+        };
         Ok(StartLoad::Ready(Box::new(snapshot)))
     }
 }
@@ -1616,6 +1696,7 @@ mod tests {
             &machine,
             None,
             Some("orch-exec"),
+            None,
         );
         assert!(ready.ready);
         assert_eq!(ready.widest, SandboxMode::Open);
@@ -1629,6 +1710,7 @@ mod tests {
             &machine,
             None,
             Some("orch-exec"),
+            None,
         );
         let words = sandbox_explanation("world-box", &denied);
         assert!(!denied.ready);
@@ -1646,6 +1728,7 @@ mod tests {
             &machine,
             Some(&json!({"sandbox":{"max":"read_only"}})),
             Some("orch-exec"),
+            None,
         );
         assert!(!template.ready);
         assert_eq!(template.source, Source::Template);
@@ -1657,6 +1740,7 @@ mod tests {
             &machine,
             Some(&json!({})),
             Some("orch-exec"),
+            None,
         );
         assert!(!cautious.ready);
         assert_eq!(cautious.source, Source::Default);
@@ -1667,6 +1751,7 @@ mod tests {
             &machine,
             None,
             Some("orch-exec"),
+            None,
         );
         assert!(!requested.ready);
         assert!(sandbox_explanation("world-box", &requested).contains("place's Sandbox setting"));
@@ -1677,6 +1762,7 @@ mod tests {
             &machine,
             None,
             Some("orch-exec"),
+            None,
         );
         assert!(!unknown.ready);
         assert!(unknown.enforceable.is_empty());
@@ -1689,11 +1775,65 @@ mod tests {
             &machine,
             None,
             Some("orch-exec"),
+            None,
         );
         assert!(!default.ready);
         assert_eq!(default.source, Source::Default);
         assert_eq!(default.widest, SandboxMode::Workspace);
         assert!(default.template_limit.is_none());
+    }
+
+    #[test]
+    fn a_programs_own_reason_explains_a_workspace_it_cannot_enforce_where_it_runs() {
+        // Claude Code on a machine without bubblewrap and socat declares Open alone, with why: the turn is refused
+        // at once, before anything starts, in the program's words and with the way on.
+        let machine = orch_db::queries::environment_facts::EnvironmentMachine {
+            machine_id: Some(new_id()),
+            descriptor: Some(json!({"confinement":"none","lifecycle":"attach"})),
+            policy: Some(json!({"agent.max_sandbox":"open"})),
+        };
+        let reason = "Claude Code's sandbox needs bubblewrap (bwrap) and socat, which are not installed on this machine.";
+        let refused = sandbox_readiness(
+            SandboxMode::Workspace,
+            Some(&[SandboxMode::Open]),
+            &json!({}),
+            &machine,
+            None,
+            None,
+            Some(reason),
+        );
+        assert!(!refused.ready);
+        assert_eq!(refused.enforceable, [SandboxMode::Open]);
+        assert_eq!(refused.reason.as_deref(), Some(reason));
+        let words = sandbox_explanation("Lab workspace", &refused);
+        assert!(words.starts_with("Sandbox: Lab workspace: "), "{words}");
+        assert!(words.contains(reason), "{words}");
+        assert!(
+            words.contains("Allow Full access in this place's Sandbox setting."),
+            "{words}"
+        );
+        assert!(is_sandbox_refusal(&words));
+        // Where its sandbox starts, the same choice is ready, and an executor's report keeps its own reason.
+        let ready = sandbox_readiness(
+            SandboxMode::Workspace,
+            Some(&[SandboxMode::Workspace, SandboxMode::Open]),
+            &json!({}),
+            &machine,
+            None,
+            None,
+            None,
+        );
+        assert!(ready.ready && ready.reason.is_none());
+        let through = sandbox_readiness(
+            SandboxMode::Open,
+            Some(&[SandboxMode::Open]),
+            &json!({"executors":[{"kind":"orch-exec","available":true,"sandbox_modes":["open"],"reason":"Executor words."}]}),
+            &machine,
+            None,
+            Some("orch-exec"),
+            Some(reason),
+        );
+        assert_eq!(through.reason.as_deref(), Some("Executor words."));
     }
 
     #[test]
@@ -1706,6 +1846,50 @@ mod tests {
             "/workspace/web/api/v1"
         );
         assert_eq!(absolute_cwd("/workspace", "", "api"), "/workspace/api");
+    }
+
+    #[test]
+    fn confinement_refusals_name_the_choice_without_internal_setting_keys() {
+        for (mode, name) in [
+            (ApprovalMode::Ask, "Ask"),
+            (ApprovalMode::OnRequest, "On request"),
+            (ApprovalMode::Auto, "Auto"),
+            (ApprovalMode::Bypass, "Bypass"),
+        ] {
+            let unsupported = unsupported_approval_detail(mode);
+            let disallowed = disallowed_approval_detail(mode);
+            assert_eq!(
+                unsupported,
+                format!("Approval mode “{name}” is not supported by this agent")
+            );
+            assert_eq!(
+                disallowed,
+                format!("Approval mode “{name}” is not allowed here")
+            );
+            assert!(is_approval_mode_refusal(&unsupported));
+            assert!(is_approval_mode_refusal(&disallowed));
+            assert!(!is_approval_mode_refusal(&format!(
+                "{unsupported} Vendor detail"
+            )));
+        }
+        for detail in [
+            APPROVAL_UNSUPPORTED,
+            APPROVAL_NOT_ALLOWED,
+            SANDBOX_UNSUPPORTED,
+        ] {
+            for key in [
+                "approval.mode",
+                "approval.allowed_modes",
+                "sandbox.mode",
+                "sandbox.max",
+                "agent.max_sandbox",
+            ] {
+                assert!(
+                    !detail.contains(key),
+                    "internal setting key in public refusal: {detail}"
+                );
+            }
+        }
     }
 
     #[test]
