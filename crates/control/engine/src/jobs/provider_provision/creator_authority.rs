@@ -292,6 +292,14 @@ async fn retain_inner(
     let current = rows::state(conn, provider)
         .await?
         .ok_or_else(|| EngineError::unreadable("The new provider disappeared."))?;
+    // The creation gave the provider this first owner: its creator, or where a creator from outside the home's org (a
+    // system admin acting as one) adds it, the nearest org's first owner who is a member, as for anything an outsider
+    // makes. A copy is its copier's.
+    let owner = if duplicate.is_none() {
+        orch_authz::ownership::owner_of_new(conn, origin.user(), Some(current.home_id)).await?
+    } else {
+        origin.user()
+    };
     if !matches!(
         (origin.operation(), duplicate.is_some()),
         ("ProviderCreate", false) | ("ProviderDuplicate" | "ProviderMoveOut", true)
@@ -309,7 +317,7 @@ async fn retain_inner(
         || row.plan.get("provider_recovery").is_some()
         || row.plan.get("target").is_some()
         || current.deleted_at.is_some()
-        || current.owner_id != origin.user()
+        || current.owner_id != owner
         || current.home_id != home
         || current.machine_id.is_some()
         || !matches!(current.kind.as_str(), "api" | "subscription")
@@ -318,6 +326,11 @@ async fn retain_inner(
         return Err(EngineError::unreadable(
             "This is not the creator's exact new-provider Make.",
         ));
+    }
+    if owner != origin.user() {
+        // An outsider's new provider is its owner's from the start, and so is its first Make, as every later one is:
+        // the creator holds nothing of his own in that org for an authority to keep.
+        return Ok(());
     }
     let (template, named_host) = template_and_host(conn, provider).await?;
     let authority = Authority {

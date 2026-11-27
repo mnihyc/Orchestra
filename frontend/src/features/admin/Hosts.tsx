@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 
 import { bundledNodeQuery, hostsPageQuery, retryBundledNode } from '@/api/admin';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
+import { diskWords } from '@/features/resources/amounts';
 import { fullEffect, FULL_PERCENT_SHIPPED, declaredShare, megabytes } from '@/features/admin/hosts';
 import { ChoiceSetting, NumberSetting, useSystemSettings } from '@/features/admin/SettingRows';
 import type { Host, WhenFull } from '@/generated/api-types';
@@ -120,7 +121,7 @@ export function Hosts() {
       cell: (host) => (
         <span className="flex flex-col text-sm whitespace-nowrap text-text-muted">
           <span>{host.capacity.cpu_millis > 0 ? t('admin.hosts.cpus', { count: host.capacity.cpu_millis / 1000, number: formatNumber(host.capacity.cpu_millis / 1000, locale) }) : '–'}</span>
-          <span>{host.capacity.disk_gb > 0 ? t('admin.hosts.disk', { size: formatBytes(host.capacity.disk_gb * 1024 ** 3, locale) }) : '–'}</span>
+          <span>{host.capacity.disk_gb > 0 ? t('admin.hosts.disk', { size: diskWords(host.capacity.disk_gb, t, locale) }) : '–'}</span>
           <span>{t('admin.hosts.environments', { count: host.running.environment, number: formatNumber(host.running.environment, locale) })}</span>
           <span>{t('admin.hosts.providers', { count: host.running.provider, number: formatNumber(host.running.provider, locale) })}</span>
         </span>

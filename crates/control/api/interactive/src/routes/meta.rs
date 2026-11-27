@@ -360,6 +360,9 @@ async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<Setu
     let opened = open_session(&ctx, &mut tx, &user, how).await?;
     orch_db::idempotency::creation::observe_account(&mut tx, user.id, "setup_account", 200).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
+    // The token of the node installed with the server waits for this administrator: it is registered in their name
+    // now, rather than at the next retry, so that the host it enrolls is theirs to use as soon as the node asks.
+    ctx.app.link.certificates().retry_bundled_enrollment();
     let answer = opened.answer();
     Ok(Answer {
         body: SetupCreateReply::full(answer.body),

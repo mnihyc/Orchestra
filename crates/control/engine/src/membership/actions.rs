@@ -73,12 +73,17 @@ struct ResourceBefore {
     kind: String,
     id: Id,
     disabled: bool,
+    /// An environment whose removal this deletion dated at the trash's end: its restoration withdraws that removal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    removal_dated: bool,
 }
 
 /// Corroborated native restoration rows, frozen before their first effect.
 pub struct PreparedHomeRestoration {
     node: Id,
     resources: Vec<resources::AccessFacts>,
+    /// The environments whose removal the deletion dated at the trash's end.
+    dated: Vec<Id>,
 }
 impl PreparedHomeRestoration {
     #[must_use]
@@ -457,7 +462,7 @@ impl Engine {
         origin: &orch_db::audit::Origin,
     ) -> Result<(Vec<Id>, Json), EndError> {
         let facts = resources::resources_under_home(conn, node).await?;
-        self.end_home_resource_facts_in(conn, &facts, to, by, at, origin)
+        self.end_home_resource_facts_in(conn, &facts, to, by, (at, None), origin)
             .await
     }
 
@@ -471,17 +476,42 @@ impl Engine {
         at: Time,
         origin: &orch_db::audit::Origin,
     ) -> Result<(Vec<Id>, Json), EndError> {
-        self.end_home_resource_facts_in(conn, prepared.resources(), to, by, at, origin)
+        self.end_home_resource_facts_in(conn, prepared.resources(), to, by, (at, None), origin)
             .await
     }
 
+    /// A deleted place takes the environments at home in it to the trash with it: as an org's, they stop and are
+    /// kept whole, to come back with it, and their removal is dated at the trash's end (`until`), withdrawn again by
+    /// its restoration. Handed to `to`, they stay live there instead.
+    pub async fn trash_prepared_home_resources_in(
+        &self,
+        conn: &mut Conn,
+        prepared: &crate::archive::deletion::Prepared,
+        to: Option<Id>,
+        by: Id,
+        (at, until): (Time, chrono::DateTime<chrono::Utc>),
+        origin: &orch_db::audit::Origin,
+    ) -> Result<(Vec<Id>, Json), EndError> {
+        self.end_home_resource_facts_in(
+            conn,
+            prepared.resources(),
+            to,
+            by,
+            (at, Some(until)),
+            origin,
+        )
+        .await
+    }
+
+    /// `until`: where a place's deletion takes its environments to the trash, the trash's end, at which their
+    /// removal is dated; none for a membership's or an org's ending.
     async fn end_home_resource_facts_in(
         &self,
         conn: &mut Conn,
         facts: &[resources::AccessFacts],
         to: Option<Id>,
         by: Id,
-        at: Time,
+        (at, until): (Time, Option<chrono::DateTime<chrono::Utc>>),
         origin: &orch_db::audit::Origin,
     ) -> Result<(Vec<Id>, Json), EndError> {
         let mut environments = Vec::new();
@@ -508,11 +538,6 @@ impl Engine {
                 .await
                 .map_err(DbError::from)?;
             } else {
-                kept.push(ResourceBefore {
-                    kind: fact.kind.clone(),
-                    id: fact.id,
-                    disabled: fact.disabled,
-                });
                 let kind = fact
                     .kind
                     .parse::<ObjectKind>()
@@ -529,6 +554,19 @@ impl Engine {
                     origin,
                 )
                 .await?;
+                let removal_dated = match until {
+                    Some(until) if fact.kind == "environment" => {
+                        self.schedule_environment_removal(conn, fact.id, Some(by), until, at.get())
+                            .await?
+                    }
+                    _ => false,
+                };
+                kept.push(ResourceBefore {
+                    kind: fact.kind.clone(),
+                    id: fact.id,
+                    disabled: fact.disabled,
+                    removal_dated,
+                });
             }
         }
         Ok((environments, json!(kept)))
@@ -888,17 +926,25 @@ impl Engine {
             return Ok(PreparedHomeRestoration {
                 node,
                 resources: Vec::new(),
+                dated: Vec::new(),
             });
         };
         let saved: Option<Json> = sqlx::query_scalar("SELECT details->'resources_before' FROM audit_log WHERE action='node.deleted' AND object_id=$1 AND details->>'deletion_id'=$2::uuid::text ORDER BY at DESC,id DESC LIMIT 1")
             .bind(node).bind(deletion).fetch_optional(&mut *conn).await.map_err(DbError::from)?.flatten();
-        let before = saved
+        let (before, rest): (Vec<_>, Vec<_>) = saved
             .as_ref()
             .and_then(Json::as_array)
             .into_iter()
             .flatten()
             .filter_map(|one| serde_json::from_value::<ResourceBefore>(one.clone()).ok())
-            .filter(|one| !one.disabled && table_of(&one.kind).is_some())
+            .partition(|one| !one.disabled && table_of(&one.kind).is_some());
+        // An environment switched off before is not switched on again, but its removal dated by the deletion is
+        // withdrawn all the same.
+        let dated = before
+            .iter()
+            .chain(&rest)
+            .filter(|one| one.removal_dated && one.kind == "environment")
+            .map(|one| one.id)
             .collect::<Vec<_>>();
         let ids = before.iter().map(|one| one.id).collect::<Vec<_>>();
         let mut facts = resources::resource_facts(conn, &ids).await?;
@@ -935,6 +981,7 @@ impl Engine {
         Ok(PreparedHomeRestoration {
             node,
             resources: facts,
+            dated,
         })
     }
 
@@ -966,6 +1013,13 @@ impl Engine {
             };
             sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} x SET {change},revision=revision+1,updated_at=$3 WHERE x.id=$1 AND EXISTS(SELECT 1 FROM nodes n WHERE n.id=x.{home} AND $2=ANY(n.path) AND n.deleted_at IS NULL)")))
                 .bind(fact.id).bind(prepared.node).bind(at.get()).execute(&mut *conn).await.map_err(DbError::from)?;
+        }
+        for environment in &prepared.dated {
+            let home_back: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environments x JOIN nodes n ON n.id=x.home_node_id WHERE x.id=$1 AND $2=ANY(n.path) AND n.deleted_at IS NULL)")
+                .bind(environment).bind(prepared.node).fetch_one(&mut *conn).await.map_err(DbError::from)?;
+            if home_back {
+                orch_db::queries::environments::hosting::keep(conn, *environment, at.get()).await?;
+            }
         }
         Ok(())
     }
