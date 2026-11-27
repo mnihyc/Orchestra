@@ -70,7 +70,8 @@ for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-
     await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(`/topic/${ACME.fixLogin}?tab=activity`);
     const list = page.getByRole('tablist', { name: caption('@places.topic.sections', locale), exact: true });
     const activity = list.getByRole('tab', { name: caption('@places.topic.tabs.activity', locale), exact: true });
-    await expect(list.getByRole('tab')).toHaveCount(7); await selectedInside(list, activity);
+    // The tabs that do not fit wait under More; the chosen one is always in the row.
+    await expect(list.getByRole('tab', { includeHidden: true })).toHaveCount(7); await selectedInside(list, activity);
     await border.press('End'); const wideTabs = await widthOf(list);
     await border.press('Home'); await expect.poll(() => widthOf(list)).toBeLessThan(wideTabs);
     await selectedInside(list, activity); await expect(border).toBeFocused(); expect(page.viewportSize()?.width).toBe(1440);

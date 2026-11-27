@@ -115,6 +115,18 @@ pub async fn retain(
             "this standalone source is not EnvironmentCreate",
         ));
     }
+    // An outsider's new environment (a system admin acting as one, or a person let make things in a place of an org
+    // he is not a member of) is its home's nearest org's first owner who is a member from the start, and so is its
+    // first Make, as every later one is: the creator holds nothing of his own there for an authority to keep.
+    let owner = envs::environment(conn, made.id)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the new Environment disappeared"))?
+        .owner_id;
+    if owner != origin.user()
+        && owner == orch_authz::ownership::owner_of_new(conn, origin.user(), Some(home)).await?
+    {
+        return Ok(());
+    }
     retain_inner(conn, origin, made, home, at).await
 }
 

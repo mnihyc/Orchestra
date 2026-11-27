@@ -334,6 +334,17 @@ function tellVisible(threadId: string): void {
   socket.visible(`thread:${threadId}`, on);
 }
 
+/**
+ * Whether a frame of a thread changed what is held of how it runs (its settings, and the composer's facts read from
+ * them): its model, its effort or its session changed, a setting was recorded in its history, or a block cleared.
+ * A block clears when something it depended on was mended, a place's setting say, which leaves no line in the thread;
+ * the composer's tool access line, read before the block, would otherwise keep saying what no longer holds.
+ */
+export function choicesChanged(earlier: Thread, now: Thread, settingRecorded: boolean): boolean {
+  return now.model !== earlier.model || now.effort !== earlier.effort || now.execution_revision !== earlier.execution_revision
+    || settingRecorded || earlier.state === 'blocked' && now.state !== 'blocked';
+}
+
 function takeThreadRows(threadId: ThreadReadTarget, data: ThreadFeedData, reset: boolean): void {
   const before = applyThreadFeedRows(threadId, data, reset);
   if (before === null) return;
@@ -351,12 +362,10 @@ function takeThreadRows(threadId: ThreadReadTarget, data: ThreadFeedData, reset:
   const now = current.thread;
   // Current workbench tabs have their own read keys and share the native choice readers.
   if (earlier !== null && now !== null && !threadReadOnly(current) && current.read?.projection?.follows_active !== false) {
-    const modelChanged = now.model !== earlier.model || now.effort !== earlier.effort
-      || now.execution_revision !== earlier.execution_revision;
     const settingRecorded = !reset && data.items?.some((item) =>
       item.kind === 'marker' && (item.payload.marker === 'setting_changed' || item.payload.marker === 'model_changed')
-      && !before.items.has(item.id) && current.items.has(item.id));
-    if (modelChanged || settingRecorded) chosen.push(...threadRowChanges(now.id));
+      && !before.items.has(item.id) && current.items.has(item.id)) === true;
+    if (choicesChanged(earlier, now, settingRecorded)) chosen.push(...threadRowChanges(now.id));
     const observed = data.items?.filter((item) => current.items.get(item.id) !== before.items.get(item.id)
       && current.items.get(item.id)?.seq_updated === item.seq_updated) ?? [];
     chosen.push(...threadMcpChanges(now, earlier, observed));

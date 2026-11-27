@@ -32,9 +32,14 @@ export interface SummaryBoxProps {
   askBlockedReason?: string | undefined;
   details?: ReactNode;
   className?: string;
-  /** A place's page shows a summary that has nothing yet as one closed row, opened by whoever wants its acts. */
+  /** A summary above a page's content that has nothing yet (nothing written, nothing on its way, nothing to explain) is
+   * one closed row with its title and that it has nothing yet, opened by whoever wants its acts. */
   foldWhenEmpty?: boolean | undefined;
+  /** The person's own choice to show or put away the summary above a thread: its title shows or folds it. */
+  fold?: SummaryFold | undefined;
 }
+
+export interface SummaryFold { open: boolean; onOpenChange: (open: boolean) => void }
 
 /** What stopped a summary, as the server names it; each has its sentence under `summaryBox.failure`. */
 const failureReasons = ['asker_ended', 'source_gone', 'source_unreadable', 'nothing_new', 'no_summarizer', 'provider_gone', 'provider_not_ready', 'no_interface',
@@ -61,14 +66,16 @@ export function SummaryBox(props: SummaryBoxProps) {
   return <SummaryContent key={JSON.stringify([props.readerKey, props.target.kind, props.target.reference])} {...props} />;
 }
 
-function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, nothingNew = false, onConfigure, onAsk, askBlockedReason, details, className, foldWhenEmpty = false }: SummaryBoxProps) {
+function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, nothingNew = false, onConfigure, onAsk, askBlockedReason, details, className, foldWhenEmpty = false, fold: chosen }: SummaryBoxProps) {
   const { t } = useTranslation();
   const heading = useId();
+  const body = useId();
   const title = t(target.kind === 'chat_title' ? 'summaryOptions.fields.chat_title' : target.kind === 'chat' ? 'summaryBox.catchUp' : 'summaryBox.title');
   const emptyText = t(target.kind === 'chat' ? 'summaryBox.nothingNew.chat' : 'summaryBox.nothingNew.other');
   const stateText = (text: string) => target.kind === 'chat' || target.kind === 'chat_title'
     ? t('summaryBox.subjectState', { subject: title, state: text }) : text;
   const locked = useRef(false);
+  const [emptyOpen, setEmptyOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<{ revision: string; error: unknown } | null>(null);
   // A later durable revision supersedes an older request's local error.
@@ -101,10 +108,26 @@ function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, noth
     }
   };
 
-  const box = <section aria-labelledby={heading} aria-busy={state === 'updating'} data-summary-state={state} data-summary-target={target.kind} data-summary-reference={target.reference}
-    className={cx('flex min-w-0 flex-col gap-2', !foldWhenEmpty && className)}>
+  // Nothing written yet, nothing on its way and nothing to explain: one closed row says so, above the page's content,
+  // whatever the person chose for a summary with words.
+  const empty = state === 'empty' && !hasText && changed === null;
+  const fold: SummaryFold | undefined = foldWhenEmpty && empty ? { open: emptyOpen, onOpenChange: setEmptyOpen } : chosen;
+  // Folded, the row says what a reader would look for first: the summary's first line, or why there is none.
+  const firstLine = hasText ? summary.text?.split('\n').find((line) => line.trim() !== '')?.trim() : undefined;
+  const essentials = firstLine ?? (state === 'empty' ? (nothingToSay ? emptyText : t('summaryBox.empty'))
+    : changed !== null ? changeText : state === 'failed' && failureText !== undefined ? failureText : stateText(t(`summaryBox.state.${state}`)));
+  const toggle = fold === undefined ? null : <SummaryFoldToggle title={title} fold={fold} controls={body} essentials={essentials} />;
+  if (fold !== undefined && !fold.open) {
+    return <section aria-labelledby={heading} data-summary-fold data-summary-state={state} data-summary-target={target.kind} data-summary-reference={target.reference}
+      className={cx('flex min-w-0', className)}>
+      <h2 id={heading} className="min-w-0 max-w-full">{toggle}</h2>
+    </section>;
+  }
+
+  const box = <section id={fold === undefined ? undefined : body} aria-labelledby={heading} aria-busy={state === 'updating'} data-summary-state={state} data-summary-target={target.kind} data-summary-reference={target.reference}
+    data-summary-fold={fold === undefined ? undefined : 'open'} className={cx('flex min-w-0 flex-col gap-2', className)}>
     <div className="flex min-w-0 flex-wrap items-center gap-2">
-      <h2 id={heading} className="text-sm font-medium text-text">{title}</h2>
+      <h2 id={heading} className="text-sm font-medium text-text">{toggle ?? title}</h2>
       {state !== 'no_summarizer' && state !== 'empty' && <span role="status"><StatusDot tone={tones[state]} label={stateText(t(`summaryBox.state.${state}`))} showLabel /></span>}
       {summary.producer?.kind === 'model' ? <ResourceChip subject={summary.producer} hint={false} />
         : summary.producer?.kind === 'extension' ? <span className="min-w-0 truncate text-sm text-text-muted" data-overflow-text={summary.producer.name}>{summary.producer.name}</span>
@@ -126,14 +149,25 @@ function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, noth
     {changed !== null && state !== 'updating' && <StateLine compact title={changeText} />}
     {changed === null && state === 'empty' && (nothingToSay || !hasText) && <StateLine compact title={nothingToSay ? emptyText : t('summaryBox.empty')} />}
   </section>;
-  // Nothing written yet, nothing on its way and nothing to explain: one closed row says so, above the page's tabs.
-  if (!foldWhenEmpty || state !== 'empty' || hasText || changed !== null) return box;
-  return <details data-summary-fold className={cx('group min-w-0', className)}>
-    <summary className="flex w-fit max-w-full cursor-default items-center gap-1 rounded-sm text-sm select-none focus-inset">
-      <ChevronRight aria-hidden className="size-4 shrink-0 text-text-subtle transition-transform group-open:rotate-90" />
-      <span className="font-medium text-text">{title}</span>
-      <span className="min-w-0 truncate text-text-muted">· {nothingToSay ? emptyText : t('summaryBox.empty')}</span>
-    </summary>
-    <div className="pt-2">{box}</div>
-  </details>;
+  return box;
+}
+
+/** The one row a folded summary is: its title, and while folded what it says first; pressing it opens or folds it. */
+function SummaryFoldToggle({ title, fold, controls, essentials }: { title: string; fold: SummaryFold; controls?: string | undefined; essentials?: string | undefined }) {
+  const { t } = useTranslation();
+  return <button type="button" aria-expanded={fold.open} aria-controls={controls} data-summary-fold-toggle
+    className="focus-inset flex min-w-0 max-w-full cursor-default items-center gap-1 rounded-sm text-sm select-none" onClick={() => fold.onOpenChange(!fold.open)}>
+    <ChevronRight aria-hidden className={cx('size-4 shrink-0 text-text-subtle transition-transform motion-reduce:transition-none', fold.open && 'rotate-90')} />
+    <span className="shrink-0 font-medium text-text">{title}</span>
+    {!fold.open && essentials !== undefined && <span className="min-w-0 truncate font-normal text-text-muted" data-overflow-text={essentials}>{t('resourceFacts.separator')}{essentials}</span>}
+  </button>;
+}
+
+/** A folded summary the person put away themselves: its row alone, with nothing read until it is opened again. */
+export function SummaryFoldRow({ fold, className }: { fold: SummaryFold; className?: string | undefined }) {
+  const { t } = useTranslation();
+  const heading = useId();
+  return <section aria-labelledby={heading} data-summary-fold className={cx('flex min-w-0', className)}>
+    <h2 id={heading} className="min-w-0 max-w-full"><SummaryFoldToggle title={t('summaryBox.title')} fold={fold} /></h2>
+  </section>;
 }

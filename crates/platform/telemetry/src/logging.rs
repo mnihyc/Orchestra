@@ -4,6 +4,10 @@
 //! collector. What is logged is events and identifiers: never a secret, a
 //! token, a credential or what was said in a conversation. The level is
 //! `info` unless `ORCH_LOG` names another filter.
+//!
+//! A line that cannot be written (a full disk, a standard error nobody reads) is lost, and only that line: the
+//! next one begins on a line of its own, and writing never fails the code that logs. That code is any task of the
+//! process, the link's reconnecting among them, so a log that could not be written must never end it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -50,14 +54,14 @@ pub fn init(component: &'static str, format: LogFormat) {
             .with(
                 fmt::layer()
                     .json()
-                    .with_writer(std::io::stderr)
+                    .with_writer(StandardError::default())
                     .with_filter(filter),
             )
             .try_init(),
         LogFormat::Text => registry
             .with(
                 fmt::layer()
-                    .with_writer(std::io::stderr)
+                    .with_writer(StandardError::default())
                     .with_filter(filter),
             )
             .try_init(),
@@ -97,33 +101,36 @@ fn init_files(
         open: Mutex::new(None),
     };
     let registry = tracing_subscriber::registry().with(crate::database::layer());
+    // The formatter's own report of a write that failed is an `eprintln!`, which panics where standard error cannot
+    // be written either (one full disk under both): the panic ended whichever task had logged. The writers here
+    // never fail, and the report stays off as well.
     let started = match format {
         LogFormat::Json => registry
             .with(mirror.then(|| {
                 fmt::layer()
                     .json()
-                    .with_writer(std::io::stderr)
+                    .with_writer(StandardError::default())
                     .with_filter(filter.clone())
             }))
             .with(
                 fmt::layer()
                     .json()
                     .with_writer(files)
-                    .log_internal_errors(mirror)
+                    .log_internal_errors(false)
                     .with_filter(filter),
             )
             .try_init(),
         LogFormat::Text => registry
             .with(mirror.then(|| {
                 fmt::layer()
-                    .with_writer(std::io::stderr)
+                    .with_writer(StandardError::default())
                     .with_filter(filter.clone())
             }))
             .with(
                 fmt::layer()
                     .with_ansi(false)
                     .with_writer(files)
-                    .log_internal_errors(mirror)
+                    .log_internal_errors(false)
                     .with_filter(filter),
             )
             .try_init(),
@@ -163,12 +170,86 @@ fn today() -> i64 {
     i64::try_from(secs / DAY_SECS).unwrap_or(0)
 }
 
+/// Writes `line` to `sink`, so that a line that fails is the only one lost: where only the beginning of the last
+/// line got there (a full disk takes what still fits), `cut` says so, and that part is ended before this line
+/// begins. The error is the caller's to drop.
+fn write_line(sink: &mut impl std::io::Write, cut: &mut bool, line: &[u8]) -> std::io::Result<()> {
+    if *cut {
+        sink.write_all(b"\n")?;
+        *cut = false;
+    }
+    let mut rest = line;
+    while !rest.is_empty() {
+        match sink.write(rest) {
+            Ok(0) => {
+                *cut = rest.len() < line.len();
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            Ok(written) => rest = rest.get(written..).unwrap_or_default(),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                *cut = rest.len() < line.len();
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Standard error, a whole line at a time, as the files are written.
+#[derive(Default)]
+struct StandardError {
+    cut: Mutex<bool>,
+}
+
+/// One line to standard error.
+struct StandardErrorLine<'a> {
+    cut: &'a Mutex<bool>,
+}
+
+impl std::io::Write for StandardErrorLine<'_> {
+    fn write(&mut self, line: &[u8]) -> std::io::Result<usize> {
+        self.write_all(line)?;
+        Ok(line.len())
+    }
+
+    /// The formatter hands over each event as one whole line. One that cannot be written is lost; this never fails.
+    fn write_all(&mut self, line: &[u8]) -> std::io::Result<()> {
+        let mut cut = self
+            .cut
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = write_line(&mut std::io::stderr().lock(), &mut cut, line);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        Ok(())
+    }
+}
+
+impl<'a> fmt::MakeWriter<'a> for StandardError {
+    type Writer = StandardErrorLine<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        StandardErrorLine { cut: &self.cut }
+    }
+}
+
+/// The file of a day, open, and whether its last line was cut.
+struct DayFile {
+    date: String,
+    file: std::fs::File,
+    cut: bool,
+}
+
 /// The files a component logs to, one a day.
 struct DailyFiles {
     dir: PathBuf,
     component: &'static str,
     keep_days: u64,
-    open: Mutex<Option<(String, std::fs::File)>>,
+    open: Mutex<Option<DayFile>>,
 }
 
 impl DailyFiles {
@@ -211,7 +292,13 @@ struct DailyWriter<'a> {
 }
 
 impl std::io::Write for DailyWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, line: &[u8]) -> std::io::Result<usize> {
+        self.write_all(line)?;
+        Ok(line.len())
+    }
+
+    /// The formatter hands over each event as one whole line. One that cannot be written is lost; this never fails.
+    fn write_all(&mut self, line: &[u8]) -> std::io::Result<()> {
         let mut open = self
             .files
             .open
@@ -219,16 +306,20 @@ impl std::io::Write for DailyWriter<'_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let day = today();
         let date = date_of(day);
-        if open.as_ref().is_none_or(|(at, _)| *at != date) {
+        if open.as_ref().is_none_or(|file| file.date != date) {
             // A file that cannot be opened drops the line here and is retried at the next one.
             // The optional standard-error mirror is independent; files-only services keep it off.
-            *open = self.files.file_of(&date).ok().map(|file| (date, file));
+            *open = self.files.file_of(&date).ok().map(|file| DayFile {
+                date,
+                file,
+                cut: false,
+            });
             self.files.prune(day);
         }
-        match open.as_mut() {
-            Some((_, file)) => std::io::Write::write(file, bytes),
-            None => Ok(bytes.len()),
+        if let Some(open) = open.as_mut() {
+            let _ = write_line(&mut open.file, &mut open.cut, line);
         }
+        Ok(())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -237,10 +328,10 @@ impl std::io::Write for DailyWriter<'_> {
             .open
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match open.as_mut() {
-            Some((_, file)) => std::io::Write::flush(file),
-            None => Ok(()),
+        if let Some(open) = open.as_mut() {
+            let _ = open.file.flush();
         }
+        Ok(())
     }
 }
 
@@ -300,5 +391,73 @@ mod tests {
             other.exists(),
             "another component's file is not this one's to remove"
         );
+    }
+
+    /// Takes all it is given, or what still fits of it while it fills, or nothing once it is full: a disk that
+    /// fills up and is then given space again.
+    struct FillingDisk {
+        written: Vec<u8>,
+        room: Option<usize>,
+    }
+
+    impl std::io::Write for FillingDisk {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let taken = self.room.map_or(bytes.len(), |room| room.min(bytes.len()));
+            if taken == 0 && !bytes.is_empty() {
+                return Err(std::io::ErrorKind::StorageFull.into());
+            }
+            self.written.extend_from_slice(&bytes[..taken]);
+            self.room = self.room.map(|room| room - taken);
+            Ok(taken)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_a_full_disk_cuts_is_the_only_line_lost_and_the_next_begins_on_a_line_of_its_own() {
+        let mut disk = FillingDisk {
+            written: Vec::new(),
+            room: None,
+        };
+        let mut cut = false;
+        write_line(&mut disk, &mut cut, b"first\n").unwrap();
+        disk.room = Some(4);
+        assert!(write_line(&mut disk, &mut cut, b"second\n").is_err());
+        assert!(cut, "only the beginning of the line got there");
+        assert!(
+            write_line(&mut disk, &mut cut, b"third\n").is_err(),
+            "the disk is full"
+        );
+        disk.room = None;
+        write_line(&mut disk, &mut cut, b"fourth\n").unwrap();
+        write_line(&mut disk, &mut cut, b"fifth\n").unwrap();
+        assert_eq!(
+            String::from_utf8(disk.written).unwrap(),
+            "first\nseco\nfourth\nfifth\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_file_of_the_day_never_fails_the_formatter_on_a_full_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = DailyFiles {
+            dir: dir.path().to_owned(),
+            component: "connector",
+            keep_days: 14,
+            open: Mutex::new(Some(DayFile {
+                date: date_of(today()),
+                file: std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/full")
+                    .unwrap(),
+                cut: false,
+            })),
+        };
+        assert!(std::io::Write::write_all(&mut files.make_writer(), b"a line\n").is_ok());
+        assert!(std::io::Write::flush(&mut files.make_writer()).is_ok());
     }
 }

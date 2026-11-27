@@ -116,9 +116,13 @@ pub(crate) async fn present(
     let Some(phase) = row.removal_phase.as_deref() else {
         return Ok(None);
     };
-    let (manager, admin) = orch_engine::jobs::retained::authority(conn, principal, id)
-        .await
-        .map_err(ApiError::internal)?;
+    let (manager, admin) = match orch_engine::jobs::retained::authority(conn, principal, id).await {
+        Ok(rights) => rights,
+        // The place it was in is gone too (a deleted place's trash keeps its environments for the window): what is
+        // kept reads as gone, with no name and no act on it, instead of failing whatever lists it.
+        Err(orch_engine::EngineError::Authz(orch_authz::Error::NotFound(_))) => (false, false),
+        Err(error) => return Err(ApiError::internal(error)),
+    };
     let by = match row.deleted_by {
         Some(id) => crate::middleware::authorization::refusals::user_refs(conn, &[id])
             .await?
