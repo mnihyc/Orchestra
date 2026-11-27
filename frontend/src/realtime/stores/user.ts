@@ -199,6 +199,15 @@ export const userWriter = {
     set(() => ({ error }));
   },
 
+  /**
+   * A full resync retires the Inbox before its fresh read: the counters stay on screen until that read replaces them, and
+   * so do the rows an open Inbox shows; rows nobody shows are let go, so the next Inbox opening reads its first page.
+   */
+  retire(keepRows: boolean): void {
+    if (keepRows) return;
+    set((state) => ({ ...INITIAL, counters: state.counters }));
+  },
+
   /** Forgets everything: whoever was signed in has left. */
   clear(): void {
     useUserStore.setState(INITIAL, true);

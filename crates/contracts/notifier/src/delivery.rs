@@ -317,6 +317,10 @@ pub struct DeliverError {
     /// The target no longer exists, or no longer takes this sender.
     #[serde(default)]
     pub gone: bool,
+    /// The declared field of the channel this is about, where the notifier can tell: a form says the
+    /// refusal of a check at that field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 impl DeliverError {
@@ -329,7 +333,15 @@ impl DeliverError {
             retryable: false,
             retry_after_secs: None,
             gone: false,
+            field: None,
         }
+    }
+
+    /// The same error, about the declared field `name` of the channel.
+    #[must_use]
+    pub fn at(mut self, name: &str) -> Self {
+        self.field = Some(name.to_owned());
+        self
     }
 
     /// A failure that may pass, such as a far side that cannot be reached now.

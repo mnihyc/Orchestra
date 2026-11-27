@@ -1,6 +1,7 @@
 /** Keeps a fault of one part of the page to that part: what failed is replaced by what the caller draws for it, and everything round it goes on.
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { retryPart } from '@/lib/partFailures';
 
 export interface ErrorBoundaryProps {
   /** What is drawn in place of the part that failed. `retry` draws the part anew. */
@@ -32,6 +33,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, State> {
   }
 
   retry = (): void => {
+    retryPart(this.state.error);
     this.setState({ failed: false, error: null });
   };
 

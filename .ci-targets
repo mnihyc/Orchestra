@@ -1,0 +1,4 @@
+test -p orch-db --test participation_summaries -- a_transaction_reads_its_summaries_on_one_plan_with_the_same_answers
+test -p orch-db --test provider_keeper -- a_reported_model_list_is_kept_in_its_own_row_and_the_facts_hold_the_rest facts_are_written_when_they_differ_and_not_otherwise
+test -p orch-api-core --test everything_scale -- simultaneous::an_org_chat_opening_reads_its_default_models_candidates_together_once --nocapture
+test -p orch-api-core --test everything_resources -- a_row_of_the_providers_list_holds_what_its_table_draws_and_leaves_out_what_only_a_provider_page_does

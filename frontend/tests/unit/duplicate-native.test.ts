@@ -2,7 +2,7 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import type * as Client from '@/api/client';
 import { beforeEach, expect, it, vi } from 'vitest';
-import { duplicate, duplicateBody, duplicateObjects, duplicatePath, previewChatDuplicate, type DuplicateKind } from '@/api/duplicates';
+import { duplicate, duplicateBody, duplicateObjects, duplicatePath, type DuplicateKind } from '@/api/duplicates';
 import { applyChanges, findAct } from '@/api/acts';
 import { i18n } from '@/i18n';
 import { duplicateEntries, openDuplicate, resourceDuplicateEntries, useDuplicateHost } from '@/features/duplicate/target';
@@ -24,7 +24,7 @@ it.each(kinds)('keeps %s duplication in its declared native operation and accept
   calls.json.mockResolvedValue(receipt);
   expect(await duplicate(kind, 'original', { destination: { kind: 'node', id: 'another-org' }, expected_revision: 7 }, 'one-act')).toEqual(receipt);
   const ordinary = { name: null, destination: { kind: 'node', id: 'another-org' }, expected_revision: 7 };
-  const expected = kind === 'chat' ? { copy: ordinary, notify: null, notify_preview_id: null } : kind === 'mcp_server' ? { ...ordinary, machine_id: null } : kind === 'environment' ? { ...ordinary, managed: null, machine_id: null } : ordinary;
+  const expected = kind === 'chat' ? { copy: ordinary } : kind === 'mcp_server' ? { ...ordinary, machine_id: null } : kind === 'environment' ? { ...ordinary, managed: null, machine_id: null } : ordinary;
   expect(calls.json).toHaveBeenCalledExactlyOnceWith(`/${duplicateObjects[kind]}/original/duplicate`, {
     method: 'POST', key: 'one-act', body: expected,
   });
@@ -44,12 +44,8 @@ it('keeps a physical MCP recipient independent of home, and ignores that field f
   expect(duplicateBody('mcp_server', body, { machineId: 'usable-machine' })).toEqual({ ...body, name: null, expected_revision: null, machine_id: 'usable-machine' });
   expect(duplicateBody('provider', body, { machineId: 'usable-machine' })).toEqual({ ...body, name: null, expected_revision: null });
 });
-it('binds an explicit group notification to its own native preview', async () => {
-  calls.json.mockResolvedValue({ people: 3, notify_limit: 200, preview_id: 'preview' });
-  await previewChatDuplicate('group');
-  expect(calls.json).toHaveBeenCalledWith('/chats/group/duplicate/preview', { method: 'POST' });
-  expect(duplicateBody('chat', {}, { notify: { preview: 'preview' } })).toEqual({ copy: { name: null, destination: null, expected_revision: null }, notify: true, notify_preview_id: 'preview' });
-  expect(duplicateBody('chat', {})).toEqual({ copy: { name: null, destination: null, expected_revision: null }, notify: null, notify_preview_id: null });
+it('copies a conversation without notice options', () => {
+  expect(duplicateBody('chat', {})).toEqual({ copy: { name: null, destination: null, expected_revision: null } });
 });
 it('rejects an acknowledgement for a different family without opening it', async () => {
   calls.json.mockResolvedValue({ projection: 'receipt', kind: 'environment', id: 'foreign' });
@@ -63,9 +59,9 @@ it.each(kinds)('registers %s creation without marking its source content changed
   expect(missing.some((view) => view.id === 'source')).toBe(false);
   expect(act?.changes.some((change) => 'row' in change && change.row.id === 'source')).toBe(false);
 });
-it('registers draft creation and a read-only audience preview separately', () => {
+it('registers draft creation without a duplicate chat audience route', () => {
   expect(findAct('POST', '/skills/source/draft/duplicate')).not.toBeNull();
-  expect(findAct('POST', '/chats/source/duplicate/preview')?.changes).toEqual([]);
+  expect(findAct('POST', '/chats/source/duplicate/preview')).toBeNull();
 });
 it('does not turn a permission-page name or Manage into readable source configuration', () => {
   const access: ResourceAccess = { administers: false, permissions: ['provider.manage'], through: [] };

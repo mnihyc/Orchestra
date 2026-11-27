@@ -1,4 +1,4 @@
-/** The dialogs of a document that stands in the tree: a new title, another place, and deleting it with the way back.
+/** The dialogs of a document that stands in the tree: a new title and another place; Delete moves it to the trash at once.
  *
  * They are opened from the document's menu in the left bar and drawn by the one host of the frame.
  * Moving is the documents' own dialog, which shows who gains and who loses the document before it
@@ -6,21 +6,21 @@
  * document that was deleted is taken to the place it stood beside.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 
-import { deleteDocument, documentQuery, renameDocument, restoreDocument } from '@/api/documents';
+import { documentQuery, renameDocument } from '@/api/documents';
 import { MoveDialog } from '@/features/documents/Placement';
 import { type DocPlace, documentPath, placePath } from '@/features/navigation/places';
+import { useDocumentTrash } from '@/features/trash/useDocumentTrash';
+import { placeById } from '@/features/trash/where';
 import { useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
-import { ConfirmDialog } from '@/ui/ConfirmDialog';
-import { adminSpec } from '@/ui/AdminAct';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
 import { SkeletonRows } from '@/ui/Skeleton';
-import { toast } from '@/ui/Toast';
 
 interface DialogProps {
   doc: DocPlace;
@@ -87,36 +87,23 @@ export function MoveDocumentDialog({ doc, open, onClose }: DialogProps) {
   );
 }
 
-export function DeleteDocumentDialog({ doc, open, onClose }: DialogProps) {
-  const { t } = useTranslation();
+/**
+ * Deleting asks nothing: the document goes to the trash of its place, and the line after it has Show and Undo.
+ * Whoever was looking at it has nothing left to look at and goes to the place it stood beside.
+ */
+export function TrashDocument({ request, doc, onClose }: { request: object; doc: DocPlace; onClose: () => void }) {
   const navigate = useNavigate();
   const viewing = useRouterState({ select: (state) => state.location.pathname === documentPath(doc.id) });
-  const remove = useMutation({
-    mutationFn: () => deleteDocument(doc.id),
-    onSuccess: () => {
-      onClose();
-      // Whoever was looking at it has nothing left to look at: they go to the place it stood beside.
-      if (viewing) void navigate({ to: placePath(doc.node) });
-      toast({
-        tone: 'success',
-        title: t('documents.delete.done', { title: doc.title }),
-        action: { label: t('places.toast.undo'), run: () => void restoreDocument(doc.id) },
-      });
-    },
-  });
-  return (
-    <ConfirmDialog
-      open={open}
-      onOpenChange={(next) => !next && onClose()}
-      title={t('documents.delete.title', { title: doc.title })}
-      admin={adminSpec(doc, 'doc.manage')}
-      confirmLabel={t('documents.delete.confirm', { title: doc.title })}
-      danger
-      pending={remove.isPending}
-      error={remove.error ?? undefined}
-      onConfirm={() => remove.mutate()}
-    >
-      {t('documents.delete.about')}
-    </ConfirmDialog>
-  );
+  const trash = useDocumentTrash();
+  // Each opening is one act, however often the host draws it.
+  const asked = useRef<object | null>(null);
+  useEffect(() => {
+    if (asked.current === request) return;
+    asked.current = request;
+    onClose();
+    void trash([{ item: { kind: 'document', id: doc.id }, name: doc.title }], placeById(doc.node.id, doc.node.kind)).then((result) => {
+      if (viewing && result.groups.length > 0) void navigate({ to: placePath(doc.node) });
+    });
+  }, [request, doc, trash, onClose, navigate, viewing]);
+  return null;
 }
