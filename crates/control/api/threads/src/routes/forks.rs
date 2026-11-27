@@ -498,6 +498,7 @@ async fn side_failed(conn: &mut Conn, parent: Id, error: SideError) -> ApiError 
         )
         .with("open", open)
         .with("max", max),
+        SideError::DifferentAccess => ApiError::invalid("client_id", &error.to_string()),
         SideError::Invalid(message) => ApiError::invalid("to_turn", &message),
         SideError::NoReading(why) => {
             ApiError::new(ErrorCode::CapabilityUnsupported, why).with("capability", "side_reading")

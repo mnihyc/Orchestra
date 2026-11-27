@@ -93,19 +93,48 @@ pub fn descriptor() -> NotifierDescriptor {
 pub struct PushNotifier {
     vapid: Vapid,
     clock: Arc<dyn Clock>,
+    contact: Contact,
+}
+
+type ContactRead =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, DeliverError>> + Send>>;
+
+/// The installation's current public address, supplied by the composing service at each delivery.
+#[derive(Clone)]
+pub struct Contact(Arc<dyn Fn() -> ContactRead + Send + Sync>);
+
+impl std::fmt::Debug for Contact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Contact")
+    }
+}
+
+impl Contact {
+    /// The callback reads committed state; neither the key nor the notifier captures a startup address.
+    pub fn new<F, R>(read: F) -> Self
+    where
+        F: Fn() -> R + Send + Sync + 'static,
+        R: std::future::Future<Output = Result<String, DeliverError>> + Send + 'static,
+    {
+        Self(Arc::new(move || Box::pin(read())))
+    }
 }
 
 impl PushNotifier {
     /// A notifier that signs with the system's key.
     #[must_use]
-    pub fn new(vapid: Vapid) -> Self {
-        Self::with_clock(vapid, Arc::new(SystemClock))
+    pub fn new(vapid: Vapid, contact: Contact) -> Self {
+        Self::with_clock(vapid, Arc::new(SystemClock), contact)
     }
 
     /// A notifier whose signature expiration follows the supplied clock.
     #[must_use]
-    pub fn with_clock(vapid: Vapid, clock: Arc<dyn Clock>) -> Self {
-        Self { vapid, clock }
+    pub fn with_clock(vapid: Vapid, clock: Arc<dyn Clock>, contact: Contact) -> Self {
+        Self {
+            vapid,
+            clock,
+            contact,
+        }
     }
 
     /// The public half of the system's key: what a browser subscribes with.
@@ -256,9 +285,10 @@ impl Notifier for PushNotifier {
         let content = serde_json::to_vec(&payload::content_of(&delivery))
             .map_err(|error| DeliverError::refused("message", &error.to_string()))?;
         let body = encryption::seal(subscription.public_key, subscription.auth, &content)?;
+        let contact = (self.contact.0)().await?;
         let authorization = self
             .vapid
-            .sign_for(&endpoint, self.clock.as_ref())
+            .sign_for(&endpoint, &contact, self.clock.as_ref())
             .map_err(|error| DeliverError::refused("message", &error.to_string()))?;
 
         let client = reqwest::Client::builder()

@@ -114,6 +114,7 @@ struct Entry {
     fact: EnvironmentFactsMount,
     name: String,
     files: Option<Files>,
+    directory: Option<(u64, crate::platform::FileNumber)>,
 }
 
 /// The mounts of one environment.
@@ -161,7 +162,10 @@ impl Mounts {
         let mut entries = Vec::new();
         for mount in attached {
             let mode = link_mode(mount.mode);
-            let files = Self::open(Path::new(&mount.path), limits, gates);
+            let (files, directory) = match Self::open(Path::new(&mount.path), limits, gates) {
+                Some((files, identity)) => (Some(files), Some(identity)),
+                None => (None, None),
+            };
             let fact = match &files {
                 Some(_) => EnvironmentFactsMount {
                     mount_id: Id::nil(),
@@ -179,6 +183,7 @@ impl Mounts {
                 fact,
                 name: mount.name,
                 files,
+                directory,
             });
         }
         Ok(Self { entries })
@@ -217,15 +222,26 @@ impl Mounts {
             } else {
                 None
             };
-            let (fact, files) = match fault {
+            let (fact, files, directory) = match fault {
                 Some(fault) => (
                     Self::unavailable(request.mount_id, &request.name, asked, fault),
+                    None,
                     None,
                 ),
                 None => {
                     let files = Self::open(&source, limits, gates);
                     match files {
-                        Some(_) => (
+                        Some((files, _)) if !Self::recorded_identity_matches(request, &files) => (
+                            Self::unavailable(
+                                request.mount_id,
+                                &request.name,
+                                asked,
+                                MountFault::Refused,
+                            ),
+                            None,
+                            None,
+                        ),
+                        Some((files, identity)) => (
                             EnvironmentFactsMount {
                                 mount_id: request.mount_id,
                                 name: request.name.clone(),
@@ -237,7 +253,8 @@ impl Mounts {
                                 // The data is used where it is: only the harness's sandbox and the permissions keep writes out.
                                 enforced: false,
                             },
-                            files,
+                            Some(files),
+                            Some(identity),
                         ),
                         None => (
                             Self::unavailable(
@@ -247,6 +264,7 @@ impl Mounts {
                                 MountFault::Missing,
                             ),
                             None,
+                            None,
                         ),
                     }
                 }
@@ -255,9 +273,28 @@ impl Mounts {
                 fact,
                 name: request.name.clone(),
                 files,
+                directory,
             });
         }
         Self { entries }
+    }
+
+    fn recorded_identity_matches(request: &EnvAttachMount, files: &Files) -> bool {
+        let Some(recorded) = request
+            .volume
+            .as_ref()
+            .and_then(|volume| volume.directory.as_ref())
+        else {
+            return true;
+        };
+        let (Some(device), Some(inode)) = (recorded.device, recorded.inode) else {
+            return false;
+        };
+        Path::new(&request.source) == Path::new(&recorded.path)
+            && files
+                .root()
+                .root_meta()
+                .is_ok_and(|actual| actual.dev == device && actual.ino == inode)
     }
 
     fn unavailable(
@@ -278,7 +315,11 @@ impl Mounts {
         }
     }
 
-    fn open(path: &Path, limits: &Limits, gates: &Arc<GateState>) -> Option<Files> {
+    fn open(
+        path: &Path,
+        limits: &Limits,
+        gates: &Arc<GateState>,
+    ) -> Option<(Files, (u64, crate::platform::FileNumber))> {
         let workspace = Workspace::open(
             path,
             &[],
@@ -286,12 +327,23 @@ impl Mounts {
             crate::platform::DEFAULT_CASE_SENSITIVE,
         )
         .ok()?;
-        Some(Files::mount(
-            workspace,
-            Arc::new(HashCache::new()),
-            limits.clone(),
-            Arc::clone(gates),
+        let actual = workspace.root_meta().ok()?;
+        Some((
+            Files::mount(
+                workspace,
+                Arc::new(HashCache::new()),
+                limits.clone(),
+                Arc::clone(gates),
+            ),
+            (actual.dev, actual.ino),
         ))
+    }
+
+    /// Actual opened roots retained by this attachment, independent of mutable path names.
+    pub(crate) fn directory_identities(
+        &self,
+    ) -> impl Iterator<Item = (u64, crate::platform::FileNumber)> + '_ {
+        self.entries.iter().filter_map(|entry| entry.directory)
     }
 
     /// What became of each mount, for the environment's facts.
@@ -424,6 +476,49 @@ mod tests {
         let roots = mounts.roots();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].mode, DriverMode::ReadOnly);
+    }
+
+    #[test]
+    fn an_owned_mount_does_not_attach_a_replacement_directory_at_its_recorded_path() {
+        use std::os::unix::fs::MetadataExt;
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("owned");
+        std::fs::create_dir(&path).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mut request = request("owned", &path, AttachMode::ReadOnly);
+        request.volume = Some(orch_driver_contract::runtime::VolumeRef {
+            name: format!("orch-mount-{}", request.mount_id),
+            storage: None,
+            directory: Some(orch_driver_contract::runtime::DirectoryBinding {
+                path: path.to_string_lossy().into_owned(),
+                device: Some(metadata.dev()),
+                inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    metadata.ino(),
+                )),
+            }),
+        });
+        let initial = Mounts::attach_in_place(
+            &[request.clone()],
+            &MountPolicy::default(),
+            &["/workspace"],
+            &Limits::default(),
+            &gates(),
+        );
+        assert_eq!(initial.facts()[0].state, MountState::Attached);
+        drop(initial);
+        std::fs::rename(&path, base.path().join("original")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("foreign.txt"), b"another directory").unwrap();
+        let mounts = Mounts::attach_in_place(
+            &[request],
+            &MountPolicy::default(),
+            &["/workspace"],
+            &Limits::default(),
+            &gates(),
+        );
+        assert_eq!(mounts.facts()[0].state, MountState::Unavailable);
+        assert_eq!(mounts.facts()[0].reason, Some(MountFault::Refused));
+        assert!(mounts.files("owned").is_err());
     }
 
     #[test]

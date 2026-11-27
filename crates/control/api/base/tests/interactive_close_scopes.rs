@@ -382,17 +382,18 @@ async fn display_close_full_bounds_optional_thread_names_to_own_operation() -> P
 }
 
 async fn legacy_full(surface: Surface) -> Proof {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     let scene = scene(surface).await?;
     ordinary(surface, &scene).await?;
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let scopes = vec!["*".to_owned()];
     create_api_token(
         &mut *scene.rig.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: scene.cai.id(),
             name: "Legacy full Close guard origin",
             token_hash: &hash,
