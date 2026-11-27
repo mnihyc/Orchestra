@@ -253,7 +253,10 @@ async fn confirmation(
         ));
     }
     let kept: KeptPlan = serde_json::from_value(row.plan).map_err(ApiError::internal)?;
-    let purge = purge_at(ctx.now, ctx.app.config.retention.soft_delete_days);
+    let purge = purge_at(
+        ctx.now,
+        orch_settings::retention::deleted_keep_days(conn).await?,
+    );
     let revision = prepared.node().revision;
     let same = revision == kept.revision
         && body.expected_revision.is_none_or(|seen| seen == revision)
@@ -537,6 +540,10 @@ impl effects::Apply for Delete {
                 }));
             }
             let (place, kind) = placed(conn, id).await?;
+            let deadline = purge_at(
+                ctx.now,
+                orch_settings::retention::deleted_keep_days(conn).await?,
+            );
             let node = value.native.node();
             if kind == NodeKind::Thread {
                 let removed = ctx
@@ -558,7 +565,7 @@ impl effects::Apply for Delete {
                 let settled = &removed.settled;
                 let who = actor_name(ctx)?;
                 record(ctx,conn,orch_db::audit::action!(AuditAction::NodeDeleted),place,&format!("{who} deleted the thread {}",node.name),
-                    json!({"nodes":removed.gone,"archived_first":removed.archived_first,"threads":settled.threads,"turns":settled.turns,"inputs":settled.inputs,"approvals":settled.approvals,"environments":removed.environments.len(),"resources_before":[],"deleted_nodes":removed.deleted_nodes,"purge_at":purge_at(ctx.now,ctx.app.config.retention.soft_delete_days)})).await?;
+                    json!({"nodes":removed.gone,"archived_first":removed.archived_first,"threads":settled.threads,"turns":settled.turns,"inputs":settled.inputs,"approvals":settled.approvals,"environments":removed.environments.len(),"resources_before":[],"deleted_nodes":removed.deleted_nodes,"purge_at":deadline})).await?;
             } else {
                 if let Some(parent) = value.native.member_destination() {
                     cut()?;
@@ -627,7 +634,7 @@ impl effects::Apply for Delete {
                     );
                 let who = actor_name(ctx)?;
                 record(ctx,conn,orch_db::audit::action!(AuditAction::NodeDeleted),place,&format!("{who} deleted the {} {}",kind_word(kind),node.name),
-                    json!({"nodes":gone,"archived_first":archived_first,"threads":settled.threads,"turns":settled.turns,"inputs":settled.inputs,"approvals":settled.approvals,"environments":environments.len(),"resources_before":resources_before,"deleted_nodes":deleted_nodes,"purge_at":purge_at(ctx.now,ctx.app.config.retention.soft_delete_days)})).await?;
+                    json!({"nodes":gone,"archived_first":archived_first,"threads":settled.threads,"turns":settled.turns,"inputs":settled.inputs,"approvals":settled.approvals,"environments":environments.len(),"resources_before":resources_before,"deleted_nodes":deleted_nodes,"purge_at":deadline})).await?;
                 hierarchy::stamp_subtree(conn, id).await?;
             }
             let deletion_id = orch_db::queries::trace::node_deletion(conn, id).await?;

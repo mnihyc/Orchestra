@@ -16,6 +16,59 @@ use orch_driver_contract::units::UnitStateKind;
 use orch_testkit::doubles::driver::Operation;
 
 #[tokio::test]
+async fn an_inspection_that_waited_across_a_native_incarnation_change_never_reports_it_as_the_replacement()
+ {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "original-observation");
+    rig.made(&spec).await;
+    let role = rig.role();
+    rig.driver.hold(Operation::Inspect);
+    struct Release(std::sync::Arc<orch_testkit::doubles::driver::MemoryDriver>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release(Operation::Inspect);
+        }
+    }
+    let release = Release(rig.driver.clone());
+    let reading = role.reconciler().observe();
+    tokio::pin!(reading);
+    tokio::time::timeout(common::PATIENCE, async {
+        loop {
+            let before = rig.driver.targets_of(Operation::Inspect).len();
+            assert!(futures::poll!(&mut reading).is_pending());
+            if rig.driver.targets_of(Operation::Inspect).len() > before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = orch_types::new_id();
+    role.ledger()
+        .update(spec.runtime_id, |record| {
+            record.incarnation = orch_node_core::ledger::Incarnation::Tracked(replacement);
+        })
+        .unwrap();
+    drop(release);
+    let observations = reading.await;
+    assert!(
+        !observations
+            .iter()
+            .any(|observation| observation.runtime_id == spec.runtime_id)
+    );
+    let fresh = role.reconciler().observe().await;
+    let current = fresh
+        .iter()
+        .find(|observation| observation.runtime_id == spec.runtime_id)
+        .unwrap();
+    assert_eq!(current.source.incarnation, Some(replacement));
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn at_start_the_node_tells_the_real_state_of_every_unit_it_made_before() {
     let mut rig = Rig::new();
     rig.have_connector();
@@ -157,6 +210,42 @@ async fn a_runtime_a_command_is_being_carried_out_for_is_left_to_the_command() {
     tokio::time::timeout(common::PATIENCE, rig.controller.wait_command(started))
         .await
         .unwrap();
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_unit_that_ends_while_its_stop_is_held_is_reported_without_waiting_for_the_command() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "stopping-workspace");
+    rig.made(&spec).await;
+    rig.start_runtime(spec.runtime_id).await;
+    rig.driver.hold(Operation::Stop);
+    let stopped = rig.controller.issue(
+        &orch_link_contract::commands::SerialKey::Runtime(spec.runtime_id),
+        rig.deadline(),
+        &orch_link_contract::commands::NodeRuntimeStop {
+            runtime_id: spec.runtime_id,
+            reason: None,
+        },
+    );
+    rig.wait_call(Operation::Stop, &spec.name).await;
+    rig.driver.crash(&spec.name, 137, "Ended while stopping");
+    assert_eq!(rig.role().reconciler().pass().await, 1);
+    rig.wait_state(spec.runtime_id, "failed").await;
+    assert_eq!(
+        rig.role().reconciler().pass().await,
+        0,
+        "the same terminal observation is not repeated"
+    );
+    rig.driver.release(Operation::Stop);
+    assert!(matches!(
+        tokio::time::timeout(common::PATIENCE, rig.controller.wait_command(stopped))
+            .await
+            .unwrap(),
+        orch_link::commands::Progress::Succeeded(_)
+    ));
     rig.stop().await;
 }
 

@@ -152,12 +152,12 @@ pub fn mount(registry: &mut Registry) {
 
 /// When what was deleted at `at` is gone for good.
 pub(super) fn purge_at(at: DateTime<Utc>, days: u64) -> DateTime<Utc> {
-    at + Duration::days(i64::try_from(days).unwrap_or(i64::MAX / 86_400))
+    orch_settings::retention::purge_at(at, days)
 }
 
 /// The moment before which a deletion has been purged by `now`.
 pub(super) fn purged_before(now: DateTime<Utc>, days: u64) -> DateTime<Utc> {
-    now - Duration::days(i64::try_from(days).unwrap_or(i64::MAX / 86_400))
+    orch_settings::retention::deleted_before(now, days)
 }
 
 /// The kind of a stored deletion plan.
@@ -253,7 +253,10 @@ async fn prepare_delete_review(
     Ok(DeleteReview {
         node,
         set: set.to_vec(),
-        purge_at: purge_at(ctx.now, ctx.app.config.retention.soft_delete_days),
+        purge_at: purge_at(
+            ctx.now,
+            orch_settings::retention::deleted_keep_days(conn).await?,
+        ),
     })
 }
 
@@ -309,6 +312,13 @@ async fn render_delete_review(
     let review = &saved.review;
     let refs = view::refs(conn, principal, &[review.node.id], Policy::default()).await?;
     Ok(NodeDeletePlan {
+        retention: orch_engine::schedule::node_retention(
+            conn,
+            review.node.id,
+            principal.now().get(),
+        )
+        .await
+        .map_err(ApiError::engine)?,
         preflight_id: saved.preflight.id,
         expires_at: Time::new(saved.preflight.expires_at),
         node: refs
@@ -376,8 +386,8 @@ async fn deleted_list(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<Dele
             })
         }
     };
-    let days = ctx.app.config.retention.soft_delete_days;
     let mut conn = ctx.app.db.acquire().await?;
+    let days = orch_settings::retention::deleted_keep_days(&mut conn).await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
     let batch = i64::try_from(limit + 1).unwrap_or(i64::MAX);
     let mut rows = hierarchy::deleted_under(

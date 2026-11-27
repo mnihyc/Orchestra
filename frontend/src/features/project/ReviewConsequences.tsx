@@ -1,14 +1,14 @@
-/** Complete per-place archive, move and deletion consequences, shared by single and selected-row reviews. */
+/** Complete per-place archive and move consequences, shared by single and selected-row reviews. */
 import { useTranslation } from 'react-i18next';
 import { Account } from '@/features/access/ChangePreview';
 import { PlaceLink } from '@/features/navigation/places';
 import { useNodeLabel } from '@/features/navigation/placeLabels';
 import { Facts } from '@/features/resources/Facts';
-import type { NodeArchivePlan, NodeDeletePlan, NodeMovePlan, NodeRef, NodeOrSystem, PlanBlocker } from '@/generated/api-types';
-import { permissionLabel } from '@/lib/permissions';
+import type { NodeArchivePlan, NodeMovePlan, NodeRef, NodeOrSystem, PlanBlocker } from '@/generated/api-types';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { RelativeTime } from '@/ui/RelativeTime';
+import { RetentionFacts } from './RetentionFacts';
 
 export function ReviewPlace({ place }: { place: Exclude<NodeOrSystem, 'system'> }) {
   const { t } = useTranslation();
@@ -30,7 +30,7 @@ export function ArchiveConsequences({ plan }: { plan: NodeArchivePlan }) {
   const { t } = useTranslation();
   const unknown = t('placeReview.notVisible');
   return <div className="flex min-w-0 flex-col gap-3 text-sm">
-    <p>{t(plan.archiving ? 'placeReview.archiveAbout' : 'placeReview.unarchiveAbout')}</p>
+    <div className="flex flex-wrap items-center gap-2"><p>{t(plan.archiving ? 'placeReview.archiveAbout' : 'placeReview.unarchiveAbout')}</p><RetentionFacts retention={plan.retention} /></div>
     <p>{t('placeReview.documentsReadOnly', { count: plan.counts.documents })}</p>
     <ul className="flex flex-col gap-1" aria-label={t('placeReview.subtree')}>{plan.subtree.map((item) => <li key={item.node.id} className="flex flex-wrap items-baseline gap-x-2"><span>{t(`finder.kinds.${item.node.kind}`)}</span><ReviewPlace place={item.node} /><span className="text-text-muted">{t(item.read_only_after ? 'placeReview.readOnly' : 'placeReview.ordinaryRights')}{item.own_archived && !plan.archiving ? ` · ${t('placeReview.ownArchiveKept')}` : ''}</span></li>)}</ul>
     {plan.archiving ? <ul className="flex flex-col gap-3" aria-label={t('placeReview.work')}>{plan.work.map((item) => <li key={item.thread.id} className="flex flex-col gap-1"><ReviewPlace place={item.thread} /><Facts rows={[
@@ -58,17 +58,5 @@ export function MoveConsequences({ plan }: { plan: NodeMovePlan }) {
     <p>{t('placeReview.addresses', { members: plan.addresses.members, resources: plan.addresses.resources })}</p>
     <ul className="flex flex-col gap-2" aria-label={t('placeReview.settings')}>{plan.settings.map((setting) => <li key={setting.key} className="flex flex-col gap-1"><code className="wrap-anywhere">{setting.key}</code><span className="wrap-anywhere">{value(setting.from)}{' → '}{value(setting.to)}</span>{setting.locked_by !== null && <span>{t('placeReview.lockedBy')}{' '}{setting.locked_by === 'system' ? t('placeReview.system') : <ReviewPlace place={setting.locked_by} />}</span>}</li>)}</ul>
     <p>{t('places.move.plan.untouched')}</p><ReviewBlockers blockers={plan.blockers} />
-  </div>;
-}
-
-export function DeleteConsequences({ plan }: { plan: NodeDeletePlan }) {
-  const { t } = useTranslation();
-  return <div className="flex flex-col gap-3 text-sm">
-    <Facts rows={[
-      ...(['orgs', 'projects', 'topics', 'threads', 'documents'] as const).map((kind) => ({ name: t(`placeReview.counts.${kind}`), value: plan.counts[kind] })),
-      { name: t('placeReview.purgeAt'), value: <RelativeTime at={plan.purge_at} /> },
-      { name: t('placeReview.restoreBy'), value: <span>{permissionLabel(plan.restore_by.permission)}{' · '}{plan.restore_by.place === 'system' ? t('placeReview.system') : <ReviewPlace place={plan.restore_by.place} />}</span> },
-    ]} />
-    <p>{t('placeReview.deleteAbout')}</p><p className="text-text-muted">{t('placeReview.expires')}{' '}<RelativeTime at={plan.expires_at} /></p>
   </div>;
 }

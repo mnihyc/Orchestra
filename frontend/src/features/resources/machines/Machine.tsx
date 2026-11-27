@@ -1,3 +1,5 @@
+import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
+import { holds } from '@/lib/permissions';
 /** Identity, facts, roles, registered resources and certificate.
  *
  * A machine's page is its console in Orch. It says what the machine is and reports (its system, its
@@ -35,11 +37,12 @@ import { useResourceHeading } from '@/features/resources/trail';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import type { Machine as MachineRow } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
-import { formatBytes, formatNumber } from '@/lib/format';
+import { formatNumber } from '@/lib/format';
 import { DAY_MS, formatDateTime, useNow } from '@/lib/time';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
-import { ErrorState } from '@/ui/ErrorState';
+import { Button } from '@/ui/Button';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
@@ -97,8 +100,7 @@ function Overview({ machine }: { machine: MachineRow }) {
             { name: t('machines.overview.system'), value: facts.osVersion ?? OS_NAMES[machine.platform_os] },
             ...(facts.dedicated ? [{name:t('machines.policy.isolation'),value:t('machines.policy.dedicated')}] : []),
             ...(facts.hostname === null || facts.hostname===machine.name ? [] : [{ name: t('machines.overview.hostname'), value: facts.hostname }]),
-            ...(facts.cpus === null ? [] : [{ name: t('machines.overview.cpus'), value: formatNumber(facts.cpus, locale) }]),
-            ...(facts.memoryBytes === null ? [] : [{ name: t('machines.overview.memory'), value: formatBytes(facts.memoryBytes, locale) }]),
+            ...(facts.cpus === null && facts.memoryBytes === null ? [] : [{ name:t('machines.capacity.title'),value:<MachineCapacityLine facts={machine.facts} /> }]),
             { name: t('machines.overview.roles'), value: <MachineRoles machine={machine}/> },
             { name: t('machines.overview.lastSeen'), value: machine.last_seen_at === null ? t('machines.list.never') : <span className="flex flex-wrap items-center gap-x-2"><RelativeTime at={machine.last_seen_at} />{machine.last_ip !== null && <span className="text-text-muted">{t('machines.overview.from', { address: machine.last_ip })}</span>}</span> },
             {
@@ -130,7 +132,7 @@ function Overview({ machine }: { machine: MachineRow }) {
         {slow && <p className="text-sm text-text-muted">{t('machines.overview.slowWhy', { ms: SLOW_LINK_MS })}</p>}
       </Section>
 
-      <MachineGatewayStatus machineId={machine.id} online={machine.online} />
+      <MachineGatewayStatus key={machine.id} machineId={machine.id} online={machine.online} manage={holds(machine.access,'machine.manage')||holds(machine.access,'host.manage')} />
 
       <ResourceDetails><JsonTree value={machine.facts} label={t('machines.overview.about')} /></ResourceDetails>
 
@@ -174,7 +176,8 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
   const acts = useMachineActs();
 
   if (query.isPending) return <Skeletons read={query} />;
-  if (query.isError) return <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
+  // A refresh that failed keeps the machine on screen with one line and Try again; only a first read that failed has nothing to show.
+  if (query.data === undefined) return <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const machine = query.data;
   const { edit, primary, menu } = acts.page(machine);
   const registration = tab === 'programs' || tab === 'sessions' ? tab : 'registered';
@@ -183,9 +186,14 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
   const installation = machine.installation ?? installationOf(machine.facts);
   const sectionHref = (section: string) => `/resources/machines/${encodeURIComponent(machine.id)}?tab=${section}`;
 
+  const notices = <>
+    {query.isError && <ErrorAlert error={query.error} action={<Button size="sm" pending={query.isRefetching} onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />}
+    <UpdateNotice update={machine.software_update} action={primary?.id === 'update-now' ? primary : null} />
+    <MachineSandboxReadiness key={machine.id} values={machine.environment_sandboxes} />
+  </>;
   return (
     <Page>
-      <PageHeader
+      <PageHeader compactResource
         adminAccess={machine.access?.admin_access} ownership={machine} opening={{ kind: 'machine', id: machine.id }}
         back={back}
         mark={
@@ -197,9 +205,7 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
         facts={[<MachineStatus key="state" machine={machine} />]}
         actions={<HeadingActs omit={primary?.id === 'update-now' ? ['update-now'] : []} admin={adminSpec(machine, ['machine.manage', 'host.manage'])} name={machine.name} primary={primary?.id === 'update-now' ? null : primary} edit={edit} menu={menu} />}
       />
-      <UpdateNotice update={machine.software_update} action={primary?.id === 'update-now' ? primary : null} />
-      <MachineSandboxReadiness key={machine.id} values={machine.environment_sandboxes} />
-      <Tabs
+      <Tabs frame={(navigation, panels) => <>{navigation}{notices}{panels}</>}
         label={t('machines.tabs.label')}
         value={shown}
         onValueChange={onTab}
@@ -213,13 +219,13 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
             panel: <DetailSections label={t('machines.tabs.registered')} value={registration} onValueChange={onTab} hrefOf={sectionHref} sections={[
               { value: 'registered', label: t('resourceDetails.layout.registered'), panel: <RegisteredHere machine={machine} /> },
               { value: 'programs', label: t('machinePrograms.title'), panel: <MachineProgramsTab machine={machine} /> },
-              ...(harnessesOfMachine(machine).length === 0 ? [] : [{ value: 'sessions' as const, label: t('adopt.tab'), panel: <HarnessSessions harnesses={harnessesOfMachine(machine)} /> }]),
+              ...(harnessesOfMachine(machine).length === 0 ? [] : [{ value: 'sessions' as const, label: t('adopt.tab'), panel: <HarnessSessions scopeKey={"machine:" + machine.id} harnesses={harnessesOfMachine(machine)} /> }]),
             ]} />,
           },
           { value: 'storage', label: t('resourceDetails.layout.storage'), panel: <DetailSections label={t('resourceDetails.layout.storage')} sections={[
+            { value: 'storages', label: t('machineStorage.title'), panel: <MachineStorages facts={machine.facts} dataDirectory={machine.data_directory} /> },
             { value: 'mounts', label: t('resourceDetails.mount.here.title'), panel: <MountsHere machine={machine.id} name={machine.name} /> },
             { value: 'directories', label: t('environmentData.roots'), panel: <EnvironmentDirectoriesHere machine={machine.id} /> },
-            { value: 'storages', label: t('machineStorage.title'), panel: <MachineStorages facts={machine.facts} dataDirectory={machine.data_directory} /> },
           ]} /> },
           { value: 'policy', label: t('machines.tabs.policy'), panel: machine.access === null || machine.access === undefined
             ? <MachinePolicyTab machine={machine} />

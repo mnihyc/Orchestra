@@ -423,19 +423,27 @@ impl Endpoint for ExecEndpoint {
             );
         }
         let upgrade = hyper::upgrade::on(&mut request);
+        let stop = session.exchange_stop("exec");
         tokio::spawn(async move {
-            let Ok(upgraded) = upgrade.await else {
-                return;
+            let exchange = async move {
+                let Ok(upgraded) = upgrade.await else {
+                    return;
+                };
+                let harness = WebSocketStream::from_raw_socket(
+                    TokioIo::new(upgraded),
+                    Role::Server,
+                    Some(websocket_config()),
+                )
+                .await;
+                match upstream {
+                    Upstream::Here(socket) => join_websockets(harness, *socket).await,
+                    Upstream::Through(tunnel) => pump(harness, tunnel).await,
+                }
             };
-            let harness = WebSocketStream::from_raw_socket(
-                TokioIo::new(upgraded),
-                Role::Server,
-                Some(websocket_config()),
-            )
-            .await;
-            match upstream {
-                Upstream::Here(socket) => join_websockets(harness, *socket).await,
-                Upstream::Through(tunnel) => pump(harness, tunnel).await,
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => {},
+                () = exchange => {},
             }
         });
         let mut response = text(StatusCode::SWITCHING_PROTOCOLS, "");

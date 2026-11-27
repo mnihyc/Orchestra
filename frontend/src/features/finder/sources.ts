@@ -235,7 +235,7 @@ export function useAnswers({ active, mode, query, env, searchRow, helpForScreen,
 function saidIn(nodeId: string): boolean | null {
   for (const tree of useTreeStore.getState().byOrg.values()) {
     const node = tree.nodes.get(nodeId);
-    if (node !== undefined) return node.chat.seq > 0;
+    if (node !== undefined) return node.chat.seq === null ? null : node.chat.seq > 0;
   }
   return null;
 }
