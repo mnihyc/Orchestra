@@ -79,8 +79,10 @@ impl Reading<'_> {
     }
 
     pub async fn remember_node_ids(&self, conn: &mut Conn, ids: &[Id]) -> ApiResult<()> {
+        let found = targets::nodes(conn, ids).await?;
         for id in ids {
-            Self::remember(&self.primary, targets::node(conn, *id).await?)?;
+            let target = found.get(id).cloned().ok_or_else(ApiError::not_found)?;
+            Self::remember(&self.primary, target)?;
         }
         Ok(())
     }
@@ -210,6 +212,34 @@ impl Reading<'_> {
             }
         }
         Ok(bounds)
+    }
+
+    /// Record the actual references selected by the bounded native producer, each once, from one Graph read: a list
+    /// names the same org and project on every row's path.
+    pub async fn references(&self, conn: &mut Conn, nodes: &[&NodeRef]) -> ApiResult<()> {
+        let mut seen = BTreeSet::new();
+        let named: Vec<Id> = nodes
+            .iter()
+            .filter(|node| !node.redacted && (node.name.is_some() || node.thread_display.is_some()))
+            .map(|node| node.id)
+            .filter(|id| seen.insert(*id))
+            .collect();
+        let found = targets::nodes(conn, &named).await?;
+        for id in named {
+            let target = found.get(&id).cloned().ok_or_else(ApiError::not_found)?;
+            if !self.plan.permits_binding(
+                self.caller,
+                1,
+                target.object.kind,
+                std::slice::from_ref(&target),
+            )? {
+                return Err(ApiError::internal(
+                    "the native reference exceeded its declared source",
+                ));
+            }
+            self.remember_source(target.object.kind, target)?;
+        }
+        Ok(())
     }
 
     /// Record the actual reference selected by the bounded native producer.

@@ -13,8 +13,8 @@ interface Listing { items: LinkedThing[]; next_cursor: string | null }
 const calls = vi.hoisted(() => ({
   preview: vi.fn<() => Promise<unknown>>(),
   tabs: vi.fn<(id: string) => Promise<DocumentLinks>>(),
-  references: vi.fn<(id: string, direction: string, cursor: string | null) => Promise<Listing>>(),
-  mentions: vi.fn<(id: string, of: string, cursor: string) => Promise<Listing>>(),
+  references: vi.fn<(id: string, direction: string, cursor: string | null, q?: string) => Promise<Listing>>(),
+  mentions: vi.fn<(id: string, of: string, cursor: string | null, q?: string) => Promise<Listing>>(),
   related: vi.fn<(id: string, seq: number, cursor: string | null) => Promise<RelatedItems>>(),
   graph: vi.fn<(id: string) => Promise<LinkGraph>>(),
   go: vi.fn<(path: string) => void>(),
@@ -27,13 +27,13 @@ vi.mock('@/api/links', async (original) => {
   return {
     ...real,
     documentLinksQuery: (id: string) => queryOptions({ queryKey: ['t-links', id], queryFn: () => calls.tabs(id), staleTime: Infinity, retry: false }),
-    referencesQuery: (id: string, direction: string) => infiniteQueryOptions({
-      queryKey: ['t-references', id, direction], initialPageParam: null as string | null, staleTime: Infinity, retry: false,
-      queryFn: ({ pageParam }) => calls.references(id, direction, pageParam), getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor,
+    referencesQuery: (id: string, direction: string, q = '') => infiniteQueryOptions({
+      queryKey: ['t-references', id, direction, q], initialPageParam: null as string | null, staleTime: Infinity, retry: false,
+      queryFn: ({ pageParam }) => q === '' ? calls.references(id, direction, pageParam) : calls.references(id, direction, pageParam, q), getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor,
     }),
-    mentionsQuery: (id: string, of: string, first: string) => infiniteQueryOptions({
-      queryKey: ['t-mentions', id, of], initialPageParam: first, staleTime: Infinity, retry: false,
-      queryFn: ({ pageParam }) => calls.mentions(id, of, pageParam), getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor,
+    mentionsQuery: (id: string, of: string, first: string, q = '') => infiniteQueryOptions({
+      queryKey: ['t-mentions', id, of, q], initialPageParam: q === '' ? first : null as string | null, staleTime: Infinity, retry: false,
+      queryFn: ({ pageParam }) => q === '' ? calls.mentions(id, of, pageParam) : calls.mentions(id, of, pageParam, q), getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor,
     }),
     relatedPagesQuery: (id: string, seq: number) => infiniteQueryOptions({
       queryKey: ['t-related', id, seq], initialPageParam: null as string | null, staleTime: Infinity, retry: false,
@@ -213,4 +213,30 @@ it.each(['en', 'zh-CN'] as const)('names its tabs in %s', async (locale) => {
   show(<LinksPanel documentId="plan" seq={1} />);
   await screen.findByRole('tablist');
   for (const tab of ['referenced_by', 'references', 'related', 'graph'] as const) expect(screen.getByRole('tab', { name: i18n.t(`links.tabs.${tab}`) })).toBeVisible();
+});
+
+it('searches native reference names and keeps an expanded source and its loaded mentions after filtering it out', async () => {
+  const user = userEvent.setup(); const other = source({ id: 'other-source', name: 'Other source', occurrences: [] });
+  calls.references.mockImplementation((_id, direction, _cursor, q) => Promise.resolve(direction !== 'in' ? page([])
+    : q === 'other' ? page([other]) : page([source({ mentions: 3, next_mentions: 'next-mention' }), other])));
+  calls.mentions.mockResolvedValue(page([source({ occurrences: [{ anchor: { type: 'message', message_id: 'later' }, line: { before: '', reference: 'Plan', after: ' kept later' }, by: null, at: '2026-10-28T12:00:00.000Z' }] })]));
+  show(<LinksPanel documentId="plan" seq={1} />);
+  await user.click(await screen.findByRole('button', { name: 'Show mentions in Notes' }));
+  await user.click(screen.getByRole('button', { name: 'Show more' })); await screen.findByText('kept later');
+  const search = screen.getByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('links.tabs.referenced_by') }) });
+  await user.type(search, 'other'); await waitFor(() => expect(calls.references).toHaveBeenCalledWith('plan', 'in', null, 'other'));
+  expect(screen.queryByRole('button', { name: 'Hide mentions in Notes' })).toBeNull();
+  await user.clear(search); expect(await screen.findByRole('button', { name: 'Hide mentions in Notes' })).toBeVisible();
+  expect(screen.getByText('kept later')).toBeVisible(); expect(calls.mentions).toHaveBeenCalledOnce();
+});
+
+it('searches every native mention page while retaining the source and its expansion', async () => {
+  const user = userEvent.setup();
+  calls.references.mockImplementation((_id, direction) => Promise.resolve(direction === 'in' ? page([source({ mentions: 30, next_mentions: 'native-later' })]) : page([])));
+  calls.mentions.mockResolvedValue(page([source({ occurrences: [{ anchor: { type: 'message', message_id: 'late-match' }, line: { before: 'Farther ', reference: 'Plan', after: ' needle' }, by: null, at: '2026-10-28T12:00:00.000Z' }] })]));
+  show(<LinksPanel documentId="plan" seq={1} />); await user.click(await screen.findByRole('button', { name: 'Show mentions in Notes' }));
+  await user.type(screen.getByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('links.row.mentions', { name: 'Notes' }) }) }), 'needle');
+  await waitFor(() => expect(calls.mentions).toHaveBeenCalledWith('plan', `document:${source().id}`, null, 'needle'));
+  expect(await screen.findByRole('button', { name: 'Open Notes at this mention' })).toHaveTextContent('Farther Plan needle');
+  expect(screen.getByRole('button', { name: 'Hide mentions in Notes' })).toBeVisible();
 });

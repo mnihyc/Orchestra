@@ -8,6 +8,8 @@ test.beforeEach(async () => {
   await scenario();
 });
 
+const accountKey = /^opat_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048][A-Za-z0-9]{6}$/;
+
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 
 /** Signs in and goes to a page by its address. */
@@ -86,7 +88,7 @@ test.describe('a person’s own settings', () => {
     const dialog = page.getByRole('dialog', { name: 'Set up an authenticator app' });
     await dialog.getByLabel('Your password', { exact: true }).fill('not the password');
     await dialog.getByRole('button', { name: 'Continue' }).click();
-    await expect(dialog.getByText('That did not work. Check the name and the password or code.')).toBeVisible();
+    await expect(dialog.getByText('That did not work. Check the username and the password or code.')).toBeVisible();
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(dialog.getByRole('img', { name: 'Code to scan with your authenticator app' })).toBeVisible();
@@ -193,7 +195,7 @@ test.describe('a person’s own settings', () => {
     const made = page.getByRole('dialog', { name: 'Token created' });
     await expect(made.getByText('This is the only time the token is shown.')).toBeVisible();
     const secret = await made.getByLabel('Token ci').inputValue();
-    expect(secret).toMatch(/^opat_[0-9a-f]{32}$/);
+    expect(accountKey.test(secret)).toBe(true);
     await made.getByRole('button', { name: 'Done' }).click();
 
     const row = page.getByRole('row', { name: /ci/ });
@@ -320,7 +322,7 @@ test.describe('a person’s own settings', () => {
     await dialog.getByLabel('New address').fill('ada@new.example');
     await dialog.getByLabel('Your password', { exact: true }).fill('not the password');
     await dialog.getByRole('button', { name: 'Change address' }).click();
-    await expect(dialog.getByText('That did not work. Check the name and the password or code.')).toBeVisible();
+    await expect(dialog.getByText('That did not work. Check the username and the password or code.')).toBeVisible();
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
     await dialog.getByRole('button', { name: 'Change address' }).click();
     await expect(page.getByText('Changing to ada@new.example: open the link we sent there.')).toBeVisible();
@@ -380,7 +382,7 @@ test.describe('a person’s own settings', () => {
     await expect(help.getByText('You closed 2 hints.')).toBeVisible();
     await help.getByRole('button', { name: 'Show again' }).click();
     await expect(help.getByText('You have not finished a tutorial.')).toBeVisible();
-    await help.getByRole('button', { name: 'Restore tips' }).click();
+    await help.getByRole('button', { name: 'Restore hints' }).click();
     await expect(help.getByText('You have not closed any hint.')).toBeVisible();
   });
 });
@@ -393,7 +395,7 @@ test.describe('an org’s settings', () => {
     await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'general'));
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
-    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Outside Orch']);
+    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Email and channels']);
     await expectAccessibleSettled(page);
 
     // The departments are listed with what each holds, and one opens its own settings.
@@ -453,7 +455,7 @@ test.describe('an org’s settings', () => {
     await expectAccessibleSettled(page);
   });
 
-  test('a member is moved to another domain, after the dialog says what that changes', async ({ page }) => {
+  test('a member is moved to another domain, and the dialog says only what is lost', async ({ page }) => {
     // Domain is a responsive table column; retain it beside the workbench's other views.
     await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'members'));
@@ -466,10 +468,10 @@ test.describe('an org’s settings', () => {
     await expect(dialog.getByRole('button', { name: 'Move Grace Hopper' })).toHaveAttribute('aria-disabled', 'true');
     await dialog.getByRole('combobox', { name: 'Move to' }).click();
     await page.getByRole('option', { name: /^Acme \/ Research \/ ML/ }).click();
-    // What it does is written out before it is done, from the server's plan.
-    await expect(dialog.getByText("Grace Hopper's place becomes ML, and no longer Acme.")).toBeVisible();
-    await expect(dialog.getByText('Nothing that names Grace Hopper changes:')).toBeVisible();
-    await expect(dialog.getByText('They keep what they own, where it is: 2 things in Acme.')).toBeVisible();
+    // Move is ready at once; what stays the same is not narrated.
+    await expect(dialog.getByRole('button', { name: 'Move Grace Hopper' })).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(dialog.getByText('Nothing that names Grace Hopper changes:')).toHaveCount(0);
+    await expect(dialog.getByText(/They keep what they own/)).toHaveCount(0);
     await expectAccessibleSettled(page, '[role="dialog"]');
     await dialog.getByRole('button', { name: 'Move Grace Hopper' }).click();
     await expect(notices(page).getByText('Grace Hopper now belongs to ML').first()).toBeVisible();
@@ -507,7 +509,7 @@ test.describe('an org’s settings', () => {
     // Each resource she made is kept unless she is told otherwise; one is a subscription others work on.
     await expect(dialog.getByText('Dora’s API key')).toBeVisible();
     await expect(dialog.getByText('used by 2 people · in 1 thread')).toBeVisible();
-    await expect(dialog.getByText("Other people will go on working on Dora Developer's sign-in.")).toBeVisible();
+    await expect(dialog.getByText("Other people will go on using Dora Developer's sign-in.")).toBeVisible();
     await dialog.getByRole('radiogroup', { name: 'What becomes of Dora’s API key' }).getByRole('radio', { name: 'Remove' }).click();
     await expectAccessibleSettled(page, '[role="dialog"]');
     await dialog.getByRole('button', { name: 'Remove Dora Developer from Acme' }).click();
@@ -518,7 +520,7 @@ test.describe('an org’s settings', () => {
     await page.getByRole('button', { name: 'Actions for Grace Hopper' }).click();
     await page.getByRole('menuitem', { name: 'Remove from Acme…' }).click();
     const grace = page.getByRole('dialog', { name: 'Remove Grace Hopper from Acme' });
-    await expect(grace.getByText('What Grace Hopper owns alone: 1 topic and 1 thread. Each passes to the first owner of the org it lies in.')).toBeVisible();
+    await expect(grace.getByText('What Grace Hopper owns alone: 1 topic and 1 thread. Each passes to the first owner of the organization it lies in.')).toBeVisible();
     await grace.getByRole('button', { name: 'Cancel' }).click();
     await page.getByRole('button', { name: 'Actions for Ada Lovelace' }).click();
     await page.getByRole('menuitem', { name: 'Leave Acme…' }).click();
@@ -745,7 +747,7 @@ test.describe('an org’s settings', () => {
     await list.getByRole('button', { name: 'Tokens of Deploy bot' }).click();
     const tokens = page.getByRole('dialog', { name: 'Tokens of Deploy bot' });
     await expect(tokens).toBeVisible();
-    await tokens.getByRole('button', { name: 'Make token' }).click();
+    await tokens.getByRole('button', { name: 'Create token' }).click();
     await tokens.getByLabel('Name', { exact: true }).fill('prod');
     await chooseKeyRule(page, tokens, 'account');
     await tokens.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
@@ -756,7 +758,7 @@ test.describe('an org’s settings', () => {
     expect(serviceId).toBeDefined();
     expect(await bodySent(serviceRequest)).toMatchObject({ rules: [{ target: { kind: 'account', id: serviceId, reach: 'subtree' }, resources: ['key'], allow: [{ operation: 'MeTokenList', actions: ['read'] }] }], proof: { password: PEOPLE.ada.password } });
     await expect(tokens.getByText('This is the only time the token is shown.')).toBeVisible();
-    await expect(tokens.getByLabel('Token prod', { exact: true })).toHaveValue(/^opat_/);
+    expect(accountKey.test(await tokens.getByLabel('Token prod', { exact: true }).inputValue())).toBe(true);
     await expectAccessibleSettled(page, '[role="dialog"]');
     await tokens.getByRole('button', { name: 'Close', exact: true }).last().click();
     await expect(list.getByRole('listitem').filter({ hasText: 'Deploy bot' })).toContainText('1 token');

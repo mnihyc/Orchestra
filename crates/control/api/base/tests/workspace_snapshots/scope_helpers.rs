@@ -6,7 +6,7 @@
 
 use crate::workspace::Site;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
@@ -70,7 +70,7 @@ async fn insert(
     scope: Option<Json>,
 ) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *site.world.conn().await,
         &identity::NewApiToken {

@@ -199,6 +199,7 @@ pub struct ShareWithAgents {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Time>,
     /// A client-generated value that makes a repeated request safe.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 

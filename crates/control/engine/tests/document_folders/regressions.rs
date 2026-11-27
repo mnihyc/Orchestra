@@ -175,7 +175,7 @@ async fn remove(
     let request = request(domain::Command::Delete, vec![item], None, key);
     let mut tx = world.pool.begin().await?;
     let now = Time::new(world.clock.now());
-    let options = domain::Options::for_engine(&world.engine());
+    let options = domain::Options::for_engine(&mut tx).await?;
     let actor = domain::Actor::Agent { thread: actor };
     let plan = domain::plan_delete_in(&mut tx, actor, &request, now, options).await?;
     let receipt =
