@@ -51,16 +51,17 @@ fn rule(operation: &str, kind: &str, id: Id, actions: &[&str]) -> Value {
 /// A real short-lived stored token in rule mode; no legacy permission fallback.
 async fn key(room: &Room, user: Id, rules: Vec<Value>) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let stored = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     create_api_token_scoped(
         &mut *room.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Message mutation scope control",
             token_hash: &token_hash(&secret),
@@ -749,7 +750,7 @@ async fn delete_refuses_the_unreadable_chat_before_disclosing_whether_its_messag
 
 #[tokio::test]
 async fn a_delete_refusal_uses_the_same_tokens_current_mode_after_waiting_for_its_identity() {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     use tower::ServiceExt;
 
@@ -777,8 +778,8 @@ async fn a_delete_refusal_uses_the_same_tokens_current_mode_after_waiting_for_it
             "The identity wait must not delete this message",
         )
         .await;
-    let token = new_token(API_TOKEN_PREFIX);
     let token_id = new_id();
+    let token = new_api_token(token_id);
     create_api_token(
         &mut *room.world.conn().await,
         &NewApiToken {

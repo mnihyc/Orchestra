@@ -31,6 +31,7 @@ export function treeNode(seed: Seed): TreeNode & { participating: boolean } {
     tree_seq: 0,
     ...seed,
     docs_seq: seed.docs_seq ?? 0,
+    shortcuts: seed.shortcuts ?? 0,
     participating: seed.participating ?? true,
   };
 }

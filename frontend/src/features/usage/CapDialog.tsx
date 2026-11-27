@@ -52,7 +52,7 @@ import { RadioGroup } from '@/ui/RadioGroup';
 import { Select } from '@/ui/Select';
 import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
-import type { CapRequest } from '@/features/usage/AddCap';
+import type { CapRequest } from '@/features/usage/capRequest';
 
 // ---------------------------------------------------------------- the sentence, in the order the language says it
 
@@ -440,7 +440,7 @@ export function CapDialog({ request, open, onClose }: { request: CapRequest; ope
                 </fieldset>}
                 {draft.meter!=='running' && <fieldset className="flex min-w-0 flex-col gap-2">
                   <legend className="text-sm font-medium text-text">{t('caps.form.purposes')}</legend>
-                  <PatternsField kind="purpose" models={draft.purposes} known={{models:['turn','summary','review','embeddings','web_search','page_fetch','image_generation','ask'].map((name)=>({name,display:purposeLabel(name,t)})),groups:[],tiers:[]}} onChange={(next)=>set('purposes',next)} error={faults.purposes} />
+                  <PatternsField kind="purpose" models={draft.purposes} known={{models:['turn','summary','review','embeddings','web_search','page_fetch','image_generation','ask','relay'].map((name)=>({name,display:purposeLabel(name,t)})),groups:[],tiers:[]}} onChange={(next)=>set('purposes',next)} error={faults.purposes} />
                 </fieldset>}
 
                 <fieldset className="flex flex-col gap-2">

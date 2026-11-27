@@ -2,7 +2,7 @@
  */
 import type { TFunction } from 'i18next';
 
-import type { Environment, EnvironmentRemovalPhase, EnvironmentStatus } from '@/generated/api-types';
+import type { Environment, EnvironmentListRow, EnvironmentRemovalPhase, EnvironmentStatus } from '@/generated/api-types';
 import { record } from '@/features/resources/UnitCommands';
 
 /** Every unit can report a machine; directory attachment is a lifecycle fact, not that reference. */
@@ -39,7 +39,8 @@ export function holding(permissions: readonly string[]): Holding {
 }
 
 /** How many threads an environment holds that the reader may see, with the others, and in how many topics. */
-export function threadCounts(environment: Pick<Environment, 'threads' | 'threads_hidden'>): { threads: number; topics: number; hidden: number } {
+export function threadCounts(environment: Pick<Environment, 'threads' | 'threads_hidden'> | Pick<EnvironmentListRow, 'threads_count' | 'topics_count' | 'threads_hidden'>): { threads: number; topics: number; hidden: number } {
+  if (!('threads' in environment)) return { threads: environment.threads_count, topics: environment.topics_count, hidden: environment.threads_hidden };
   return {
     threads: environment.threads.length,
     topics: new Set(environment.threads.map((entry) => entry.topic.id)).size,

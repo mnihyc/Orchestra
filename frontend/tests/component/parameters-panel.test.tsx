@@ -35,7 +35,7 @@ vi.mock('@/api/threads', async (importOriginal) => ({
   }),
   setThreadSetting: (id: string, key: string, body: NodeSettingSetBody) => server.write(id, key, body),
 }));
-vi.mock('@/realtime/live', () => ({ refreshThread: vi.fn() }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), refreshThread: vi.fn() }));
 // Approval-rule history is an adjacent, independent view; this suite exercises the real parameter body.
 vi.mock('@/features/approvals/ThreadRules', () => ({ ThreadRules: () => null }));
 
@@ -110,7 +110,6 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       expect(screen.queryByText(t('inspector.parameters.effort'))).not.toBeInTheDocument();
       expect(screen.queryByText(t('inspector.parameters.subagentsAtOnce', { count: 8 }))).not.toBeInTheDocument();
       expect(screen.queryByText(t('inspector.parameters.subagentDepth', { count: 1 }))).not.toBeInTheDocument();
-      expect(screen.queryByText(t('inspector.parameters.subagentsApply'))).not.toBeInTheDocument();
       expect(screen.queryByText(t('inspector.parameters.subagentsUnsupported'))).not.toBeInTheDocument();
     });
 
@@ -125,7 +124,8 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
         if (supported.includes(key)) expect(screen.getByText(words)).toBeVisible();
         else expect(screen.queryByText(words)).not.toBeInTheDocument();
       }
-      expect(screen.getAllByText(t('inspector.parameters.subagentsApply'))).toHaveLength(1);
+      // When a value applies is the help's one rule, not a line under the controls.
+      expect(screen.queryByText(/next turn/i)).not.toBeInTheDocument();
       expect(screen.queryByText(t('inspector.parameters.subagentsUnsupported'))).not.toBeInTheDocument();
     });
 

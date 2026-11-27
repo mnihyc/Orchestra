@@ -6,7 +6,7 @@ import { Pinned } from '@/features/chat/Pinned';
 import { DORA, message } from '../doubles/chat-rows';
 import { show } from './support';
 
-vi.mock('@/api/chats', () => ({
+vi.mock('@/api/chats', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   pinnedQuery: () => ({ queryKey: ['pinned-test'], queryFn: () => Promise.resolve([message(1, { author: DORA, parts: [{ type: 'text', text: 'Please read' }] })]) }),
 }));
 

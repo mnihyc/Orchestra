@@ -1,5 +1,5 @@
 /** Canonical names and signs for application acts, kept separate from values and states. */
-import { Activity, Archive, AtSign, Ban, Bell, BellOff, BellRing, Box, Boxes, Check, CheckCheck, CircleHelp, CirclePause, CirclePlay, Copy, Download, Ellipsis, Eraser, Eye, EyeOff, FilePlus, FileText, FolderInput, FolderPlus, FolderTree, GitBranch, GitCompareArrows, History, House, Inbox, Info, KeyRound, LayoutPanelLeft, Link, List, ListChecks, LogIn, LogOut, Mail, MailCheck, MailPlus, Maximize2, MessageSquarePlus, MessageSquareQuote, MessagesSquare, Minimize2, PanelsTopLeft, Paperclip, Pencil, Play, Plus, Power, Printer, RefreshCw, Reply, RotateCcw, RotateCw, Save, Search, Send, Settings, Settings2, Share2, Shield, ShieldCheck, ShieldMinus, ShieldQuestionMark, ShieldX, SlidersHorizontal, SmilePlus, Square, SquareKanban, SquareTerminal, Star, StarOff, TableProperties, Trash2, Upload, UserRound, UserRoundPlus, UserRoundSearch, X } from 'lucide-react';
+import { Activity, Archive, AtSign, Ban, Bell, BellOff, BellRing, Box, Boxes, Check, CheckCheck, CircleHelp, CirclePause, CirclePlay, Copy, Download, Ellipsis, Eraser, Eye, EyeOff, FilePlus, FileText, FolderInput, FolderPlus, FolderTree, GitBranch, GitCompareArrows, History, House, Inbox, Info, KeyRound, LayoutPanelLeft, Link, List, ListChecks, LogIn, LogOut, Mail, MailCheck, MailPlus, Maximize2, MessageSquarePlus, MessageSquareQuote, MessagesSquare, Minimize2, PanelsTopLeft, Paperclip, Pencil, Play, Plus, Power, Printer, RefreshCw, Reply, RotateCcw, RotateCw, Save, Search, Send, Settings, Settings2, Share2, Shield, ShieldCheck, ShieldMinus, ShieldQuestionMark, ShieldX, SlidersHorizontal, SmilePlus, Sparkles, Square, SquareKanban, SquareTerminal, Star, StarOff, TableProperties, Trash2, Upload, UserRound, UserRoundPlus, UserRoundSearch, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Network, Palette, Shuffle, Focus, ListCollapse, ChevronsDownUp, FolderOpen, ExternalLink, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Briefcase, Diamond, Folder, LayoutGrid, Menu as NavigationIcon, MessageSquareText, ShieldOff, BrainCircuit, Tags } from 'lucide-react';
 
@@ -43,6 +43,7 @@ export const ACTIONS = {
   notifications: { Icon: Bell, label: 'actions.notifications.label', named: 'actions.notifications.named' },
   tokens: { Icon: KeyRound, label: 'actions.tokens.label', named: 'actions.tokens.named' },
   interface: { Icon: SlidersHorizontal, label: 'actions.interface.label', named: 'actions.interface.named' },
+  ask: { Icon: Sparkles, label: 'ask.open', named: 'ask.open' },
   help: { Icon: CircleHelp, label: 'actions.help.label', named: 'actions.help.named' },
   settings: { Icon: Settings, label: 'actions.settings.label', named: 'actions.settings.named' },
   layout: { Icon: LayoutPanelLeft, label: 'actions.layout.label', named: 'actions.layout.named' },
@@ -198,7 +199,7 @@ const COMPATIBLE_LABELS: Partial<Record<ActionId, readonly TranslationKey[]>> = 
   settings: ["screens.sections.settings", "access.area.settings", "places.org.settings", "places.topic.tabs.settings", "departments.openSettingsShort", "providers.tabs.settings", "environments.tabs.settings", "hosts.tabs.settings", "finder.groups.settings", "finder.modes.settings", "departments.openSettings"],
   layout: ["documents.history.layout"],
   resetLayout: ["settings.interface.device.reset", "commands.arrangement.reset"],
-  show: ["workbench.tab.show", "files.markdown.mode", "approvals.review", "ports.preview", "ports.reviewAgain", "ports.hostForm.review", "ports.showPort", "export.page.more", "trace.inspect"],
+  show: ["workbench.tab.show", "files.markdown.mode", "approvals.review", "ports.preview", "ports.reviewAgain", "ports.showPort", "export.page.more", "trace.inspect"],
   dismiss: ["common.close", "workbench.tab.close", "finder.legend.close", "ports.closeOpening", "trace.closeResults"],
   cancel: ["common.cancel", "approvals.cancel", "ports.cancel", "trace.clearSelection", "trace.clearPerson", "trace.clearFilters", "navigation.filter.clear", "export.list.cancel"],
   actions: ["access.roles.actions", "places.menu.more", "places.members.actions", "places.topics.actions", "documents.page.menu", "chat.row.menu", "resources.act.column", "resources.act.menuOf", "settings.editor.menuOf", "members.groups.columns.actions", "machines.menu.label", "providers.menu.label", "providers.models.actions", "providers.models.menuOf", "environments.menu.label", "agents.menu.label", "templates.menu.label", "hosts.menu.label", "hosts.runtimes.actions", "hosts.runtimes.menu", "files.menu.for", "processes.actions", "places.menu.of", "export.chatMenu", "export.list.menuOf", "trace.userMenu"],

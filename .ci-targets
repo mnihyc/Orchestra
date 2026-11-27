@@ -1,0 +1,4 @@
+# n41-connector-roots: a connector starts on a machine without certificate authorities (its build cache opens without an
+# HTTPS client); the cache's unit tests and the connector program's start-up composition tests
+test -p orch-node-core --lib -- tools::
+test -p orch-connector --bin orch-connector -- composition::
