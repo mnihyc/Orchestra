@@ -297,7 +297,7 @@ pub struct ToolSessionScope {
     pub thread_id: Id,
     pub segment_id: Id,
     pub opening_id: Id,
-    /// exec, llm or mcp:<server>, selected from the native service binding.
+    /// `exec`, `llm` or `mcp:<server>`, selected from the native service binding.
     pub member: String,
     pub nonce: Id,
     pub revision: i64,

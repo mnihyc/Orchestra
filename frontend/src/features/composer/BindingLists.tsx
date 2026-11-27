@@ -137,6 +137,7 @@ const link = 'px-2 text-sm text-link hover:underline';
 
 /** The agent, as a control that shows its name alone and opens the list. */
 export function AgentChip({ choices, value, name, provider, onChoose, pending = false, loaded = true, facts, fragment, below, ...chip }: ChipProps & {
+  /** The current agent's facts, closed at the foot of its list until asked for. */
   facts?: ReactNode;
   fragment?: ReactNode;
   choices: readonly AgentChoice[];
@@ -156,7 +157,7 @@ export function AgentChip({ choices, value, name, provider, onChoose, pending = 
   return <><ChoiceChip what={t('composer.row.agentName')} value={name} title={name} control="agent" {...chip} disabled={facts === undefined && below === undefined && (chip.disabled === true || only)}
     reason={only ? t('composer.pick.agent.only') : chip.reason}
     groups={agentGroups(choices, value, provider, t).map((group) => ({ ...group, rows: group.rows.map((row) => chip.disabled === true || only ? { ...row, disabled: true } : row) }))} searchLabel={t('composer.pick.find')}
-    below={<>{facts}{value === '' ? null : <Link to="/resources/agents/$id" params={{ id: value }} className={link}>{t('composer.pick.agent.open')}</Link>}{below}</>}
+    below={<>{value === '' ? null : <Link to="/resources/agents/$id" params={{ id: value }} className={link}>{t('composer.pick.agent.open')}</Link>}{below}</>} facts={facts}
     empty={<p role="status" className="px-2 text-sm text-text-muted">{pending ? t('common.loading') : t('start.agent.none')}</p>}
     onChoose={(row, close) => {
       const choice = choices.find((one) => one.id === row.id);

@@ -2,15 +2,17 @@
  *
  * The server compares the chosen tool access with what the agent program (or its executor) enforces there and
  * the widest the environment allows, as a turn is admitted. Where nothing at or below the choice can be
- * enforced, a turn would be refused: the line says so in the program's own words and offers the one choice
- * that runs as the machine allows. Nothing is changed by itself; the change is the person's, recorded as any
- * change of tool access is.
+ * enforced, a turn would be refused: the line says so in the program's own words (where an executor carries out
+ * the commands, in what that executor can enforce there) and offers the one choice that runs as the machine
+ * allows. Nothing is changed by itself; the change is the person's, recorded as any change of tool access is.
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import type { TFunction } from 'i18next';
 import { ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { settingsKey, settingsQuery } from '@/api/settings';
 import { setThreadSetting, threadKeys } from '@/api/threads';
+import { sandboxCapability } from '@/features/resources/SandboxReadiness';
 import type { ResolvedSetting, SandboxReadiness, Thread, ThreadParameters } from '@/generated/api-types';
 import { offeredChoice } from '@/i18n/choices';
 import { holds } from '@/lib/permissions';
@@ -70,15 +72,24 @@ export function RunAsMachineAllows({ thread, report }: { thread: Thread; report:
   </>;
 }
 
+/** Why the line says it: the program's own sentence, or where an executor carries out the commands and says nothing of
+ * itself, what that executor can enforce there, in the words the blocked thread's line and the environment's readiness
+ * use. */
+function shortfallReason(t: TFunction, report: SandboxReadiness, place: string | undefined): string | null {
+  if (report.reason !== null) return report.reason;
+  return report.executor === null || place === undefined ? null : sandboxCapability(report, place, t);
+}
+
 /** The line above the composer's controls: what cannot be enforced, the program's reason, and the way on. */
 export function SandboxShortfallLine({ thread, report }: { thread: Thread; report: SandboxReadiness }) {
   const { t } = useTranslation();
   const mode = offeredChoice(t, 'sandboxLevel', report.requested)?.name ?? report.requested;
   const place = thread.environment?.name;
   const said = place === undefined ? t('composer.confinement.shortfallHere', { mode }) : t('composer.confinement.shortfall', { mode, place });
+  const why = shortfallReason(t, report, place);
   return <div role="status" className="flex min-w-0 items-start gap-2 px-1 text-xs text-warning-text" data-sandbox-shortfall={report.requested}>
     <ShieldAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
-    <span className="min-w-0 flex-1 wrap-anywhere">{said}{report.reason !== null && <span className="text-text-muted"> {report.reason}</span>}
+    <span className="min-w-0 flex-1 wrap-anywhere">{said}{why !== null && <span className="text-text-muted"> {why}</span>}
       {!managesAccess(thread) && runsAs(report) !== null && <span className="text-text-muted"> {t('composer.confinement.readOnly', { who: thread.owner.display_name })}</span>}</span>
     {managesAccess(thread) && <span className="flex shrink-0 flex-col items-end gap-1"><RunAsMachineAllows thread={thread} report={report} /></span>}
   </div>;

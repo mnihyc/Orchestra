@@ -41,6 +41,9 @@ internal_bind = "0.0.0.0:8444"
 # Plain HTTP, on the stack's own network only.
 metrics_bind = "0.0.0.0:9100"
 db_pool = 32
+# Connections kept open and ready while nobody is asking; each serves for four hours before it is replaced.
+db_pool_warm = 8
+db_pool_lifetime_secs = 14400
 # The API has no published port: everything that reaches it is the web edge,
 # which says who the browser was.
 trusted_proxy_cidrs = [] # Compose supplies its control network; add operator edge/CDN ranges there.

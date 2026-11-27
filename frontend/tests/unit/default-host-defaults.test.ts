@@ -8,7 +8,7 @@ import { failedEnvironmentWhy, waitingWords } from '@/features/timeline/waiting'
 import { reasonWords } from '@/features/change/Result';
 import { provisionKind } from '@/features/change/EnvironmentChange';
 import { environmentPlaceWhy } from '@/features/start/words';
-import { hostUnavailable } from '@/features/resources/choiceAvailability';
+import { hostUnavailable, mayUseAnyHost } from '@/features/resources/choiceAvailability';
 import { i18n } from '@/i18n';
 import { enrollmentHost } from '../doubles/enrollment-row';
 import { failedStart } from '../component/failed-start-fixtures';
@@ -36,6 +36,29 @@ it("places a provider's new container by itself only on a host of its owner's or
   expect(automaticHostWorks([host('me', use)], 'provider', 'me', refusal('provider'))).toBe(true);
   expect(automaticHostWorks([host(null, use)], 'provider', 'me', refusal('provider'))).toBe(true);
   expect(automaticHostWorks([host('me', ['host.view'])], 'provider', 'me', refusal('provider')), 'a host the person may not use').toBe(false);
+});
+
+it("counts a host for a provider's container only where its owner may use it as themself, not through As admin", () => {
+  // As admin lists the bundled host with Use to a system administrator; the container still runs as the provider's owner.
+  const reached = (owner: string | null): Host => ({ ...host(owner, ['host.view', 'host.use']),
+    access: { permissions: ['host.view', 'host.use'], administers: true, through: [], admin_only: ['host.use'], participating: false } });
+  expect(hostUnavailable(reached('me'), t, 'provider')).toBe(t('resourceChoices.hostUse'));
+  expect(hostUnavailable(reached('me'), t, 'environment')).toBeNull();
+  expect(automaticHostWorks([reached('me')], 'provider', 'me', refusal('provider'))).toBe(false);
+  expect(automaticHostWorks([reached('me')], 'environment', 'me', refusal('environment'))).toBe(true);
+  expect(automaticHostWorks([host('me', ['host.view', 'host.use'])], 'provider', 'me', refusal('provider'))).toBe(true);
+});
+
+it('tells a host one may not use at all from one that only does not suit', () => {
+  expect(mayUseAnyHost([], 'environment')).toBe(false);
+  expect(mayUseAnyHost([host('ada', ['host.view'])], 'environment')).toBe(false);
+  expect(mayUseAnyHost([host('ada', ['host.view', 'host.use'])], 'environment')).toBe(true);
+  // A host of the place's list is one the person may use, whatever its room says.
+  expect(mayUseAnyHost([placeHost('h1', 'orch-node', { usable: false })], 'environment')).toBe(true);
+  const reached: Host = { ...host('ada', ['host.view', 'host.use']),
+    access: { permissions: ['host.view', 'host.use'], administers: true, through: [], admin_only: ['host.use'], participating: false } };
+  expect(mayUseAnyHost([reached], 'environment')).toBe(true);
+  expect(mayUseAnyHost([reached], 'provider')).toBe(false);
 });
 
 it('says why an environment failed without the step it stopped in or a second stop', () => {

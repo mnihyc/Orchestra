@@ -197,42 +197,48 @@ fn word<T: DeserializeOwned>(snapshot: &Snapshot, key: &str) -> Result<Option<T>
         .transpose()
 }
 
+/// The keys a thread runs with: what [`load`] resolves for its turns and their admission.
+const RUNS_WITH: [&str; 30] = [
+    keys::AGENT_MODEL,
+    keys::AGENT_EFFORT,
+    keys::AGENT_PARAMS,
+    keys::AGENT_FEATURES,
+    keys::THREADS_BACKGROUND_WAKE,
+    keys::THREADS_OUTPUT_CAPTURE_BYTES,
+    keys::AGENTS_WEB_ACTION_WAIT_SECS,
+    keys::AGENTS_IMAGE_GENERATION,
+    keys::AGENTS_PROMPT_CACHE_TTL,
+    keys::AGENT_INSTRUCTIONS,
+    keys::AGENT_MEMORY,
+    keys::AGENTS_SUBAGENTS_AT_ONCE,
+    keys::AGENTS_SUBAGENT_DEPTH,
+    keys::AGENT_MESSAGES,
+    keys::APPROVAL_MODE,
+    keys::APPROVAL_ALLOWED_MODES,
+    keys::SANDBOX_MODE,
+    keys::MODELS_ALLOWED,
+    keys::COLLAB_ATTRIBUTION,
+    keys::THREAD_CWD,
+    keys::BINDING_PREFER,
+    keys::PROVIDERS_TRANSLATION,
+    keys::BINDING_ALLOWED,
+    keys::ORCH_TOOLS_CALLS_PER_MINUTE,
+    keys::ORCH_TOOLS_SEARCH_QUERY_CHARS,
+    keys::ORCH_TOOLS_SEARCH_RESULTS,
+    keys::ORCH_TOOLS_SEARCH_CONTEXT,
+    keys::BROADCAST_RATE_PER_HOUR,
+    keys::BROADCAST_THREAD_MESSAGES_PER_HOUR,
+    keys::BROADCAST_AGENT_OPTIONS,
+];
+
+/// Whether a thread's turns read `key`: a change of it at a place is a change of what the threads there run with.
+#[must_use]
+pub fn runs_with(key: &str) -> bool {
+    RUNS_WITH.contains(&key)
+}
+
 fn wanted() -> Result<Vec<&'static SettingDef>, EngineError> {
-    [
-        keys::AGENT_MODEL,
-        keys::AGENT_EFFORT,
-        keys::AGENT_PARAMS,
-        keys::AGENT_FEATURES,
-        keys::THREADS_BACKGROUND_WAKE,
-        keys::THREADS_OUTPUT_CAPTURE_BYTES,
-        keys::AGENTS_WEB_ACTION_WAIT_SECS,
-        keys::AGENTS_IMAGE_GENERATION,
-        keys::AGENTS_PROMPT_CACHE_TTL,
-        keys::AGENT_INSTRUCTIONS,
-        keys::AGENT_MEMORY,
-        keys::AGENTS_SUBAGENTS_AT_ONCE,
-        keys::AGENTS_SUBAGENT_DEPTH,
-        keys::AGENT_MESSAGES,
-        keys::APPROVAL_MODE,
-        keys::APPROVAL_ALLOWED_MODES,
-        keys::SANDBOX_MODE,
-        keys::MODELS_ALLOWED,
-        keys::COLLAB_ATTRIBUTION,
-        keys::THREAD_CWD,
-        keys::BINDING_PREFER,
-        keys::PROVIDERS_TRANSLATION,
-        keys::BINDING_ALLOWED,
-        keys::ORCH_TOOLS_CALLS_PER_MINUTE,
-        keys::ORCH_TOOLS_SEARCH_QUERY_CHARS,
-        keys::ORCH_TOOLS_SEARCH_RESULTS,
-        keys::ORCH_TOOLS_SEARCH_CONTEXT,
-        keys::BROADCAST_RATE_PER_HOUR,
-        keys::BROADCAST_THREAD_MESSAGES_PER_HOUR,
-        keys::BROADCAST_AGENT_OPTIONS,
-    ]
-    .into_iter()
-    .map(def)
-    .collect()
+    RUNS_WITH.into_iter().map(def).collect()
 }
 
 /// The settings a thread runs with.

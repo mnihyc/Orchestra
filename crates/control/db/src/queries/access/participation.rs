@@ -175,7 +175,45 @@ fn statement(sql: String, explain: bool) -> String {
     }
 }
 
+/// Asks PostgreSQL for one plan of the summaries per connection, for the next statement of this transaction alone,
+/// and says what to put back after it. Left to itself PostgreSQL plans the summaries again at every call: their
+/// generic plan is estimated for ten members in each of the reader's sets, so it never looks cheaper than a plan made
+/// for the actual sets, though it runs about as fast. On the team fixture the summaries spent 2.7-4.1 ms planning a
+/// call against 0.3-0.5 ms running; their generic plan runs in 1.0-2.3 ms and is made once (D-3146). The setting is
+/// the transaction's own (`set_config(…, true)`), so a failed statement's rollback puts it back too; outside a
+/// transaction the summaries are planned as before.
+async fn one_plan(conn: &mut Conn) -> Result<Option<String>, DbError> {
+    use sqlx::Connection as _;
+    if !conn.is_in_transaction() {
+        return Ok(None);
+    }
+    // The current mode is read before it is set: a materialized `was` is read once, before the setting that names it
+    // (a plain subquery is folded into the outer row and would read the mode just set).
+    Ok(sqlx::query_scalar(
+        "WITH was AS MATERIALIZED (SELECT current_setting('plan_cache_mode') AS mode)
+         SELECT was.mode FROM was,
+           LATERAL (SELECT set_config('plan_cache_mode', 'force_generic_plan', true) WHERE was.mode IS NOT NULL) kept",
+    )
+    .fetch_optional(&mut *conn)
+    .await?)
+}
+
 async fn read<R>(conn: &mut Conn, request: Request<'_>, explain: bool) -> Result<Vec<R>, DbError>
+where
+    R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Unpin + Send,
+{
+    let was = if explain { None } else { one_plan(conn).await? };
+    let rows = select(conn, request, explain).await?;
+    if let Some(was) = was {
+        sqlx::query("SELECT set_config('plan_cache_mode', $1, true)")
+            .bind(was)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(rows)
+}
+
+async fn select<R>(conn: &mut Conn, request: Request<'_>, explain: bool) -> Result<Vec<R>, DbError>
 where
     R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Unpin + Send,
 {
