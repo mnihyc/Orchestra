@@ -924,6 +924,42 @@ pub mod thread_engine {
         .await?)
     }
 
+    /// The models named in `wanted` (provider, model name), as [`model`] reads each, in one statement: those that
+    /// are not there are absent.
+    pub async fn models_named(
+        conn: &mut Conn,
+        wanted: &[(Id, String)],
+    ) -> Result<Vec<((Id, String), ModelRow)>, DbError> {
+        #[derive(sqlx::FromRow)]
+        struct Named {
+            provider_id: Id,
+            #[sqlx(flatten)]
+            model: ModelRow,
+        }
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (providers, names): (Vec<Id>, Vec<&str>) = wanted
+            .iter()
+            .map(|(provider, name)| (*provider, name.as_str()))
+            .unzip();
+        let rows: Vec<Named> = sqlx::query_as(
+            "SELECT m.provider_id, m.model_name, m.display_name, m.parameters,
+                    provider_option_layers(m.provider_id, m.groups) AS option_layers, m.groups, m.enabled
+               FROM provider_models m
+               JOIN unnest($1::uuid[], $2::text[]) AS wanted(provider_id, model_name)
+                 ON m.provider_id = wanted.provider_id AND m.model_name = wanted.model_name",
+        )
+        .bind(&providers)
+        .bind(&names)
+        .fetch_all(conn)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ((row.provider_id, row.model.model_name.clone()), row.model))
+            .collect())
+    }
+
     /// The selected model's display name, including models the provider has since disabled.
     pub async fn model_display_name(
         conn: &mut Conn,
@@ -4016,8 +4052,11 @@ pub mod routes {
         /// The selected facts/models sources, learned descriptors and safe per-element errors.
         #[sqlx(default)]
         pub sources: Json,
-        /// What its harness or endpoint reported.
+        /// What its harness or endpoint reported, but for the model list ([`crate::queries::resources::keeper::listed_models`]).
         pub facts: Json,
+        /// How many models its models source lists; none where it has listed none.
+        #[sqlx(default)]
+        pub listed_models: Option<i32>,
         /// What was written in by hand over that.
         pub facts_overrides: Json,
         /// When the facts were taken.
@@ -4034,7 +4073,9 @@ pub mod routes {
 
     const PROVIDER_COLUMNS: &str = "id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, upstreams,
         config, model_group_options, service_offerings, protocols, provider_placement(machine_id) AS placement, machine_id, key_machine_id, arrangements, held_by_environment_id, held_since,
-        runtime_config, status, status_detail, runtime_unavailable, sources, facts, facts_overrides, facts_at, revision, observation_revision, created_at, updated_at";
+        runtime_config, status, status_detail, runtime_unavailable, sources, facts,
+        (SELECT catalogue.listed FROM provider_model_lists catalogue WHERE catalogue.provider_id = providers.id) AS listed_models,
+        facts_overrides, facts_at, revision, observation_revision, created_at, updated_at";
 
     /// The providers `ids` that are not deleted, in the order they were made.
     pub async fn providers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<ProviderRow>, DbError> {
@@ -5009,7 +5050,77 @@ pub mod keeper {
         credit_source_revision: i64,
     }
 
-    /// Stores what the machine that keeps a provider reports of it. Nothing is written when it says what is
+    /// What a facts report says of the model list it may carry.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum ModelList<'a> {
+        /// It carries none: the stored list stays.
+        Kept,
+        /// It says there is none (`"models": null`).
+        Cleared,
+        /// The list as the source reported it.
+        Reported(&'a Json),
+    }
+
+    /// A provider's facts as its row keeps them, every member but the model list, and what the facts say of that
+    /// list, which is kept in a row of its own (`provider_model_lists`): the list can be megabytes, and every check,
+    /// list and view of a provider reads its row.
+    #[must_use]
+    pub fn listed_apart(facts: &Json) -> (Json, ModelList<'_>) {
+        let Some(members) = facts.as_object() else {
+            return (facts.clone(), ModelList::Kept);
+        };
+        let listed = match members.get("models") {
+            None => return (facts.clone(), ModelList::Kept),
+            Some(models) if models.is_array() => ModelList::Reported(models),
+            Some(_) => ModelList::Cleared,
+        };
+        let mut shown = members.clone();
+        shown.remove("models");
+        (Json::Object(shown), listed)
+    }
+
+    /// Keeps what a report says of the model list: a list replaces the stored one (nothing is written when it is
+    /// the same), `null` removes it, and a report without one keeps it. Says whether something was written.
+    pub async fn keep_listed(
+        conn: &mut Conn,
+        provider: Id,
+        listed: ModelList<'_>,
+    ) -> Result<bool, DbError> {
+        let written = match listed {
+            ModelList::Kept => 0,
+            ModelList::Cleared => {
+                sqlx::query("DELETE FROM provider_model_lists WHERE provider_id = $1")
+                    .bind(provider)
+                    .execute(conn)
+                    .await?
+                    .rows_affected()
+            }
+            ModelList::Reported(models) => sqlx::query(
+                "INSERT INTO provider_model_lists (provider_id, models) VALUES ($1, $2)
+                 ON CONFLICT (provider_id) DO UPDATE SET models = EXCLUDED.models
+                  WHERE provider_model_lists.models IS DISTINCT FROM EXCLUDED.models",
+            )
+            .bind(provider)
+            .bind(models)
+            .execute(conn)
+            .await?
+            .rows_affected(),
+        };
+        Ok(written > 0)
+    }
+
+    /// The model list a provider's models source last reported, as it reported it; none where it reported none.
+    pub async fn listed_models(conn: &mut Conn, provider: Id) -> Result<Option<Json>, DbError> {
+        Ok(
+            sqlx::query_scalar("SELECT models FROM provider_model_lists WHERE provider_id = $1")
+                .bind(provider)
+                .fetch_optional(conn)
+                .await?,
+        )
+    }
+
+    /// Stores what the machine that keeps a provider reports of it: the model list it may carry in its own row
+    /// ([`listed_apart`]), every other member in the provider's facts. Nothing is written when it says what is
     /// stored. The answer says whether something was.
     pub async fn set_facts(
         conn: &mut Conn,
@@ -5018,6 +5129,8 @@ pub mod keeper {
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
         use sqlx::Connection;
+        let (facts, listed) = listed_apart(facts);
+        let facts = &facts;
         // A savepoint keeps the reading, its samples and its audit atomic. A non-key
         // lock orders observations without waiting for a thread's foreign-key reference.
         let mut tx = conn.begin().await?;
@@ -5046,6 +5159,17 @@ pub mod keeper {
         .execute(&mut *tx)
         .await?;
         let changed = done.rows_affected() == 1;
+        // A new list is an observation of the provider as a change of its facts is (its trigger counts a row that
+        // differs).
+        if keep_listed(&mut tx, provider, listed).await? && !changed {
+            sqlx::query("UPDATE providers SET observation_revision = observation_revision + 1, updated_at = $2 WHERE id = $1 AND deleted_at IS NULL")
+                .bind(provider)
+                .bind(at)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
         if changed {
             crate::queries::provider_credits::record(
                 &mut tx,
@@ -5472,6 +5596,7 @@ pub mod binding {
         new: &NewMachineSubscription<'_>,
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
+        let (facts, listed) = super::keeper::listed_apart(new.facts);
         let made = sqlx::query(
             "INSERT INTO providers (id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id,
                                     machine_id, arrangements, status, facts, facts_at,
@@ -5488,11 +5613,14 @@ pub mod binding {
         .bind(new.agent_id)
         .bind(new.machine_id)
         .bind(new.arrangements)
-        .bind(new.facts)
+        .bind(&facts)
         .bind(at)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?
         .rows_affected();
+        if made > 0 {
+            super::keeper::keep_listed(conn, new.id, listed).await?;
+        }
         Ok(made > 0)
     }
 

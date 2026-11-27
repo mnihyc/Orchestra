@@ -595,6 +595,16 @@ pub(super) async fn run<K: Input>(
         {
             tracing::warn!(node=%output.node,%error,"inherited workspace changes remain pending");
         }
+        if orch_engine::resolved::runs_with(&output.key)
+            && let Err(error) = completed
+                .ctx
+                .app
+                .engine
+                .admission_scope_changed(output.node)
+                .await
+        {
+            tracing::warn!(node=%output.node,%error,"blocked threads see the changed setting at the next recheck");
+        }
     }
     let full = reply::render::<Setting<K>>(&completed.ctx, &completed.accepted, output).await?;
     Ok(full.map_or_else(

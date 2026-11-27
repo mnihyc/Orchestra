@@ -31,10 +31,12 @@ On a fresh Linux connector, **Made by Orch** creates workspace and home director
 Linux directory environments work with the machine's ordinary policy. On macOS and Windows, go to **Machine → Policy → Native system review** to confirm the running connector build. Replacing the executable requires a fresh review. Revocation closes directory attachments and keeps their data. A registered agent program can run independently. On a reviewed Windows connector, shared-directory file operations and an existing loopback VNC server are available. Native process trees, terminals, mounts and listener forwarding have separate platform requirements. On macOS executors report the shell, installed program and sandbox modes they can actually use.
 
 The host installed with the server is marked **Server host** in the host list and overview.
-Its containers may share the server's kernel. Giving Host Use or handing over its ownership
-requires the server-host warning. `orchctl doctor --config <file> --only node` reports whether
-non-administrator accounts hold Host Use, including through higher permissions; an accepted
-sharing choice does not make the node's health check fail.
+From the first start the first administrator uses it, without **As admin**; nobody else does
+until its **Access** names them. Its containers may share the server's kernel. Giving Host Use
+or handing over its ownership requires the server-host warning.
+`orchctl doctor --config <file> --only node` reports whether non-administrator accounts hold Host
+Use, including through higher permissions; an accepted sharing choice does not make the node's
+health check fail.
 
 ## Choose a gateway
 

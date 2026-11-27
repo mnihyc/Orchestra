@@ -10,6 +10,7 @@ import { MachineLink } from '@/features/resources/machines/MachineLink';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { Button } from '@/ui/Button';
+import { cx } from '@/ui/cx';
 import { IconButton } from '@/ui/IconButton';
 import { TagChip } from '@/ui/TagChip';
 import { UserChip } from '@/ui/UserChip';
@@ -29,16 +30,17 @@ export function ResourceGroupHeader({ group, collapsed, onToggle, kinds = [], pi
   const draft = picking ? null : poolFromGroup(group, kinds);
   const Icon = collapsed ? ChevronRight : ChevronDown;
   const managed = !picking && group.home !== undefined && group.home.kind !== 'thread';
-  return <div data-resource-group={group.id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 py-1">
+  // In a picker the header is a separator, small and quiet, as the other pickers' group words are; in a list it is a heading.
+  return <div data-resource-group={group.id} className={cx('flex min-w-0 items-center', picking ? 'gap-x-1 text-xs font-medium text-text-subtle' : 'flex-wrap gap-x-2 gap-y-1 py-1')}>
     <IconButton size="sm" label={t(collapsed ? 'resourceGroups.expand' : 'resourceGroups.collapse', { name: group.label })}
       aria-expanded={!collapsed} onClick={onToggle} icon={<Icon aria-hidden />} />
-    <span className="min-w-0 max-w-full truncate font-medium" title={group.label}>
+    <span className={cx('min-w-0 max-w-full truncate', !picking && 'font-medium')} title={group.label}>
       {group.owner !== undefined ? <UserChip user={group.owner} size={24} />
         : group.machine !== undefined ? <MachineLink machine={group.machine} />
         : group.tag !== undefined ? <TagChip name={group.tag.name} color={group.tag.color} />
         : group.home !== undefined ? <PlaceLink place={group.home}>{group.label}</PlaceLink> : group.label}
     </span>
-    <span className="shrink-0 text-sm text-text-muted tabular-nums">{formatNumber(group.rows.length, locale)}</span>
+    <span className={cx('shrink-0 tabular-nums', !picking && 'text-sm text-text-muted')}>{formatNumber(group.rows.length, locale)}</span>
     {draft !== null && <Button size="sm" variant="ghost" aria-label={t('pools.makeFrom', { name: group.label })} onClick={() => setPool(draft)}>{t('pools.make')}</Button>}
     {pool !== null && <PoolDialog initial={pool} onClose={() => setPool(null)} />}
     {managed && group.home !== undefined && kinds.length > 0 && <ResourceSharingSummary home={group.home} kinds={kinds} />}

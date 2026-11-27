@@ -116228,6 +116228,13 @@
             ],
             "description": "The target as its reader sees it now; absent unless the target is open to them."
           },
+          "last_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a deleted target: the name it had when it was deleted, given only to a reader who would find it by that name\nin the trash where it lies; it opens nothing and grants nothing."
+          },
           "org_id": {
             "type": [
               "string",
@@ -158831,6 +158838,14 @@
             ],
             "format": "uuid",
             "description": "The deletion group; `null` for a side thread that was closed."
+          },
+          "environments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many environments at home in what was deleted went to the trash with it: their running work stopped, and\nthey come back with it. Given to a person's own session only, where there were any; otherwise absent."
           }
         },
         "required": [
