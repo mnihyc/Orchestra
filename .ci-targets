@@ -1,0 +1,10 @@
+# Kept data of an environment whose place was deleted: its acts, lists, host deletion and jobs.
+test -p orch-api-core --test hosts
+test -p orch-api-core --test retained_scopes
+test -p orch-api-core --test cluster_retained
+test -p orch-api-core --test loss
+test -p orch-engine --test trace_retention
+# The token encoding's description, written as code, in the generated contracts.
+contracts
+# The updater's fixture cases (the installation records' mount point) and the release helpers.
+release-checks

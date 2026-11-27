@@ -37955,6 +37955,12 @@ export interface components {
              * @description The deletion group; `null` for a side thread that was closed.
              */
             deletion_id: string | null;
+            /**
+             * Format: int64
+             * @description How many environments at home in what was deleted went to the trash with it: their running work stopped, and
+             *     they come back with it. Given to a person's own session only, where there were any; otherwise absent.
+             */
+            environments?: number | null;
         };
         /** @description Selects kept environments in a place. */
         NodeDeletedEnvironmentListQuery: {
@@ -50810,6 +50816,11 @@ export interface components {
             /** @description The target as its reader sees it now; absent unless the target is open to them. */
             item: components["schemas"]["ShortcutItem"] | null;
             /**
+             * @description For a deleted target: the name it had when it was deleted, given only to a reader who would find it by that name
+             *     in the trash where it lies; it opens nothing and grants nothing.
+             */
+            last_name?: string | null;
+            /**
              * Format: uuid
              * @description The place it is kept in; `null` in the reader's own list.
              */
@@ -56116,7 +56127,7 @@ export interface components {
             /**
              * @description The secret, in the first answer only; `null` when the same creation is asked again with its key,
              *     since no secret is kept to be given twice. The canonical encoding is
-             *     opat_<lowercase hyphenated key UUID>_<43 base64url secret characters><6 Base62 CRC32 digits>.
+             *     `opat_<lowercase hyphenated key UUID>_<43 base64url secret characters><6 Base62 CRC32 digits>`.
              */
             token: string | null;
         };

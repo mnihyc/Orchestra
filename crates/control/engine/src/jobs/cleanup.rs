@@ -293,7 +293,9 @@ impl Cleaning {
             .await?
             .ok_or_else(|| failed("gone", "the environment is gone"))?;
         let principal = self.principal(&mut tx, job, work).await?;
-        let (manager, admin) = super::retained::authority(&mut tx, &principal, environment).await?;
+        let (manager, admin) = super::retained::authority(&mut tx, &principal, environment)
+            .await
+            .map_err(super::retained::recheck)?;
         let promise = retained::removal(&mut tx, environment)
             .await?
             .ok_or_else(|| failed("gone", "the kept files are gone"))?;

@@ -1353,6 +1353,88 @@ async fn restore_rechecks_the_original_sign_in_and_home_authority_before_creatin
     }
 }
 
+/// A place deleted after a restore or an early purge was asked: its trash keeps the environment and what it kept, and
+/// the job stops plainly for that, with the kept files, their deadline and the unit untouched.
+#[tokio::test]
+async fn restore_and_early_purge_stop_plainly_when_the_place_is_deleted_after_they_were_asked() {
+    let world = world().await;
+    let host = hosting::ScriptedHost::on(&world, "trace-deleted-place", 32_768).await;
+    let template = hosting::template(&world).await;
+    for purge in [false, true] {
+        let (name, login) = if purge {
+            ("Purged from a deleted place", "place_purger")
+        } else {
+            ("Restored into a deleted place", "place_restorer")
+        };
+        let (id, _, _unit) = hosting::running(&world, &host, template, name).await;
+        schedule(&world, id).await;
+        remove(&world, id).await;
+        let kept = promise(&world, id).await;
+        let person = world.person(login).await;
+        let session = orch_types::new_id();
+        let mut tx = world.pool.begin().await.unwrap();
+        orch_db::queries::transaction_guard::lock_authority(&mut tx)
+            .await
+            .unwrap();
+        rows::lock_environment(&mut tx, id).await.unwrap();
+        orch_db::queries::identity::testing::insert_session(
+            &mut tx,
+            session,
+            person,
+            orch_types::Hash::of(session.as_bytes()).as_bytes(),
+            world.clock.now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
+        let job = orch_engine::jobs::retained::queue(
+            &mut tx,
+            id,
+            kept.removal_revision,
+            purge,
+            Some(person),
+            json!({"session_id":session}),
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(world.topic)
+            .bind(world.clock.now())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let before = (
+            host.count(K::NodeRuntimeCreate),
+            host.count(K::NodeRuntimeRemove),
+        );
+        world.engine().kick();
+        let (state, _, error) = hosting::wait_over(&world, job.id).await;
+        assert_eq!(state, "failed", "{error:?}");
+        assert_eq!(
+            error.as_ref().map(|error| error["code"].clone()),
+            Some(json!("place_gone")),
+            "{error:?}"
+        );
+        assert_eq!(
+            (
+                host.count(K::NodeRuntimeCreate),
+                host.count(K::NodeRuntimeRemove)
+            ),
+            before
+        );
+        let current = promise(&world, id).await;
+        assert_eq!(current.removal_phase.as_deref(), Some("kept"));
+        assert_eq!(current.retained_volumes, kept.retained_volumes);
+        assert_eq!(current.volumes_purge_at, kept.volumes_purge_at);
+        sqlx::query("UPDATE nodes SET deleted_at=NULL WHERE id=$1")
+            .bind(world.topic)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn restore_and_early_purge_honor_the_tokens_current_scope_subtree_and_org_refusal() {
     let world = world().await;

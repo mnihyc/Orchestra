@@ -10,7 +10,7 @@ import { createHostToken, createMachineToken, hostKey, hostsQuery, machineKey, m
 import type * as ResourcesApi from '@/api/resources';
 import { applyChanges, resourceChanges, userEventChanges } from '@/api/acts';
 import type * as EnrollmentApi from '@/api/enrollment';
-import { enrollmentProgressKey } from '@/api/enrollment';
+import { ENROLLMENT_READ_AGAIN_MS, enrollmentProgressKey } from '@/api/enrollment';
 import { setResourceFollowing } from '@/realtime/resourceFollowing';
 import { type ResourceRows, resourceRows } from '@/api/listed';
 import type { HomePickerProps } from '@/features/resources/HomePicker';
@@ -230,14 +230,16 @@ it('does not open from a late command for changed consent or from a dialog the p
   expect(live.navigate).not.toHaveBeenCalled(); expect(toast).not.toHaveBeenCalled();
 });
 
-it('reads seldom while the live connection is up, and recovers only the current receipt on reconnect', async () => {
+it('reads again a few seconds apart while it waits, with the live connection up too, and recovers only the current receipt on reconnect', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const { closed } = openEnrollment();
   await issueCommand();
   await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
-  await act(async () => { await vi.advanceTimersByTimeAsync(READ_AGAIN_UP_MS - 2_000); });
+  // A person watches this dialog: never half a minute behind a notice the reset of their feed dropped.
+  expect(ENROLLMENT_READ_AGAIN_MS).toBeLessThan(READ_AGAIN_UP_MS);
+  await act(async () => { await vi.advanceTimersByTimeAsync(ENROLLMENT_READ_AGAIN_MS - 1_000); });
   expect(live.progress).toHaveBeenCalledTimes(1);
-  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_500); });
   expect(live.progress).toHaveBeenCalledTimes(2);
   expect(live.machines).not.toHaveBeenCalled(); expect(live.hosts).not.toHaveBeenCalled();
   const connected = machine('missed-while-disconnected', true);
@@ -248,6 +250,42 @@ it('reads seldom while the live connection is up, and recovers only the current 
   expect(live.progress).toHaveBeenCalledTimes(3);
   expect(closed).toHaveBeenCalledTimes(1);
   expect(live.machines).not.toHaveBeenCalled(); expect(live.hosts).not.toHaveBeenCalled();
+});
+
+it('keeps reading a few seconds apart while its progress keeps changing, which put a query\'s own interval off for ever', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const { client } = openEnrollment();
+  await issueCommand();
+  await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
+  // Rows of the machine the progress names arrive every second (its own feed, the page behind the dialog).
+  const enrolled = machine('busy-progress', false);
+  live.progress.mockResolvedValue({ receipt: RECEIPT, machine: enrolled, host: null });
+  for (let second = 0; second < 7; second += 1) {
+    await act(async () => {
+      client.setQueryData<EnrollmentProgress>(enrollmentProgressKey(RECEIPT), (held) => held === undefined ? held : { ...held, machine: { ...enrolled, last_seen_at: new Date(Date.now() + second).toISOString() } });
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+  }
+  // Seven seconds of changes: still read again twice, a few seconds apart.
+  expect(live.progress.mock.calls.length).toBeGreaterThanOrEqual(3);
+});
+
+it('moves on within a few seconds of the machine\'s session when both of its notices are lost and the live connection stays up', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const { closed } = openEnrollment();
+  await issueCommand();
+  await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
+  // The enrollment and the session are never told (the server dropped both while the person's feed was joined again),
+  // and the read when it joined came before the session.
+  const connected = machine('both-notices-lost', true);
+  live.progress.mockResolvedValue({ receipt: RECEIPT, machine: connected, host: null });
+  await act(async () => { await vi.advanceTimersByTimeAsync(ENROLLMENT_READ_AGAIN_MS); });
+  await waitFor(() => expect(live.navigate).toHaveBeenCalledExactlyOnceWith({ to: '/resources/machines/$id', params: { id: connected.id }, search: { tab: 'programs' } }));
+  expect(closed).toHaveBeenCalledTimes(1);
+  expect(live.progress).toHaveBeenCalledTimes(2);
+  // Online, it reads no more.
+  await act(async () => { await vi.advanceTimersByTimeAsync(ENROLLMENT_READ_AGAIN_MS * 3); });
+  expect(live.progress).toHaveBeenCalledTimes(2);
 });
 
 it('reads its progress again as soon as the person\'s feed joins again, so a lost enrollment notice does not wait for the next re-read', async () => {

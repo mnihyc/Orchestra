@@ -4,8 +4,8 @@
 //! of a machine, a fork, the files of a new environment, a recreated unit) is the transfer's own. It
 //! is never recorded as a cached version of a file. The transfer pins what it brings, as soon as the
 //! source has uploaded it, so that nothing collects it while the destination fetches it; and it lets
-//! go of every pin once, whatever its end, with [`release_transfer`]. What nothing else holds is then
-//! gone from the server at once ([`Released::settle`]), not after the grace that ordinary content gets.
+//! go of every pin once, whatever its end, with `release_transfer`. What nothing else holds is then
+//! gone from the server at once (`Released::settle`), not after the grace that ordinary content gets.
 //!
 //! Whether a place relays at all is its setting `storage.relay_transfers` ([`relay_on`]): a place that chose
 //! to cache keeps what it always did, the grace.

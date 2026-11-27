@@ -50,6 +50,13 @@ check "the web edge serves the same update-status directory" compose exec -T fro
 check "the updater finds an installed release on the selected disk" says 'installed already' update_sh "$TAG" --from "$A" --yes
 check "the default server directory was not created" test ! -e "$STACK/runtime/data"
 check "the default PostgreSQL directory was not created" test ! -e "$STACK/runtime/postgres/data"
+# Docker makes a missing mount point inside a directory it binds itself, owned by root: the API's container mounts the
+# installation records inside the server's directory.
+SERVICE_UID="$(sed -n 's/^ORCH_UID=//p' "$STACK/.env" | tail -n 1)"
+check "the installation records' mount point in the server's directory is the stack user's" \
+  test "$(stat -c %u "$data_disk/server/installation")" = "$SERVICE_UID"
+check "nothing in the server's or PostgreSQL's directory belongs to anyone else" \
+  test -z "$(find "$data_disk" ! -user "$SERVICE_UID" -print -quit)"
 
 check "there is no previous release yet" test ! -e "$STACK/runtime/server/previous"
 check "a dump was taken before the stack started" test -n "$(dumps)"
@@ -117,6 +124,21 @@ bundled_host_online() {
 wait_for 180 "the fresh installation has its own enrolled, online host" bundled_host_online
 wait_for 60 "orchctl doctor passes on the whole stack" ready "$TAG"
 expect "the node container stays up" "running" "$(compose ps --format '{{.State}}' node)"
+
+step "the first administrator uses the bundled host as themself, and nobody else does"
+# A sign-in of its own, whose administrator switch is off, as a browser's first one is: Add environment's and Add
+# provider's defaults place on the hosts this session lists as usable.
+uses_bundled_host() {
+  local reply token
+  reply="$(curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/auth/login" \
+    -d "{\"login\":\"$ADMIN_NAME\",\"password\":\"$ADMIN_PASSWORD\"}")" || return 1
+  token="$(printf '%s' "$reply" | json_field access_token)"
+  edge_get /api/v1/hosts -H "authorization: Bearer $token" |
+    jq -e '[.[] | select(.bundled_with_server and (.access.permissions | index("host.use")) and ((.access.admin_only // []) | index("host.use") | not))] | length == 1'
+}
+check "with As admin off, the first administrator may use the bundled host" uses_bundled_host
+expect "its Use row names the first administrator alone" "$ADMIN_NAME" \
+  "$(sql "SELECT string_agg(u.username, ',') FROM permission_entries pe JOIN hosts h ON h.id=pe.object_id JOIN users u ON u.id=pe.holder_id WHERE h.bundled_with_server AND pe.permission='host.use' AND pe.page='live' AND pe.removed_at IS NULL")"
 
 step "./update.sh doctor, once, from the host"
 DOCTOR_OUT="$(update_sh doctor 2>&1)" && DOCTOR_CODE=0 || DOCTOR_CODE=$?

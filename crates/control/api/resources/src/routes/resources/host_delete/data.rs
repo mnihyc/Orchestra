@@ -356,15 +356,25 @@ pub(super) async fn plan(
             ));
         }
         if fate == Fate::Purge {
-            let (manager, admin) =
-                orch_engine::jobs::retained::authority(conn, principal, promise.id)
-                    .await
-                    .map_err(ApiError::internal)?;
-            if !admin && !(manager && promise.volumes_purge_at.is_some_and(|at| at <= ctx.now)) {
-                row.blockers.push(blocked(
-                    "access.denied",
-                    "Only its current home administrator may shorten this recovery window",
-                ));
+            match orch_engine::jobs::retained::authority(conn, principal, promise.id).await {
+                Ok((manager, admin)) => {
+                    if !admin
+                        && !(manager && promise.volumes_purge_at.is_some_and(|at| at <= ctx.now))
+                    {
+                        row.blockers.push(blocked(
+                            "access.denied",
+                            "Only its current home administrator may shorten this recovery window",
+                        ));
+                    }
+                }
+                // Nobody administers the home of what a deleted place kept until the place is back.
+                Err(error) if orch_engine::jobs::retained::place_gone(&error) => {
+                    row.blockers.push(blocked(
+                        "place_gone",
+                        "Its place was deleted: bring the place back to purge this data now, or choose Wait",
+                    ));
+                }
+                Err(error) => return Err(ApiError::internal(error)),
             }
             if !facts.inventory.online {
                 row.blockers.push(blocked(

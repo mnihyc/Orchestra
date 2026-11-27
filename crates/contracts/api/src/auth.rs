@@ -487,7 +487,7 @@ pub struct ApiTokenInfo {
 pub struct TokenCreated {
     /// The secret, in the first answer only; `null` when the same creation is asked again with its key,
     /// since no secret is kept to be given twice. The canonical encoding is
-    /// opat_<lowercase hyphenated key UUID>_<43 base64url secret characters><6 Base62 CRC32 digits>.
+    /// `opat_<lowercase hyphenated key UUID>_<43 base64url secret characters><6 Base62 CRC32 digits>`.
     #[schemars(extend("x-storage-exact" = true))]
     pub token: Option<String>,
     /// The token as it is listed.

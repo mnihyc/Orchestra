@@ -94,15 +94,39 @@ pub(crate) async fn may_read(
     principal: &Principal,
     id: Id,
 ) -> ApiResult<(bool, bool)> {
-    let rights = orch_engine::jobs::retained::authority(conn, principal, id)
-        .await
-        .map_err(ApiError::internal)?;
+    let rights = match orch_engine::jobs::retained::authority(conn, principal, id).await {
+        Ok(rights) => rights,
+        Err(error) if orch_engine::jobs::retained::place_gone(&error) => {
+            return Err(place_gone_refusal(conn, principal, id).await);
+        }
+        Err(error) => return Err(ApiError::internal(error)),
+    };
     if !rights.0 && !rights.1 {
         return Err(denied());
     }
     Ok(rights)
 }
 orch_api_base::__api_bind_069be0bc4b!();
+
+/// The refusal for what an environment whose place was deleted kept: it is read and acted on once the place is back,
+/// as a document in a deleted place is restored after it, and the place is named as the caller may know it.
+async fn place_gone_refusal(conn: &mut Conn, principal: &Principal, id: Id) -> ApiError {
+    let home = match hosting::environment(conn, id).await {
+        Ok(Some(environment)) => environment.home_node_id,
+        Ok(None) => return ApiError::not_found(),
+        Err(error) => return error.into(),
+    };
+    let place =
+        match crate::routes::nodes::view::refs(conn, principal, &[home], Policy::default()).await {
+            Ok(mut refs) => refs.remove(&home),
+            Err(error) => return error,
+        };
+    ApiError::new(
+        ErrorCode::NodeRestoreParentFirst,
+        "bring back the environment's place under its own restoration authority first",
+    )
+    .with("parent", place)
+}
 
 pub(crate) async fn present(
     ctx: &Ctx,
@@ -116,9 +140,13 @@ pub(crate) async fn present(
     let Some(phase) = row.removal_phase.as_deref() else {
         return Ok(None);
     };
-    let (manager, admin) = orch_engine::jobs::retained::authority(conn, principal, id)
-        .await
-        .map_err(ApiError::internal)?;
+    let (manager, admin) = match orch_engine::jobs::retained::authority(conn, principal, id).await {
+        Ok(rights) => rights,
+        // The place it was in is gone too: what is kept reads as gone, with no name and no act on it, instead of
+        // failing whatever lists it.
+        Err(error) if orch_engine::jobs::retained::place_gone(&error) => (false, false),
+        Err(error) => return Err(ApiError::internal(error)),
+    };
     let by = match row.deleted_by {
         Some(id) => crate::middleware::authorization::refusals::user_refs(conn, &[id])
             .await?

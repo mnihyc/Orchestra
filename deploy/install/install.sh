@@ -423,7 +423,6 @@ install_systemd_unit() {
   unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   if ! command -v systemctl > /dev/null 2>&1 || ! systemctl --user show-environment > /dev/null 2>&1; then
     say "No systemd user manager is reachable here, so no service was installed."
-    say "Start the connector yourself: $BIN --data-dir '$DATA_DIR' run"
     return 0
   fi
   mkdir -p "$unit_dir"
@@ -441,6 +440,7 @@ install_systemd_unit() {
   systemctl --user enable "$unit" > /dev/null 2>&1
   systemctl --user restart "$unit"
   PLACED_SERVICE=""
+  STARTED=1
   say "The connector runs as the systemd user unit $unit"
   if command -v loginctl > /dev/null 2>&1 && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2> /dev/null)" != yes ]; then
     say "  It stops when you log out. To keep it running: loginctl enable-linger $(id -un)"
@@ -483,17 +483,24 @@ EOF
   record_installation --service
   launchctl bootstrap "$domain" "$plist"
   PLACED_SERVICE=""
+  STARTED=1
   say "The connector runs as the launchd agent $label"
 }
 
+# Whether a service now runs the connector: only then is the machine connected when this ends.
+STARTED=0
 if [ "$SERVICE" = 1 ]; then
   if [ "$OS" = macos ]; then install_launchd_agent; else install_systemd_unit; fi
 else
-  say "No service was installed (--no-service). Start the connector with: $BIN --data-dir '$DATA_DIR' run"
+  say "No service was installed (--no-service)."
 fi
 
 case ":${PATH:-}:" in
   *":$BIN_DIR:"*) ;;
   *) say "$BIN_DIR is not on your PATH; add it to run orch-connector by name" ;;
 esac
-say "Done: this machine is connected to $URL. Its page in Orch shows it within a minute."
+if [ "$STARTED" = 1 ]; then
+  say "Done: this machine is connected to $URL. Its page in Orch shows it within a minute."
+else
+  say "Done: this machine is enrolled with $URL and is not connected yet. Start the connector, which runs in the foreground: $BIN --data-dir '$DATA_DIR' run"
+fi

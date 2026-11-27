@@ -66,6 +66,18 @@ fn failed(code: &str, why: impl Into<String>) -> Stop {
     Stop::Failed(Failure::new(code, why))
 }
 
+/// A job's recheck of [`authority`] stops plainly where the environment's place was deleted meanwhile.
+pub(crate) fn recheck(error: EngineError) -> Stop {
+    if place_gone(&error) {
+        failed(
+            "place_gone",
+            "the environment's place was deleted; bring the place back first",
+        )
+    } else {
+        error.into()
+    }
+}
+
 /// Claims files for a restore or a purge in the caller's guarded transaction.
 pub async fn queue(
     conn: &mut Conn,
@@ -174,7 +186,14 @@ pub async fn queue_before(
     Ok(row)
 }
 
-/// Current intrinsic home administration, with token scopes and subtree still narrowing it.
+/// Whether [`authority`] failed because the environment's place is gone: a deleted place's trash keeps its
+/// environments, and what they kept, for its window, and nobody administers their home until the place is back.
+pub fn place_gone(error: &EngineError) -> bool {
+    matches!(error, EngineError::Authz(orch_authz::Error::NotFound(_)))
+}
+
+/// Current intrinsic home administration, with token scopes and subtree still narrowing it. An environment whose
+/// place is gone has none: see [`place_gone`].
 pub async fn authority(
     conn: &mut Conn,
     principal: &orch_authz::Principal,
@@ -276,7 +295,11 @@ impl Kept {
         } else {
             requester(conn, &row, job.now()).await?
         };
-        if !authority(conn, &principal, self.environment).await?.1 {
+        if !authority(conn, &principal, self.environment)
+            .await
+            .map_err(recheck)?
+            .1
+        {
             return Err(failed(
                 "denied",
                 "the requester is no longer an admin of the environment's home",
@@ -311,7 +334,9 @@ impl Kept {
         } else {
             requester(conn, &row, job.now()).await?
         };
-        let (manager, admin) = authority(conn, &principal, self.environment).await?;
+        let (manager, admin) = authority(conn, &principal, self.environment)
+            .await
+            .map_err(recheck)?;
         if !manager && !admin {
             return Err(failed(
                 "denied",

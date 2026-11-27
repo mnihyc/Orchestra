@@ -90,6 +90,7 @@ async fn reviewing_a_native_system_allows_its_shared_directory_and_revocation_cl
         data_sources: None,
         environment_id: id,
         workspace_root: Some(workspace.to_string_lossy().into_owned()),
+        workspace: Default::default(),
         ignore: vec![],
         index: IndexMode::Live,
         mounts: Some(vec![]),

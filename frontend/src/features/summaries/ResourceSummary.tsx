@@ -18,7 +18,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { UserChip } from '@/ui/UserChip';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
-import { SummaryBox } from './SummaryBox';
+import { SummaryBox, type SummaryFold } from './SummaryBox';
 import { summaryActionKey } from './model';
 import { conformanceFacts, conformanceFragment, ProducerFact, summaryProducer, tokenWords, usageWords } from './facts';
 
@@ -29,14 +29,16 @@ export interface ResourceSummaryProps {
   enabled?: boolean;
   onConfigure?: () => void;
   className?: string;
-  /** Shown as one closed row while it has nothing yet (a place's page). */
+  /** Shown as one closed row while it has nothing yet (a place's page, a thread). */
   foldWhenEmpty?: boolean;
+  /** The person's own choice to show or put away a thread's summary. */
+  fold?: SummaryFold | undefined;
 }
 export function ResourceSummary(props: ResourceSummaryProps) {
   const reader = useStore(client.session, summaryReaderKey);
   return <CurrentSummary key={JSON.stringify([reader, props.target.kind, props.target.id, props.range?.after ?? null, props.range?.through ?? null])} {...props} reader={reader} />;
 }
-function CurrentSummary({ target, reference, range, enabled = true, onConfigure, className, foldWhenEmpty = false, reader }: ResourceSummaryProps & { reader: string }) {
+function CurrentSummary({ target, reference, range, enabled = true, onConfigure, className, foldWhenEmpty = false, fold, reader }: ResourceSummaryProps & { reader: string }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? 'en';
   const cache = useQueryClient();
@@ -47,7 +49,7 @@ function CurrentSummary({ target, reference, range, enabled = true, onConfigure,
   if (query.isError) return <ErrorAlert error={query.error} action={<Button size="sm" onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />;
   // A summary is written beside its page (on a place, it comes with the place's chat opening): the page's content is
   // shown without waiting for it.
-  if (query.data === undefined) return <div data-after-content><SkeletonRows rows={foldWhenEmpty ? 1 : 2} /></div>;
+  if (query.data === undefined) return <div data-after-content><SkeletonRows rows={foldWhenEmpty || fold?.open === false ? 1 : 2} /></div>;
   const reply = query.data;
   const manualReason = reply.manual_problem === 'cap_reached' ? t('summaryBox.manualCap')
     : reply.manual_problem === 'no_model' ? t('summaryBox.manualModel') : undefined;
@@ -118,7 +120,7 @@ function CurrentSummary({ target, reference, range, enabled = true, onConfigure,
       {!native && readableRates.length === 0 && <div className="flex min-w-0 flex-col gap-2"><p className="text-sm font-medium text-text">{t('summaryBox.baseRates')}</p><StateLine compact title={t('summaryBox.noRates')} /></div>}
     </FactDisclosure>
   </>;
-  return <SummaryBox readerKey={reader} target={{ kind: target.kind, reference }} className={className} foldWhenEmpty={foldWhenEmpty}
+  return <SummaryBox readerKey={reader} target={{ kind: target.kind, reference }} className={className} foldWhenEmpty={foldWhenEmpty} fold={fold}
     summary={{ revision: JSON.stringify(reply), state: reply.state, text: reply.text, producer: summaryProducer(reply.producer, t('summaryBox.model')), updated_at: reply.updated_at, wait: reply.wait,
       ...(reply.problem === null ? {} : { error: new ApiError(reply.problem, null) }) }}
     onRefresh={refresh} refreshBlockedReason={reply.inspecting ? t('summaryBox.inspection') : manualReason}

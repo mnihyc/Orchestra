@@ -543,6 +543,111 @@ async fn a_host_of_the_system_is_used_by_every_user_and_managed_by_system_admins
     assert_eq!(owners, [Some(sysadmin)]);
 }
 
+/// "Only me" on a resource of the system: owning it counts in no root org, so its row names its maker, who uses it
+/// as themself with administrator mode off. Nobody else does, another system admin included, until its page says so.
+/// The host installed with the server is made so, in the first administrator's name.
+#[tokio::test]
+async fn only_me_on_a_resource_of_the_system_is_used_by_its_maker_as_themself_and_by_nobody_else() {
+    let w = World::new().await;
+    let (first, second, member) = (
+        w.user("first").await,
+        w.user("second").await,
+        w.member("member").await,
+    );
+    for admin in [first, second] {
+        let mut conn = w.conn().await;
+        orch_db::queries::access::testing::make_system_admin(&mut conn, admin)
+            .await
+            .unwrap();
+    }
+    for (kind, used, managed) in [
+        ("host", P::HostUse, P::HostManage),
+        ("template", P::TemplateUse, P::TemplateManage),
+    ] {
+        let thing = w.system_thing(kind, "only-me").await;
+        {
+            let mut conn = w.conn().await;
+            ownership::start_resource(
+                &mut conn,
+                object(kind, thing),
+                first,
+                NewAccess::OnlyMe,
+                w.now,
+            )
+            .await
+            .unwrap();
+        }
+        let plain = |who: Id| Caller::session(who).with_admin_mode(false);
+        assert!(
+            w.decide_on(plain(first), kind, thing, used)
+                .await
+                .is_allowed(),
+            "its maker uses the {kind} as themself"
+        );
+        assert!(
+            !w.decide_on(plain(first), kind, thing, managed)
+                .await
+                .is_allowed(),
+            "the system manages its {kind}: its maker does so in administrator mode"
+        );
+        for other in [second, member] {
+            assert!(
+                !w.decide_on(plain(other), kind, thing, used)
+                    .await
+                    .is_allowed(),
+                "nobody else uses the {kind}"
+            );
+        }
+        let named: Vec<(String, Option<Id>, String)> = sqlx::query_as(
+            "SELECT holder_kind, holder_id, source FROM permission_entries
+              WHERE object_kind = $1 AND object_id = $2 AND permission = $3 AND removed_at IS NULL",
+        )
+        .bind(kind)
+        .bind(thing)
+        .bind(used.as_str())
+        .fetch_all(&w.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            named,
+            [("user".to_owned(), Some(first), "creation".to_owned())]
+        );
+    }
+    // With a home, owning counts: the row stays as it was, its maker not named in it.
+    let homed = {
+        let mut conn = w.conn().await;
+        let id = orch_db::queries::resources::access_fixtures::insert_resource(
+            &mut conn,
+            "host",
+            Some(member),
+            Some(w.root),
+            "homed",
+        )
+        .await
+        .unwrap();
+        ownership::start_resource(
+            &mut conn,
+            object("host", id),
+            member,
+            NewAccess::OnlyMe,
+            w.now,
+        )
+        .await
+        .unwrap();
+        id
+    };
+    assert!(w.can_on(member, "host", homed, P::HostUse).await);
+    let entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM permission_entries
+          WHERE object_kind = 'host' AND object_id = $1 AND permission = 'host.use' AND removed_at IS NULL",
+    )
+    .bind(homed)
+    .fetch_one(&w.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(entries, 0);
+}
+
 #[tokio::test]
 async fn a_second_owner_is_named_by_an_owner_or_an_admin_and_holds_all_but_naming_outsiders() {
     let w = World::new().await;
