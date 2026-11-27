@@ -64,7 +64,7 @@ services:
       POSTGRES_DB: orch
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
     volumes:
-      - ./runtime/postgres/data:/var/lib/postgresql/data
+      - "${ORCH_POSTGRES_DATA_DIR:-./runtime/postgres/data}:/var/lib/postgresql/data"
       - ./runtime/postgres/passwd:/etc/passwd:ro
     networks: [backend]
     stop_grace_period: 60s
@@ -96,13 +96,14 @@ services:
       - ./config/ca-certificates:/etc/orch/ca-certificates:ro
       - ./runtime/server/current:/opt/orch:ro
       - ./runtime/cli/current:/opt/orchctl:ro
-      - ./runtime/data:/var/lib/orch
+      - "${ORCH_DATA_DIR:-./runtime/data}:/var/lib/orch"
       # Protected operator metadata only; imported after installation-id and manifest-hash checks.
       - ./runtime/update:/var/lib/orch/installation:ro
       - ./config/orch.toml:/etc/orch/orch.toml:ro
       - ./config/secrets/orch_ca_cert.pem:/run/secrets/orch_ca_cert.pem:ro
       - ./config/secrets/orch_ca_key.pem:/run/secrets/orch_ca_key.pem:ro
       - ./config/secrets/orch_master_key:/run/secrets/orch_master_key:ro
+      - ./config/secrets/orch_vapid_private_key:/run/secrets/orch_vapid_private_key:ro
       - ./config/secrets/orch_ports_assertion_key:/run/secrets/orch_ports_assertion_key:ro
       - ./config/secrets/service_api_cert.pem:/run/secrets/service_api_cert.pem:ro
       - ./config/secrets/service_api_key.pem:/run/secrets/service_api_key.pem:ro
@@ -193,8 +194,11 @@ services:
     <<: *service
     # What the system calls this host, which is the name it enrolls under.
     hostname: orch-node
-    # Runs, and enrolls itself with the bundled node's token the first time.
-    command: ["/opt/orch/bin/orch-node", "run", "--token-file", "/run/secrets/node_enrollment_token"]
+    # Runs, and enrolls itself with the bundled node's token the first time. It
+    # runs from the path its program has on the host: a check of an agent
+    # program, a live mount and a volume copy hand that program to a unit of
+    # their own, and the Docker daemon finds it by that path.
+    command: ["${ORCH_HOME:?run ./update.sh first-start}/runtime/server/current/bin/orch-node", "run", "--token-file", "/run/secrets/node_enrollment_token"]
     depends_on:
       gateway:
         condition: service_healthy
@@ -203,13 +207,14 @@ services:
     environment:
       <<: *service-environment
       # The node hands paths to the Docker daemon, which resolves them on the
-      # host. So its directory is mounted at the path it has there, and the
-      # node is told that path.
+      # host. So its directories are mounted at the paths they have there, and
+      # the node is told that path.
       ORCH_INSTALLATION_ROOT: "${ORCH_HOME:?run ./update.sh first-start}"
       ORCH_NODE_DATA_DIR: "${ORCH_HOME:?run ./update.sh first-start}/runtime/node"
     volumes:
       - ./config/ca-certificates:/etc/orch/ca-certificates:ro
       - ./runtime/server/current:/opt/orch:ro
+      - "${ORCH_HOME}/runtime/server/current:${ORCH_HOME}/runtime/server/current:ro"
       - ./config/orch.toml:/etc/orch/orch.toml:ro
       - ./config/secrets/node_enrollment_token:/run/secrets/node_enrollment_token:ro
       - "${ORCH_HOME}/runtime/node:${ORCH_HOME}/runtime/node"
@@ -224,6 +229,7 @@ services:
     group_add: ["${ORCH_GID:?run ./update.sh first-start}"]
     environment:
       ORCH_FRONTEND_HTTPS_BIND: "${ORCH_FRONTEND_HTTPS_BIND:-}"
+      ORCH_FRONTEND_HUMAN_CHECK: "${ORCH_FRONTEND_HUMAN_CHECK:-}"
     read_only: true
     # The master process starts as root to bind port 80 and hand the work to
     # its unprivileged workers; nothing else is kept.
@@ -240,9 +246,10 @@ services:
       - "${ORCH_FRONTEND_BIND:-127.0.0.1:5180}:80"
     volumes:
       - ./frontend.sh:/etc/orch/frontend.sh:ro
-      - ./runtime/data/frontend-tls:/etc/orch/frontend-tls:ro
+      - ./frontend-csp.sh:/etc/orch/frontend-csp.sh:ro
+      - "${ORCH_DATA_DIR:-./runtime/data}/frontend-tls:/etc/orch/frontend-tls:ro"
       - ./runtime/frontend/current/dist:/usr/share/nginx/html:ro
-      - ./runtime/data/update-status:/var/lib/orch-update-status:ro
+      - "${ORCH_DATA_DIR:-./runtime/data}/update-status:/var/lib/orch-update-status:ro"
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       # The authority the upstreams' certificates are checked against.
       - ./config/secrets/orch_ca_cert.pem:/etc/orch/secrets/orch_ca_cert.pem:ro

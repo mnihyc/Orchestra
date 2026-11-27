@@ -100,6 +100,13 @@ pub const DEFAULT_SILENCE_SECS: u64 = 15 * 60;
 /// this is only for a harness that is set to try longer, or for one that does not stop.
 pub const DEFAULT_RETRY_PATIENCE_SECS: u64 = 10 * 60;
 
+/// How long the harness is given to end a turn it was asked to stop (a person's Stop) before its process is ended,
+/// and the turn with it: five seconds. The harness's own Esc stops at once, so a turn that still runs tools or asks
+/// for approvals five seconds after the interrupt is not stopping; and it is well under the 30 seconds after which
+/// the engine gives up on an unanswered interrupt and leaves the process running. The next turn starts a process
+/// of its own that takes the session up where its transcript is.
+pub const DEFAULT_STOP_GRACE_SECS: u64 = 5;
+
 /// How long a request whose window is decided waits for its transcript to show it before it is reported as the
 /// stream said it. Measured on the pinned build against runs of a sub-agent with two requests: the transcript held
 /// all the lines of a message 0.10 to 0.25 s after the message ended; a second is four times the longest.
@@ -121,6 +128,8 @@ pub fn turn_end_delays() -> Json {
             pointer: "/child_usage_wait_ms".to_owned(),
             also_ms: u64::try_from(EXIT_GRACE.as_millis()).unwrap_or(u64::MAX),
             default_ms: DEFAULT_CHILD_USAGE_WAIT_MS,
+            default_setting: None,
+            pending_buffer: None,
         }],
     })
     .unwrap_or(Json::Null)
@@ -187,6 +196,9 @@ pub struct ProfileConfig {
     /// Seconds the harness may go on trying again, with nothing else between, before the turn is ended and the
     /// process stopped; `0` never.
     pub retry_patience_secs: u64,
+    /// Seconds the harness is given to end a turn it was asked to stop before its process is ended and the turn is
+    /// ended as stopped; `0` never (the engine's own wait for an unanswered interrupt then applies).
+    pub stop_grace_secs: u64,
     /// Native retry number at which an error notice appears; zero means the first reported retry.
     /// Live retry status is always reported, independently of this threshold.
     pub retry_notice_attempt: u64,
@@ -208,6 +220,7 @@ impl Default for ProfileConfig {
             setting_sources: "project".to_owned(),
             silence_secs: DEFAULT_SILENCE_SECS,
             retry_patience_secs: DEFAULT_RETRY_PATIENCE_SECS,
+            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
             retry_notice_attempt: RETRY_NOTICE_ATTEMPT,
             child_usage_wait_ms: DEFAULT_CHILD_USAGE_WAIT_MS,
         }
@@ -236,6 +249,9 @@ impl ProfileConfig {
         }
         if let Some(secs) = map.get("retry_patience_secs").and_then(Json::as_u64) {
             options.retry_patience_secs = secs;
+        }
+        if let Some(secs) = map.get("stop_grace_secs").and_then(Json::as_u64) {
+            options.stop_grace_secs = secs;
         }
         if let Some(attempt) = map.get("retry_notice_attempt").and_then(Json::as_u64) {
             options.retry_notice_attempt = attempt;
@@ -268,6 +284,12 @@ impl ProfileConfig {
         (self.retry_patience_secs > 0).then(|| Duration::from_secs(self.retry_patience_secs))
     }
 
+    /// How long a turn that was asked to stop is given before its process is ended, `None` for as long as it takes.
+    #[must_use]
+    pub fn stop_grace(&self) -> Option<Duration> {
+        (self.stop_grace_secs > 0).then(|| Duration::from_secs(self.stop_grace_secs))
+    }
+
     /// How long a due sub-agent request waits for its transcript.
     #[must_use]
     pub fn child_usage_wait(&self) -> Duration {
@@ -294,6 +316,15 @@ mod tests {
         assert!(!options.background_tasks);
         assert_eq!(options.silence(), Some(Duration::from_secs(900)));
         assert_eq!(options.retry_patience(), Some(Duration::from_secs(600)));
+        assert_eq!(options.stop_grace(), Some(Duration::from_secs(5)));
+        assert_eq!(
+            ProfileConfig::from_json(&json!({ "stop_grace_secs": 0 })).stop_grace(),
+            None
+        );
+        assert_eq!(
+            ProfileConfig::from_json(&json!({ "stop_grace_secs": 2 })).stop_grace(),
+            Some(Duration::from_secs(2))
+        );
     }
 
     #[test]

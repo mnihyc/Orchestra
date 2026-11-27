@@ -1,5 +1,6 @@
 """A release waits for the exact tagged CI and refuses failed or stale results."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -48,8 +49,23 @@ class CiWaitTests(unittest.TestCase):
         self.assertIsNone(status(TAG, COMMIT, [run(run_attempt=2, status="in_progress", conclusion=None)]))
         self.assertEqual(status(TAG, COMMIT, [run(run_attempt=2)])["run_attempt"], 2)
 
-    def test_other_commits_tags_and_pull_requests_cannot_satisfy_the_gate(self):
-        self.assertIsNone(status(TAG, COMMIT, [run(head_branch="main"), run(head_sha="b" * 40), run(event="pull_request")]))
+    def test_a_commit_green_on_main_can_be_tagged_without_running_ci_again(self):
+        with patch("release_ci.fetch", return_value=[run(head_branch="main")]), patch("release_ci.dispatch") as start:
+            self.assertEqual(wait(TAG, COMMIT, "example/orch", start_missing=True)["id"], 12)
+            start.assert_not_called()
+
+    def test_a_tag_waits_for_the_running_branch_check(self):
+        with patch("release_ci.fetch", side_effect=[[], [run(head_branch="main", status="queued")], [run(head_branch="main")]]), patch("release_ci.dispatch") as start:
+            wait(TAG, COMMIT, "example/orch", start_missing=True, sleep=lambda _: None)
+            start.assert_not_called()
+
+    def test_a_tag_without_any_ci_starts_one_check_even_if_it_takes_time_to_appear(self):
+        with patch("release_ci.fetch", side_effect=[[], [], [], [run(event="workflow_dispatch")]]), patch("release_ci.dispatch") as start:
+            wait(TAG, COMMIT, "example/orch", start_missing=True, sleep=lambda _: None)
+            start.assert_called_once_with("example/orch", TAG)
+
+    def test_other_commits_and_pull_requests_cannot_satisfy_the_gate(self):
+        self.assertIsNone(status(TAG, COMMIT, [run(head_sha="b" * 40), run(event="pull_request")]))
 
 
 class PublicationTests(unittest.TestCase):
@@ -77,10 +93,12 @@ class PublicationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "differs"):
                     check_published_manifest({"assets": [{**asset, "digest": "sha256:" + hashlib.sha256(wrong).hexdigest()}]}, directory, "example/orch")
 
-    def run_publish(self, failed_ci=False, tag=TAG, published_tag="v1.2.2"):
-        with tempfile.TemporaryDirectory() as name:
+    def run_publish(self, failed_ci=False, tag=TAG, published_tag="v1.2.2", notes=None):
+        with tempfile.TemporaryDirectory() as name, tempfile.TemporaryDirectory() as notes_dir:
             directory = Path(name)
             (directory / "version.json").write_text(json.dumps({"tag": tag, "version": tag[1:], "commit": COMMIT}))
+            if notes is not None:
+                (Path(notes_dir) / f"{tag}.md").write_text(notes)
             commands = []
             def execute(args, **kwargs):
                 commands.append(args)
@@ -92,9 +110,10 @@ class PublicationTests(unittest.TestCase):
                     return json.dumps({"sha": COMMIT})
                 return json.dumps([[{"tag_name": published_tag, "draft": False, "prerelease": False}]] if published_tag else [[]])
             argv = ["release_publish.py", "--release", str(directory), "--repo", "example/orch", "--images", str(directory)]
+            notes_patch = patch("release_publish.NOTES_DIR", Path(notes_dir)) if notes is not None else contextlib.nullcontext()
             with patch.object(sys, "argv", argv), patch.dict(os.environ, {"PUBLISH_IMAGES": "false"}), \
                     patch("release_publish.subprocess.run", side_effect=execute), patch("release_publish.run", side_effect=api), \
-                    patch("release_publish.reconcile_latest"), \
+                    patch("release_publish.reconcile_latest"), notes_patch, \
                     patch("release_publish.wait_for_ci", side_effect=ValueError("CI failed") if failed_ci else None) as ci:
                 if failed_ci:
                     with self.assertRaisesRegex(ValueError, "CI failed"):
@@ -119,6 +138,47 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("--verify-tag", create)
         self.assertIn(".github/release-notes/v1.2.3.md", create)
         self.assertNotIn("--draft", create)
+
+    def test_a_version_whose_notes_say_pre_release_is_created_as_a_pre_release_and_not_latest(self):
+        commands = self.run_publish(notes="# Orch 1.2.3\n\n**Status:** Pre-release. **Released:** 2026-11-27.\n")
+        create = next(command for command in commands if command[:3] == ["gh", "release", "create"])
+        self.assertIn("--prerelease", create)
+        self.assertIn("--latest=false", create)
+        self.assertNotIn("--latest=true", create)
+
+    def test_a_version_whose_notes_say_nothing_of_a_pre_release_stays_a_stable_release(self):
+        commands = self.run_publish(notes="# Orch 1.2.3\n\n**Status:** Stable. **Released:** 2026-11-27.\n")
+        create = next(command for command in commands if command[:3] == ["gh", "release", "create"])
+        self.assertNotIn("--prerelease", create)
+        self.assertIn("--latest=true", create)
+
+    def test_a_pre_release_draft_is_published_with_the_pre_release_flag_and_not_as_latest(self):
+        with tempfile.TemporaryDirectory() as name, tempfile.TemporaryDirectory() as notes_dir:
+            directory = Path(name)
+            manifest = json.dumps({"tag": TAG, "version": "1.2.3", "commit": COMMIT})
+            (directory / "version.json").write_text(manifest)
+            (Path(notes_dir) / f"{TAG}.md").write_text("**Status:** Pre-release. **Released:** 2026-11-27.\n")
+            draft = {"draft": True, "assets": [{"name": "version.json",
+                     "digest": "sha256:" + hashlib.sha256(manifest.encode()).hexdigest()}]}
+            commands = []
+            def execute(args, **kwargs):
+                commands.append(args)
+                if args[:2] == ["gh", "api"]:
+                    return subprocess.CompletedProcess(args, 0, json.dumps(draft), "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            def api(*args):
+                return json.dumps({"sha": COMMIT}) if "/commits/" in args[-1] else json.dumps([[]])
+            argv = ["release_publish.py", "--release", str(directory), "--repo", "example/orch", "--images", str(directory)]
+            with patch.object(sys, "argv", argv), patch.dict(os.environ, {"PUBLISH_IMAGES": "false"}), \
+                    patch("release_publish.subprocess.run", side_effect=execute), patch("release_publish.run", side_effect=api), \
+                    patch("release_publish.NOTES_DIR", Path(notes_dir)), \
+                    patch("release_publish.wait_for_ci"), patch("release_publish.reconcile_latest"):
+                publish()
+            edit = next(command for command in commands if command[:3] == ["gh", "release", "edit"])
+            self.assertIn("--draft=false", edit)
+            self.assertIn("--prerelease=true", edit)
+            self.assertIn("--latest=false", edit)
+            self.assertIn(str(Path(notes_dir) / f"{TAG}.md"), edit)
 
     def test_ci_failure_at_the_final_recheck_never_creates_a_release(self):
         commands = self.run_publish(failed_ci=True)

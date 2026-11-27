@@ -13,18 +13,22 @@ use std::collections::BTreeMap;
 use orch_agent_contract::adapter::AdapterError;
 use orch_agent_contract::descriptor::{ApprovalMode, SandboxMode};
 use orch_agent_contract::events::{
-    ApprovalOption, ApprovalRequested, HarnessRequest, HarnessRequestDetail, HarnessRequestKind,
-    OptionScope, OptionStyle, Question, QuestionOption,
+    ApprovalMatcher, ApprovalOption, ApprovalRequested, HarnessRequest, HarnessRequestDetail,
+    HarnessRequestKind, OptionScope, OptionStyle, Question, QuestionOption,
 };
 use orch_agent_contract::session::{ApprovalDecision, TurnId};
 use orch_types::Json;
 use serde_json::json;
 
+use crate::sandbox::SandboxSupport;
 use crate::stream::Frame;
 use crate::tools::{Family, ToolContext, call_title, family_of, tool_payload};
 
 /// The option that lets the one thing happen.
 pub const OPTION_ALLOW_ONCE: &str = "allow_once";
+/// The option that lets it happen and keeps a rule for this thread that answers the later requests of its kind:
+/// Orch keeps the rule, never the harness's settings.
+pub const OPTION_ALLOW_THREAD: &str = "allow_thread";
 /// The option that refuses it.
 pub const OPTION_DENY: &str = "deny";
 
@@ -63,19 +67,29 @@ pub const fn permission_mode(mode: ApprovalMode) -> &'static str {
 /// The settings of the harness's shell sandbox for a sandbox mode of Orch, to be merged into the session's
 /// settings. `workspace` turns the sandbox on and makes it a hard requirement, so that a sandbox that cannot
 /// start fails the session and never runs a command unconfined; with the approval mode `on_request`, commands
-/// that run inside the sandbox run without asking. `open` asks for nothing: the environment is the boundary.
+/// that run inside the sandbox run without asking. Where the sandbox starts here only as the harness's weaker
+/// nested sandbox (`support`, see [`crate::sandbox`]), it is asked for that one. `open` asks for nothing: the
+/// environment is the boundary.
 #[must_use]
-pub fn sandbox_settings(approval: ApprovalMode, sandbox: SandboxMode) -> Option<Json> {
+pub fn sandbox_settings(
+    approval: ApprovalMode,
+    sandbox: SandboxMode,
+    support: &SandboxSupport,
+) -> Option<Json> {
     match sandbox {
         SandboxMode::Open | SandboxMode::ReadOnly => None,
-        SandboxMode::Workspace => Some(json!({
-            "sandbox": {
+        SandboxMode::Workspace => {
+            let mut settings = json!({
                 "enabled": true,
                 "failIfUnavailable": true,
                 "allowUnsandboxedCommands": false,
                 "autoAllowBashIfSandboxed": matches!(approval, ApprovalMode::OnRequest),
+            });
+            if support.weaker_nested {
+                settings["enableWeakerNestedSandbox"] = json!(true);
             }
-        })),
+            Some(json!({ "sandbox": settings }))
+        }
     }
 }
 
@@ -94,6 +108,9 @@ pub struct PermissionAsk {
     pub agent_id: Option<String>,
     /// The harness's sentence on it.
     pub description: Option<String>,
+    /// The permission updates the harness suggests so that it is not asked again (`permission_suggestions`): what
+    /// its own prompt offers as "don't ask again", read for the rule this thread may keep.
+    suggestions: Vec<Json>,
     /// Native content elicitation keeps its own response protocol inside the same pending approvals.
     elicitation: bool,
 }
@@ -122,6 +139,7 @@ impl PermissionAsk {
                     .and_then(Json::as_str)
                     .map(str::to_owned),
                 description: Some(message),
+                suggestions: Vec::new(),
                 elicitation: true,
             });
         }
@@ -144,6 +162,11 @@ impl PermissionAsk {
                 .get("description")
                 .and_then(Json::as_str)
                 .map(str::to_owned),
+            suggestions: request
+                .get("permission_suggestions")
+                .and_then(Json::as_array)
+                .cloned()
+                .unwrap_or_default(),
             elicitation: false,
         })
     }
@@ -183,7 +206,7 @@ impl PermissionAsk {
         let reason = self.description.clone();
         let (options, detail) = match kind {
             HarnessRequestKind::Other => (
-                allow_or_deny(),
+                allow_or_deny(None),
                 HarnessRequestDetail::Other {
                     summary: self
                         .description
@@ -215,7 +238,7 @@ impl PermissionAsk {
                 )
             }
             HarnessRequestKind::Command => (
-                allow_or_deny(),
+                allow_or_deny(self.command_rule(ctx)),
                 HarnessRequestDetail::Command {
                     command: self
                         .input
@@ -234,7 +257,7 @@ impl PermissionAsk {
                         _ => Vec::new(),
                     };
                 (
-                    allow_or_deny(),
+                    allow_or_deny(None),
                     HarnessRequestDetail::FileChange { changes, reason },
                 )
             }
@@ -257,7 +280,11 @@ impl PermissionAsk {
                 },
             ),
             _ => (
-                allow_or_deny(),
+                allow_or_deny(if family == Family::WebFetch {
+                    self.host_rule()
+                } else {
+                    None
+                }),
                 HarnessRequestDetail::Permissions {
                     permissions: json!({ "tool": self.tool_name, "input": self.input }),
                     reason,
@@ -298,7 +325,7 @@ impl PermissionAsk {
         }
         match decision {
             ApprovalDecision::Option { option_id, note } => match option_id.as_str() {
-                OPTION_ALLOW_ONCE | OPTION_PROCEED => Ok(self.allow()),
+                OPTION_ALLOW_ONCE | OPTION_ALLOW_THREAD | OPTION_PROCEED => Ok(self.allow()),
                 OPTION_KEEP_PLANNING => Ok(json!({
                     "behavior": "deny",
                     "message": note.clone().filter(|note| !note.is_empty()).unwrap_or_else(|| DEFAULT_KEEP_PLANNING.to_owned()),
@@ -327,6 +354,58 @@ impl PermissionAsk {
         }
     }
 
+    /// The rule this thread may keep for a command: the commands that begin as the harness's own "don't ask again"
+    /// suggests, where this is one simple command that begins so; otherwise exactly this command. A later request
+    /// offers the same rule only where the same holds of it, so that the rule never answers a command it was not
+    /// shown for: a second command, a redirection or an expansion makes the command one to be allowed exactly.
+    fn command_rule(&self, ctx: &ToolContext<'_>) -> Option<ApprovalMatcher> {
+        let command = self.input.get("command").and_then(Json::as_str)?.trim();
+        if command.is_empty() {
+            return None;
+        }
+        let cwd = ctx.cwd.to_owned();
+        if let Some(words) = simple_words(command)
+            && let Some(prefix) = suggested_prefix(&self.suggestions)
+            && let Some(prefix) = simple_words(&prefix)
+            && words.starts_with(&prefix)
+        {
+            return Some(ApprovalMatcher::CommandPrefix { argv: prefix, cwd });
+        }
+        Some(ApprovalMatcher::CommandExact {
+            command: command.to_owned(),
+            cwd,
+        })
+    }
+
+    /// The rule this thread may keep for a page fetch: the host of its address, by protocol and port.
+    fn host_rule(&self) -> Option<ApprovalMatcher> {
+        let url = self.input.get("url").and_then(Json::as_str)?;
+        let (scheme, rest) = url.split_once("://")?;
+        let protocol = scheme.to_ascii_lowercase();
+        let default_port = match protocol.as_str() {
+            "https" => 443,
+            "http" => 80,
+            _ => return None,
+        };
+        let authority = rest.split(['/', '?', '#']).next()?;
+        // A user name or a bracketed address is not a plain host name: no rule is offered.
+        if authority.contains('@') || authority.contains('[') {
+            return None;
+        }
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host, port.parse().ok()?),
+            None => (authority, default_port),
+        };
+        if host.is_empty() {
+            return None;
+        }
+        Some(ApprovalMatcher::Host {
+            host: host.to_ascii_lowercase(),
+            protocol,
+            port,
+        })
+    }
+
     /// Allows this exact tool input without changing it.
     #[must_use]
     pub fn allow(&self) -> Json {
@@ -352,6 +431,7 @@ fn proceed_or_keep_planning() -> Vec<ApprovalOption> {
             style: OptionStyle::Allow,
             scope: Some(OptionScope::Once),
             rule: None,
+            note: false,
         },
         ApprovalOption {
             id: OPTION_KEEP_PLANNING.to_owned(),
@@ -359,27 +439,117 @@ fn proceed_or_keep_planning() -> Vec<ApprovalOption> {
             style: OptionStyle::Deny,
             scope: None,
             rule: None,
+            note: true,
         },
     ]
 }
 
-fn allow_or_deny() -> Vec<ApprovalOption> {
-    vec![
-        ApprovalOption {
-            id: OPTION_ALLOW_ONCE.to_owned(),
-            label: "Allow once".to_owned(),
+/// Allow once; allow for this thread where a rule can be kept; deny, with the person's words for the agent.
+fn allow_or_deny(rule: Option<ApprovalMatcher>) -> Vec<ApprovalOption> {
+    let mut options = vec![ApprovalOption {
+        id: OPTION_ALLOW_ONCE.to_owned(),
+        label: "Allow once".to_owned(),
+        style: OptionStyle::Allow,
+        scope: Some(OptionScope::Once),
+        rule: None,
+        note: false,
+    }];
+    if let Some(rule) = rule {
+        options.push(ApprovalOption {
+            id: OPTION_ALLOW_THREAD.to_owned(),
+            label: "Allow for this thread".to_owned(),
             style: OptionStyle::Allow,
-            scope: Some(OptionScope::Once),
-            rule: None,
-        },
-        ApprovalOption {
-            id: OPTION_DENY.to_owned(),
-            label: "Deny".to_owned(),
-            style: OptionStyle::Deny,
-            scope: None,
-            rule: None,
-        },
-    ]
+            scope: Some(OptionScope::Thread),
+            rule: Some(rule),
+            note: false,
+        });
+    }
+    options.push(ApprovalOption {
+        id: OPTION_DENY.to_owned(),
+        label: "Deny".to_owned(),
+        style: OptionStyle::Deny,
+        scope: None,
+        rule: None,
+        // The harness reads the words as the refusal's message.
+        note: true,
+    });
+    options
+}
+
+/// The words of a command that is one simple command, as the shell splits them: no second command, no redirection,
+/// no expansion, no escape and no pattern, so that what it begins with is what runs. None for anything else.
+fn simple_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    for character in command.trim().chars() {
+        if let Some(open) = quote {
+            if character == open {
+                quote = None;
+            } else if open == '"' && matches!(character, '$' | '`' | '\\') {
+                return None;
+            } else {
+                word.push(character);
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                in_word = true;
+            }
+            ' ' | '\t' => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}' | '$' | '`' | '\\' | '\n'
+            | '\r' | '#' | '*' | '?' | '[' | ']' | '~' | '!' => return None,
+            _ => {
+                word.push(character);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(word);
+    }
+    // A first word that assigns a variable is not the command it runs.
+    (words.first().is_some_and(|first| !first.contains('='))).then_some(words)
+}
+
+/// The command prefix of the harness's one suggested shell rule (`find:*`, `npm run test *`); none where it suggests
+/// none, several (a command of several parts), or one without a wildcard.
+fn suggested_prefix(suggestions: &[Json]) -> Option<String> {
+    let mut found = suggestions
+        .iter()
+        .filter(|suggestion| {
+            suggestion.get("type").and_then(Json::as_str) == Some("addRules")
+                && suggestion.get("behavior").and_then(Json::as_str) == Some("allow")
+        })
+        .flat_map(|suggestion| {
+            suggestion
+                .get("rules")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|rule| rule.get("toolName").and_then(Json::as_str) == Some("Bash"))
+        .filter_map(|rule| rule.get("ruleContent").and_then(Json::as_str));
+    let content = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    let prefix = content
+        .strip_suffix(":*")
+        .or_else(|| content.strip_suffix(" *"))?
+        .trim();
+    (!prefix.is_empty()).then(|| prefix.to_owned())
 }
 
 fn approval_title(ask: &PermissionAsk, family: &Family, ctx: &ToolContext<'_>) -> String {
@@ -497,6 +667,8 @@ mod tests {
 
     fn ctx() -> ToolContext<'static> {
         ToolContext {
+            outputs: None,
+            output_capture_bytes: orch_agent_contract::output::DEFAULT_CAPTURE_BYTES,
             directory: "/workspace/web",
             cwd: "/workspace/web",
         }
@@ -635,14 +807,58 @@ mod tests {
 
     #[test]
     fn the_sandbox_is_a_hard_requirement_in_workspace_mode_and_absent_in_open_mode() {
-        let ask_each = sandbox_settings(ApprovalMode::Ask, SandboxMode::Workspace).unwrap();
+        let here = SandboxSupport::declared();
+        let ask_each = sandbox_settings(ApprovalMode::Ask, SandboxMode::Workspace, &here).unwrap();
         assert_eq!(ask_each["sandbox"]["enabled"], true);
         assert_eq!(ask_each["sandbox"]["failIfUnavailable"], true);
         assert_eq!(ask_each["sandbox"]["allowUnsandboxedCommands"], false);
         assert_eq!(ask_each["sandbox"]["autoAllowBashIfSandboxed"], false);
-        let on_request = sandbox_settings(ApprovalMode::OnRequest, SandboxMode::Workspace).unwrap();
+        assert!(
+            ask_each["sandbox"]
+                .get("enableWeakerNestedSandbox")
+                .is_none()
+        );
+        let on_request =
+            sandbox_settings(ApprovalMode::OnRequest, SandboxMode::Workspace, &here).unwrap();
         assert_eq!(on_request["sandbox"]["autoAllowBashIfSandboxed"], true);
-        assert!(sandbox_settings(ApprovalMode::Bypass, SandboxMode::Open).is_none());
+        assert!(sandbox_settings(ApprovalMode::Bypass, SandboxMode::Open, &here).is_none());
+    }
+
+    #[test]
+    fn the_settings_written_follow_what_the_sandbox_does_where_the_harness_runs() {
+        // Where only the weaker nested sandbox starts (a container that keeps its /proc), that one is asked for,
+        // still as a hard requirement.
+        let nested = SandboxSupport {
+            workspace: true,
+            weaker_nested: true,
+            reason: None,
+        };
+        let written =
+            sandbox_settings(ApprovalMode::OnRequest, SandboxMode::Workspace, &nested).unwrap();
+        assert_eq!(written["sandbox"]["enableWeakerNestedSandbox"], true);
+        assert_eq!(written["sandbox"]["failIfUnavailable"], true);
+        // Where it cannot start, the program declares Open alone, so that no turn asks for Workspace; Open writes
+        // no sandbox at all.
+        let none = SandboxSupport {
+            workspace: false,
+            weaker_nested: false,
+            reason: Some(
+                "Claude Code's sandbox needs bubblewrap (bwrap) and socat, which are not installed on this machine."
+                    .into(),
+            ),
+        };
+        assert_eq!(none.modes(), [SandboxMode::Open]);
+        assert!(sandbox_settings(ApprovalMode::OnRequest, SandboxMode::Open, &none).is_none());
+        let declared = crate::descriptor::descriptor_where("2.1.322", false, &none);
+        assert_eq!(declared.sandbox_modes, [SandboxMode::Open]);
+        assert_eq!(declared.sandbox_reason, none.reason);
+        assert_eq!(declared.check(), Ok(()));
+        let full = crate::descriptor::descriptor_where("2.1.322", false, &nested);
+        assert_eq!(
+            full.sandbox_modes,
+            [SandboxMode::Workspace, SandboxMode::Open]
+        );
+        assert!(full.sandbox_reason.is_none());
     }
 
     #[test]
@@ -676,6 +892,174 @@ mod tests {
             ("mkdir -p out && echo hi > out/x", "/workspace/web")
         );
         assert_eq!(reason.as_deref(), Some("Say hello"));
+    }
+
+    fn suggested(tool: &str, input: Json, suggestions: Json) -> PermissionAsk {
+        PermissionAsk::from_frame(&Frame::from_value(json!({
+            "type": "control_request", "request_id": "req-2",
+            "request": { "subtype": "can_use_tool", "tool_name": tool, "input": input,
+                         "tool_use_id": "toolu_2", "permission_suggestions": suggestions }
+        })))
+        .unwrap()
+    }
+
+    fn find_rule() -> Json {
+        json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "find:*" }],
+                 "behavior": "allow", "destination": "localSettings" }])
+    }
+
+    fn ids(approval: &ApprovalRequested) -> Vec<&str> {
+        approval
+            .request
+            .options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_harness_own_dont_ask_again_becomes_a_rule_this_thread_keeps_for_commands_that_begin_so()
+    {
+        let ask = suggested(
+            "Bash",
+            json!({ "command": "find . -name '*.rs' -type f" }),
+            find_rule(),
+        );
+        let approval = ask.approval(new_id(), &ctx());
+        assert_eq!(
+            ids(&approval),
+            [OPTION_ALLOW_ONCE, OPTION_ALLOW_THREAD, OPTION_DENY]
+        );
+        let thread = &approval.request.options[1];
+        assert_eq!(
+            (thread.style, thread.scope),
+            (OptionStyle::Allow, Some(OptionScope::Thread))
+        );
+        assert_eq!(
+            thread.rule,
+            Some(ApprovalMatcher::CommandPrefix {
+                argv: vec!["find".into()],
+                cwd: "/workspace/web".into()
+            })
+        );
+        // Choosing it allows this command; the rule is Orch's to keep, never written into the harness's settings.
+        let allowed = ask
+            .answer(&ApprovalDecision::Option {
+                option_id: OPTION_ALLOW_THREAD.into(),
+                note: None,
+            })
+            .unwrap();
+        assert_eq!(
+            allowed,
+            json!({ "behavior": "allow", "updatedInput": ask.input })
+        );
+        assert!(allowed.get("updatedPermissions").is_none());
+        // A later find offers the very same rule, which then answers it.
+        let later = suggested(
+            "Bash",
+            json!({ "command": "find src -type d" }),
+            find_rule(),
+        );
+        assert_eq!(
+            later.approval(new_id(), &ctx()).request.options[1].rule,
+            thread.rule
+        );
+    }
+
+    #[test]
+    fn a_command_of_several_parts_or_with_expansions_is_kept_only_exactly() {
+        for command in [
+            "find . -type f | xargs rm",
+            "find . -delete; rm -rf ~",
+            "find \"$HOME\" -type f",
+            "find . > list.txt",
+            "FIND=1 find .",
+        ] {
+            let ask = suggested("Bash", json!({ "command": command }), find_rule());
+            let approval = ask.approval(new_id(), &ctx());
+            assert_eq!(
+                approval.request.options[1].rule,
+                Some(ApprovalMatcher::CommandExact {
+                    command: command.into(),
+                    cwd: "/workspace/web".into()
+                }),
+                "{command}"
+            );
+        }
+        // No suggestion: exactly this command; several suggested rules: exactly this command too.
+        let bare = ask("Bash", json!({ "command": "npm test" }));
+        assert_eq!(
+            bare.approval(new_id(), &ctx()).request.options[1].rule,
+            Some(ApprovalMatcher::CommandExact {
+                command: "npm test".into(),
+                cwd: "/workspace/web".into()
+            })
+        );
+        let several = suggested(
+            "Bash",
+            json!({ "command": "git status" }),
+            json!([{ "type": "addRules", "behavior": "allow", "destination": "session",
+                     "rules": [{ "toolName": "Bash", "ruleContent": "git status:*" },
+                               { "toolName": "Bash", "ruleContent": "git log:*" }] }]),
+        );
+        assert!(matches!(
+            several.approval(new_id(), &ctx()).request.options[1].rule,
+            Some(ApprovalMatcher::CommandExact { .. })
+        ));
+        let prefix = suggested(
+            "Bash",
+            json!({ "command": "npm run test -- --watch=false" }),
+            json!([{ "type": "addRules", "behavior": "allow", "destination": "localSettings",
+                     "rules": [{ "toolName": "Bash", "ruleContent": "npm run test *" }] }]),
+        );
+        assert_eq!(
+            prefix.approval(new_id(), &ctx()).request.options[1].rule,
+            Some(ApprovalMatcher::CommandPrefix {
+                argv: vec!["npm".into(), "run".into(), "test".into()],
+                cwd: "/workspace/web".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_page_fetch_may_be_kept_for_its_host_and_a_refusal_carries_the_persons_words() {
+        let fetch = ask(
+            "WebFetch",
+            json!({ "url": "https://Example.com/docs?q=1", "prompt": "What is its title?" }),
+        );
+        let approval = fetch.approval(new_id(), &ctx());
+        assert_eq!(
+            approval.request.options[1].rule,
+            Some(ApprovalMatcher::Host {
+                host: "example.com".into(),
+                protocol: "https".into(),
+                port: 443
+            })
+        );
+        assert!(
+            ask("WebFetch", json!({ "url": "https://user@example.com/" }))
+                .approval(new_id(), &ctx())
+                .request
+                .options
+                .iter()
+                .all(|option| option.rule.is_none())
+        );
+        // A change of files has no rule to keep; every refusal takes the person's words for the agent.
+        let edit = ask(
+            "Edit",
+            json!({ "file_path": "/workspace/web/a.txt", "old_string": "one", "new_string": "two" }),
+        );
+        let approval = edit.approval(new_id(), &ctx());
+        assert_eq!(ids(&approval), [OPTION_ALLOW_ONCE, OPTION_DENY]);
+        assert!(approval.request.options[1].note && !approval.request.options[0].note);
+        assert_eq!(
+            edit.answer(&ApprovalDecision::Option {
+                option_id: OPTION_DENY.into(),
+                note: Some("Edit b.txt instead".into()),
+            })
+            .unwrap(),
+            json!({ "behavior": "deny", "message": "Edit b.txt instead" })
+        );
     }
 
     #[test]

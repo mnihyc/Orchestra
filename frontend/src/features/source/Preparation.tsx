@@ -4,21 +4,26 @@
  * source is ready; this says so above the conversation. A directory that was there already is kept
  * on every machine. Nothing here guesses a branch or an address.
  */
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { Folder, FolderGit2 } from 'lucide-react';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { isOver, jobQuery } from '@/api/forks';
 import { prepareSource } from '@/api/source';
+import { JobActivityLine } from '@/features/change/Progress';
 import { workspaceDenial } from '@/features/files/door';
 import type { SourceInfo, Thread } from '@/generated/api-types';
 import { newActKey } from '@/lib/requests';
 import { Button } from '@/ui/Button';
-import { ErrorAlert } from '@/ui/ErrorState';
+import { Dialog } from '@/ui/Dialog';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
-import { sourceFailure } from './words';
+import { SkeletonRows } from '@/ui/Skeleton';
+import { preparationFailure, sourceFailure } from './words';
+import { WorkspaceInstructions } from '@/features/start/WorkspaceInstructions';
 
 /** Preparing a repository needs management of its environment. */
 const PREPARE_PERMISSION = 'environment.manage';
@@ -36,36 +41,50 @@ export function sourceLine(t: TFunction, source: SourceInfo): string {
 export function SourcePreparation({ thread }: { thread: Thread }) {
   const { t } = useTranslation();
   const key = useRef(newActKey());
+  const [jobDetails, setJobDetails] = useState<string | null>(null);
   const environment = thread.environment;
   const again = useMutation({ mutationFn: () => prepareSource(environment?.id ?? '', thread.id, key.current) });
   const source = thread.source;
-  if (source === null || source.state === 'ready' || environment === null || thread.state === 'blocked' && thread.blocked?.reason === 'environment_unavailable') return null;
+  // A source in an environment that failed is never prepared: the thread's environment line says why and the ways on.
+  if (source === null || source.state === 'ready' || environment === null || environment.status === 'failed' || thread.state === 'blocked' && thread.blocked?.reason === 'environment_unavailable') return null;
   const mayPrepare = thread.environment_permissions.includes(PREPARE_PERMISSION);
+  const job = source.job;
+  const details = job === null ? undefined : <Button action="show" size="sm" variant="ghost" onClick={() => setJobDetails(job.id)}>{t('source.prepare.details')}</Button>;
+  const failedWhy = source.state === 'failed' ? failureReason(t, source, mayPrepare, environment) : null;
+  const panel = jobDetails !== null && job?.id === jobDetails && <PreparationJob id={jobDetails} source={source} failedWhy={failedWhy} onClose={() => setJobDetails(null)} />;
   if (source.state === 'failed') {
     return (
+      <>
       <InlineAlert
         tone="danger"
         title={t('source.prepare.failed')}
         action={
-          mayPrepare ? (
+          <span className="flex flex-wrap items-center gap-2">
+            {details}
+          {mayPrepare && (
             <Button action="retry" size="sm" pending={again.isPending} onClick={() => again.mutate()}>
-              {t('source.prepare.again')}
+              {source.reason === 'clone_stalled' ? t('source.prepare.retry') : t('source.prepare.again')}
             </Button>
-          ) : undefined
+          )}
+          </span>
         }
       >
         <span className="flex flex-col gap-1" data-source-state="failed">
           <span className="wrap-anywhere">{sourceLine(t, source)}</span>
-          {source.reason !== null && <span className="wrap-anywhere">{sourceFailure(t, source.reason)}</span>}
+          {source.reason !== null && <span className="wrap-anywhere">{preparationFailure(t, source)}</span>}
           <span>{t('source.prepare.held')}</span>
+          <WorkspaceInstructions environmentId={environment.id} directory={thread.directory} recovery={{thread:thread.id,state:JSON.stringify([source.state,source.job?.id,source.job?.state])}}/>
           {!mayPrepare && <span className="text-text-muted">{workspaceDenial(t, PREPARE_PERMISSION, environment)}</span>}
           {again.error !== null && <ErrorAlert error={again.error} />}
         </span>
       </InlineAlert>
+      {panel}
+      </>
     );
   }
   return (
-    <InlineAlert tone="info" title={source.state === 'pending' ? t('source.prepare.pending') : t('source.prepare.preparing')}>
+    <>
+    <InlineAlert tone="info" title={source.state === 'pending' ? t('source.prepare.pending') : t('source.prepare.preparing')} action={details}>
       <span className="flex flex-col gap-1" data-source-state={source.state}>
         <span className="inline-flex items-center gap-1 wrap-anywhere">
           {/* A plain directory is not drawn as a repository: nothing about it needs Git. */}
@@ -76,5 +95,50 @@ export function SourcePreparation({ thread }: { thread: Thread }) {
         <span>{t('source.prepare.held')}</span>
       </span>
     </InlineAlert>
+    {panel}
+    </>
   );
+}
+
+/** The steps a preparation goes through, by the names its job gives them. */
+const STEPS = ['validate', 'apply', 'verify', 'files', 'commit'] as const;
+
+/** The name of the step a preparation stopped at. */
+function stepName(t: TFunction, phase: string): string {
+  const step = STEPS.find((known) => known === phase);
+  return step === undefined ? t('source.step.other') : t(`source.step.${step}`);
+}
+
+/** Why a preparation failed, in the reader's words: whoever may not prepare it is told whom to ask, as the line above
+ * the conversation tells them; otherwise the sentence of the failure's code. */
+function failureReason(t: TFunction, source: SourceInfo, mayPrepare: boolean, environment: NonNullable<Thread['environment']>): string {
+  if (source.reason === 'access.denied' && !mayPrepare) return workspaceDenial(t, PREPARE_PERMISSION, environment);
+  return preparationFailure(t, source);
+}
+
+/**
+ * A short source reference grants no diagnostic body; opening it makes the current authorized job read. A failed one
+ * says the step it stopped at and why: from the job's error where the reader may read it, otherwise from what the
+ * thread's own source says (its code), which is what its line above the conversation says too.
+ */
+function PreparationJob({ id, source, failedWhy, onClose }: { id: string; source: SourceInfo; failedWhy: string | null; onClose: () => void }) {
+  const { t } = useTranslation();
+  const read = useQuery(jobQuery(id));
+  const job = read.data;
+  const step = [job?.error?.phase, job?.progress.phase, source.job?.phase].find((phase) => phase !== undefined && phase !== '') ?? '';
+  const failed = job?.state === 'failed';
+  return <Dialog open size="md" title={t('source.prepare.detailsTitle')} onOpenChange={(open) => { if (!open) onClose(); }}
+    footer={<Button onClick={onClose}>{t('common.close')}</Button>}>
+    {read.isError ? <ErrorState compact error={read.error} retrying={read.isRefetching} onRetry={() => void read.refetch()} /> : job === undefined
+      ? <SkeletonRows read={read} rows={2} /> : <div className="flex min-w-0 flex-col gap-3" data-source-job={job.state}>
+        <Meter look="progress" value={job.progress.percent} label={t(`source.job.${job.state}`)} />
+        <JobActivityLine job={job} />
+        {job.error !== null ? <>
+          <ErrorAlert error={job.error} message={t('source.step.line', { step: stepName(t, step), why: sourceFailure(t, job.error.code) })} />
+          <p className="wrap-anywhere whitespace-pre-wrap text-sm" data-user-content>{job.error.message}</p>
+        </> : failed && failedWhy !== null ? <p role="status" className="wrap-anywhere text-sm" data-source-failed-step={step === '' ? undefined : step}>
+          {t('source.step.line', { step: stepName(t, step), why: failedWhy })}
+        </p> : isOver(job.state) && <p role="status" className="text-sm">{t(`source.job.${job.state}`)}</p>}
+      </div>}
+  </Dialog>;
 }

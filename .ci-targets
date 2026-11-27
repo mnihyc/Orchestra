@@ -1,0 +1,9 @@
+# firstday-2 on 370bd8aad9: the reds of 45951892105 again, with the receipt and test fixes
+test -p orch-api-core --test karchive_delete
+test -p orch-api-core --test trace_walk
+test -p orch-api-core --test node_delete_native_scopes
+test -p orch-api-core --test undo_delete
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test forks
+contracts
+clippy

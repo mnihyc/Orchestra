@@ -115,6 +115,18 @@ pub async fn retain(
             "this standalone source is not EnvironmentCreate",
         ));
     }
+    // An outsider's new environment (a system admin acting as one, or a person let make things in a place of an org
+    // he is not a member of) is its home's nearest org's first owner who is a member from the start, and so is its
+    // first Make, as every later one is: the creator holds nothing of his own there for an authority to keep.
+    let owner = envs::environment(conn, made.id)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the new Environment disappeared"))?
+        .owner_id;
+    if owner != origin.user()
+        && owner == orch_authz::ownership::owner_of_new(conn, origin.user(), Some(home)).await?
+    {
+        return Ok(());
+    }
     retain_inner(conn, origin, made, home, at).await
 }
 
@@ -277,6 +289,7 @@ struct Value {
     initial: Option<crate::initial_files::Plan>,
     duplicate: bool,
     copy: Option<orch_types::Hash>,
+    pools: Vec<Id>,
 }
 struct Choosing;
 struct Placed;
@@ -330,6 +343,7 @@ const CHOOSING: Declaration<Source> = Declaration {
         CREATE.bindings[3],
         CREATE.bindings[4],
         CREATE.bindings[5],
+        orch_api_contract::environment_sources::CREATION_POOLS,
     ],
 };
 const DUPLICATE_CHOOSING: Declaration<Source> = Declaration {
@@ -340,6 +354,7 @@ const DUPLICATE_CHOOSING: Declaration<Source> = Declaration {
         DUPLICATE.bindings[3],
         DUPLICATE.bindings[4],
         DUPLICATE.bindings[5],
+        orch_api_contract::environment_sources::CREATION_POOLS,
     ],
 };
 async fn native_prepare(
@@ -373,6 +388,9 @@ async fn native_prepare(
         })
         .ok_or(NativeError::Refused)?;
     let wanted = crate::places::wanted(conn, env.home_node_id, template, &env.config).await?;
+    let pools = crate::resource_choice::host::retained(conn, &row, &env)
+        .await?
+        .map_or_else(Vec::new, |selected| selected.pools());
     let host = input.host.or_else(|| {
         row.plan
             .get("host")
@@ -401,6 +419,28 @@ async fn native_prepare(
             .map_err(|error| NativeError::Native(EngineError::unreadable(error)))?,
         ),
     ];
+    let mut actual_pools = Vec::new();
+    for id in &pools {
+        actual_pools.push(
+            targets::resource_identity(
+                conn,
+                ObjectRef {
+                    kind: ObjectKind::Pool,
+                    id: *id,
+                },
+            )
+            .await
+            .map_err(EngineError::unreadable)?,
+        );
+    }
+    facts.push(sources::Facts::collection(
+        Source::Pools,
+        if actual_pools.is_empty() {
+            vec![]
+        } else {
+            vec![(KeyTargetKind::Object(ObjectKind::Pool), actual_pools)]
+        },
+    ));
     let mut mounts = Vec::new();
     for id in &wanted.mounts {
         mounts.push(
@@ -514,6 +554,7 @@ async fn native_prepare(
             initial,
             duplicate: duplicating::is_managed(proof.origin.operation()),
             copy: proof.copy,
+            pools,
         },
         facts,
     ))
@@ -591,7 +632,27 @@ macro_rules! stage {
                             .iter()
                             .map(|id| (ObjectKind::Mount, *id, Permission::MountUse)),
                     );
-                    if let Some(id) = value.host {
+                    if !value.pools.is_empty() {
+                        let row = jobs::job(conn, input.job)
+                            .await?
+                            .ok_or(NativeError::Refused)?;
+                        let environment = envs::environment(conn, value.environment)
+                            .await?
+                            .ok_or(NativeError::Refused)?;
+                        let selected =
+                            crate::resource_choice::host::retained(conn, &row, &environment)
+                                .await?
+                                .ok_or(NativeError::Refused)?;
+                        crate::resource_choice::host::current(
+                            conn,
+                            principal,
+                            &row,
+                            &environment,
+                            selected.host().ok_or(NativeError::Refused)?,
+                        )
+                        .await?
+                        .ok_or(NativeError::Refused)?;
+                    } else if let Some(id) = value.host {
                         required.push((ObjectKind::Host, id, Permission::HostUse));
                     }
                     for (kind, id, permission) in required {
@@ -648,7 +709,8 @@ macro_rules! stage {
                         && opened.home == fresh.home
                         && opened.template == fresh.template
                         && opened.copy == fresh.copy
-                        && opened.host == fresh.host)
+                        && opened.host == fresh.host
+                        && opened.pools == fresh.pools)
                 })
             }
         }
@@ -667,6 +729,7 @@ const MOVE_CHOOSING: Declaration<Source> = Declaration {
         MOVE_MANAGED.bindings[4],
         MOVE_MANAGED.bindings[5],
         MOVE_MANAGED.bindings[6],
+        orch_api_contract::environment_sources::CREATION_POOLS,
     ],
 };
 stage!(MoveChoosing, EnvironmentMoveOut, MOVE_CHOOSING);
@@ -743,14 +806,21 @@ pub(crate) async fn checkpoint_current(
         continuing::prepare::<Placed>(conn, clock, &proof.origin, input)
             .await
             .map(|frame| (frame.into_parts().principal, None))
-            .map_err(EngineError::unreadable)
+            .map_err(checkpoint_error)
     } else {
         continuing::preparation::prepare::<Choosing>(conn, clock, &proof.origin, input)
             .await
             .map(|frame| (frame.into_parts().principal, None))
-            .map_err(EngineError::unreadable)
+            .map_err(checkpoint_error)
     }
 }
+fn checkpoint_error(error: NativeError) -> EngineError {
+    match error {
+        NativeError::Native(error) => error,
+        error => EngineError::BeforeEffect(Box::new(error)),
+    }
+}
+
 /// Legacy sampled-time callers retain their interface; wire checks use their actual Clock.
 pub(crate) async fn principal_at(
     conn: &mut Conn,
@@ -800,6 +870,7 @@ pub async fn bound_candidates(
     known: &Prepared,
     template: Id,
     mounts: &[Id],
+    pools: &[Id],
     places: &mut Vec<HostPlace>,
 ) -> Result<(), CreateError> {
     if known.variant().operation != CREATE.operation
@@ -813,6 +884,34 @@ pub async fn bound_candidates(
         );
     }
     let mut plan = known.clone();
+    let mut actual_pools = Vec::new();
+    for id in pools {
+        actual_pools.push(
+            targets::resource_identity(
+                conn,
+                ObjectRef {
+                    kind: ObjectKind::Pool,
+                    id: *id,
+                },
+            )
+            .await
+            .map_err(EngineError::unreadable)?,
+        );
+    }
+    for index in indices(&plan, Source::Pools)? {
+        if actual_pools.is_empty() {
+            plan.bind_empty(index)
+        } else {
+            plan.bind_collection(
+                index,
+                &[(
+                    KeyTargetKind::Object(ObjectKind::Pool),
+                    actual_pools.clone(),
+                )],
+            )
+        }
+        .map_err(failed)?;
+    }
     let template = targets::resource_identity(
         conn,
         ObjectRef {

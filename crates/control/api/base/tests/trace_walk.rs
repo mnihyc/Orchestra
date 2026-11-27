@@ -448,17 +448,14 @@ async fn a_real_harness_tool_is_findable_for_its_original_person_and_deleted_his
         .await
         .ok();
     assert!(people_only.items.is_empty());
-    // Deleting the place removes its environment by a job of its own, which tells its owner when it is
-    // over: wait for that actual removal job, not an empty queue before the reaper schedules it.
-    // Its terminal state and completion notification commit together, before the read-only baseline.
-    common::eventually("the deleted place's removal jobs end", || async {
+    // Deleting the place takes its environment to the trash with it: stopped and kept whole, its removal dated at the
+    // trash's end. Wait for that to settle, with no job left under way, before the read-only baseline.
+    common::eventually("the deleted place's environment rests in the trash", || async {
         sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM jobs WHERE environment_id=$1 AND kind=$2
-                           AND plan->>'runtime' IS NULL AND state NOT IN ('queued','running'))
+            "SELECT EXISTS(SELECT 1 FROM environments WHERE id=$1 AND deleted_at IS NULL AND remove_at IS NOT NULL)
                 AND NOT EXISTS(SELECT 1 FROM jobs WHERE state IN ('queued','running'))",
         )
         .bind(world.environment)
-        .bind(orch_db::queries::jobs::kind::ENVIRONMENT_REMOVE)
         .fetch_one(world.pool.pool())
         .await
         .unwrap()
@@ -579,6 +576,8 @@ async fn a_person_finds_a_removed_environment_inspects_its_frozen_day_and_restor
         .query(&EnvironmentDeleteQuery {
             confirm: "Trace HTTP kept files".to_owned(),
             at: None,
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await

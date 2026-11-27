@@ -30,6 +30,146 @@ async fn rig_with_session() -> (Rig, Id, Id) {
 }
 
 #[tokio::test]
+async fn cancelling_a_native_opening_retires_its_local_tool_key_and_its_late_loss_cannot_retire_the_next_one()
+ {
+    use orch_agent_contract::adapter::{
+        AdapterError, AgentAdapter, AgentStart, AgentStarted, EventSink,
+    };
+    use orch_agent_contract::descriptor::AgentDescriptor;
+    use orch_agent_contract::session::{SessionOpened, SessionSpec, ThreadId, TurnStart};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    struct Gate {
+        inner: orch_adapter_fake::FakeAdapter,
+        calls: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        specs: Arc<Mutex<Vec<(Id, String)>>>,
+        sink: Arc<Mutex<Option<EventSink>>>,
+    }
+    #[async_trait::async_trait]
+    impl AgentAdapter for Gate {
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+        async fn start(
+            &mut self,
+            start: AgentStart,
+            sink: EventSink,
+        ) -> Result<AgentStarted, AdapterError> {
+            *self.sink.lock().unwrap() = Some(sink.clone());
+            self.inner.start(start, sink).await
+        }
+        async fn stop(&mut self) -> Result<(), AdapterError> {
+            self.inner.stop().await
+        }
+        async fn probe(&mut self) -> Result<AgentDescriptor, AdapterError> {
+            self.inner.probe().await
+        }
+        async fn open_session(&mut self, spec: SessionSpec) -> Result<SessionOpened, AdapterError> {
+            self.specs
+                .lock()
+                .unwrap()
+                .push((spec.opening_id, spec.session_key.clone()));
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            self.inner.open_session(spec).await
+        }
+        async fn close_session(&mut self, thread: ThreadId) -> Result<(), AdapterError> {
+            self.inner.close_session(thread).await
+        }
+        async fn start_turn(&mut self, turn: TurnStart) -> Result<(), AdapterError> {
+            self.inner.start_turn(turn).await
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let specs = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(Mutex::new(None));
+    let mut registration = common::fake_registration();
+    let (factory_calls, factory_entered, factory_specs, factory_sink) =
+        (calls.clone(), entered.clone(), specs.clone(), sink.clone());
+    registration.factory = Arc::new(move |clock| {
+        Box::new(Gate {
+            inner: orch_adapter_fake::FakeAdapter::new(clock),
+            calls: factory_calls.clone(),
+            entered: factory_entered.clone(),
+            specs: factory_specs.clone(),
+            sink: factory_sink.clone(),
+        })
+    });
+    let mut rig = Rig::new();
+    rig.adapters = orch_connector_core::harnesses::AdapterRegistry::new();
+    rig.adapters.register(registration).unwrap();
+    rig.start().await;
+    rig.agent_start(json!({})).await;
+    let (thread, segment) = (new_id(), new_id());
+    let body: orch_link_contract::commands::SessionOpen =
+        serde_json::from_value(rig.open_body(thread, segment, "/tmp/work")).unwrap();
+    let opening = rig
+        .controller
+        .issue(&SerialKey::Thread(thread), rig.deadline(), &body);
+    tokio::time::timeout(PATIENCE, entered.notified())
+        .await
+        .unwrap();
+    let loopback = rig.connector.as_ref().unwrap().loopback().clone();
+    let (original, key) = specs.lock().unwrap()[0].clone();
+    assert_eq!(
+        original, opening,
+        "the adapter's public opening comes from the real accepted command"
+    );
+    assert!(loopback.session(&key).is_some());
+    rig.controller.link().commands().cancel(opening);
+    assert!(matches!(
+        tokio::time::timeout(PATIENCE, rig.controller.wait_command(opening))
+            .await
+            .unwrap(),
+        Progress::Cancelled
+    ));
+    until("the cancelled opening's local tool key is retired", || {
+        loopback.session(&key).is_none()
+    })
+    .await;
+    rig.open_session(rig.open_body(thread, segment, "/tmp/work"))
+        .await;
+    let (_, current_key) = specs.lock().unwrap()[1].clone();
+    let source = sink.lock().unwrap().clone().unwrap();
+    source
+        .session(
+            thread,
+            segment,
+            orch_agent_contract::events::SessionEvent::SessionLost(
+                orch_agent_contract::events::SessionLost {
+                    uncertain: false,
+                    expected: false,
+                    opening_id: original,
+                    reason: "the cancelled opening's delayed report".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    rig.wait_for(thread, segment, "session.lost", 1).await;
+    assert!(
+        loopback.session(&current_key).is_some(),
+        "a stale physical report cannot unbind its replacement even on the same segment"
+    );
+    assert_eq!(
+        rig.connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap()
+            .sessions_open(),
+        1
+    );
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
 async fn retained_command_output_arrives_before_its_item_and_survives_a_cut_upload() {
     let (rig, thread, segment) = rig_with_session().await;
     assert_eq!(rig.roles, vec![Role::Agent]);
@@ -177,7 +317,10 @@ async fn an_idle_update_fence_holds_a_new_turn_out_and_a_running_approval_keeps_
     tokio::time::timeout(PATIENCE, async {
         loop {
             let progress = rig.controller.progress(id);
-            if matches!(progress, Some(Progress::Accepted)) {
+            if matches!(
+                progress,
+                Some(Progress::Accepted | Progress::Running | Progress::Released)
+            ) {
                 break;
             }
             assert!(
@@ -284,7 +427,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
                 public_url: "https://orch.test".into(),
             },
             pin: "test".into(),
-            protocol_version: 1,
+            protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
             enrolled_at: rig.clock.time(),
             managed: false,
         })
@@ -319,6 +462,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
     tokio::pin!(updating);
     let grant = MachineUpdateNow {
         recommended: "2.0.0".into(),
+        automatic: true,
     };
     let granted = rig.send(&SerialKey::Machine, &grant);
     tokio::pin!(granted);
@@ -432,24 +576,25 @@ async fn a_link_cut_in_the_middle_of_a_turn_loses_no_event_and_repeats_none() {
 #[tokio::test]
 async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_became_of_it() {
     let (mut rig, thread, segment) = rig_with_session().await;
-    rig.start_turn(thread, "#!fake\nsay going\nsleep 600000\nsay never")
+    let admitted = rig
+        .start_turn(thread, "#!fake\nsay going\nsleep 600000\nsay never")
         .await;
     rig.wait_for(thread, segment, "item.completed", 1).await;
     rig.kill().await;
     // The process that was killed has nothing more to say; the one that takes its place does.
     tokio::time::sleep(Duration::from_millis(300)).await;
     rig.start().await;
-    rig.wait_for(thread, segment, "session.lost", 1).await;
+    rig.wait_for(thread, segment, "turn.lost", 1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let kinds = rig.kinds(thread, segment);
     assert_eq!(
-        kinds.iter().filter(|k| *k == "session.lost").count(),
+        kinds.iter().filter(|k| *k == "turn.lost").count(),
         1,
         "{kinds:?}"
     );
     assert_eq!(
         kinds.last().unwrap(),
-        "session.lost",
+        "turn.lost",
         "nothing of the dead turn comes after: {kinds:?}"
     );
     assert!(
@@ -459,13 +604,33 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
     let lost = rig
         .applied(thread, segment)
         .into_iter()
-        .find(|e| e.kind == "session.lost")
+        .find(|e| e.kind == "turn.lost")
         .unwrap();
+    let opened = rig
+        .applied(thread, segment)
+        .into_iter()
+        .find(|event| event.kind == "session.opened")
+        .unwrap();
+    assert_eq!(
+        lost.body["opening_id"], opened.body["opening_id"],
+        "the restarted connector reports the original physical session, never a current-map replacement"
+    );
+    assert!(
+        lost.body["opening_id"]
+            .as_str()
+            .and_then(|text| text.parse::<Id>().ok())
+            .is_some()
+    );
+    assert_eq!(
+        lost.body["turn_id"],
+        serde_json::json!(admitted),
+        "the synthetic adapter cannot reattach the admitted native turn"
+    );
     assert!(
         lost.body["reason"]
             .as_str()
             .unwrap()
-            .contains("turn was running")
+            .contains("unavailable")
     );
     for (place, event) in rig.applied(thread, segment).iter().enumerate() {
         assert_eq!(event.seq, place as i64 + 1);
@@ -478,6 +643,47 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
     let last = status.iter().rfind(|e| e.kind == "harness.status").unwrap();
     assert_eq!(last.body["status"], "online");
     assert_eq!(last.body["sessions_open"], 0);
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn an_idle_conversation_retires_its_original_tool_opening_quietly_after_connector_restart() {
+    let (mut rig, thread, segment) = rig_with_session().await;
+    let original = rig
+        .applied(thread, segment)
+        .into_iter()
+        .find(|event| event.kind == "session.opened")
+        .unwrap();
+    rig.kill().await;
+    rig.start().await;
+    rig.wait_for(thread, segment, "session.lost", 1).await;
+    let lost = rig
+        .applied(thread, segment)
+        .into_iter()
+        .find(|event| event.kind == "session.lost")
+        .unwrap();
+    assert_eq!(lost.body["opening_id"], original.body["opening_id"]);
+    assert_eq!(lost.body["expected"], json!(true));
+    assert!(
+        rig.connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap()
+            .session_key(thread)
+            .is_none()
+    );
+    rig.open_session(rig.open_body(thread, segment, "/tmp/work"))
+        .await;
+    let openings = rig
+        .applied(thread, segment)
+        .into_iter()
+        .filter(|event| event.kind == "session.opened")
+        .collect::<Vec<_>>();
+    assert_eq!(openings.len(), 2);
+    assert_ne!(openings[1].body["opening_id"], original.body["opening_id"]);
     rig.connector.unwrap().stop().await;
 }
 
@@ -544,7 +750,55 @@ async fn a_session_that_asks_for_what_the_machines_owner_forbids_is_refused_with
 }
 
 #[tokio::test]
-async fn a_sandbox_wider_than_the_ceiling_reaches_the_harness_lowered_and_the_system_is_told() {
+async fn a_managed_runtime_never_attributes_its_template_sandbox_to_a_machine_policy() {
+    let mut rig = Rig::new();
+    rig.managed = true;
+    rig.start().await;
+    let (thread, segment) = (new_id(), new_id());
+    let connector = rig.connector.as_ref().unwrap();
+    assert!(connector.services().policy.policy().is_none());
+    connector
+        .services()
+        .agents
+        .get()
+        .unwrap()
+        .report_sandbox(
+            (thread, segment),
+            Some(new_id()),
+            new_id(),
+            orch_link_contract::commands::SandboxMode::Open,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    connector
+        .services()
+        .publisher
+        .publish(
+            orch_link_contract::streams::Stream::Session {
+                thread_id: thread,
+                segment_id: segment,
+            },
+            orch_link_contract::events::Event::SessionTitle(
+                orch_link_contract::events::SessionTitle {
+                    title: "The callback finished".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    rig.wait_for(thread, segment, "session.title", 1).await;
+    assert!(
+        !rig.applied(thread, segment)
+            .iter()
+            .any(|event| event.kind == "session.sandbox")
+    );
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn the_applied_sandbox_stays_with_its_native_command_after_the_machine_policy_changes() {
     let mut rig = Rig::new();
     rig.start().await;
     rig.agent_start(json!({})).await;
@@ -574,6 +828,44 @@ async fn a_sandbox_wider_than_the_ceiling_reaches_the_harness_lowered_and_the_sy
     assert_eq!(told[0].body["payload"]["policy"], "agent.max_sandbox");
     assert_eq!(told[0].body["payload"]["asked"], "open");
     assert_eq!(told[0].body["payload"]["used"], "workspace");
+    let mut unchanged = turn.clone();
+    unchanged.turn_id = new_id();
+    unchanged.sandbox_mode = orch_link_contract::commands::SandboxMode::ReadOnly;
+    rig.succeed(&SerialKey::Thread(thread), &unchanged).await;
+    rig.wait_for(thread, segment, "turn.completed", 2).await;
+    rig.wait_for(thread, segment, "session.sandbox", 3).await;
+    rig.connector
+        .as_ref()
+        .unwrap()
+        .services()
+        .policy
+        .set_here(
+            orch_link_contract::policy::PolicyKey::AgentMaxSandbox,
+            &json!("read_only"),
+        )
+        .unwrap();
+    let decisions: Vec<_> = rig
+        .applied(thread, segment)
+        .into_iter()
+        .filter(|event| event.kind == "session.sandbox")
+        .collect();
+    assert_eq!(decisions.len(), 3);
+    assert!(decisions[0].body["turn_id"].is_null());
+    assert_eq!(decisions[1].body["turn_id"], json!(turn.turn_id));
+    for decision in &decisions[..2] {
+        assert_eq!(decision.body["requested"], "open");
+        assert_eq!(decision.body["applied"], "workspace");
+        assert_eq!(decision.body["governing_policy"], "machine_policy");
+        let command: Id = serde_json::from_value(decision.body["command_id"].clone()).unwrap();
+        assert_ne!(command, Id::nil());
+    }
+    assert_eq!(decisions[2].body["turn_id"], json!(unchanged.turn_id));
+    assert_eq!(decisions[2].body["requested"], "read_only");
+    assert_eq!(decisions[2].body["applied"], "read_only");
+    assert_ne!(
+        decisions[0].body["command_id"],
+        decisions[1].body["command_id"]
+    );
     rig.connector.unwrap().stop().await;
 }
 
@@ -1002,3 +1294,474 @@ async fn an_opening_the_system_gave_up_stops_fetching_and_removes_what_it_fetche
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
     rig.connector.unwrap().stop().await;
 }
+
+#[tokio::test]
+async fn a_delayed_close_keeps_its_original_physical_target_after_the_same_segment_reopens() {
+    use orch_link_contract::commands::{Cmd, NativeTarget};
+    for fenced in [false, true] {
+        let (rig, thread, segment) = rig_with_session().await;
+        rig.wait_for(thread, segment, "session.opened", 1).await;
+        let hosting = rig.connector.as_ref().unwrap().hosting().unwrap();
+        let process = hosting.process(rig.provider, rig.agent).unwrap();
+        let original = process.session_target(thread).unwrap();
+        let mut delayed = if fenced {
+            Cmd::new(
+                new_id(),
+                &SerialKey::Thread(thread),
+                rig.deadline(),
+                &orch_link_contract::continuations::SessionCloseFenced {
+                    thread_id: thread,
+                    segment_id: segment,
+                },
+            )
+            .unwrap()
+        } else {
+            Cmd::new(
+                new_id(),
+                &SerialKey::Thread(thread),
+                rig.deadline(),
+                &SessionClose { thread_id: thread },
+            )
+            .unwrap()
+        };
+        delayed.native_target = Some(NativeTarget::Session(original.clone()));
+        let native = rig
+            .applied(thread, segment)
+            .into_iter()
+            .find(|event| event.kind == "session.opened")
+            .unwrap()
+            .body["native_session_ref"]
+            .clone();
+        let mut reopened = rig.open_body(thread, segment, "/tmp/work");
+        reopened["mode"] = json!("resume");
+        reopened["native_session_ref"] = native;
+        rig.open_session(reopened).await;
+        rig.wait_for(thread, segment, "session.opened", 2).await;
+        let current = process.session_target(thread).unwrap();
+        assert_ne!(current.opening_id, original.opening_id);
+        let mut handle = rig.controller.link().commands().issue(delayed);
+        assert!(
+            matches!(
+                tokio::time::timeout(PATIENCE, handle.wait()).await.unwrap(),
+                Progress::Succeeded(_)
+            ),
+            "the original opening is already gone; its close is a successful no-op"
+        );
+        assert_eq!(process.session_target(thread).unwrap(), current);
+        assert_eq!(process.sessions_open(), 1);
+        rig.start_turn(thread, "#!fake\nsay still current").await;
+        rig.wait_for(thread, segment, "turn.completed", 1).await;
+        assert_eq!(rig.messages(thread, segment), ["still current"]);
+        rig.connector.unwrap().stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_close_accepted_while_absent_does_not_find_and_close_a_session_opened_later() {
+    use orch_link_contract::commands::{Cmd, NativeTarget, SessionTarget};
+    let mut rig = Rig::new();
+    rig.start().await;
+    rig.agent_start(json!({})).await;
+    let (thread, segment) = (new_id(), new_id());
+    let mut delayed = Cmd::new(
+        new_id(),
+        &SerialKey::Thread(thread),
+        rig.deadline(),
+        &SessionClose { thread_id: thread },
+    )
+    .unwrap();
+    delayed.native_target = Some(NativeTarget::Session(SessionTarget::absent(thread)));
+    rig.open_session(rig.open_body(thread, segment, "/tmp/work"))
+        .await;
+    let hosting = rig.connector.as_ref().unwrap().hosting().unwrap();
+    let process = hosting.process(rig.provider, rig.agent).unwrap();
+    let current = process.session_target(thread).unwrap();
+    let mut handle = rig.controller.link().commands().issue(delayed);
+    assert!(matches!(
+        tokio::time::timeout(PATIENCE, handle.wait()).await.unwrap(),
+        Progress::Succeeded(_)
+    ));
+    assert_eq!(process.session_target(thread).unwrap(), current);
+    assert_eq!(process.sessions_open(), 1);
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn a_session_call_waiting_for_its_adapter_cannot_act_after_its_physical_slot_ends() {
+    use orch_link_contract::commands::NativeTarget;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let (rig, thread, _) = rig_with_session().await;
+    let process = rig
+        .connector
+        .as_ref()
+        .unwrap()
+        .hosting()
+        .unwrap()
+        .process(rig.provider, rig.agent)
+        .unwrap();
+    let target = process.session_target(thread).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let fences = Arc::new(orch_link::native_fences::NativeFences::new(
+        directory.path().into(),
+    ));
+    fences
+        .observe_session(
+            &target,
+            orch_link_contract::native_target::SessionAction::Open,
+        )
+        .unwrap();
+    let context = orch_link::commands::CommandContext {
+        authority_deadline: None,
+        native_members: None,
+        native_revision: None,
+
+        native_fences: Some(fences),
+        native_target: Some(NativeTarget::Session(target.clone())),
+        id: new_id(),
+        key: None,
+        deadline: rig.deadline(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+    };
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (held, waiting, finish) = (process.clone(), entered.clone(), release.clone());
+    let holder = tokio::spawn(async move {
+        held.call(move |_| {
+            Box::pin(async move {
+                waiting.notify_one();
+                finish.notified().await;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    });
+    tokio::time::timeout(PATIENCE, entered.notified())
+        .await
+        .unwrap();
+    let acted = Arc::new(AtomicBool::new(false));
+    let marker = acted.clone();
+    let pending = process.call_target(&context, move |_| {
+        Box::pin(async move {
+            marker.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    });
+    tokio::pin!(pending);
+    tokio::select! {
+        biased;
+        result = &mut pending => panic!("the call must queue behind the held adapter: {result:?}"),
+        () = tokio::task::yield_now() => {},
+    }
+    process.session_closed_if(thread, target.opening_id.unwrap());
+    release.notify_one();
+    holder.await.unwrap();
+    let error = tokio::time::timeout(PATIENCE, &mut pending)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        orch_link_contract::commands::ErrorCode::SessionNotFound.as_str()
+    );
+    assert!(!acted.load(Ordering::SeqCst));
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn a_queued_mcp_update_cannot_replace_its_successors_members_but_an_independent_model_change_does_not_block_it()
+ {
+    use orch_link_contract::commands::NativeTarget;
+    use orch_link_contract::native_target::SessionAction;
+    use orch_link_contract::tool_sessions::{ToolSessionMember, ToolSessionUpdate};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    for changed_mcp in [true, false] {
+        let (rig, thread, _) = rig_with_session().await;
+        let process = rig
+            .connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap();
+        let target = process.session_target(thread).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let fences = Arc::new(orch_link::native_fences::NativeFences::new(
+            directory.path().into(),
+        ));
+        fences
+            .observe_session(&target, SessionAction::Open)
+            .unwrap();
+        let mcp = ToolSessionMember {
+            member: format!("mcp:{}", new_id()),
+            nonce: new_id(),
+        };
+        let model = ToolSessionMember {
+            member: "llm".into(),
+            nonce: new_id(),
+        };
+        let original = vec![mcp.clone(), model];
+        let mut update = ToolSessionUpdate {
+            machine_id: rig.machine_id,
+            thread_id: thread,
+            segment_id: target.segment_id.unwrap(),
+            opening_id: target.opening_id,
+            opening_epoch: target.opening_epoch.unwrap(),
+            revision: 1,
+            live: true,
+            members: original.clone(),
+        };
+        fences.observe_tools(&update).unwrap();
+        let loopback = rig.connector.as_ref().unwrap().loopback();
+        loopback.native_fences(fences.clone());
+        loopback.apply_tool_update(&update);
+        let context = orch_link::commands::CommandContext {
+            authority_deadline: None,
+            native_target: Some(NativeTarget::Session(target)),
+            native_fences: Some(fences.clone()),
+            native_members: Some(original),
+            native_revision: Some(1),
+            id: new_id(),
+            key: None,
+            deadline: rig.deadline(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (held, waiting, finish) = (process.clone(), entered.clone(), release.clone());
+        let holder = tokio::spawn(async move {
+            held.call(move |_| {
+                Box::pin(async move {
+                    waiting.notify_one();
+                    finish.notified().await;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        });
+        tokio::time::timeout(PATIENCE, entered.notified())
+            .await
+            .unwrap();
+        let acted = Arc::new(AtomicBool::new(false));
+        let marker = acted.clone();
+        let pending = process.call_config(&context, SessionAction::Mcp, move |_| {
+            Box::pin(async move {
+                marker.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        tokio::pin!(pending);
+        tokio::select! {biased;result=&mut pending=>panic!("configuration must wait behind the adapter: {result:?}"),()=tokio::task::yield_now()=>{}}
+        update.revision = 2;
+        if changed_mcp {
+            update.members[0].nonce = new_id();
+        } else {
+            update.members[1].nonce = new_id();
+        }
+        fences.observe_tools(&update).unwrap();
+        loopback.apply_tool_update(&update);
+        release.notify_one();
+        holder.await.unwrap();
+        let result = tokio::time::timeout(PATIENCE, &mut pending).await.unwrap();
+        if changed_mcp {
+            assert_eq!(
+                result.unwrap_err().code,
+                orch_link_contract::commands::ErrorCode::Conflict.as_str()
+            );
+            assert!(!acted.load(Ordering::SeqCst));
+        } else {
+            result.unwrap();
+            assert!(acted.load(Ordering::SeqCst));
+        }
+        rig.connector.unwrap().stop().await;
+    }
+}
+
+#[tokio::test]
+async fn an_earlier_turns_late_completion_keeps_the_replacement_turn_busy_in_memory_and_on_disk() {
+    use orch_agent_contract::adapter::{
+        AdapterError, AgentAdapter, AgentStart, AgentStarted, EventSink,
+    };
+    use orch_agent_contract::descriptor::AgentDescriptor;
+    use orch_agent_contract::session::{SessionOpened, SessionSpec, ThreadId, TurnStart};
+    use std::sync::{Arc, Mutex};
+    struct Capture {
+        inner: orch_adapter_fake::FakeAdapter,
+        sink: Arc<Mutex<Option<EventSink>>>,
+    }
+    #[async_trait::async_trait]
+    impl AgentAdapter for Capture {
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+        async fn start(
+            &mut self,
+            start: AgentStart,
+            sink: EventSink,
+        ) -> Result<AgentStarted, AdapterError> {
+            *self.sink.lock().unwrap() = Some(sink.clone());
+            self.inner.start(start, sink).await
+        }
+        async fn stop(&mut self) -> Result<(), AdapterError> {
+            self.inner.stop().await
+        }
+        async fn probe(&mut self) -> Result<AgentDescriptor, AdapterError> {
+            self.inner.probe().await
+        }
+        async fn open_session(&mut self, spec: SessionSpec) -> Result<SessionOpened, AdapterError> {
+            self.inner.open_session(spec).await
+        }
+        async fn close_session(&mut self, thread: ThreadId) -> Result<(), AdapterError> {
+            self.inner.close_session(thread).await
+        }
+        async fn start_turn(&mut self, turn: TurnStart) -> Result<(), AdapterError> {
+            self.inner.start_turn(turn).await
+        }
+    }
+    for retry_same_turn in [false, true] {
+        let sink = Arc::new(Mutex::new(None));
+        let source = sink.clone();
+        let mut registration = common::fake_registration();
+        registration.factory = Arc::new(move |clock| {
+            Box::new(Capture {
+                inner: orch_adapter_fake::FakeAdapter::new(clock),
+                sink: source.clone(),
+            })
+        });
+        let mut rig = Rig::new();
+        rig.adapters = orch_connector_core::harnesses::AdapterRegistry::new();
+        rig.adapters.register(registration).unwrap();
+        rig.start().await;
+        rig.agent_start(json!({})).await;
+        let (thread, segment) = (new_id(), new_id());
+        rig.open_session(rig.open_body(thread, segment, "/tmp/work"))
+            .await;
+        let process = rig
+            .connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap();
+        let original = process.session_target(thread).unwrap();
+        let old = rig.start_turn(thread, "#!fake\nsay old").await;
+        rig.wait_for(thread, segment, "turn.completed", 1).await;
+        let mut next = rig.open_body(thread, segment, "/tmp/work");
+        next["mode"] = json!("resume");
+        next["native_session_ref"] = json!(process.native_session_ref(thread));
+        rig.open_session(next).await;
+        let current = process.session_target(thread).unwrap();
+        assert_ne!(original.opening_id, current.opening_id);
+        let running = if retry_same_turn {
+            let body: orch_link_contract::commands::TurnStart = serde_json::from_value(json!({
+                "thread_id":thread,"turn_id":old,"text":"#!fake\nsleep 3600000","images":[],
+                "model":"fake-large","effort":"high","params":{},
+                "approval_mode":"on_request","sandbox_mode":"workspace"
+            }))
+            .unwrap();
+            rig.succeed(
+                &orch_link_contract::commands::SerialKey::Thread(thread),
+                &body,
+            )
+            .await;
+            old
+        } else {
+            rig.start_turn(thread, "#!fake\nsleep 3600000").await
+        };
+        rig.wait_for(thread, segment, "turn.started", 2).await;
+        assert_eq!(process.running_turn(thread), Some(running));
+        let source = sink.lock().unwrap().clone().unwrap();
+        source.emit(orch_agent_contract::adapter::AdapterEvent::from_wire(
+        "session.background_tasks",
+            json!({"thread_id":thread,"segment_id":segment,"native_opening_id":current.opening_id,
+            "self_waking":true,"native_idle":false,"native_wake":null,
+            "tasks":[{"id":"background","run_id":"current","native_item_ref":"tool-current",
+                "origin_turn":running,"kind":"command","label":"Current follow-up","state":"completed",
+                "exit_code":0,"can_end":false}]}),
+    ).unwrap()).await.unwrap();
+        rig.wait_for(thread, segment, "session.background_tasks", 1)
+            .await;
+        assert!(process.background_running(thread));
+        source
+            .emit(
+                orch_agent_contract::adapter::AdapterEvent::from_wire(
+                    "turn.started",
+                json!({"thread_id":thread,"segment_id":segment,"native_opening_id":original.opening_id,
+                "turn_id":old,"native_turn_ref":"late-original-turn"}),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        rig.wait_for(thread, segment, "turn.started", 3).await;
+        assert_eq!(process.running_turn(thread), Some(running));
+        assert!(process.background_running(thread));
+        source
+            .emit(
+                orch_agent_contract::adapter::AdapterEvent::from_wire(
+                    "session.background_tasks",
+            json!({"thread_id":thread,"segment_id":segment,"native_opening_id":original.opening_id,
+            "self_waking":false,"native_idle":true,"tasks":[],"native_wake":null}),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        rig.wait_for(thread, segment, "session.background_tasks", 2)
+            .await;
+        assert!(
+            process.background_running(thread),
+            "an earlier native idle report cannot release the current wake"
+        );
+        source
+            .emit(
+                orch_agent_contract::adapter::AdapterEvent::from_wire(
+                    "turn.completed",
+                json!({"thread_id":thread,"segment_id":segment,"native_opening_id":original.opening_id,
+                "turn_id":old,"status":"completed","error":null}),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        rig.wait_for(thread, segment, "turn.completed", 2).await;
+        assert_eq!(
+            rig.applied(thread, segment)
+                .iter()
+                .rev()
+                .find(|event| event.kind == "turn.completed")
+                .unwrap()
+                .native_opening_id,
+            original.opening_id
+        );
+        assert_eq!(process.running_turn(thread), Some(running));
+        let hosted = rig
+            .connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .ledger()
+            .hosted();
+        assert!(hosted.iter().flat_map(|harness| &harness.sessions).any(
+            |session| session.thread_id == thread
+                && Some(session.opening_id) == current.opening_id
+                && session.running_turn == Some(running)
+        ));
+        rig.connector.unwrap().stop().await;
+    }
+}
+
+#[path = "agent_role/automatic_install.rs"]
+mod automatic_install;
+#[path = "agent_role/stop_during_command.rs"]
+mod stop_during_command;

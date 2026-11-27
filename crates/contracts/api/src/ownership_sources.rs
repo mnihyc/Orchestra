@@ -149,6 +149,7 @@ pub const RESTORE_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(K::McpServer),
             KeyTargetKind::Object(K::Mount),
             KeyTargetKind::Object(K::Skill),
+            KeyTargetKind::Object(K::Pool),
         ],
         TargetResolver::ResolvedCollection("restoration_resources"),
     ),
@@ -187,6 +188,7 @@ pub const RESTORE_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(K::McpServer),
             KeyTargetKind::Object(K::Mount),
             KeyTargetKind::Object(K::Skill),
+            KeyTargetKind::Object(K::Pool),
         ],
         TargetResolver::ResolvedCollection("restored_content"),
     ),
@@ -229,7 +231,8 @@ pub const RESTORE: Declaration<Source> = Declaration {
 };
 
 /// A node's intrinsic hierarchy cascade is one effect; independent native resource/member acts
-/// retain their actual subjects. The successful NodeDeleted acknowledgement contains only an id.
+/// retain their actual subjects. The successful NodeDeleted acknowledgement contains only an id, and for a person's own
+/// session how many environments went to the trash with it where there were any.
 pub const DELETE_FACETS: &[FacetSpec] = &[
     FacetSpec::required(
         KeyAction::Manage,
@@ -253,6 +256,7 @@ pub const DELETE_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(K::McpServer),
             KeyTargetKind::Object(K::Mount),
             KeyTargetKind::Object(K::Skill),
+            KeyTargetKind::Object(K::Pool),
         ],
         TargetResolver::ResolvedCollection("deletion_resources"),
     ),
@@ -365,6 +369,7 @@ pub const MEMBER_END_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(K::McpServer),
             KeyTargetKind::Object(K::Mount),
             KeyTargetKind::Object(K::Skill),
+            KeyTargetKind::Object(K::Pool),
         ],
         TargetResolver::ResolvedCollection("member_effects"),
     ),
@@ -521,6 +526,7 @@ pub const MEMBER_HOLDINGS_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(K::McpServer),
             KeyTargetKind::Object(K::Mount),
             KeyTargetKind::Object(K::Skill),
+            KeyTargetKind::Object(K::Pool),
         ],
         TargetResolver::ResolvedCollection("holdings_resources"),
     ),

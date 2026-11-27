@@ -357,7 +357,7 @@ pub(super) async fn recycle(
                     .ctx
                     .app
                     .engine
-                    .finish_accepted_environment_stop(accepted)
+                    .finish_accepted_environment_stop(*accepted)
                     .await
                 {
                     Ok(()) => {
@@ -406,7 +406,7 @@ enum CandidateOutcome {
     SkippedPermission,
     SkippedActive,
     Dry(Snapshot),
-    Accepted(Snapshot, orch_engine::environments::AcceptedStop),
+    Accepted(Snapshot, Box<orch_engine::environments::AcceptedStop>),
 }
 
 async fn candidate(
@@ -532,7 +532,7 @@ async fn candidate(
         )
         .await;
     match accepted {
-        Ok(accepted) => Ok(CandidateOutcome::Accepted(snapshot, accepted)),
+        Ok(accepted) => Ok(CandidateOutcome::Accepted(snapshot, Box::new(accepted))),
         Err(
             orch_engine::environments::StopError::Busy(_)
             | orch_engine::environments::StopError::Unavailable(_),

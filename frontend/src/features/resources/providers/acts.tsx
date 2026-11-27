@@ -1,3 +1,6 @@
+import { providerQuery } from '@/api/resources';
+import { currentResourceDetail, ResourceReadDialog, useCurrentResourceDetail } from '@/features/resources/ReadDialog';
+import { useQuery } from '@tanstack/react-query';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 import { providerCopySetup } from '@/features/duplicate/CopySetup';
@@ -23,26 +26,30 @@ import { DeleteProviderDialog, DisableProviderDialog } from '@/features/resource
 import { EditProvider } from '@/features/resources/providers/Edit';
 import type { ProviderTab } from '@/features/resources/providers/Provider';
 import { PROVIDER_NEXT, providerState } from '@/features/resources/providers/state';
-import type { Provider } from '@/generated/api-types';
+import type { Provider as FullProvider, ProviderListRow } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { holds } from '@/lib/permissions';
 import { useNow } from '@/lib/time';
+import { useErrorText } from '@/ui/errorText';
+import { toast } from '@/ui/Toast';
+
+type ProviderTarget = FullProvider | ProviderListRow;
 
 export interface Asked {
   what: 'edit' | 'rename' | 'disable' | 'delete';
-  provider: Provider;
+  provider: ProviderTarget;
 }
 
 export interface ProviderActs {
-  list: ListActs<Provider>;
+  list: ListActs<ProviderTarget>;
   /** Asks for an act that has a dialog, for a button of the page that is not in the menu. */
-  ask: (what: Asked['what'], provider: Provider) => void;
-  page: (provider: Provider) => { edit: Act | null; primary: Act | null; menu: RowActs['entries'] };
+  ask: (what: Asked['what'], provider: ProviderTarget) => void;
+  page: (provider: ProviderTarget) => { edit: Act | null; primary: Act | null; menu: RowActs['entries'] };
   dialogs: ReactNode;
 }
 
 /** The page of a provider says how its tabs are opened. */
-export function useProviderActs(options: { onTab?: (provider: Provider, tab: ProviderTab) => void; afterDelete?: () => void } = {}): ProviderActs {
+export function useProviderActs(options: { onTab?: (provider: ProviderTarget, tab: ProviderTab) => void; afterDelete?: () => void } = {}): ProviderActs {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const locale = useAppearance((state) => state.locale);
@@ -52,18 +59,37 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
   const { busy } = useBusy();
   const cleanup = useResourceCleanup();
   const enablePlan = useResourceEnable();
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...providerQuery(requested?.provider.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested?.provider) === undefined ? 0 : Infinity, enabled: requested !== null });
+  const fullDetail = useCurrentResourceDetail(detail, requested?.provider);
+  const asked = requested === null || fullDetail === undefined ? null : { ...requested, provider: fullDetail };
 
   /** Leads to a tab of the provider's page: from a row by the address, from the page by its own way. */
-  const toTab = (provider: Provider, tab: ProviderTab) => {
+  const toTab = (provider: ProviderTarget, tab: ProviderTab) => {
     if (options.onTab !== undefined) options.onTab(provider, tab);
     else void navigate({ to: '/resources/providers/$id', params: { id: provider.id }, search: tab === 'overview' ? {} : { tab } });
   };
-  const enableResource = (provider: Provider): EnableResource => ({target:{object:{kind:'provider',id:provider.id},model_id:null},name:provider.name,admin:adminSpec(provider,'provider.manage'),enable:(runWaiting)=>enableProvider(provider.id,runWaiting)});
-  const turnOff = (provider: Provider): Promise<unknown> => disableProvider(provider.id);
-  const drop = (provider: Provider): Promise<void> => deleteProvider(provider.id);
+  const enableResource = (provider: ProviderTarget): EnableResource => ({target:{object:{kind:'provider',id:provider.id},model_id:null},name:provider.name,admin:adminSpec(provider,'provider.manage'),enable:(runWaiting)=>enableProvider(provider.id,runWaiting)});
+  const turnOff = (provider: ProviderTarget): Promise<unknown> => disableProvider(provider.id);
+  const describe = useErrorText();
+  /** Switches it off at once: one line says the running threads that stopped, Show uses opens the threads bound to it,
+   * and Undo switches it on again. A note or a notice to the people it stops goes with Disable… on its page. */
+  const disableNow = (provider: ProviderTarget) => void disableProvider(provider.id).then(() => {
+    toast({
+      tone: 'success',
+      title: t('providers.danger.disabled', { name: provider.name }),
+      ...(provider.running_threads > 0 ? { description: t('trash.stopped', { count: provider.running_threads }) } : {}),
+      action: [
+        { label: t('resourceImpact.showUses'), keep: true, run: () => toTab(provider, 'threads') },
+        { label: t('places.toast.undo'), run: () => void enableProvider(provider.id).then(
+          () => toast({ tone: 'success', title: t('providers.danger.enabledAgain', { name: provider.name }) }),
+          (error: unknown) => toast({ tone: 'danger', title: t('providers.danger.notEnabled', { name: provider.name }), description: describe(error).message })) },
+      ],
+    });
+  }, (error: unknown) => toast({ tone: 'danger', title: t('providers.danger.notDisabled', { name: provider.name }), description: describe(error).message }));
+  const drop = (provider: ProviderTarget): Promise<void> => deleteProvider(provider.id);
 
-  const actsOf = (provider: Provider, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
+  const actsOf = (provider: ProviderTarget, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
     const manage = holds(provider.access, 'provider.manage');
     const guarded = (act: Act | null) => managedAct(act, manage, t('resources.act.manageRequired'));
     const state = providerState(provider, t, { locale, timeZone }, now);
@@ -79,7 +105,7 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
             run: () => toTab(provider, step.tab),
           } : null);
     const enable: Act | null = guarded(provider.status === 'disabled' ? { id: 'enable', label: t('resources.act.enable'), icon: <CirclePlay aria-hidden />, run: () => enablePlan.ask(enableResource(provider)) } : null);
-    const disable: Act | null = guarded(provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', provider }) } : null);
+    const disable: Act | null = guarded(provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disableNow'), icon: <Ban aria-hidden />, run: () => disableNow(provider) } : null);
     const rename: Act | null = guarded({ id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', provider }) });
     const share = shareAct(t, { kind: 'provider', id: provider.id, name: provider.name }, provider.access);
     const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'provider', id: provider.id }) };
@@ -94,7 +120,7 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
     };
   };
 
-  const bulk: BulkAct<Provider>[] = [
+  const bulk: BulkAct<ProviderTarget>[] = [
     {
       id: 'enable',
       label: t('resources.act.enable'),
@@ -105,15 +131,10 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
     },
     {
       id: 'disable',
-      label: t('resources.act.disable'),
+      label: t('resources.act.disableNow'),
       icon: <Ban aria-hidden />,
       can: (provider) => holds(provider.access, 'provider.manage') && provider.status !== 'disabled',
       run: turnOff,
-      confirm: (rows) => ({
-        title: t('providers.bulk.disableTitle', { count: rows.length }),
-        body: <BulkNames names={rows.map((row) => row.name)} lead={t('providers.bulk.disableBody')} />,
-        label: t('providers.bulk.disableConfirm', { count: rows.length }),
-      }),
       done: (count) => t('providers.bulk.disabled', { count }),
     },
     {
@@ -134,6 +155,7 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
 
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.provider.name} read={detail} onClose={() => setAsked(null)} />}
       {cleanup.dialogs}
       {enablePlan.dialogs}
       {asked !== null && (asked.what === 'edit' || asked.what === 'rename') && (

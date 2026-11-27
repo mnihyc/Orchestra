@@ -103,7 +103,7 @@ function PlanPage({provider,span,mode,metric='subscription',bucket,onMode,onMetr
   const known=new Map(provider.facts.windows.map((window)=>[window.id,window]));
   const windows=subscription.query.data===undefined ? provider.facts.windows.filter((window)=>Number.isFinite(window.used_percent)).toSorted((one,other)=>Number(other.is_active===true)-Number(one.is_active===true) || (one.duration_minutes ?? Infinity)-(other.duration_minutes ?? Infinity)).slice(0,PLAN_PAGE_SIZE) : subscription.query.data.items.flatMap((series)=>{const window=known.get(series.window_id);return window===undefined ? [] : [window];});
   return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')} className="@container" action={<>
-    {available.length>1 && <SegmentedControl size="sm" label={t('providerCredits.metric')} value={metric} onValueChange={(value)=>onMetric?.(value)} segments={available.map((value)=>({value,name:t(value==='credits' ? 'providerCredits.credits' : 'providerCredits.subscription')}))} />}
+    {available.length>1 && <SegmentedControl size="sm" label={t('providerCredits.metric')} value={metric} onValueChange={onMetric ?? (() => undefined)} segments={available.map((value)=>({value,name:t(value==='credits' ? 'providerCredits.credits' : 'providerCredits.subscription')}))} />}
     <Button size="sm" icon={<RefreshCw aria-hidden />} pending={refresh.isPending} onClick={()=>refresh.mutate()}>{t(refresh.isPending ? 'providerPlan.reading' : 'providers.overview.refresh')}</Button>
   </>}>
     <ProviderUsageSummary provider={provider} windows={windows} />

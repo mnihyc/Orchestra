@@ -254,13 +254,19 @@ pub async fn gate(conn: &mut Conn, environment: Id, kind: PortOpeningKind) -> Re
     };
     let decision = word("decision", &definition.default_decision);
     let approver_scope = word("approver_scope", &definition.default_approver_scope);
-    // The nearest place whose row names this key decides it; values from places further up only fill in.
+    // Attribute the decision to the nearest row that actually supplied it.
     let source = configured.as_ref().and_then(|_| {
         resolved
             .parts
             .iter()
             .rev()
-            .find(|part| part.value.get(key).is_some())
+            .find(|part| {
+                part.value
+                    .get(key)
+                    .and_then(|member| member.get("decision"))
+                    .and_then(Json::as_str)
+                    == Some(decision.as_str())
+            })
             .map(|part| part.source.clone())
     });
     let (policy_scope, policy_node, policy_by) = match source {
