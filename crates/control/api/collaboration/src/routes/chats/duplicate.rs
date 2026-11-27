@@ -120,7 +120,6 @@ pub(crate) fn mount(registry: &mut Registry) {
     duplicates::register::<Groups, _>(registry, ChatDuplicate);
     duplicates::register::<Moving, _>(registry, ChatMoveOut);
     moving::mount(registry);
-    preview::mount(registry);
 }
 orch_api_base::__api_bind_fce0a68441!();
 
@@ -351,25 +350,17 @@ async fn prepare_native(
     let preview = matches!(&intent, Intent::Preview(_));
     let moving = !matches!(&intent, Intent::Copy(_));
     let declaration = intent.declaration();
-    let (body, confirmation) = match intent {
-        Intent::Copy(body) => (body, None),
-        Intent::Preview(copy) => (
-            ChatDuplicateBody {
-                copy,
-                ..Default::default()
-            },
-            None,
-        ),
+    let (options, confirmation, notify, notice_review) = match intent {
+        Intent::Copy(body) => (body.copy, None, false, None),
+        Intent::Preview(copy) => (copy, None, false, None),
         Intent::Move(body) => (
-            ChatDuplicateBody {
-                copy: body.copy,
-                notify: body.notify,
-                notify_preview_id: body.notify_preview_id,
-            },
+            body.copy,
             Some(body.delete_plan),
+            body.notify == Some(true),
+            body.notify_preview_id,
         ),
     };
-    let options = &body.copy;
+    let options = &options;
     let source = rows::lock(conn, ctx.id("id")?)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -450,14 +441,7 @@ async fn prepare_native(
     } else {
         None
     };
-    let notices = if body.notify == Some(true) {
-        let audience = if moving {
-            crate::routes::notifications::person::move_audience(ctx, conn, &principal, source.id)
-                .await?
-        } else {
-            crate::routes::notifications::person::copy_audience(ctx, conn, &principal, source.id)
-                .await?
-        };
+    let notices = if let Some(audience) = audience.as_ref().filter(|_| notify) {
         if audience.people
             > u64::try_from(orch_api_contract::notifications::PERSON_NOTIFY_MAX_PEOPLE)
                 .map_err(ApiError::internal)?
@@ -471,7 +455,7 @@ async fn prepare_native(
             ));
         }
         if !audience.users.is_empty() {
-            let review = body.notify_preview_id.ok_or_else(|| {
+            let review = notice_review.ok_or_else(|| {
                 ApiError::invalid(
                     "notify_preview_id",
                     "review the current contributors before notifying them",
@@ -485,12 +469,7 @@ async fn prepare_native(
                         "the contributor preview is no longer available",
                     )
                 })?;
-            if preview.kind
-                != if moving {
-                    "chat_move_out"
-                } else {
-                    "chat_duplicate"
-                }
+            if preview.kind != "chat_move_out"
                 || preview.created_by != principal.user()
                 || preview.plan.get("source_chat") != Some(&serde_json::json!(source.id))
                 || moving
@@ -519,7 +498,7 @@ async fn prepare_native(
                 ));
             }
         }
-        audience.users
+        audience.users.clone()
     } else {
         Vec::new()
     };
@@ -662,33 +641,21 @@ async fn apply_native<'a>(
         }
     }
     if !value.notices.is_empty() {
-        if value.delete.is_some() {
-            let receipt = orch_api_contract::duplicates::DuplicateReceipt {
-                projection: orch_api_contract::common::ReceiptProjection::Receipt,
-                kind: DuplicateKind::Chat,
-                id: target,
-                setup: None,
-            };
-            crate::routes::notifications::person::tell_chat_move(
-                ctx,
-                conn,
-                principal,
-                value.source,
-                &receipt,
-                &value.notices,
-            )
-            .await?;
-        } else {
-            crate::routes::notifications::person::tell_chat_copy(
-                ctx,
-                conn,
-                principal,
-                value.source,
-                target,
-                &value.notices,
-            )
-            .await?;
-        }
+        let receipt = orch_api_contract::duplicates::DuplicateReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            kind: DuplicateKind::Chat,
+            id: target,
+            setup: None,
+        };
+        crate::routes::notifications::person::tell_chat_move(
+            ctx,
+            conn,
+            principal,
+            value.source,
+            &receipt,
+            &value.notices,
+        )
+        .await?;
         deadline.check()?;
     }
     if value.delete.is_some() {
@@ -813,6 +780,3 @@ fn move_plan(
 
 #[path = "duplicate/moving.rs"]
 pub mod moving;
-
-#[path = "duplicate/preview.rs"]
-pub mod preview;

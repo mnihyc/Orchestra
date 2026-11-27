@@ -1,21 +1,22 @@
 //! The MCP servers of the harnesses' own configuration here: names reported, one definition copied into the connector's own directory when it is imported, started from that copy, and forgotten.
 //!
 //! A machine that has a harness set up usually has tool servers in that harness's own configuration. They
-//! are not configured a second time and they are not used unasked: a server is **found**, then
-//! **imported**, then enabled, and only the last step makes an agent act with it.
+//! remain the program's own configuration for local execution. Discovery reports their names independently
+//! of permission to import; importing and enabling adds a managed resource without editing the native file.
 //!
 //! * **Found.** The connector asks the adapter of each harness process it hosts that declares
 //!   `mcp_discovery` for the servers its harness has configured, in its user's own configuration and in the
 //!   environment's workspace, and reports each by name, harness, place and transport in the environment's
-//!   facts ([`McpImports::rediscover`]). No command line, no address and no secret is reported. Where the
-//!   machine's policy lets none be imported, none is reported.
+//!   facts ([`McpImports::rediscover`]). No command line, no address and no secret is reported. Import policy
+//!   governs copies, while native names remain visible.
 //! * **Imported.** One definition is read out of where it was found, through the adapter of that harness, and
-//!   kept as a copy in the connector's own data directory ([`McpImports::import`]). From then on the copy is
-//!   what runs (`mcp.start` with `local`), whatever becomes of the harness's file; `mcp.forget` deletes it.
+//!   kept as a copy in the connector's own data directory ([`McpImports::import`]). Orch starts that copy
+//!   (`mcp.start` with `local`); native execution keeps its own file, and `mcp.forget` deletes only the copy.
 //!
 //! The adapters are asked through the harness processes of the agent role, so a harness that is not
 //! running here has nothing to say: the servers found are those of the harnesses the connector hosts.
 
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use orch_agent_contract::discovery::{McpFound, McpImportRequest, McpScope, McpSearch};
@@ -53,6 +54,55 @@ fn scope_of(word: &str) -> Result<McpScope, CommandError> {
     }
 }
 
+/// Native paths stay local; the environment advertises only workspace-relative project names.
+pub(crate) fn in_workspace(mut found: McpFound, root: &Path) -> Option<McpFound> {
+    if found.scope == McpScope::Directory {
+        let directory = Path::new(found.directory.as_deref()?);
+        // A rooted path without a drive (`\workspace` on Windows) is not absolute there, and it is
+        // no workspace-relative name either: it is compared with the root like an absolute one.
+        let relative = if directory.has_root() {
+            directory.strip_prefix(root).ok()?
+        } else {
+            directory
+        };
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return None;
+        }
+        found.directory = Some(relative.to_string_lossy().replace('\\', "/"));
+    }
+    Some(found)
+}
+
+fn native_directory(
+    root: &Path,
+    scope: &McpScope,
+    directory: Option<&str>,
+) -> Result<Option<String>, CommandError> {
+    if *scope == McpScope::User {
+        return Ok(None);
+    }
+    let directory = directory.ok_or_else(|| {
+        CommandError::new(
+            ErrorCode::Unsupported,
+            "a project import names its workspace directory",
+        )
+    })?;
+    let path = Path::new(directory);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(CommandError::new(
+            ErrorCode::Unsupported,
+            "a project import stays within its environment workspace",
+        ));
+    }
+    Ok(Some(root.join(path).to_string_lossy().into_owned()))
+}
+
 impl McpImports {
     /// Imports over the environments of `host`, asking the harness processes of `hosting` (a machine that
     /// hosts none finds nothing).
@@ -85,7 +135,11 @@ impl McpImports {
                 .await
             {
                 Ok(listed) => {
-                    for server in listed {
+                    for mut server in listed {
+                        server.profile = Some(orch_agent_contract::discovery::McpProfile {
+                            provider_id: process.provider_id,
+                            agent_id: process.agent_id,
+                        });
                         if !found.contains(&server) {
                             found.push(server);
                         }
@@ -100,19 +154,29 @@ impl McpImports {
     }
 
     /// Looks again at what the harnesses here have configured, for one environment, keeps it in the
-    /// environment's facts and says the facts if they changed. Where the machine lets no tool server be
-    /// imported nothing is reported.
+    /// environment's facts and says the facts if they changed. Import restrictions do not hide native names.
     pub async fn rediscover(&self, environment_id: Id) -> Result<EnvironmentFacts, CommandError> {
         let environment = self.host.environment(environment_id)?;
-        let allowed = environment.mcp().import_allowed();
-        let found = if allowed {
-            let root = environment.facts().workspace_root;
-            self.found(&[root]).await
-        } else {
-            Vec::new()
-        };
+        let root = environment.facts().workspace_root;
+        let mut directories = vec![root.clone()];
+        if let Some(hosting) = &self.hosting {
+            directories.extend(hosting.mcp_directories(environment_id, &root));
+        }
+        directories.sort();
+        directories.dedup();
+        let found = self
+            .found(&directories)
+            .await
+            .into_iter()
+            .filter_map(|found| in_workspace(found, Path::new(&root)))
+            .collect();
         environment.mcp().set_found(found);
         Ok(self.host.facts_changed(environment_id).await?)
+    }
+
+    /// The agent role's session changes, shared without retaining the environment role itself.
+    pub fn changes(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.hosting.as_ref().map(|hosting| hosting.mcp_changes())
     }
 
     /// `mcp.import`: reads the definition of one server out of the harness's configuration, through that
@@ -164,12 +228,17 @@ impl McpImports {
         if !environment.mcp().import_allowed() {
             return Err(orch_envhost::error::HostError::McpImportDisabled.into());
         }
+        let scope = scope_of(&body.scope)?;
         let request = McpImportRequest {
             server_id: body.server_id,
             source: body.source.clone(),
-            scope: scope_of(&body.scope)?,
+            scope,
             name: body.name.clone(),
-            directory: body.directory.clone(),
+            directory: native_directory(
+                Path::new(&environment.facts().workspace_root),
+                &scope,
+                body.directory.as_deref(),
+            )?,
         };
         let Some(hosting) = &self.hosting else {
             return Err(CommandError::new(
@@ -181,11 +250,13 @@ impl McpImports {
             "no harness of the kind {} here has configured a server called {}",
             body.source, body.name
         );
-        for process in hosting
-            .with_mcp_discovery()
-            .into_iter()
-            .filter(|process| process.kind == body.source)
-        {
+        for process in hosting.with_mcp_discovery().into_iter().filter(|process| {
+            process.kind == body.source
+                && body.profile.is_none_or(|profile| {
+                    profile.provider_id == process.provider_id
+                        && profile.agent_id == process.agent_id
+                })
+        }) {
             let asked = request.clone();
             match process.call(move |adapter| adapter.read_mcp(asked)).await {
                 Ok(definition) => {
@@ -216,4 +287,44 @@ fn transfer_info(body: &McpImport, recipient: Id) -> Result<Vec<u8>, CommandErro
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn project_imports_return_to_the_exact_native_directory_named_by_discovery() {
+        let root = Path::new("/workspace");
+        for relative in ["", "project", "project/api"] {
+            let absolute = root.join(relative);
+            let found = McpFound {
+                profile: None,
+                definition_fingerprint: None,
+                name: "docs".into(),
+                source: "codex".into(),
+                scope: McpScope::Directory,
+                directory: Some(absolute.to_string_lossy().into_owned()),
+                transport: orch_agent_contract::discovery::McpTransport::Stdio,
+                digest: "synthetic-definition".into(),
+            };
+            let Some(found) = in_workspace(found, root) else {
+                panic!("the discovery belongs to this workspace")
+            };
+            assert_eq!(found.directory.as_deref(), Some(relative));
+            let Ok(Some(directory)) =
+                native_directory(root, &McpScope::Directory, found.directory.as_deref())
+            else {
+                panic!("a discovered project imports from its actual native directory")
+            };
+            assert_eq!(Path::new(&directory), absolute);
+        }
+        assert!(native_directory(root, &McpScope::Directory, Some("../outside")).is_err());
+        assert!(native_directory(root, &McpScope::Directory, None).is_err());
+        assert!(matches!(
+            native_directory(root, &McpScope::User, None),
+            Ok(None)
+        ));
+    }
 }
