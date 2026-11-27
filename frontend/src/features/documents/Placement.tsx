@@ -1,7 +1,8 @@
-/** Where a document lies and who may read it: moving it, deleting it, and making it private and open again.
+/** Where a document lies and who may read it: moving it, and making it private and open again.
  *
- * "Move to…" picks another node where the person may make documents and shows who gains and who loses
- * the document before it moves. Delete asks once. "Private: only you, until you share it" first shows who
+ * "Move to…" picks another node where the person may make documents and moves it there; inside one organization
+ * nothing is said, into another one line counts who loses it, with the names on Show. The notice offers Undo.
+ * "Private: only you, until you share it" first shows who
  * will lose the document; "Open again" makes it follow its node once more, after showing who gains it.
  * Adding people to a document is Share, the permission page every other thing has.
  */
@@ -11,7 +12,8 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
-import { deleteDocument, moveDocument, previewMove, previewPrivate, setPrivate, type Document } from '@/api/documents';
+import { moveDocument, previewMove, previewPrivate, setPrivate, type Document } from '@/api/documents';
+import { LossLine, organizationOf } from '@/features/org/Move';
 import { holds } from '@/lib/permissions';
 import { useOrgTree } from '@/realtime/stores/tree';
 import { Button } from '@/ui/Button';
@@ -49,7 +51,7 @@ function Preview({ preview }: { preview: PagePreview }) {
 export function PrivateDialog({ doc, open, onOpenChange }: DialogProps) {
   const { t } = useTranslation();
   const whole = doc.page === 'restricted' ? 'reset' : 'private';
-  const preview = useQuery({ queryKey: ['document-preview', doc.id, whole], queryFn: () => previewPrivate(doc.id, whole), enabled: open, staleTime: 0 });
+  const preview = useQuery({ queryKey: ['document-preview', doc.id, whole], queryFn: () => previewPrivate(doc.id, whole), enabled: open });
   const change = useMutation({
     mutationFn: () => setPrivate(doc.id, whole),
     onSuccess: () => {
@@ -74,40 +76,6 @@ export function PrivateDialog({ doc, open, onOpenChange }: DialogProps) {
   );
 }
 
-// ---------------------------------------------------------------- Delete
-
-export function DeleteDialog({ doc, open, onOpenChange }: DialogProps) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const remove = useMutation({
-    mutationFn: () => deleteDocument(doc.id),
-    onSuccess: async () => {
-      onOpenChange(false);
-      toast({ tone: 'success', title: t('documents.delete.done', { title: doc.title }) });
-      await navigate({ to: pathOf(doc.node.kind), params: { id: doc.node.id } as never } as never);
-    },
-  });
-  return (
-    <ConfirmDialog
-      open={open}
-      onOpenChange={onOpenChange}
-      title={t('documents.delete.title', { title: doc.title })}
-      confirmLabel={t('documents.delete.confirm', { title: doc.title })}
-      danger
-      pending={remove.isPending}
-      error={remove.error}
-      onConfirm={() => remove.mutate()}
-    >
-      {t('documents.delete.about')}
-    </ConfirmDialog>
-  );
-}
-
-/** The screen of a node, by its kind. */
-function pathOf(kind: string): string {
-  return kind === 'project' ? '/project/$id' : kind === 'topic' ? '/topic/$id' : kind === 'thread' ? '/thread/$id' : '/org/$id';
-}
-
 // ---------------------------------------------------------------- Move
 
 export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
@@ -121,15 +89,20 @@ export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
     () =>
       [...tree.nodes.values()]
         .filter((node) => !node.deleted && !node.archived && node.id !== doc.node.id)
-        .filter((node) => node.name.toLowerCase().includes(query.trim().toLowerCase()))
-        .slice(0, 30),
+        .filter((node) => node.name.toLowerCase().includes(query.trim().toLowerCase())),
     [tree.nodes, query, doc.node.id],
   );
-  const preview = useQuery({ queryKey: ['document-move', doc.id, target], queryFn: () => previewMove(doc.id, target ?? ''), enabled: open && target !== null, staleTime: 0 });
+  // Who loses it is read only into another organization; a line beside the choice, never a gate.
+  const across = target !== null && organizationOf(tree.nodes, target) !== organizationOf(tree.nodes, doc.node.id);
+  const preview = useQuery({ queryKey: ['document-move', doc.id, target], queryFn: () => previewMove(doc.id, target ?? ''), enabled: open && across, retry: false, gcTime: 0 });
   const move = useMutation({
     mutationFn: () => moveDocument(doc.id, target ?? ''),
     onSuccess: (moved) => {
-      toast({ tone: 'success', title: t('documents.move.done', { place: moved.node.name ?? '' }) });
+      const from = doc.node;
+      toast({ tone: 'success', title: t('documents.move.done', { place: moved.node.name ?? '' }),
+        action: { label: t('places.toast.undo'), run: () => void moveDocument(doc.id, from.id).then(
+          () => toast({ tone: 'success', title: t('documents.move.done', { place: from.name ?? '' }) }),
+          () => toast({ tone: 'danger', title: t('placeReview.undoChanged') })) } });
       onOpenChange(false);
       void navigate({ to: '/doc/$documentId', params: { documentId: doc.id } });
     },
@@ -154,7 +127,7 @@ export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
     >
       <div className="flex flex-col gap-3">
         <Input label={t('documents.move.search')} value={query} onChange={(event) => setQuery(event.target.value)} />
-        <div className="max-h-(--doc-menu-height) overflow-y-auto rounded-lg border border-border">
+        <div className="max-h-(--list-max-height) overflow-y-auto rounded-lg border border-border">
           {places.length === 0 && <EmptyState compact className="px-3" title={t('documents.move.none')} />}
           <div role="listbox" aria-label={t('documents.move.places')} className="flex flex-col">
             {places.map((node) => (
@@ -163,7 +136,7 @@ export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
                 type="button"
                 role="option"
                 aria-selected={target === node.id}
-                className={cx('flex w-full items-center justify-between gap-2 px-3 py-1 text-left text-sm hover:bg-bg-muted', target === node.id && 'bg-accent-subtle')}
+                className={cx('flex min-h-(--row-height) w-full items-center justify-between gap-2 px-3 py-1 text-left text-sm hover:bg-bg-muted', target === node.id && 'bg-accent-subtle')}
                 onClick={() => setTarget(node.id)}
               >
                 {content}
@@ -171,7 +144,7 @@ export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
             ))}
           </div>
         </div>
-        {target !== null && (preview.isPending ? <SkeletonRows read={preview} rows={1} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} /> : <Preview preview={preview.data} />)}
+        {across && <LossLine preview={preview.data} />}
         {move.isError && <ErrorAlert error={move.error} />}
       </div>
     </Dialog>

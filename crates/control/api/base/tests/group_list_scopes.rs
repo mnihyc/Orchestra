@@ -15,10 +15,10 @@ use orch_access_contract::key_scope::{KeyPlaceExclusion, KeyScope};
 use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::access::{HolderInput, PageChange, PageChangeWhole, PermissionPageUpdate};
 use orch_api_contract::directory::{
-    Group, GroupHolderAdd, GroupMemberAdd, NodeGroupList, OrgGroupCreate, OrgGroupCreateBody,
-    OrgGroupList, OrgGroupListQuery,
+    Group, GroupHolderAdd, GroupMemberAdd, GroupPage, NodeGroupList, OrgGroupCreate,
+    OrgGroupCreateBody, OrgGroupList, OrgGroupListQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::{Caller, Principal};
 use orch_db::queries::{access, identity};
@@ -47,7 +47,10 @@ impl Reader {
                     .app
                     .call(OrgGroupList, &[&id])
                     .token(secret)
-                    .query(&OrgGroupListQuery { under: Some(under) })
+                    .query(&OrgGroupListQuery {
+                        under: Some(under),
+                        ..OrgGroupListQuery::default()
+                    })
                     .send_bytes()
                     .await
             }
@@ -96,8 +99,8 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>, excluded: Option<Id>) -
         });
     }
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -117,11 +120,12 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>, excluded: Option<Id>) -
     Key { id, secret }
 }
 async fn legacy_key(world: &World, actor: Id) -> String {
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Group legacy full-account control",
             token_hash: &token_hash(&secret),
@@ -135,9 +139,6 @@ async fn legacy_key(world: &World, actor: Id) -> String {
     .unwrap();
     secret
 }
-fn value(reply: &RawReply) -> Json {
-    serde_json::from_slice(&reply.raw).unwrap()
-}
 fn success(reply: RawReply) -> Json {
     assert_eq!(
         reply.status,
@@ -145,7 +146,12 @@ fn success(reply: RawReply) -> Json {
         "{}",
         String::from_utf8_lossy(&reply.raw)
     );
-    value(&reply)
+    let page: GroupPage = serde_json::from_slice(&reply.raw).unwrap();
+    assert!(
+        page.next_cursor.is_none(),
+        "this fixture fits one native page"
+    );
+    serde_json::to_value(page.items).unwrap()
 }
 async fn no_dispatch(world: &World) {
     let count: i64 =
@@ -795,4 +801,51 @@ async fn current_key_narrowing_revocation_and_real_ordinary_view_loss_do_not_reu
         StatusCode::FORBIDDEN
     );
     no_dispatch(&world).await;
+}
+
+#[tokio::test]
+async fn a_group_after_a_thousand_is_found_without_scanning_browser_pages() {
+    let world = World::new().await;
+    let c = resources::company(&world).await;
+    sqlx::query("INSERT INTO groups(id,org_id,name,description)
+        SELECT gen_random_uuid(),$1,'Group '||lpad(n::text,4,'0'),'A directory group' FROM generate_series(0,1000) n")
+        .bind(c.acme).execute(&world.db.pool).await.unwrap();
+    let found = world
+        .app
+        .call(OrgGroupList, &[&c.acme])
+        .token(&c.boss.token)
+        .query(&OrgGroupListQuery {
+            q: Some("Group 1000".into()),
+            limit: Some(37),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].name, "Group 1000");
+    let mut cursor = None;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(OrgGroupList, &[&c.acme])
+            .token(&c.boss.token)
+            .query(&OrgGroupListQuery {
+                limit: Some(137),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(seen.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 1001);
 }

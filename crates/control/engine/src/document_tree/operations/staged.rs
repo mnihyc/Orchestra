@@ -103,11 +103,8 @@ pub fn complete_operation_in<'a>(
     options: Options,
 ) -> BoxFuture<'a, Result<Operation, Error>> {
     Box::pin(async move {
-        if matches!(sources.command(), Command::Delete | Command::MoveOut) != confirmation.is_some()
-        {
-            return Err(Error::Invalid(
-                "deletion and Move to another org require their complete native deletion plan",
-            ));
+        if !sources.command().fits_deletion_plan(confirmation.is_some()) {
+            return Err(Error::Invalid(crate::document_tree::DELETION_PLAN_MISFIT));
         }
         sources::check_association(conn, actor, &sources).await?;
         let digest = match confirmation {

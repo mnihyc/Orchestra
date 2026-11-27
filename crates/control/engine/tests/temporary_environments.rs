@@ -162,6 +162,46 @@ async fn only_the_creating_threads_archive_starts_the_warning_and_keep_withdraws
 }
 
 #[tokio::test]
+async fn a_maintenance_snapshot_cannot_forget_the_environments_creating_thread() {
+    let (world, clock, host, template) = setup().await;
+    let (id, _, _unit) = running(&world, &host, template, "Concurrent association").await;
+    opt_in(&world, id, "thread").await;
+    let creator = world.thread("The actual creator").await;
+    world.engine().stop();
+    let snapshot = temporary::read(&mut world.pool.acquire().await.unwrap(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.thread_id.is_none());
+    temporary::associate(
+        &mut world.pool.acquire().await.unwrap(),
+        id,
+        creator,
+        world.ada,
+    )
+    .await
+    .unwrap();
+    // A sweep that read before association saves its timing after association.
+    // It owns those timing fields, never the first creating-thread relationship.
+    temporary::save(
+        &mut world.pool.acquire().await.unwrap(),
+        &snapshot,
+        clock.now(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        temporary::read(&mut world.pool.acquire().await.unwrap(), id)
+            .await
+            .unwrap()
+            .unwrap()
+            .thread_id,
+        Some(creator)
+    );
+}
+
+#[tokio::test]
 async fn an_open_export_job_defers_archive_cleanup_and_finishing_it_leaves_another_warning_hour() {
     let (world, clock, host, template) = setup().await;
     let (id, _, _unit) = running(&world, &host, template, "Export in progress").await;
@@ -382,6 +422,8 @@ async fn recovery_after_the_original_deadline_replays_original_and_busy_child_su
             commands
                 .issue(Outgoing {
                     authority: None,
+                    input_facts: None,
+                    session_offer: None,
                     id: child,
                     ..command
                 })

@@ -8,14 +8,14 @@
 import { queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok } from '@/api/client';
-import type { Favorite, PersonalTarget } from '@/generated/api-types';
+import type { PersonalTarget, Shortcut } from '@/generated/api-types';
 
 export const favoritesKey = ['favorites'] as const;
 
-/** The nodes a person starred, in order. */
+/** What a person starred, in order: their own shortcuts, to places and threads, documents and chats. */
 export const favoritesQuery = queryOptions({
   queryKey: favoritesKey,
-  queryFn: ({ signal }): Promise<Favorite[]> => ok(api.GET('/me/favorites', { signal })),
+  queryFn: ({ signal }): Promise<Shortcut[]> => ok(api.GET('/me/favorites', { signal })),
 });
 
 /**

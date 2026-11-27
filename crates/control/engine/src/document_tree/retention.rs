@@ -48,6 +48,6 @@ pub fn restore_deadline_from(
     };
     Ok(Some(match purge_at.or(cohort_until) {
         Some(until) => until,
-        None => prepare::deadline(Time::new(deleted), options)?,
+        None => prepare::deadline(Time::new(deleted), options),
     }))
 }

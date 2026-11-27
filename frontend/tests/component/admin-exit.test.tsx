@@ -1,5 +1,5 @@
 /** Only confirmed native mode loss moves an inaccessible page, retaining the frame while its parent is checked. */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { meKey } from '@/api/auth';
@@ -15,9 +15,9 @@ import { i18n, setLocale } from '@/i18n';
 import { me, org, personalHomeOf, userRef } from '../doubles/fixtures';
 
 const world = vi.hoisted(() => ({ href: '/project/private', navigate: vi.fn(), read: vi.fn<(path: string, options: unknown) => Promise<{ response: { ok: boolean } }>>(), acts: new Set<(act: Act) => void | Promise<void>>() }));
-vi.mock('@tanstack/react-router', () => {
+vi.mock('@tanstack/react-router', async (loadOriginal) => {
   const router = { get state() { return { location: { href: world.href } }; }, navigate: world.navigate };
-  return { useRouter: () => router, useRouterState: () => world.href };
+  return { ...await loadOriginal<object>(), useRouter: () => router, useRouterState: () => world.href };
 });
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
@@ -26,6 +26,22 @@ vi.mock('@/api/client', async (original) => {
 });
 function Frame() { const pending = useAdminExit(); return <><nav aria-label="Frame">Account</nav><AdminExitNotice /><main>{pending ? <ScreenLoading /> : <p>Current page</p>}</main></>; }
 const caches: QueryClient[] = [];
+
+it('keeps the native exit plan when a kept pane reconnects its existing readers', () => {
+  const cache = setup();
+  const key = ['pane-value'];
+  cache.setQueryData(key, 'held');
+  render(<QueryClientProvider client={cache}><Frame /></QueryClientProvider>);
+  const read = vi.spyOn(cache, 'getQueryData');
+  try {
+    const observer = new QueryObserver(cache, { queryKey: key, enabled: false });
+    const stop = observer.subscribe(() => undefined);
+    observer.setOptions({ queryKey: key, enabled: false, staleTime: Infinity });
+    stop();
+    expect(read).not.toHaveBeenCalled();
+    expect(world.navigate).not.toHaveBeenCalled();
+  } finally { read.mockRestore(); }
+});
 function setup() {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }); caches.push(cache);
   const person = me(1, 'ada', 'Ada');
