@@ -263,6 +263,10 @@ pub const TRUST_SET_FACETS: [FacetSpec; 8] = [
 /// The native enabled-server selection and its independently bounded references.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpSource {
+    /// Readable names of the actual native agent profiles.
+    Profiles,
+    /// The optional actual thread whose native connection observations are requested.
+    NativeThread,
     /// The live Environment whose native whole reading door was selected.
     Environment,
     /// Native enabled servers and stored imports identified beside their discovered origins.
@@ -285,6 +289,18 @@ pub enum McpSource {
 pub const MCP_GET: Declaration<McpSource> = Declaration {
     operation: "EnvironmentMcpGet",
     bindings: &[
+        Binding {
+            source: McpSource::Profiles,
+            target: TargetResolver::ResolvedCollection("environment_mcp_profiles"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: McpSource::NativeThread,
+            target: TargetResolver::ResolvedCollection("environment_mcp_native_thread"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
         Binding {
             source: McpSource::Environment,
             target: TargetResolver::Path("id"),
@@ -337,7 +353,16 @@ pub const MCP_GET: Declaration<McpSource> = Declaration {
 };
 
 /// The native primary context, selected server content and optional context names.
-pub const MCP_GET_FACETS: [FacetSpec; 8] = [
+pub const MCP_GET_FACETS: [FacetSpec; 10] = [
+    FacetSpec::response_content(
+        &[KeyTargetKind::Object(ObjectKind::Agent)],
+        TargetResolver::ResolvedCollection("environment_mcp_profiles"),
+    ),
+    FacetSpec::required(
+        KeyAction::Read,
+        &[KeyTargetKind::Object(ObjectKind::Thread)],
+        TargetResolver::ResolvedCollection("environment_mcp_native_thread"),
+    ),
     FacetSpec::required(
         KeyAction::Read,
         &[KeyTargetKind::Object(ObjectKind::Environment)],
@@ -1058,6 +1083,8 @@ pub const RECIPIENTS_FACETS: [FacetSpec; 1] = [FacetSpec::required(
     KeyAction::Read,
     &[
         KeyTargetKind::Object(ObjectKind::Host),
+        KeyTargetKind::Object(ObjectKind::McpServer),
+        KeyTargetKind::Object(ObjectKind::Mount),
         KeyTargetKind::Object(ObjectKind::Environment),
         KeyTargetKind::Object(ObjectKind::Provider),
         KeyTargetKind::Object(ObjectKind::Machine),
@@ -1480,6 +1507,8 @@ pub const RETAINED_CHANGE_FACETS: [FacetSpec; 3] = [
 /// Actual native standalone creation sources and its independently readable singleton.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateSource {
+    /// Every actual pool in the selected host's native membership path.
+    Pools,
     /// Actual original environment ended only after its independent native copy succeeds.
     MoveSubject,
     /// The same original environment whose native deletion preview is returned.
@@ -1513,6 +1542,20 @@ pub enum CreateSource {
     /// The native environment created threads source.
     Threads,
 }
+
+/// All current nested pools of the actual chosen creation host, including an empty single target.
+pub const CREATION_POOLS: Binding<CreateSource> = Binding {
+    source: CreateSource::Pools,
+    target: TargetResolver::ResolvedCollection("creation_pools"),
+    usage: FacetUsage::Required,
+    cardinality: Cardinality::Collection,
+};
+/// Pool intent is bounded independently beside the actual native Host/Template/Mount operands.
+pub const CREATION_POOLS_FACET: FacetSpec = FacetSpec::required(
+    KeyAction::Read,
+    &[KeyTargetKind::Object(ObjectKind::Pool)],
+    TargetResolver::ResolvedCollection("creation_pools"),
+);
 
 /// One table supplies the standalone creator and its native continuation.
 pub const CREATE: Declaration<CreateSource> = Declaration {
@@ -1596,11 +1639,12 @@ pub const CREATE: Declaration<CreateSource> = Declaration {
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
         },
+        CREATION_POOLS,
     ],
 };
 
 /// Creation keeps native resource-use gates and narrows each real source/effect independently.
-pub const CREATE_FACETS: [FacetSpec; 13] = [
+pub const CREATE_FACETS: [FacetSpec; 14] = [
     FacetSpec::required(
         KeyAction::Manage,
         &[KeyTargetKind::Object(ObjectKind::Environment)],
@@ -1664,4 +1708,5 @@ pub const CREATE_FACETS: [FacetSpec; 13] = [
         &[KeyTargetKind::Object(ObjectKind::Thread)],
         TargetResolver::ResolvedCollection("environment_created_threads"),
     ),
+    CREATION_POOLS_FACET,
 ];

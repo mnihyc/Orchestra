@@ -53,11 +53,11 @@ use orch_api_contract::admin::IdentityProviderTestReply;
 
 use orch_api_contract::admin::IdentityProviderUpdateBody;
 
+use orch_api_contract::common::{CollectionQuery, Page};
+
 use orch_api_contract::common::BASE_PATH;
 
 use orch_api_contract::common::ErrorCode;
-
-use orch_config::ServerConfig;
 
 use orch_db::queries::hierarchy;
 
@@ -119,16 +119,16 @@ pub fn mount(registry: &mut Registry) {
 }
 
 /// The address a provider is told to call back.
-fn callback_url(config: &ServerConfig, key: &str) -> String {
+fn callback_url(public_url: &str, key: &str) -> String {
     format!(
         "{}{BASE_PATH}/auth/oidc/{key}/callback",
-        config.system.public_url.trim_end_matches('/')
+        public_url.trim_end_matches('/')
     )
 }
 
-fn shown(config: &ServerConfig, row: IdentityProviderRow) -> IdentityProvider {
+fn shown(public_url: &str, row: IdentityProviderRow) -> IdentityProvider {
     IdentityProvider {
-        callback_url: callback_url(config, &row.key),
+        callback_url: callback_url(public_url, &row.key),
         default_role: row
             .default_role
             .and_then(|word| serde_json::from_value::<Role>(json!(word)).ok()),
@@ -152,14 +152,23 @@ fn shown(config: &ServerConfig, row: IdentityProviderRow) -> IdentityProvider {
 }
 
 /// Every identity provider.
-async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<IdentityProvider>> {
+async fn list(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<IdentityProvider>> {
     admin_of(&ctx)?;
     let mut conn = ctx.app.db.acquire().await?;
-    Ok(identity::identity_providers(&mut conn)
+    let addresses = crate::public_addresses::read(&ctx.app, &mut conn).await?;
+    let rows = identity::identity_providers(&mut conn)
         .await?
         .into_iter()
-        .map(|row| shown(&ctx.app.config, row))
-        .collect())
+        .map(|row| shown(&addresses.addresses.public_url, row))
+        .collect();
+    orch_api_base::collection::snapshot(
+        &query,
+        "admin-identity-providers",
+        rows,
+        |row: &IdentityProvider| (row.name.clone(), row.id),
+        |row| format!("{} {} {}", row.name, row.key, row.issuer),
+        false,
+    )
 }
 
 fn key_fits(key: &str) -> bool {
@@ -417,7 +426,15 @@ async fn create(
     orch_db::sequences::notify_meta_changed(&mut tx, Some(ctx.request_id.as_str())).await?;
     orch_db::idempotency::creation::observe(&mut tx, Some(admin), "identity_provider", id).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(orch_api_contract::admin::IdentityProviderCreateResponse::full(shown(&ctx.app.config, row)))
+    Ok(
+        orch_api_contract::admin::IdentityProviderCreateResponse::full(shown(
+            &crate::public_addresses::current(&ctx.app)
+                .await?
+                .addresses
+                .public_url,
+            row,
+        )),
+    )
 }
 
 /// Changes an identity provider that is at the revision the caller saw.
@@ -467,7 +484,16 @@ async fn update(
             ErrorCode::ConflictStaleRevision,
             "the provider was changed since it was read",
         )
-        .with("current", shown(&ctx.app.config, before)));
+        .with(
+            "current",
+            shown(
+                &crate::public_addresses::read(&ctx.app, &mut tx)
+                    .await?
+                    .addresses
+                    .public_url,
+                before,
+            ),
+        ));
     }
     let org_after = body.default_org_id.unwrap_or(before.default_org_id);
     let role_after = role.clone().unwrap_or_else(|| before.default_role.clone());
@@ -503,7 +529,13 @@ async fn update(
         }
     }
     if changed.is_empty() {
-        return Ok(shown(&ctx.app.config, before));
+        return Ok(shown(
+            &crate::public_addresses::read(&ctx.app, &mut tx)
+                .await?
+                .addresses
+                .public_url,
+            before,
+        ));
     }
     let after = identity::change_identity_provider(
         &mut tx,
@@ -549,7 +581,13 @@ async fn update(
         .ok_or_else(|| ApiError::internal("a provider was changed and is not there"))?;
     orch_db::sequences::notify_meta_changed(&mut tx, Some(ctx.request_id.as_str())).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown(&ctx.app.config, row))
+    Ok(shown(
+        &crate::public_addresses::current(&ctx.app)
+            .await?
+            .addresses
+            .public_url,
+        row,
+    ))
 }
 
 /// Removes an identity provider, unless somebody who can sign in only through it would be shut out.

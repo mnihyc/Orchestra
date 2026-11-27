@@ -48,7 +48,10 @@ fn shown(reply: RawReply) -> Json {
         "{}",
         String::from_utf8_lossy(&reply.raw)
     );
-    serde_json::from_slice(&reply.raw).unwrap()
+    let page: orch_api_contract::notifications::NotificationChannelPage =
+        serde_json::from_slice(&reply.raw).unwrap();
+    assert!(page.next_cursor.is_none());
+    serde_json::to_value(page.items).unwrap()
 }
 fn item(rows: &Json, id: Id) -> &Json {
     rows.as_array()
@@ -262,6 +265,7 @@ async fn system_channel_management_is_explicit_keeps_native_standing_and_needs_n
     let invalid = NotificationChannelListQuery {
         org_id: Some(s.o.acme),
         system: Some(true),
+        ..Default::default()
     };
     assert_eq!(
         list(s.o.world.app.clone(), token, invalid).await.status,

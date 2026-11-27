@@ -1,0 +1,1 @@
+web-e2e --retries 0 --grep '(disable|delete) agent 1440px light en|disable environment 1440px light en'

@@ -275,11 +275,10 @@ fn preferences_and_parameters_keep_their_existing_replace_choices() {
         keys::CALLS_RETURN,
         keys::CALLS_NOTIFY_ON_STOP,
         keys::THREAD_SWITCH_HISTORY,
-        keys::SHARING_ON_LINK,
         keys::USAGE_CATALOGUE,
         keys::USAGE_CATALOGUE_SCALE,
         keys::ASK_PAID_BY,
-        keys::INVITATIONS_DEFAULT_HOURS,
+        keys::INVITATIONS_DEFAULT_MINUTES,
         keys::TERMINAL_RECORD,
         keys::ENV_REMOVED_KEEP_DAYS,
         keys::RETENTION_ARCHIVE_IDLE_DAYS,
@@ -292,4 +291,114 @@ fn preferences_and_parameters_keep_their_existing_replace_choices() {
     assert_eq!(definition(keys::AGENT_MODEL).class, Class::Parameter);
     assert_eq!(definition(keys::AGENT_MODEL).merge, Merge::Replace);
     assert_eq!(definition(keys::REDACTION_PATTERNS).merge, Merge::Union);
+}
+
+#[test]
+fn writing_a_ceiling_uses_the_same_precision_and_unbounded_spellings_as_reading_it() {
+    let credits = definition(keys::THREAD_GOAL_MAX_CREDITS);
+    let exact = json!("9007199254740993.0000000001");
+    assert!(exceeds_ceiling(
+        credits,
+        &json!("9007199254740993.0000000002"),
+        &exact
+    ));
+    assert!(!exceeds_ceiling(
+        credits,
+        &json!("9007199254740993.00000000010"),
+        &exact
+    ));
+    assert!(exceeds_ceiling(credits, &json!("0.00"), &exact));
+    let bytes = definition(keys::IMPORT_MAX_BYTES);
+    assert!(exceeds_ceiling(bytes, &Json::Null, &json!(1000)));
+    assert!(!exceeds_ceiling(bytes, &json!(1000), &Json::Null));
+    let messages = definition(keys::BROADCAST_THREAD_MESSAGES_PER_HOUR);
+    assert!(!exceeds_ceiling(messages, &json!(0), &json!(10)));
+    assert!(exceeds_ceiling(messages, &json!(1), &json!(0)));
+}
+
+#[test]
+fn personal_read_tools_a_place_above_switched_off_stay_off_below() {
+    for locked in [false, true] {
+        let held = pair(
+            keys::ORCH_TOOLS_OWNER_READS,
+            &json!(false),
+            &json!(true),
+            locked,
+        );
+        assert_eq!(held.value, Some(json!(false)));
+        assert_eq!(held.source.scope, SourceScope::System);
+        let narrowed = pair(
+            keys::ORCH_TOOLS_OWNER_READS,
+            &json!(true),
+            &json!(false),
+            locked,
+        );
+        assert_eq!(narrowed.value, Some(json!(false)));
+        assert_eq!(narrowed.source.scope, SourceScope::Org);
+    }
+    let allowed = pair(
+        keys::ORCH_TOOLS_OWNER_READS,
+        &json!(true),
+        &json!(true),
+        false,
+    );
+    assert_eq!(allowed.value, Some(json!(true)));
+}
+
+#[test]
+fn every_policy_a_lower_place_can_set_narrows_or_is_a_reviewed_choice() {
+    // A permission, a limit or a protection that a place below the system can set only narrows what the places above
+    // allow. These are the policies reviewed as having no wider side: choices of a payer, of a way to recover or carry
+    // history, of the tabs a document's readers see, the default of a person's own choice, an accounting estimate; periods
+    // whose longer and shorter values each change what a place above chose; maps and lists whose members a place above
+    // holds by locking the key, and additions.
+    let reviewed: std::collections::BTreeSet<&str> = [
+        keys::ASK_PAID_BY,
+        keys::CALLS_RULES,
+        keys::CALLS_REPEAT_WINDOW,
+        keys::CALLS_NOTIFY_ON_STOP,
+        keys::CALLS_RETURN,
+        keys::THREAD_SWITCH_HISTORY,
+        keys::DOCUMENTS_LINKS_SHOWN,
+        keys::USAGE_CATALOGUE,
+        keys::USAGE_CATALOGUE_SCALE,
+        keys::USAGE_RATES,
+        keys::INVITATIONS_DEFAULT_MINUTES,
+        keys::CLEANUP_UNUSED_KEEP_DAYS,
+        keys::TERMINAL_RECORD,
+        keys::ENV_REMOVED_KEEP_DAYS,
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        keys::RETENTION_DELETE_ARCHIVED_DAYS,
+        keys::RETENTION_AGENT_HISTORY_IDLE_DAYS,
+        keys::STORAGE_RELAY_TRANSFERS,
+        keys::AGENT_FEATURES,
+        keys::AGENTS_HARNESS_VERSIONS,
+        keys::ENVIRONMENTS_RUNTIMES,
+        keys::CAPABILITY_POLICY,
+        keys::REDACTION_PATTERNS,
+        keys::ORG_TERMS,
+    ]
+    .into_iter()
+    .collect();
+    let found: std::collections::BTreeSet<&str> = crate::registry::all()
+        .iter()
+        .filter(|def| {
+            def.class == Class::Policy
+                && def.scopes.iter().any(|scope| *scope != Scope::System)
+                && !matches!(
+                    def.merge,
+                    Merge::Min
+                        | Merge::Max
+                        | Merge::All
+                        | Merge::Any
+                        | Merge::Stricter
+                        | Merge::Intersect
+                )
+        })
+        .map(|def| def.key)
+        .collect();
+    assert_eq!(
+        found, reviewed,
+        "a new policy that a lower place can set narrows, or is reviewed here"
+    );
 }

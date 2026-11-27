@@ -30,7 +30,8 @@ often the harness tried again by itself), the moment a limit of the plan ends (f
 runtime's) and whether an answer was cut short. A limit of the whole plan is `provider_exhausted`, one of a family of models or of spending the same but retryable,
 rate limiting is `rate_limited`, server overload is `overloaded`, and an unreachable vendor is `provider_unreachable`; other busy states retain `provider_busy`. A process that is killed, ends by itself, prints half a line or refuses to
 start ends its turn with what was last seen, and the next turn starts a fresh process; one that goes silent past `silence_secs`, or goes on trying again past
-`retry_patience_secs`, is stopped and its turn ends. Each kind of failure is a fixture recorded from Claude Code 2.1.296 (`tests/fixtures/failures`) and a test that
+`retry_patience_secs`, is stopped and its turn ends. A turn that a person stopped and that still runs `stop_grace_secs` (5) after the interrupt has its process
+ended, so that no tool, question or background command of it goes on after Stop, and it ends as stopped with a line that says so. Each kind of failure is a fixture recorded from Claude Code 2.1.296 (`tests/fixtures/failures`) and a test that
 replays it without a container (`recorded_failures`); `tests/failures.rs` runs the same faults against the real program, and
 `scripts/harness-canary/failures` runs that against another version of it and prints the rows that changed.
 
