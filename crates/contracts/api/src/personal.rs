@@ -59,6 +59,10 @@ pub struct Shortcut {
     pub state: ShortcutTargetState,
     /// The target as its reader sees it now; absent unless the target is open to them.
     pub item: Option<ShortcutItem>,
+    /// For a deleted target: the name it had when it was deleted, given only to a reader who would find it by that name
+    /// in the trash where it lies; it opens nothing and grants nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
     /// For a shortcut in the reader's own list: the root org its target lies in, where that list shows it, also while
     /// the target does not open; `null` for a shortcut kept in a place.
     #[serde(default)]

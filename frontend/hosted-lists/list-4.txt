@@ -1,0 +1,79 @@
+[chromium] › tests/e2e/thread.spec.ts › a turn is drawn as its frames arrive: text in pieces, a command and its output, a change and its diff, an approval that is decided, and the end with its usage
+[chromium] › tests/e2e/thread.spec.ts › a message sent while the agent works is queued, another is steered into the turn, and the queue shows each until it is delivered
+[chromium] › tests/e2e/thread.spec.ts › somebody who may only watch keeps the disabled composer, model and effort, and a clickable access request (1440px light)
+[chromium] › tests/e2e/thread.spec.ts › the work of an older turn is folded into one line, which opens to its steps
+[chromium] › tests/e2e/thread.spec.ts › the model and the effort are changed from the box, and its single control updates at once
+[chromium] › tests/e2e/thread.spec.ts › what was written and not sent is kept for the thread, and is in the box again when the page is opened anew
+[chromium] › tests/e2e/thread.spec.ts › queue order and delivery change through keyboard, drag and the same native PATCH
+[chromium] › tests/e2e/thread.spec.ts › a pointer drop keeps the picked id while live rows change its number, and cancellation or delivery writes nothing
+[chromium] › tests/e2e/thread.spec.ts › queue previews skip a script delimiter, while Alt arrows outside its rows still walk the real tree
+[chromium] › tests/e2e/thread.spec.ts › items are picked across turns from their menus and by their boxes, and Quote puts their words into the box that is written to the agent
+[chromium] › tests/e2e/thread.spec.ts › names the offline read cause and retries its resource view (en/light/1440)
+[chromium] › tests/e2e/thread.spec.ts › enters the person's available quick action by keyboard (en/light/1440)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › a delayed check cannot recreate a plan after its destination changes
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › move checks synced content only on request (1280px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › move checks synced content only on request (390px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › fork brings the outcome of a check into view when the Check stands at the foot of the dialog (1280px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › fork brings the outcome of a check into view when the Check stands at the foot of the dialog (390px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › move brings the outcome of a check into view when the Check stands at the foot of the dialog (1280px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › move brings the outcome of a check into view when the Check stands at the foot of the dialog (390px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › move keeps live copy counts and a cancellable content check in its mount rows (1280px)
+[chromium] › tests/e2e/mount-fingerprints.spec.ts › move keeps live copy counts and a cancellable content check in its mount rows (390px)
+[chromium] › tests/e2e/thread-controls.spec.ts › the header and every message control fit with readable compact labels at 1440px
+[chromium] › tests/e2e/thread-controls.spec.ts › the header and every message control fit with readable compact labels at 1280px
+[chromium] › tests/e2e/thread-controls.spec.ts › the header and every message control fit with readable compact labels at 390px
+[chromium] › tests/e2e/thread-controls.spec.ts › a running sub-agent opens its indented lane and the same read-only panel at 1440px
+[chromium] › tests/e2e/thread-controls.spec.ts › at 400 px full agent and long model names stay available without enlarging Send’s row
+[chromium] › tests/e2e/thread-controls.spec.ts › plus, /file and @ reach the same file picker and add actual paths to an unsent message
+[chromium] › tests/e2e/thread-controls.spec.ts › a chosen document is attached as a copy and still waits for Send
+[chromium] › tests/e2e/resources-expected.spec.ts › a row has its act at its end, and the same menu by the menu button, the right mouse button and the keyboard
+[chromium] › tests/e2e/resources-expected.spec.ts › a narrow resource row keeps its primary action and menu within the table
+[chromium] › tests/e2e/resources-expected.spec.ts › an environment that Orch made is started from its row, and the row says it is working
+[chromium] › tests/e2e/resources-expected.spec.ts › a template is edited: its name, its description and whether it is on change; its driver is shown, read only, with why
+[chromium] › tests/e2e/resources-expected.spec.ts › an environment is edited: its name and its two switches change, where it runs is read only, and its settings are on their tab
+[chromium] › tests/e2e/files.spec.ts › a path in the conversation opens its file at the line it names
+[chromium] › tests/e2e/files.spec.ts › what was typed and not saved is kept on the device and put back when the page is loaded again
+[chromium] › tests/e2e/files.spec.ts › the search by name lists paths, and the search in files lists the lines that hold the words and opens a hit at its line
+[chromium] › tests/e2e/files.spec.ts › an environment that is away shows what was opened before, from when, and cannot be written
+[chromium] › tests/accessibility/resources-expected.spec.ts › the Edit dialog of each kind, with what cannot be changed read only beside its reason
+[chromium] › tests/accessibility/resources-expected.spec.ts › a hint opens the same card beside an option on a desktop and a phone
+[chromium] › tests/accessibility/resources-expected.spec.ts › a machine that cannot connect any more is enrolled again, and its certificate is under Software
+[chromium] › tests/e2e/area-chrome.spec.ts › each area's sections keep a remembered org in Navigation at 400/en/light
+[chromium] › tests/e2e/area-chrome.spec.ts › container names and keyboard remain above sheets at 400/en/light
+[chromium] › tests/e2e/area-chrome.spec.ts › eight view icons also fit one row at 360 px without scrolling or a More menu
+[chromium] › tests/e2e/give.spec.ts › a place that keeps sharing to its owners shows the field off for everybody else, says who can, and lets them ask
+[chromium] › tests/e2e/give.spec.ts › the people behind a role open in its access row, with their level and route of access
+[chromium] › tests/e2e/give.spec.ts › where direct chats are off, or the person is not in the org, nobody is told in a chat and the link is there to copy
+[chromium] › tests/e2e/resources.spec.ts › an environment that Orch made is started, kept awake and stopped, and the page follows the job
+[chromium] › tests/e2e/resources.spec.ts › a template is made, its recipe is changed, and a change made meanwhile by somebody else is not overwritten
+[chromium] › tests/e2e/resources.spec.ts › a host is closed to new environments, stops what runs on it, and shows its capacity
+[chromium] › tests/accessibility/ffix-start.spec.ts › the starter where a configured default is unavailable, with an explicit replacement and the way to keep it
+[chromium] › tests/accessibility/ffix-start.spec.ts › the dialog, with the way that is not allowed, the new environment and the refusal of a way
+[chromium] › tests/e2e/admin-message-decisions.spec.ts › org holds one pending send and opens its accepted message (en/light/1440)
+[chromium] › tests/e2e/admin-message-decisions.spec.ts › system holds one pending send and opens its accepted message (en/light/1440)
+[chromium] › tests/e2e/card-pointer.spec.ts › a card does not open for a chip that comes under the pointer when a dialog closes, and the control beside it can be pressed
+[chromium] › tests/e2e/card-pointer.spec.ts › the card opens when the pointer then moves on the chip, closes when it leaves, and Escape closes it as well
+[chromium] › tests/e2e/help.spec.ts › the help is searched by title and heading, and the keys listed are the ones bound
+[chromium] › tests/e2e/help.spec.ts › on every screen that has a route, F1 opens the help with something for it
+[chromium] › tests/e2e/mount-page-hints.spec.ts › a mount's page shows its default, a location's hint and kept data that is purged once named (1280px)
+[chromium] › tests/e2e/mount-page-hints.spec.ts › a mount's page shows its default, a location's hint and kept data that is purged once named (390px)
+[chromium] › tests/e2e/sharing-and-rules-availability.spec.ts › sharing and rule read availability en/light/400
+[chromium] › tests/e2e/sharing-and-rules-availability.spec.ts › sharing and rule read availability en/light/1280
+[chromium] › tests/accessibility/give.spec.ts › a reader who shares up to what they hold, and a place that keeps sharing to its owners
+[chromium] › tests/e2e/admin-openings-double.spec.ts › real private HTTP, cached and admitted live readers share a native audit receipt while sessions and openings remain distinct
+[chromium] › tests/e2e/builtin-fork.spec.ts › built-in Fork keeps one Private creation (en)
+[chromium] › tests/e2e/codex-background-unavailable.spec.ts › unoffered Codex terminal End has its cause en/light/1440
+[chromium] › tests/e2e/copy-out-policy.spec.ts › copy-out policy uses the native boolean editor and inherited lock en
+[chromium] › tests/e2e/documents.spec.ts › the block menu opens at a slash, narrows as it is typed, and every kind it offers is written and read back
+[chromium] › tests/e2e/failed-environment-recovery.spec.ts › keeps the queued first input when recovering elsewhere (en/light/1440)
+[chromium] › tests/e2e/forwarded-access-program.spec.ts › an API program choice persists and disappears when no longer enabled en/light/1440
+[chromium] › tests/e2e/isolation-template-list.spec.ts › template names remain distinct (en/light/1440)
+[chromium] › tests/e2e/managed-web-search.spec.ts › managed search on a model without native search en/light/400
+[chromium] › tests/e2e/navigation-review.spec.ts › whole compact row facts at 1440/light
+[chromium] › tests/e2e/place-collection-layout.spec.ts › the project list leads at 1440 and 400 in both themes (en)
+[chromium] › tests/e2e/recorded-checkpoint-actions.spec.ts › recorded requests keep keyboard-reachable checkpoints 1440/light/en
+[chromium] › tests/e2e/settings-policy-narrowing.spec.ts › a policy only narrows its ancestor 1440/light/en
+[chromium] › tests/e2e/start-choice-origins.spec.ts › one environment origin through the start picker 1440/light/en
+[chromium] › tests/e2e/thread-display.spec.ts › thread icons follow work and a reader's finished check (light, 1440)
+[chromium] › tests/e2e/view-chooser-focus.spec.ts › the global view chooser preserves focus-mode choices at 1440px in light
+[chromium] › tests/e2e/workbench-resource-titles.spec.ts › resource tabs retain names, identities and quiet inactive readers through hard reloads in en

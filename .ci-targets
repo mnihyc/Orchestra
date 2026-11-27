@@ -1,0 +1,1 @@
+web-e2e --project=chromium --retries=0 --test-list=hosted-lists/list-2.txt --reporter=line

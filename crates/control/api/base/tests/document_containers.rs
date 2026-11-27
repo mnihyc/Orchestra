@@ -601,7 +601,12 @@ async fn deletion_moves_a_selection_to_the_trash_at_once_and_its_roots_undo_exac
         3,
         "the folder, its live child and the document beside it go to the trash without a preview"
     );
-    assert!(removed.entries.iter().all(|entry| entry.deleted_at.is_some()));
+    assert!(
+        removed
+            .entries
+            .iter()
+            .all(|entry| entry.deleted_at.is_some())
+    );
     assert!(removed.restore_until.is_some());
     assert_eq!(
         act(&desk, &desk.ada, &request).await.ok().operation,
@@ -616,13 +621,21 @@ async fn deletion_moves_a_selection_to_the_trash_at_once_and_its_roots_undo_exac
     .await
     .ok();
     assert_eq!(restored.entries.len(), 3);
-    assert!(restored.entries.iter().all(|entry| entry.deleted_at.is_none()));
+    assert!(
+        restored
+            .entries
+            .iter()
+            .all(|entry| entry.deleted_at.is_none())
+    );
     let still_deleted: bool =
         sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM documents WHERE id=$1")
             .bind(earlier)
             .fetch_one(&desk.world.db.pool)
             .await?;
-    assert!(still_deleted, "an earlier independent deletion stays in the trash");
+    assert!(
+        still_deleted,
+        "an earlier independent deletion stays in the trash"
+    );
     let moved_out = act(
         &desk,
         &desk.ada,

@@ -748,6 +748,70 @@ async fn host_managers_see_safe_volume_only_retention_without_receiving_a_purge_
     );
 }
 
+/// A deleted place's trash keeps its environments for the window, and their files stay on the host meanwhile. Its
+/// kept data reads as gone on the host (no name, no place, no act), and the host and the list of hosts are read whole,
+/// by the host's owner and by an administrator with As admin on.
+#[tokio::test]
+async fn kept_data_of_an_environment_whose_place_was_deleted_reads_as_gone_and_no_host_read_fails()
+{
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Keeper").await;
+    let project = make_project(&world, &c.boss, c.acme, "Web").await.base.id;
+    let mut conn = world.conn().await;
+    let environment = fixtures::insert_resource(
+        &mut conn,
+        "environment",
+        Some(c.boss.id()),
+        Some(project),
+        "Kept in a deleted project",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Environment.into(),
+            id: environment,
+        },
+        c.boss.id(),
+        NewAccess::OnlyMe,
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    let refs = json!([{"runtime_id":orch_types::new_id(),"environment_id":environment,"host_id":host,"driver":"test","role":"workspace","name":"kept-volume","storage":"fast"}]);
+    sqlx::query("UPDATE environments SET status='removed',deleted_at=$2,removed_keep_days=7,volumes_purge_at=$3,removal_phase='kept',removal_revision=3,retained_volumes=$4,retained_bytes=2048 WHERE id=$1")
+        .bind(environment).bind(world.now()).bind(world.now() + chrono::Duration::days(7)).bind(refs)
+        .execute(&mut *conn).await.unwrap();
+    // The project goes to the trash after its environment.
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(project)
+        .bind(world.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let shown = read(&world, &c.boss, host).await;
+    let [kept] = shown.kept_data.as_slice() else {
+        panic!("one kept environment: {:?}", shown.kept_data)
+    };
+    assert_eq!(kept.environment_id, environment);
+    assert_eq!(kept.name, None);
+    assert!(kept.home.as_ref().is_none_or(|home| home.redacted));
+    assert_eq!(kept.bytes, Some(2048));
+    assert_eq!(
+        list(&world, &c.boss, &HostListQuery::default()).await,
+        ["Keeper"]
+    );
+    let root = admin(&world, "root").await;
+    assert!(
+        list(&world, &root, &HostListQuery::default())
+            .await
+            .contains(&"Keeper".to_owned())
+    );
+}
+
 async fn list(world: &World, by: &Who, query: &HostListQuery) -> Vec<String> {
     let mut names: Vec<String> = world
         .app

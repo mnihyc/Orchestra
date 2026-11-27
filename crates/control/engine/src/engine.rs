@@ -67,6 +67,8 @@ pub struct Inner {
     pub(crate) wakes: Mutex<HashMap<Id, Instant>>,
     /// The last active goal examined by the supervisor's bounded round-robin pass.
     pub(crate) goal_cursor: Mutex<Option<Id>>,
+    /// The last thread blocked by a cause of its own that the recheck looked at: it goes round them all, a page a pass.
+    pub(crate) blocked_cursor: Mutex<Option<Id>>,
     pub(crate) signal: Notify,
     /// Tells the task that hands woken threads to their work ([`Engine::deliver_wakes`]) that one was woken.
     pub(crate) woken: Notify,
@@ -198,6 +200,7 @@ impl Engine {
                 database_recoveries: Mutex::new(HashMap::new()),
                 wakes: Mutex::new(HashMap::new()),
                 goal_cursor: Mutex::new(None),
+                blocked_cursor: Mutex::new(None),
                 signal: Notify::new(),
                 woken: Notify::new(),
                 stopped: tokio_util::sync::CancellationToken::new(),
@@ -602,14 +605,16 @@ impl Engine {
                 .await?;
                 *lock(&self.inner.goal_cursor) = next;
                 due.extend(goals);
-                due.extend(
-                    threads::threads_blocked_by_their_own_cause(
-                        &mut conn,
-                        crate::preflight::CAUSES_OF_THE_THREAD,
-                        batch,
-                    )
-                    .await?,
-                );
+                let after = *lock(&self.inner.blocked_cursor);
+                let (blocked, next) = threads::threads_blocked_by_their_own_cause(
+                    &mut conn,
+                    crate::preflight::CAUSES_OF_THE_THREAD,
+                    after,
+                    batch,
+                )
+                .await?;
+                *lock(&self.inner.blocked_cursor) = next;
+                due.extend(blocked);
             }
             // A turn's end that is still to be observed, after the commit that ended it.
             due.extend(orch_db::queries::source::threads_with_end_due(&mut conn, batch).await?);

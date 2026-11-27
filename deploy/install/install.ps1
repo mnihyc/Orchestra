@@ -258,7 +258,7 @@ try {
     & $Bin @receiptArguments
     if ($LASTEXITCODE -ne 0) { throw 'the installation ownership record could not be saved' }
     if ($NoService) {
-        Say "No task was registered (-NoService). Start the connector with: & '$Bin' --data-dir '$DataDir' run"
+        Say 'No task was registered (-NoService).'
     } else {
         # One task for the platform's own data directory, and one for each other directory.
         $TaskName = 'Orch Connector'
@@ -287,7 +287,12 @@ try {
         $Placed.Task = $null
         Say "The connector runs as the Scheduled Task '$TaskName', started at every logon"
     }
-    Say "Done: this machine is connected to $Url. Its page in Orch shows it within a minute."
+    # Only a started task runs the connector: without one the machine is enrolled, and connected once it is started.
+    if ($NoService) {
+        Say "Done: this machine is enrolled with $Url and is not connected yet. Start the connector, which runs in the foreground: & '$Bin' --data-dir '$DataDir' run"
+    } else {
+        Say "Done: this machine is connected to $Url. Its page in Orch shows it within a minute."
+    }
 } catch {
     Say "error: $($_.Exception.Message)"
     if ($Placed.Task) { Unregister-ScheduledTask -TaskName $Placed.Task -Confirm:$false -ErrorAction SilentlyContinue }
