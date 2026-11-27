@@ -7,7 +7,7 @@ import { nodeKey } from '@/api/nodes';
 import { outsideOpeningsQuery } from '@/api/ports';
 import { scheduledReads } from '@/api/readScheduler';
 import { usageQuery } from '@/api/usage';
-import { useUsageBoardParams, useWeeklyUsageParams } from '@/features/usage/Board';
+import { useUsageBoardParams, useWeeklyUsageParams } from '@/features/usage/useBoardParams';
 import { parsePageAddress } from '@/features/workbench/contentAddress';
 import { PageContext } from '@/features/workbench/pageContext';
 import { i18n, setLocale } from '@/i18n';

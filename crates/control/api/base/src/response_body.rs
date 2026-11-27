@@ -40,6 +40,24 @@ where
     ))
 }
 
+/// The typed JSON transport has made its one finite body before this check: it is checked once, before its
+/// headers, and delivered as it was checked, as a read past its credential's check finishes. A current-source
+/// check may give the whole body anew; only then do the original length and identity no longer apply. Raw
+/// streams, whose frames may still be coming, keep the per-frame path above.
+pub(crate) async fn checked_once<F, Fut>(response: Response, check: F) -> ApiResult<Response>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ApiResult<Option<bytes::Bytes>>>,
+{
+    let Some(replacement) = check().await? else {
+        return Ok(response);
+    };
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(http::header::CONTENT_LENGTH);
+    parts.headers.remove(http::header::ETAG);
+    Ok(Response::from_parts(parts, Body::from(replacement)))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::unwrap_used, reason = "transport controls fail by panicking")]
 pub mod tests {

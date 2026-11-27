@@ -260,6 +260,18 @@ impl Runtimes {
         host: &HostDriver,
         record: &Record,
     ) {
+        let original = self.inner.ledger.get(runtime);
+        if original
+            .as_ref()
+            .is_some_and(|current| current.unit != record.unit)
+        {
+            return;
+        }
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: original.as_ref().and_then(|record| record.incarnation.id()),
+        };
+        let original_identity = original.map(|record| (record.unit, record.incarnation));
+
         match self.recover_interrupted_mounts(runtime, host, record).await {
             Ok(true) => return,
             Err(error) => {
@@ -294,11 +306,25 @@ impl Runtimes {
             .await
         {
             Ok(result) if result.applied && !result.mounts.is_null() => {
+                if self
+                    .inner
+                    .ledger
+                    .get(runtime)
+                    .map(|record| (record.unit, record.incarnation))
+                    != original_identity
+                {
+                    return;
+                }
                 // A connector may have opened its directory handles before a daemon-driven start
                 // was reconciled. Its controller refreshes those handles from the completed record.
                 self.inner
                     .reports
-                    .runtime_if_changed(runtime, "running", Some("mount changes applied".into()))
+                    .runtime_if_changed(
+                        runtime,
+                        source,
+                        "running",
+                        Some("mount changes applied".into()),
+                    )
                     .await;
                 return;
             }

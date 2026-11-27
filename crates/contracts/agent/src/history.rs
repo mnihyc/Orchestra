@@ -39,6 +39,12 @@ pub struct NativePrefixSource {
     pub native_session_ref: String,
 }
 
+/// The native history and physical opening that own a recovered turn's events.
+pub struct RecoverySource {
+    pub session: NativePrefixSource,
+    pub opening_id: Id,
+}
+
 /// Server-verified creation provenance for an exact native history request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
