@@ -1,5 +1,6 @@
 /** The existing destination form carries a selected sub-agent kind with its catalogue name. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Settings from '@/api/settings';
@@ -30,6 +31,8 @@ const stored: Destination = {
 };
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof Settings>(),
   destinationsQuery: (nodeId: string) => ({ queryKey: ['destinations', nodeId], queryFn: calls.read }),
+  destinationsPageQuery: (nodeId: string, q: string) => ({ queryKey: ['destinations', nodeId, 'pages', q], initialPageParam: null,
+    queryFn: async () => ({ items: (await calls.read()).filter((row) => row.name.includes(q)).slice(0, 37), next_cursor: null }), getNextPageParam: () => null }),
   notifiersQuery: { queryKey: ['notifiers'], queryFn: () => Promise.resolve([notifier]) },
   createDestination: calls.create, updateDestination: calls.update,
 }));
@@ -39,6 +42,28 @@ beforeEach(() => {
   calls.update.mockReset().mockResolvedValue({ ...stored, kinds: ['subagent.ended'] });
 });
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+it('keeps a destination draft when a native page no longer contains its row', async () => {
+  calls.read.mockResolvedValue([stored]);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  show(<Destinations node={node} />, cache);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: i18n.t('settings.channels.editNamed', { name: stored.name }) }));
+  const dialog = screen.getByRole('dialog');
+  const name = within(dialog).getByRole('textbox', { name: i18n.t('settings.channels.name') });
+  await user.clear(name); await user.paste('Unfinished destination');
+  act(() => { cache.setQueryData(['destinations', node.id, 'pages', ''], { pages: [{ items: [], next_cursor: null }], pageParams: [null] }); });
+  expect(dialog).toBeVisible(); expect(name).toHaveValue('Unfinished destination');
+});
+
+it('finds a destination beyond a thousand by its server name search', async () => {
+  calls.read.mockResolvedValue(Array.from({ length: 1_001 }, (_, index) => ({ ...stored, id: id(6, index + 1), name: 'Destination ' + String(index).padStart(4, '0') })));
+  show(<Destinations node={node} />);
+  const user = userEvent.setup(), search = await screen.findByRole('searchbox');
+  await user.click(search); await user.paste('Destination 1000');
+  expect(await screen.findByRole('heading', { name: 'Destination 1000' })).toBeVisible();
+  expect(screen.queryByRole('heading', { name: 'Destination 0000' })).toBeNull();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const mode of ['create', 'edit'] as const) {
   it(`saves only the selected sub-agent kind through the existing ${mode} form in ${locale}`, async () => {

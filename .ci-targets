@@ -1,0 +1,2 @@
+# The credential cases on the trunk itself, to tell its own failures from a change's
+test -p orch-engine --test credentials

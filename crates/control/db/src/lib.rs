@@ -20,6 +20,7 @@ pub mod reconciliation;
 pub mod secrets;
 pub mod seeds;
 pub mod sequences;
+pub mod storage;
 pub mod usage;
 
 pub use pool::{Conn, Db, DbError, Tx};

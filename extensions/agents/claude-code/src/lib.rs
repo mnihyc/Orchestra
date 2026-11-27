@@ -20,6 +20,7 @@
 //! | [`child_usage`] | What a sub-agent's requests cost, settled from the sub-agent's own transcript |
 //! | [`failure`] | What the harness says when a turn fails, and what Orch makes of it |
 //! | [`approvals`] | Permission requests as approvals; approval and sandbox modes |
+//! | [`sandbox`] | Whether the harness's own shell sandbox can confine commands where it runs |
 //! | [`provider`] | Signing in, the facts of a sign-in, credentials |
 //! | [`tools`] | The harness's tools as steps of a kind; which tools a session has |
 //! | [`discovery`] | Sessions and MCP servers the harness already has |
@@ -32,6 +33,7 @@ pub mod adapter;
 pub mod approvals;
 pub mod child_usage;
 pub mod config;
+mod confinement;
 pub mod context_usage;
 pub mod conversation;
 pub mod descriptor;
@@ -47,6 +49,7 @@ pub mod performance;
 pub mod process;
 pub mod provider;
 pub mod review;
+pub mod sandbox;
 pub mod sessions;
 pub mod stream;
 pub mod tools;

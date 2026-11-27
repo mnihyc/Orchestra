@@ -38,7 +38,7 @@ use orch_access_contract::key_scope::KeyTargetKind;
 
 use orch_access_contract::permissions::ObjectKind;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::nodes::SharedListQuery;
 
 use orch_api_contract::nodes::SharedListItem;
 
@@ -252,7 +252,7 @@ pub(super) fn prepare<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    query: PageQuery,
+    query: SharedListQuery,
     (): (),
 ) -> OptionalOperationFuture<'a> {
     Box::pin(async move {
@@ -266,11 +266,7 @@ pub(super) fn prepare<'a>(
         let raw =
             authorization::load_principal(conn, caller.clone(), Time::new(ctx.app.clock.now()))
                 .await?;
-        let mut before = query
-            .cursor
-            .as_deref()
-            .map(|cursor| tree::shared_cursor(cursor, raw.user()))
-            .transpose()?;
+        let mut before = tree::shared_cursor(&query, raw.user())?;
         let limit = usize::try_from(query.limit()).map_err(ApiError::internal)?;
         let mut selected = Vec::new();
         let mut selected_targets = HashMap::new();
@@ -309,12 +305,16 @@ pub(super) fn prepare<'a>(
             let principal = partial.preparation_principal(ctx, conn, caller).await?;
             let (items, excluded) =
                 bounded_items(ctx, conn, caller, &plan, &principal, &candidates, &targets).await?;
-            selected_items.extend(items.into_iter().map(|item| (key(&item), item)));
-            selected.extend(
-                candidates
+            selected_items.extend(
+                items
                     .into_iter()
-                    .filter(|row| !excluded.contains(&(row.kind, row.id))),
+                    .filter(|item| tree::shared_matches(item, &query))
+                    .map(|item| (key(&item), item)),
             );
+            selected.extend(candidates.into_iter().filter(|row| {
+                !excluded.contains(&(row.kind, row.id))
+                    && (!query.filtered() || selected_items.contains_key(&(row.kind, row.id)))
+            }));
             selected_targets.extend(targets);
             if selected.len() > limit {
                 break;
@@ -323,13 +323,14 @@ pub(super) fn prepare<'a>(
         let partial = selected.len() > limit;
         let witness = selected.get(limit).copied();
         selected.truncate(limit);
-        let next_cursor = partial
-            .then(|| {
-                selected
-                    .last()
-                    .map(|last| tree::shared_cursor_text(raw.user(), *last))
-            })
-            .flatten();
+        let next_cursor = if partial {
+            selected
+                .last()
+                .map(|last| tree::shared_cursor_text(raw.user(), *last, &query))
+                .transpose()?
+        } else {
+            None
+        };
         let items: Vec<_> = selected
             .iter()
             .filter_map(|row| selected_items.remove(&(row.kind, row.id)))
@@ -361,7 +362,7 @@ pub(super) fn prepare<'a>(
     })
 }
 
-pub(super) async fn read(ctx: Ctx, query: PageQuery) -> ApiResult<SharedListReply> {
+pub(super) async fn read(ctx: Ctx, query: SharedListQuery) -> ApiResult<SharedListReply> {
     let mut conn = ctx.app.db.begin_snapshot().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     let reply = if crate::key_operations::native::prepared_read(&ctx, principal.caller()) {

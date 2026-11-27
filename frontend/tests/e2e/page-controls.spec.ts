@@ -84,8 +84,18 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
         // Before hover, the row's primary action must be visible even on a touch-width screen.
         await expect(first.locator('[data-table-column="primary"]').getByRole('button')).toBeVisible();
         await expect(page.locator(`[data-resource-kind="${kind}"]`).getByRole('button').first()).toBeVisible();
-        const top = await bar.getByRole('searchbox').evaluate((input) => input.getBoundingClientRect().top);
-        for (const control of ordinary) expect(Math.abs(await control.evaluate((element) => element.getBoundingClientRect().top) - top), `${kind}: ordinary list controls stay on one row`).toBeLessThan(MAX_DRIFT);
+        const search = bar.getByRole('searchbox'), triggers = ordinary.slice(1);
+        const top = await search.evaluate((input) => input.getBoundingClientRect().top);
+        if (width >= 1024) {
+          for (const control of ordinary) expect(Math.abs(await control.evaluate((element) => element.getBoundingClientRect().top) - top), `${kind}: ordinary list controls stay on one row`).toBeLessThan(MAX_DRIFT);
+        } else {
+          // A narrow bar gives search its own full line; the short triggers share the next one.
+          const [field, room] = await Promise.all([search.evaluate((input) => input.getBoundingClientRect().width), bar.evaluate((element) => element.getBoundingClientRect().width)]);
+          expect(field, `${kind}: search keeps the bar's width`).toBeGreaterThan(room * 0.9);
+          const below = await triggers[0]!.evaluate((element) => element.getBoundingClientRect().top);
+          expect(below, `${kind}: triggers follow under search`).toBeGreaterThan(top);
+          for (const control of triggers) expect(Math.abs(await control.evaluate((element) => element.getBoundingClientRect().top) - below), `${kind}: the triggers stay on one row`).toBeLessThan(MAX_DRIFT);
+        }
         const filter = page.locator('[data-filter-bar]').getByRole('button', { name: words.resources.controls.filter, exact: true });
         const sort = page.locator('[data-filter-bar]').getByRole('button', { name: words.resources.controls.sort, exact: true });
         const filterPanel = page.locator('[data-resource-filter-panel]'), sortPanel = page.locator('[data-resource-sort-panel]');

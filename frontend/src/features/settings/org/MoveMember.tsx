@@ -1,10 +1,9 @@
-/** The dialog that moves a member to another org of the tree: what they stop and start reaching, what of theirs stays, and the role they will hold there.
+/** The dialog that moves a member to another org of the tree, with the role they will hold there.
  *
- * A member belongs to one org of the tree, their domain, and holds a role there. Moving them changes
- * what they inherit and nothing that names them: the roles they were given by name, the groups they
- * are in and what they own stay where they are. As soon as a destination is chosen the server is asked
- * what the move would do, and the answer is written out before anything is moved. Where the caller
- * lacks what the move needs at either end, the dialog says what is missing and whom to ask.
+ * A member belongs to one org of the tree, their domain, and holds a role there. Moving them changes what they
+ * inherit and nothing that names them. One line says what they stop reaching and one which of their threads would
+ * wait, read beside the choice and never holding the move up; what the caller lacks is the move's refusal, shown
+ * with whom to ask as soon as it is known.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
@@ -18,10 +17,9 @@ import { useAppearance } from '@/lib/appearance';
 import { useOrgTree } from '@/realtime/stores/tree';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
-import { ErrorAlert, ErrorState, MissingAccessList } from '@/ui/ErrorState';
+import { ErrorAlert, MissingAccessList } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Select } from '@/ui/Select';
-import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 import { toast } from '@/ui/Toast';
 
 /** One org of the tree as a place to move to: where it lies by name. */
@@ -68,29 +66,19 @@ function Reach({ reach }: { reach: MemberMovePlan['loses'] }) {
   return <>{parts.length === 0 ? t('settings.members.move.reach.nothing') : new Intl.ListFormat(locale, { style: 'long', type: 'conjunction' }).format(parts)}</>;
 }
 
-/** What the move would do, written out. */
+/** Only what is lost: what they stop reaching, their threads that would wait, a refusal, and the reach of an Admin role chosen. */
 function Plan({ plan, member, warning }: { plan: MemberMovePlan; member: Member; warning: boolean }) {
   const { t } = useTranslation();
   const name = member.user.display_name;
-  const owned = plan.stays.nodes;
-  const ownedCount = owned.orgs + owned.projects + owned.topics + owned.threads + owned.documents;
+  const loses = plan.loses.nodes + plan.loses.resources + plan.loses.documents > 0;
   return (
-    <div className="flex flex-col gap-3 text-base text-text">
+    <div className="flex flex-col gap-3 text-sm text-text">
       {plan.missing.length > 0 && (
         <InlineAlert tone="danger" title={t('settings.members.move.missing')}>
           <MissingAccessList missing={plan.missing} className="mt-1" />
         </InlineAlert>
       )}
-      <p>{t('settings.members.move.becomes', { name, from: plan.from.name ?? '', to: plan.to.name ?? '' })}</p>
-      <p>
-        {t('settings.members.move.reaches', { name })} <Reach reach={plan.loses} />
-        {t('settings.members.move.starts')} <Reach reach={plan.gains} />.
-      </p>
-      <p>
-        {t('settings.members.move.stays', { name })}
-        {plan.stays.roles.length > 0 && ` ${t('settings.members.move.staysRoles', { count: plan.stays.roles.length })}`}
-        {ownedCount > 0 && ` ${t('settings.members.move.staysOwns', { count: ownedCount, where: plan.from.name ?? '' })}`}
-      </p>
+      {loses && <p>{t('settings.members.move.reaches', { name })} <Reach reach={plan.loses} /></p>}
       {plan.waiting.length > 0 && <p className="text-text-muted">{t('settings.members.move.waiting', { count: plan.waiting.length })}</p>}
       {warning && <InlineAlert tone="warning">{t('settings.members.move.adminOfAll', { name, to: plan.to.name ?? '' })}</InlineAlert>}
     </div>
@@ -116,7 +104,6 @@ export function MoveMember({ org, member, onClose }: MoveMemberProps) {
     queryKey: ['member-move-plan', org.id, member.user.id, to, role] as const,
     queryFn: ({ signal }) => previewMemberMove(org.id, member.user.id, to, role, signal),
     enabled: to !== '',
-    staleTime: 0,
     retry: false,
   });
   const plan = preview.data;
@@ -145,7 +132,7 @@ export function MoveMember({ org, member, onClose }: MoveMemberProps) {
           <Button disabled={move.isPending} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" pending={move.isPending} blocked={to === '' || plan === undefined || plan.missing.length > 0} onClick={() => move.mutate()}>
+          <Button variant="primary" pending={move.isPending} blocked={to === '' || plan !== undefined && plan.missing.length > 0} onClick={() => move.mutate()}>
             {t('settings.members.move.submit', { name })}
           </Button>
         </>
@@ -175,13 +162,6 @@ export function MoveMember({ org, member, onClose }: MoveMemberProps) {
             options={INVITED_ROLES.map((value) => ({ value, ...choiceOption(t, `accessRole.${value}`) }))}
           />
         </div>
-        {to !== '' && preview.isPending && (
-          <SkeletonGroup read={preview} className="flex flex-col gap-2">
-            <Skeleton className="h-4 w-3/4" />
-            <Skeleton className="h-4 w-2/3" />
-          </SkeletonGroup>
-        )}
-        {to !== '' && preview.isError && <ErrorState compact error={preview.error} retrying={preview.isRefetching} onRetry={() => void preview.refetch()} />}
         {plan !== undefined && <Plan plan={plan} member={member} warning={warning} />}
         {move.error !== null && <ErrorAlert error={move.error} />}
       </div>
