@@ -27,10 +27,13 @@ export interface FilterBarProps {
 
 export function FilterBar({ label, search, leading, participation, children, action, wrap = true, className }: FilterBarProps) {
   const { t } = useTranslation();
+  // A compact bar keeps one line where its room allows; in a narrow room (a phone, a side bar) search takes its own
+  // first line, full width, and the short triggers follow on the next one, never squeezing the field to a sliver.
   return <div role="group" aria-label={label ?? t('ui.filterBar.label')} data-filter-bar
-    className={cx('flex min-w-0 items-end', wrap ? 'flex-wrap gap-x-3 gap-y-3' : 'flex-nowrap gap-2', compactControls, className)}>
+    className={cx('flex min-w-0 items-end', wrap ? 'flex-wrap gap-x-3 gap-y-3' : '@container/filter flex-wrap gap-2', compactControls, className)}>
     {leading}
-    {search !== undefined && <div data-filter-search className={wrap ? 'min-w-0 flex-1 basis-[min(100%,16rem)] sm:max-w-(--container-form)' : 'min-w-0 flex-1 basis-0'}>{search}</div>}
+    {search !== undefined && <div data-filter-search className={wrap ? 'min-w-0 flex-1 basis-[min(100%,16rem)] sm:max-w-(--container-form)'
+      : 'min-w-0 flex-1 basis-0 @max-[32rem]/filter:order-first @max-[32rem]/filter:basis-full'}>{search}</div>}
     {participation !== undefined && <div className="flex min-h-(--control-sm) max-w-full items-center">{participation}</div>}
     {children}
     {action !== undefined && action !== null && <div data-filter-action className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">{action}</div>}

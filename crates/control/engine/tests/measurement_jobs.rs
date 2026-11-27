@@ -52,6 +52,8 @@ async fn host_reported_copy_provision_and_count_phases_accept_live_counters_with
         link::insert_command(
             &mut tx,
             &link::NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command,
                 machine_id: host.machine,
                 kind: "node.mount.measure",
@@ -69,6 +71,8 @@ async fn host_reported_copy_provision_and_count_phases_accept_live_counters_with
             .await
             .unwrap();
         tx.commit().await.unwrap();
+        let accepted_at = world.clock.now();
+        let deadline = accepted_at + chrono::Duration::seconds(60);
         for (reported_phase, percent, command) in [
             (phase, 80, command),
             ("history", 99, command),
@@ -79,7 +83,10 @@ async fn host_reported_copy_provision_and_count_phases_accept_live_counters_with
             host.added.machine.publish(&Stream::Node, &Event::JobProgress(JobProgress { command_id:Some(command),
                 job_id:id, log:None, progress:serde_json::from_value(json!({"phase":reported_phase,"phases":[],"percent":percent,
                     "files_done":percent,"files_total":100,"bytes_done":percent*100,"bytes_total":10000,
-                    "rate_bps":100,"eta_seconds":10,"message":null})).unwrap(),
+                    "rate_bps":100,"eta_seconds":10,"message":null,
+                    "activity":{"updated_at":orch_types::Time::new(accepted_at),"stall_after_seconds":0,"directories_done":null,"stopping":false,
+                        "captured_deadline":{"command":command,"phase":reported_phase,"accepted_at":orch_types::Time::new(accepted_at),
+                            "at":orch_types::Time::new(if percent < 80 { deadline+chrono::Duration::days(1) } else { deadline }),"seconds":60,"policy":null}}})).unwrap(),
             })).await;
         }
         common::eventually(
@@ -92,6 +99,15 @@ async fn host_reported_copy_provision_and_count_phases_accept_live_counters_with
         assert_eq!(progress["bytes_done"], 4000);
         assert_eq!(progress["rate_bps"], 100);
         assert!(progress["activity"]["updated_at"].is_string());
+        assert_eq!(
+            progress["activity"]["captured_deadline"]["at"],
+            json!(orch_types::Time::new(deadline)),
+            "a later counter report cannot rewrite the accepted budget"
+        );
+        assert_eq!(
+            progress["activity"]["captured_deadline"]["command"],
+            json!(command)
+        );
     }
     world.engine().stop();
 }
@@ -113,7 +129,7 @@ async fn a_preflight_answers_before_a_count_finishes_and_other_plans_reuse_the_c
         .hold(CommandKind::NodeRuntimeVolumesMeasure);
     let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},
         "environment":{"new":{"name":"Counted destination","template_id":template,
-            "host_id":target.id,"files":{"mode":"none"},"home":true,"private_views":false}}}))
+            "host_id":orch_provider_contract::pools::Target::host(target.id),"files":{"mode":"none"},"home":true,"private_views":false}}}))
     .unwrap();
     let caller = Caller::session(world.ada);
     let first = world
@@ -247,7 +263,7 @@ async fn an_incomplete_machine_answer_fails_the_count_and_a_retry_does_not_reuse
         )
     });
     let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},
-        "environment":{"new":{"name":"Retry count","template_id":template,"host_id":target.id,
+        "environment":{"new":{"name":"Retry count","template_id":template,"host_id":orch_provider_contract::pools::Target::host(target.id),
             "files":{"mode":"none"},"home":true,"private_views":false}}}))
     .unwrap();
     let caller = Caller::session(world.ada);
@@ -311,6 +327,8 @@ async fn a_directory_count_uses_its_environment_feed_only_for_its_declared_comma
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            content_transit: false,
+            native_target: None,
             id: command,
             machine_id: world.machine_id,
             kind: "fs.data.measure",

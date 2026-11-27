@@ -27,3 +27,13 @@ it.each(['en','zh-CN'] as const)('shows the keeper restriction and prevents an u
   expect(updateProvider).not.toHaveBeenCalled();
   expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
 });
+
+it.each(['en','zh-CN'] as const)('names a copy whose expiry comes from its sign-in without inventing a lifetime in %s',async(locale)=>{
+  await setLocale(locale);
+  const provider=planProvider({kind:'subscription',arrangements:[{type:'credential_shared',allowed:false,available:true,puts:'',form:{name:'account_access',title:'Sign-in',lifetime_secs:null,expires:true}}]});
+  show(<ProviderArrangements provider={provider}/>);
+  expect(i18n.exists('providers.arrangements.copyExpiry')).toBe(true);
+  expect(screen.getByText(i18n.t('providers.arrangements.copyExpiry'))).toBeVisible();
+  expect(screen.getByRole('checkbox',{name:i18n.t('providers.arrangements.types.credential_shared.name')})).not.toBeChecked();
+  expect(updateProvider).not.toHaveBeenCalled();
+});

@@ -34,8 +34,6 @@ use orch_db::queries::everything::Row;
 
 use orch_engine::resource_facts;
 
-use orch_engine::resource_facts::library::RecordedUses;
-
 use orch_types::Time;
 
 use std::collections::HashMap;
@@ -154,7 +152,7 @@ async fn raw_page(
             })
         })
         .collect();
-    let raw = resource_facts::read_with(conn, &subjects, at, Some(&RecordedUses))
+    let raw = resource_facts::library::list_rows(conn, &subjects, at)
         .await
         .map_err(crate::key_operations::snapshot_read::engine_error)?;
     let mut raw = raw;
@@ -222,6 +220,9 @@ pub(crate) fn select_relations(raw: &mut [resource_facts::RawFacts]) {
                 | orch_access_contract::permissions::ObjectKind::Agent
                 | orch_access_contract::permissions::ObjectKind::Environment => {
                     edge.relation == DependentRelation::Binding
+                }
+                orch_access_contract::permissions::ObjectKind::Pool => {
+                    edge.relation == DependentRelation::ExplicitGiving
                 }
                 orch_access_contract::permissions::ObjectKind::Skill => {
                     edge.relation == DependentRelation::ExplicitGiving

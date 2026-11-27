@@ -1,3 +1,4 @@
+import { CompleteCollection } from '@/ui/CompleteCollection';
 /** The rate card of a place: the credits a million tokens of each kind cost for a model, from which day; what the shipped catalogue estimates where nobody entered a rate, marked as an estimate; and the models in use that have no rate.
  *
  * Nobody has to fill this table in before a figure in credits appears: a model that nobody rated is
@@ -263,7 +264,7 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
         {unratedFirst.length === 0 ? (
           <EmptyState compact icon={<Coins aria-hidden />} title={t('usage.rates.none')} description={t('usage.rates.noneAbout')} />
         ) : (
-          <Table label={t('usage.rates.table')} columns={columns} rows={unratedFirst} rowKey={(model) => `${model.provider.id}/${model.model_name}`} />
+          <CompleteCollection label={t('usage.rates.table')} items={unratedFirst} textOf={(model)=>`${model.display_name} ${model.model_name} ${model.provider.name}`}>{(rows)=><Table label={t('usage.rates.table')} columns={columns} rows={rows} rowKey={(model)=>`${model.provider.id}/${model.model_name}`}/>}</CompleteCollection>
         )}
         {!manage && node.kind !== 'org' && <p className="text-sm text-text-muted">{t('usage.rates.setAtOrg')}</p>}
         <p className="max-w-prose text-sm text-text-muted">{t('usage.rates.note')}</p>
