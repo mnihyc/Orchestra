@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 /// What an executor is given about the environment it starts in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentContext {
+    /// An explicit machine policy decision for the running non-Linux connector.
+    #[serde(default)]
+    pub reviewed_native_system: bool,
     /// A native launcher before the program and its arguments; empty uses the ordinary process boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_launcher: Vec<String>,
@@ -67,6 +70,19 @@ pub struct EnvironmentContext {
 }
 
 impl EnvironmentContext {
+    /// The runtime's admission is distinct from each executor's program and sandbox probes.
+    #[must_use]
+    pub fn native_execution_refusal(&self) -> Option<&'static str> {
+        match self.os {
+            Os::Linux => None,
+            _ if !self.reviewed_native_system => {
+                Some("the machine's native system requires confirmation")
+            }
+            Os::Windows => Some("this directory runtime cannot own Windows executor process trees"),
+            Os::Macos => None,
+        }
+    }
+
     /// The native process prefix and then this program, preserving arguments as separate words.
     #[must_use]
     pub fn launch(&self, program: impl AsRef<std::ffi::OsStr>) -> Vec<std::ffi::OsString> {

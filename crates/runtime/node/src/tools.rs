@@ -131,8 +131,13 @@ const PROGRAM_MODE: u32 = 0o755;
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     /// The machine's kept or handed setting refuses a new download.
-    #[error("{0}")]
-    Policy(String),
+    #[error("{message}")]
+    Policy {
+        /// The current machine policy's safe explanation.
+        message: String,
+        /// The policy key and its actual deciding authority.
+        details: Option<orch_types::Json>,
+    },
     /// The name, the version, the hash or the address is not one.
     #[error("{0}")]
     Invalid(String),
@@ -180,7 +185,7 @@ pub enum ToolError {
 impl From<ToolError> for CommandError {
     fn from(error: ToolError) -> Self {
         let (code, retryable) = match &error {
-            ToolError::Policy(_) => (ErrorCode::Unsupported.as_str(), false),
+            ToolError::Policy { .. } => (ErrorCode::Unsupported.as_str(), false),
             ToolError::Invalid(_) | ToolError::Shape(_) => (INVALID, false),
             ToolError::Held { .. } => (ErrorCode::Conflict.as_str(), false),
             ToolError::Download(_) | ToolError::HashMismatch { .. } => {
@@ -192,6 +197,7 @@ impl From<ToolError> for CommandError {
         // A download that is not what its vendor published is said as such, so that the build is refused, not tried
         // again.
         let details = match &error {
+            ToolError::Policy { details, .. } => details.clone(),
             ToolError::HashMismatch { expected, found } => Some(serde_json::json!({
                 "checksum": "mismatch", "expected": expected, "found": found,
             })),
@@ -326,24 +332,61 @@ pub struct ToolCache {
     policy: Option<std::sync::Arc<orch_connector_core::policy::PolicyStore>>,
     dir: PathBuf,
     http: Option<reqwest::Client>,
+    /// Why a cache opened to fetch builds cannot: no HTTPS client could be made on this machine (one without
+    /// certificate authorities). It still serves what it holds, and a fetch says why it cannot.
+    fetch_unavailable: Option<String>,
     changes: std::sync::Arc<tokio::sync::Mutex<()>>,
     data_dir: PathBuf,
     link: Option<orch_link::machine::MachineLink>,
     clock: std::sync::Arc<dyn orch_types::Clock>,
 }
 
+/// An error with every cause below it, as one line: reqwest says only "builder error" by itself.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut words = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        words.push_str(": ");
+        words.push_str(&next.to_string());
+        cause = next.source();
+    }
+    words
+}
+
 impl ToolCache {
+    /// Whether this platform can keep verified builds: the cache publishes them with Unix file permissions,
+    /// and elsewhere (Windows) [`ToolCache::open`] and every publication are refused.
+    pub const SUPPORTED: bool = cfg!(unix);
+
     /// The cache of the node configured as `settings`. The directory is made, and the scratch directories of
     /// downloads that were cut off by an earlier run are removed.
     pub fn open(settings: &NodeSettings) -> Result<Self, ToolError> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(STALL_TIMEOUT)
+            .build()
+            .map_err(|error| with_causes(&error));
+        Self::open_with(settings, http)
+    }
+
+    /// [`ToolCache::open`] with the HTTPS client it fetches with, or why none could be made. A machine where
+    /// none can be made (it has no certificate authorities) still starts and keeps what its cache holds: only a
+    /// fetch is refused, with that reason.
+    pub(crate) fn open_with(
+        settings: &NodeSettings,
+        http: Result<reqwest::Client, String>,
+    ) -> Result<Self, ToolError> {
         let mut cache = Self::inspect(settings)?;
-        cache.http = Some(
-            reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .read_timeout(STALL_TIMEOUT)
-                .build()
-                .map_err(|error| ToolError::Download(error.to_string()))?,
-        );
+        match http {
+            Ok(client) => cache.http = Some(client),
+            Err(why) => {
+                tracing::warn!(
+                    %why,
+                    "no HTTPS client could be made here: builds cannot be fetched on this machine"
+                );
+                cache.fetch_unavailable = Some(why);
+            }
+        }
         cache.check_root()?;
         let dir = settings.tools_dir();
         make_cache_directory(&dir, 0o755).map_err(io(format!("making {}", dir.display())))?;
@@ -362,6 +405,7 @@ impl ToolCache {
         Ok(Self {
             dir,
             http: None,
+            fetch_unavailable: None,
             data_dir: settings.data_dir.clone(),
             link: None,
             clock: std::sync::Arc::new(orch_types::SystemClock),
@@ -394,6 +438,7 @@ impl ToolCache {
             link: self.link.clone(),
             clock: std::sync::Arc::clone(&self.clock),
             http: self.http.clone(),
+            fetch_unavailable: self.fetch_unavailable.clone(),
             policy: Some(policy),
             changes: self.changes.clone(),
         }
@@ -480,13 +525,19 @@ impl ToolCache {
         self.policy.as_ref().map_or(Ok(()), |policy| {
             policy
                 .require_tools_fetch()
-                .map_err(|error| ToolError::Policy(error.detail))
+                .map_err(|error| ToolError::Policy {
+                    message: error.detail,
+                    details: error.details,
+                })
         })
     }
 
     fn client(&self) -> Result<&reqwest::Client, ToolError> {
-        self.http.as_ref().ok_or_else(|| {
-            ToolError::Invalid("the read-only tool inventory cannot fetch tools".into())
+        self.http.as_ref().ok_or_else(|| match &self.fetch_unavailable {
+            Some(why) => ToolError::Download(format!(
+                "builds cannot be fetched on this machine: no HTTPS client could be made here (it may have no certificate authorities): {why}"
+            )),
+            None => ToolError::Invalid("the read-only tool inventory cannot fetch tools".into()),
         })
     }
 
@@ -615,7 +666,10 @@ impl ToolCache {
         cancel: &CancellationToken,
         reports: Option<&Reports>,
     ) -> Result<PathBuf, ToolError> {
-        let _change = self.changes.lock().await;
+        let _change = tokio::select! {
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            guard = self.changes.lock() => guard,
+        };
         self.check_root()?;
         let mut progress = DownloadReport {
             reports,
@@ -1087,9 +1141,82 @@ fn unpack_zip(download: &Path, content: &Path) -> Result<(), ToolError> {
         .map_err(|error| ToolError::Shape(format!("the archive cannot be unpacked: {error}")))
 }
 
+#[async_trait::async_trait]
+impl orch_connector_core::builds::BuildCache for ToolCache {
+    async fn ensure(
+        &self,
+        request: &NodeToolEnsure,
+        services: &orch_connector_core::roles::Services,
+        cancel: &CancellationToken,
+    ) -> Result<PathBuf, CommandError> {
+        self.with_policy(std::sync::Arc::clone(&services.policy))
+            .with_link(
+                services.link.clone(),
+                std::sync::Arc::clone(&services.clock),
+            )
+            .ensure(request, cancel)
+            .await
+            .map_err(CommandError::from)
+    }
+
+    fn installed(
+        &self,
+        registry: &orch_connector_core::harnesses::AdapterRegistry,
+    ) -> Vec<orch_connector_core::builds::Installed> {
+        self.list()
+            .into_iter()
+            .filter_map(|(kind, version)| {
+                if !registry.kinds_with_a_program().contains(&kind.as_str()) {
+                    return None;
+                }
+                let program = orch_connector_core::builds::find_program(
+                    &self.dir.join(&kind),
+                    &version,
+                    &registry.programs_of(&kind),
+                )?;
+                Some(orch_connector_core::builds::Installed {
+                    kind,
+                    program,
+                    version,
+                })
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_opens_where_no_https_client_can_be_made_and_only_a_fetch_says_why() {
+        let parent = tempfile::tempdir().unwrap();
+        let settings = NodeSettings::in_dir(parent.path());
+        let cache = ToolCache::open_with(
+            &settings,
+            Err("builder error: no CA certificates found".to_owned()),
+        )
+        .expect("a machine without certificate authorities still opens its cache");
+        assert!(settings.tools_dir().is_dir(), "the cache directory is made");
+        assert!(!cache.has("codex", "1"), "what it holds is read as usual");
+        match cache.client() {
+            Err(ToolError::Download(why)) => {
+                assert!(why.contains("no HTTPS client could be made here"), "{why}");
+                assert!(why.contains("no CA certificates found"), "{why}");
+            }
+            other => panic!("a fetch is refused with the reason: {other:?}"),
+        }
+        let inventory = ToolCache::inspect(&settings).unwrap();
+        assert!(
+            matches!(inventory.client(), Err(ToolError::Invalid(_))),
+            "an inventory read for itself is still no fetcher"
+        );
+        if let Ok(client) = reqwest::Client::builder().build() {
+            let cache = ToolCache::open_with(&settings, Ok(client)).unwrap();
+            assert!(cache.client().is_ok(), "where a client is made, it fetches");
+        }
+    }
 
     #[cfg(unix)]
     #[test]

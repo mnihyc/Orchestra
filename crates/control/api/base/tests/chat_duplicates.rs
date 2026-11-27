@@ -33,10 +33,7 @@ async fn copy(room: &Room, source: Id, token: &str, body: &DuplicateBody) -> Raw
         .app
         .call(ChatDuplicate, &[&source])
         .token(token)
-        .body(&ChatDuplicateBody {
-            copy: body.clone(),
-            ..Default::default()
-        })
+        .body(&ChatDuplicateBody { copy: body.clone() })
         .send_bytes()
         .await
 }
@@ -252,10 +249,7 @@ async fn group_copy_keeps_one_accepted_identity_on_retry_and_expiry_closes_the_r
         .call(ChatDuplicate, &[&source])
         .token(&r.ada.token)
         .header("Idempotency-Key", &retry)
-        .body(&ChatDuplicateBody {
-            copy: body.clone(),
-            ..Default::default()
-        })
+        .body(&ChatDuplicateBody { copy: body.clone() })
         .send_bytes()
         .await;
     let made = id(&first)?;
@@ -271,10 +265,7 @@ async fn group_copy_keeps_one_accepted_identity_on_retry_and_expiry_closes_the_r
         .call(ChatDuplicate, &[&source])
         .token(&reader.secret)
         .header("Idempotency-Key", &retry)
-        .body(&ChatDuplicateBody {
-            copy: body.clone(),
-            ..Default::default()
-        })
+        .body(&ChatDuplicateBody { copy: body.clone() })
         .send_bytes()
         .await;
     assert_eq!(id(&again)?, made);
@@ -324,163 +315,16 @@ async fn group_copy_keeps_one_accepted_identity_on_retry_and_expiry_closes_the_r
 }
 
 #[tokio::test]
-async fn copying_a_group_can_notify_exactly_the_reviewed_original_contributors_without_regranting_membership()
--> Proof {
-    use orch_api_contract::duplicates::ChatDuplicatePreview;
+async fn a_group_copy_preserves_the_messages_without_notifying_original_contributors() -> Proof {
     let r = Room::new().await;
     let source = r
-        .group(&r.ada, &[&r.bea, &r.cai], Some("Original contributors"))
+        .group(&r.ada, &[&r.bea], Some("Original contributors"))
         .await
         .base
         .id;
-    for (by, text) in [
-        (&r.ada, "Ada first"),
-        (&r.ada, "Ada again"),
-        (&r.cai, "Cai work"),
-        (&r.bea, "Copier own work"),
-    ] {
-        r.say(by, source, text).await;
-    }
-    let preview = r
-        .world
-        .app
-        .call(ChatDuplicatePreview, &[&source])
-        .token(&r.bea.token)
-        .send()
-        .await
-        .ok();
-    assert_eq!(preview.people, 2);
-    assert!(preview.preview_id.is_some());
-    let retry = new_id().to_string();
-    let body = ChatDuplicateBody {
-        copy: DuplicateBody::default(),
-        notify: Some(true),
-        notify_preview_id: preview.preview_id,
-    };
-    let first = r
-        .world
-        .app
-        .call(ChatDuplicate, &[&source])
-        .token(&r.bea.token)
-        .header("Idempotency-Key", &retry)
-        .body(&body)
-        .send_bytes()
-        .await;
-    let made = id(&first)?;
-    let notices:Vec<(Id,Json)>=sqlx::query_as("SELECT user_id,data FROM notifications WHERE chat_id=$1 AND kind='person.notify' ORDER BY user_id").bind(source).fetch_all(&r.world.db.pool).await?;
-    let mut people = vec![r.ada.id(), r.cai.id()];
-    people.sort_unstable();
-    assert_eq!(notices.iter().map(|row| row.0).collect::<Vec<_>>(), people);
-    for (_, data) in &notices {
-        assert!(data["operation_id"].is_string());
-        assert!(!data.to_string().contains(&made.to_string()));
-        assert!(data.get("raw").is_none());
-    }
-    let records:Vec<Json>=sqlx::query_scalar("SELECT o.data FROM notification_operations o WHERE id IN(SELECT (data->>'operation_id')::uuid FROM notifications WHERE chat_id=$1 AND kind='person.notify')").bind(source).fetch_all(&r.world.db.pool).await?;
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["origin"]["operation"], "ChatDuplicate");
-    assert_eq!(records[0]["raw"]["origin"]["operation"], "ChatDuplicate");
-    assert_eq!(records[0]["raw"]["credential"]["kind"], "session");
-    assert_eq!(records[0]["accepted_raw"], records[0]["raw"]);
-    let again = r
-        .world
-        .app
-        .call(ChatDuplicate, &[&source])
-        .token(&r.bea.token)
-        .header("Idempotency-Key", &retry)
-        .body(&body)
-        .send_bytes()
-        .await;
-    assert_eq!(id(&again)?, made);
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM notifications WHERE chat_id=$1 AND kind='person.notify'",
-    )
-    .bind(source)
-    .fetch_one(&r.world.db.pool)
-    .await?;
-    assert_eq!(count, 2);
-    assert!(
-        !r.world
-            .app
-            .call(orch_api_contract::chats::ChatGet, &[&made])
-            .token(&r.cai.token)
-            .send_bytes()
-            .await
-            .status
-            .is_success()
-    );
-    Ok(())
-}
-#[tokio::test]
-async fn contributor_previews_keep_opt_out_and_current_recipient_changes_and_an_explicit_no_notice_copy()
--> Proof {
-    use orch_api_contract::duplicates::ChatDuplicatePreview;
-    let r = Room::new().await;
-    let source = r
-        .group(&r.ada, &[&r.bea, &r.cai], Some("Reviewed audience"))
-        .await
-        .base
-        .id;
-    r.say(&r.ada, source, "First contributor").await;
-    let reviewed = r
-        .world
-        .app
-        .call(ChatDuplicatePreview, &[&source])
-        .token(&r.bea.token)
-        .send()
-        .await
-        .ok();
-    assert_eq!(reviewed.people, 1);
-    r.say(&r.cai, source, "A later contributor").await;
-    let stale = r
-        .world
-        .app
-        .call(ChatDuplicate, &[&source])
-        .token(&r.bea.token)
-        .body(&ChatDuplicateBody {
-            copy: DuplicateBody::default(),
-            notify: Some(true),
-            notify_preview_id: reviewed.preview_id,
-        })
-        .send_bytes()
-        .await;
-    assert_eq!(
-        stale.problem().code,
-        orch_api_contract::common::ErrorCode::ConflictStaleRevision
-    );
-    assert_eq!(count(&r).await?, 1);
-    let current = r
-        .world
-        .app
-        .call(ChatDuplicatePreview, &[&source])
-        .token(&r.bea.token)
-        .send()
-        .await
-        .ok();
-    assert_eq!(current.people, 2);
-    sqlx::query("INSERT INTO notification_prefs(user_id,disabled_kinds) VALUES($1,'[\"person.notify\"]') ON CONFLICT(user_id) DO UPDATE SET disabled_kinds=EXCLUDED.disabled_kinds").bind(r.cai.id()).execute(&r.world.db.pool).await?;
-    let opted = r
-        .world
-        .app
-        .call(ChatDuplicatePreview, &[&source])
-        .token(&r.bea.token)
-        .send()
-        .await
-        .ok();
-    assert_eq!(opted.people, 1);
-    let silent = r
-        .world
-        .app
-        .call(ChatDuplicate, &[&source])
-        .token(&r.bea.token)
-        .body(&ChatDuplicateBody {
-            copy: DuplicateBody::default(),
-            notify: Some(false),
-            notify_preview_id: None,
-        })
-        .send_bytes()
-        .await;
-    id(&silent)?;
+    r.say(&r.ada, source, "A message worth keeping").await;
+    let made = id(&copy(&r, source, &r.bea.token, &DuplicateBody::default()).await)?;
+    assert_ne!(made, source);
     let notices: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM notifications WHERE chat_id=$1 AND kind='person.notify'",
     )
@@ -490,52 +334,12 @@ async fn contributor_previews_keep_opt_out_and_current_recipient_changes_and_an_
     assert_eq!(notices, 0);
     Ok(())
 }
-
 #[path = "chat_duplicates/move_notices.rs"]
 mod move_notices;
 #[path = "chat_duplicates/moving_routes.rs"]
 mod moving_routes;
 #[path = "chat_duplicates/notices.rs"]
 mod notices;
-
-#[tokio::test]
-async fn a_contributor_preview_reads_and_publishes_only_its_own_actual_chat_source() -> Proof {
-    use orch_api_contract::duplicates::ChatDuplicatePreview;
-    let r = Room::new().await;
-    let source = r
-        .group(&r.ada, &[&r.bea], Some("Scoped reviewed source"))
-        .await
-        .base
-        .id;
-    r.say(&r.ada, source, "A real contributor").await;
-    for (operation, action, ok) in [
-        ("ChatDuplicatePreview", "read", true),
-        ("ChatGet", "read", false),
-        ("ChatDuplicatePreview", "write", false),
-    ] {
-        let token = key(
-            &r.world,
-            r.bea.id(),
-            vec![rule(operation, "chat", source, "self", action)],
-        )
-        .await?;
-        let reply = r
-            .world
-            .app
-            .call(ChatDuplicatePreview, &[&source])
-            .token(&token.secret)
-            .send()
-            .await;
-        if ok {
-            let value = reply.ok();
-            assert_eq!(value.people, 1);
-            assert!(value.preview_id.is_some());
-        } else {
-            assert_eq!(reply.status.as_u16(), 403);
-        }
-    }
-    Ok(())
-}
 
 #[tokio::test]
 async fn move_destination_ownership_follows_active_managers_and_never_creator_attribution() -> Proof

@@ -434,7 +434,8 @@ async fn read_on(
         return Ok(None);
     };
     let pending = pending(&row, request, reference)?;
-    let seconds = setting(conn, keys::MEASUREMENT_VALID_SECS).await?;
+    let valid_policy = super::super::policy_setting(conn, keys::MEASUREMENT_VALID_SECS).await?;
+    let seconds = valid_policy.seconds;
     if !pending
         && !valid(
             &row,
@@ -485,6 +486,15 @@ async fn read_on(
     }
     let count = Count {
         reference: Measurement {
+            timing: Some(super::super::assessed_timing(
+                &row,
+                valid_policy,
+                super::super::timing(&row).and_then(|value| value.observer_policy),
+                row.plan["keep_until"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Time>().ok()),
+                engine.inner.clock.now(),
+            )),
             job_id: row.id,
             measured_at: row
                 .finished_at

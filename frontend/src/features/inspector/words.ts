@@ -20,9 +20,6 @@ function wordFor(t: TFunction, family: string, value: string | null | undefined,
 /** Why a model cannot be chosen. */
 export const refusalWord = (t: TFunction, reason: string | null | undefined): string => wordFor(t, 'start.reason', reason, 'disabled');
 
-/** When a parameter's new value takes effect. */
-export const applyWord = (t: TFunction, mode: string): string => wordFor(t, 'composer.model.applies', mode, 'next_turn');
-
 /** What kind of line an entry of the outline is. */
 export const outlineKindWord = (t: TFunction, kind: string): string => wordFor(t, 'inspector.outline.kind', kind, 'marker');
 

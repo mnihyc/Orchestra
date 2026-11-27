@@ -1,0 +1,7 @@
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/openings.spec.ts --retries=0 --reporter=line
+web-e2e tests/e2e/thread.spec.ts --grep "shell worker" --retries=0 --reporter=line
+web-e2e tests/e2e/first-wave-edge.spec.ts --retries=0 --reporter=line
