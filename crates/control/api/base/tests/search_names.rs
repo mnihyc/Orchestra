@@ -43,6 +43,70 @@ async fn found(world: &World, by: &Who, text: &str, kinds: &str) -> Vec<NameHit>
 }
 
 #[tokio::test]
+async fn a_saved_target_gets_its_current_name_without_a_visit_and_keeps_private_names_hidden() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let org = make_org(&world, &ada, "Research", "research").await.base.id;
+    let project = make_project(&world, &ada, org, "Research project")
+        .await
+        .base
+        .id;
+    let topic = make_topic(&world, &ada, project, "Release plan")
+        .await
+        .base
+        .id;
+    make_topic(&world, &ada, project, "Release plan").await;
+    let exact = format!("id={topic}&kinds=topic");
+    let named = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert_eq!(named.items.len(), 1);
+    assert_eq!(named.items[0].id, topic);
+    assert_eq!(named.items[0].name, "Release plan");
+    sqlx::query("UPDATE nodes SET name = 'Updated release plan' WHERE id = $1")
+        .bind(topic)
+        .execute(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let renamed = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert_eq!(renamed.items[0].name, "Updated release plan");
+    let private = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&bea.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert!(
+        private.items.is_empty(),
+        "knowing the identity grants no name"
+    );
+    let wrong_kind = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .raw_query(&format!("id={topic}&kinds=project"))
+        .send()
+        .await
+        .ok();
+    assert!(wrong_kind.items.is_empty());
+}
+
+#[tokio::test]
 async fn named_orgs_and_chats_have_the_same_stable_addresses_as_the_inventory() {
     let room = chat_world::Room::new().await;
     let direct = room.direct(&room.ada, &room.bea).await;
@@ -684,10 +748,6 @@ async fn wildcard_characters_are_literal_and_unknown_kinds_and_bad_limits_are_re
             limit: Some(0),
             ..Default::default()
         },
-        NameSearchListQuery {
-            limit: Some(51),
-            ..Default::default()
-        },
     ] {
         assert_eq!(
             world
@@ -891,6 +951,134 @@ async fn a_participant_chat_in_an_archived_org_keeps_its_readable_name_and_archi
     assert!(
         found(&room.world, &room.eve, "frozen", "chat")
             .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_picker_starts_with_its_own_recent_names_then_finds_every_page_from_the_first_letter() {
+    use orch_api_contract::personal::{MePickerRecentChoice, MePickerRecentCreate};
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let org = make_org(&world, &ada, "Catalogue", "catalogue")
+        .await
+        .base
+        .id;
+    let mut projects = Vec::new();
+    for index in 0..13 {
+        projects.push(
+            make_project(&world, &ada, org, &format!("Project {index:02}"))
+                .await
+                .base
+                .id,
+        );
+    }
+    let mut ask = query("", "project");
+    ask.picker = Some(true);
+    ask.limit = Some(1);
+    let before = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .query(&ask)
+        .send()
+        .await
+        .ok();
+    let late = *projects
+        .iter()
+        .find(|id| **id != before.items[0].id)
+        .unwrap();
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&ada.token)
+        .body(&MePickerRecentChoice {
+            kind: "project".to_owned(),
+            key: late.to_string(),
+        })
+        .send()
+        .await
+        .ok();
+    let page = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .query(&ask)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        page.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [late]
+    );
+    assert!(page.next_cursor.is_some());
+    // Choosing a different kind elsewhere does not invalidate this place list's order.
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&ada.token)
+        .body(&MePickerRecentChoice {
+            kind: "model".to_owned(),
+            key: "provider/another-model".to_owned(),
+        })
+        .send()
+        .await
+        .ok();
+    let mut found = vec![late];
+    let mut next = page.next_cursor;
+    while let Some(cursor) = next {
+        ask.cursor = Some(cursor);
+        let page = world
+            .app
+            .call(NameSearchList, &[])
+            .token(&ada.token)
+            .query(&ask)
+            .send()
+            .await
+            .ok();
+        found.extend(page.items.iter().map(|row| row.id));
+        next = page.next_cursor;
+    }
+    // Org creation also supplies its real General project, which empty search must retain.
+    let general: Id = sqlx::query_scalar(
+        "SELECT id FROM nodes WHERE parent_id=$1 AND kind='project' AND name='General'",
+    )
+    .bind(org)
+    .fetch_one(&mut *world.conn().await)
+    .await
+    .unwrap();
+    let mut expected = projects.clone();
+    expected.push(general);
+    found.sort();
+    expected.sort();
+    assert_eq!(found, expected);
+    ask.cursor = None;
+    ask.q = Some("P".to_owned());
+    ask.limit = Some(100);
+    assert_eq!(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&ada.token)
+            .query(&ask)
+            .send()
+            .await
+            .ok()
+            .items
+            .len(),
+        13
+    );
+    assert!(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&bea.token)
+            .query(&ask)
+            .send()
+            .await
+            .ok()
+            .items
             .is_empty()
     );
 }

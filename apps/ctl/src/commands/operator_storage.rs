@@ -329,26 +329,15 @@ fn record_copy(root: &Root, name: &str, directory: &str, at: Time) -> Result<(),
     if dump.starts_with(&copy) || manifest_path.starts_with(&copy) {
         return Err("the paired blob directory cannot contain its dump or manifest".into());
     }
-    let text = fs::read_to_string(root.path.join("config/orch.toml"))
-        .map_err(|_| "the deployment configuration is unreadable")?;
-    let config: toml::Value =
-        toml::from_str(&text).map_err(|_| "the deployment configuration does not read")?;
-    let hours = match config
-        .get("retention")
-        .and_then(|value| value.get("blob_grace_hours"))
-    {
-        None => {
-            orch_config::ServerConfig::default()
-                .retention
-                .blob_grace_hours
-        }
-        Some(value) => u64::try_from(value.as_integer().ok_or("blob_grace_hours is invalid")?)
-            .map_err(|_| "blob_grace_hours is invalid")?,
-    };
-    let grace = chrono::Duration::try_hours(
-        i64::try_from(hours).map_err(|_| "blob_grace_hours is too large")?,
-    )
-    .ok_or("blob_grace_hours is too large")?;
+    let hours = parsed
+        .excluded
+        .pointer("/blobs/grace_hours")
+        .and_then(Json::as_u64)
+        .ok_or("the dump manifest lacks its blob grace period")?;
+    let grace = i64::try_from(hours)
+        .ok()
+        .and_then(chrono::Duration::try_hours)
+        .unwrap_or(chrono::Duration::MAX);
     let previous = copy_evidence(root, &parsed, &raw)
         .ok()
         .filter(|evidence| !evidence.purging)
@@ -918,10 +907,6 @@ mod tests {
         fs::create_dir_all(temp.path().join("runtime/data"))?;
         fs::create_dir_all(temp.path().join("config"))?;
         fs::write(
-            temp.path().join("config/orch.toml"),
-            "[retention]\nblob_grace_hours=24\n",
-        )?;
-        fs::write(
             temp.path().join("runtime/data/live"),
             b"keep the live store",
         )?;
@@ -937,7 +922,7 @@ mod tests {
         fs::write(
             dump.with_extension("manifest.json"),
             serde_json::to_vec(
-                &json!({"format_version":1,"system_id":root.system,"release":"v0.1.0","schema":"19","database_at":at,"completed_at":at,"cause":"manual","dump":{"name":"saved.dump","bytes":content.len(),"hash":blake3::hash(content).to_hex().to_string()},"included":{"database":true},"excluded":{"blobs":{"included":false}}}),
+                &json!({"format_version":1,"system_id":root.system,"release":"v0.1.0","schema":"19","database_at":at,"completed_at":at,"cause":"manual","dump":{"name":"saved.dump","bytes":content.len(),"hash":blake3::hash(content).to_hex().to_string()},"included":{"database":true},"excluded":{"blobs":{"included":false,"grace_hours":24}}}),
             )?,
         )?;
         Ok((temp, root, at))

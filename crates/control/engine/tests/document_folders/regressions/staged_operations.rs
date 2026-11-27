@@ -83,12 +83,13 @@ impl Case {
         }
         let confirmation = if command == domain::Command::Delete {
             let mut tx = area.world.pool.begin().await?;
+            let options = domain::Options::for_engine(&mut tx).await?;
             let plan = domain::plan_delete_in(
                 &mut tx,
                 domain::Actor::Agent { thread: area.agent },
                 &request,
                 Time::new(area.world.clock.now()),
-                domain::Options::for_engine(&area.world.engine()),
+                options,
             )
             .await?;
             tx.commit().await?;
@@ -115,6 +116,7 @@ impl Case {
             Time::new(self.area.world.clock.now()),
         )
         .await?;
+        let options = domain::Options::for_engine(tx).await?;
         Ok(domain::complete_operation_in(
             tx,
             actor,
@@ -123,7 +125,7 @@ impl Case {
                 .as_ref()
                 .map(domain::DeletionConfirmation::Membership),
             Time::new(self.area.world.clock.now()),
-            domain::Options::for_engine(&self.area.world.engine()),
+            options,
         )
         .await?)
     }
@@ -150,12 +152,13 @@ async fn each_native_tree_intent_rejects_at_its_first_actual_write_and_rolls_bac
         assert_eq!(prepared.command(), command);
         assert!(!prepared.is_replay());
         let calls = AtomicUsize::new(0);
+        let options = domain::Options::for_engine(&mut tx).await?;
         let refused = domain::apply_operation_in(
             &mut tx,
             domain::Actor::Agent { thread: area.agent },
             prepared,
             Time::new(area.world.clock.now()),
-            domain::Options::for_engine(&area.world.engine()),
+            options,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err(orch_engine::EngineError::BeforeEffect(Box::new(
@@ -202,12 +205,13 @@ async fn completed_native_tree_intents_replay_without_material_or_first_effect_a
         let calls = AtomicUsize::new(0);
         let mut tx = area.world.pool.begin().await?;
         let prepared = case.prepare(&mut tx).await?;
+        let options = domain::Options::for_engine(&mut tx).await?;
         let written = domain::apply_operation_in(
             &mut tx,
             domain::Actor::Agent { thread: area.agent },
             prepared,
             Time::new(area.world.clock.now()),
-            domain::Options::for_engine(&area.world.engine()),
+            options,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -222,12 +226,13 @@ async fn completed_native_tree_intents_replay_without_material_or_first_effect_a
         let mut tx = area.world.pool.begin().await?;
         let replay = case.prepare(&mut tx).await?;
         assert!(replay.is_replay(), "{command:?}");
+        let options = domain::Options::for_engine(&mut tx).await?;
         let repeated = domain::apply_operation_in(
             &mut tx,
             domain::Actor::Agent { thread: area.agent },
             replay,
             Time::new(area.world.clock.now()),
-            domain::Options::for_engine(&area.world.engine()),
+            options,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err(orch_engine::EngineError::BeforeEffect(Box::new(
@@ -265,12 +270,13 @@ async fn unchanged_version_tree_intents_check_before_their_real_audit_and_cannot
         Time::new(area.world.clock.now()),
     )
     .await?;
+    let options = domain::Options::for_engine(&mut tx).await?;
     let wrong = domain::apply_operation_in(
         &mut tx,
         domain::Actor::Person(&owner),
         prepared,
         Time::new(area.world.clock.now()),
-        domain::Options::for_engine(&area.world.engine()),
+        options,
         || {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -282,12 +288,13 @@ async fn unchanged_version_tree_intents_check_before_their_real_audit_and_cannot
     let prepared = case.prepare(&mut tx).await?;
     tx.rollback().await?;
     let mut tx = area.world.pool.begin().await?;
+    let options = domain::Options::for_engine(&mut tx).await?;
     let wrong = domain::apply_operation_in(
         &mut tx,
         domain::Actor::Agent { thread: area.agent },
         prepared,
         Time::new(area.world.clock.now()),
-        domain::Options::for_engine(&area.world.engine()),
+        options,
         || {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -300,12 +307,13 @@ async fn unchanged_version_tree_intents_check_before_their_real_audit_and_cannot
     assert_eq!(state(&area.world, &[area.topic]).await?, before);
     let mut tx = area.world.pool.begin().await?;
     let prepared = case.prepare(&mut tx).await?;
+    let options = domain::Options::for_engine(&mut tx).await?;
     let refused = domain::apply_operation_in(
         &mut tx,
         domain::Actor::Agent { thread: area.agent },
         prepared,
         Time::new(area.world.clock.now()),
-        domain::Options::for_engine(&area.world.engine()),
+        options,
         || {
             calls.fetch_add(1, Ordering::SeqCst);
             Err(orch_engine::EngineError::BeforeEffect(Box::new(

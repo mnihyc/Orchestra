@@ -36,6 +36,9 @@ case "$SMOKE_RUN" in
 esac
 SMOKE_RELEASES="$SMOKE_BASE/releases"
 SMOKE_DIR="$SMOKE_BASE/runs/$SMOKE_RUN"
+# Releases a scenario makes of its own (deploy_variant), beside the run's directory: the scenario's own directory is made, and
+# refused if it is there, when its stack is.
+SMOKE_VARIANTS="$SMOKE_BASE/variants/$SMOKE_RUN"
 python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" validate --repo "$SMOKE_REPO" \
   --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name preflight
 mkdir -p "$SMOKE_DIR"
@@ -124,6 +127,30 @@ broken_release() {
   rm -rf "$work"
   (cd "$SMOKE_REPO" && cargo xtask package --out "$target" --manifest-only) >&2 || abort "the manifest of the broken release was not written"
 }
+
+# deploy_variant SOURCE NAME ARGS...: a copy of a release, in $SMOKE_VARIANTS/NAME, whose orch-deploy bundle differs, with a manifest that says so
+# (scripts/smoke/deploy_variant.py has the arguments: the generation and the minimum, files to replace, the releases it
+# publishes the files of). Both releases of a scenario are packaged from the same tree, so their deployment files are the
+# same; a variant is how a scenario makes files that change, and a generation that asks for them.
+deploy_variant() {
+  local source="$1" target="$SMOKE_VARIANTS/$2"
+  shift 2
+  mkdir -p "$SMOKE_VARIANTS"
+  rm -rf "${target:?}"
+  cp -al "$source" "$target"
+  python3 -I "$SMOKE_REPO/scripts/smoke/deploy_variant.py" "$target" "$@" || abort "the deployment files of $target were not changed"
+  (cd "$SMOKE_REPO" && cargo xtask package --out "$target" --manifest-only) >&2 || abort "the manifest of $target was not written"
+}
+
+# Compare the installed deployment files with the regular files in the release bundle.
+deployment_files_match() {
+  # shellcheck disable=SC2016 # tar sets TAR_FILENAME for each regular file in the archive.
+  env INSTALL_DIR="$STACK" tar -xzf "$1" \
+    --exclude=deploy/config --to-command='cmp -- - "$INSTALL_DIR/${TAR_FILENAME#deploy/}"'
+}
+
+# nginx_serves_keys: the web edge hands the key routes to the API (a JSON answer) and not to the application's page.
+nginx_serves_keys() { curl -sS -o /dev/null -w '%{content_type}' "$EDGE/openapi/v1/nothing-here" | grep -q json; }
 
 # --- Stacks -------------------------------------------------------------------
 
@@ -220,6 +247,7 @@ finish() {
       --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name "$SMOKE_SCENARIO" || return 1
     SMOKE_CLEANUP_COMPLETE=1
   fi
+  if [ -d "$SMOKE_VARIANTS" ]; then rm -rf -- "${SMOKE_VARIANTS:?}"; rmdir -- "$SMOKE_BASE/variants" 2> /dev/null || true; fi
   printf '\n%s: %d checks, %d failed\n' "$(basename "$0")" "$CHECKED" "$FAILED"
   [ "$FAILED" -eq 0 ]
 }
@@ -266,6 +294,25 @@ sign_in() {
 
 # sql QUERY: one value from the stack's database.
 sql() { compose exec -T postgres psql -U orch -d orch -At -c "$1"; }
+
+# share_server_host HOST BODY: the owner's share act (PATCH /hosts/HOST/permissions, BODY its rows) on the host that was
+# installed with the server. That host is its installer's alone until shared: the first answer asks for the confirmation
+# that it is the server's own machine, and the act is sent again with that confirmation, as the page does. Sets
+# SHARE_ASKED to the first answer's status, code and count of such hosts, and SHARE_STATUS to the confirmed act's status.
+share_server_host() {
+  local host="$1" body="$2" reply proof
+  reply="$(mktemp)"
+  SHARE_ASKED="$(curl -sS --max-time 60 -o "$reply" -w '%{http_code}' -X PATCH "$EDGE/api/v1/hosts/$host/permissions" \
+    -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d "$body")" || SHARE_ASKED=000
+  # An answer that is not JSON (an edge's error page) becomes failed checks, not the end of the scenario.
+  SHARE_ASKED="$SHARE_ASKED $(jq -r '"\(.code) \(.server_host_use.hosts)"' "$reply" 2> /dev/null || true)"
+  proof="$(jq -r '.server_host_use.confirmation // empty' "$reply" 2> /dev/null || true)"
+  SHARE_STATUS="$(curl -sS --max-time 60 -o "$reply" -w '%{http_code}' -X PATCH "$EDGE/api/v1/hosts/$host/permissions" \
+    -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H "orch-server-host-use-confirmed: $proof" \
+    -d "$body")" || SHARE_STATUS=000
+  [ "$SHARE_STATUS" = 200 ] || printf 'HTTP %s PATCH /hosts/%s/permissions: %s\n' "$SHARE_STATUS" "$host" "$(head -c 500 "$reply")" >&2
+  rm -f "$reply"
+}
 
 # wait_for SECONDS WHAT COMMAND...: the command succeeds within the time.
 wait_for() {

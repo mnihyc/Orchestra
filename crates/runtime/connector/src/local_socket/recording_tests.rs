@@ -106,6 +106,12 @@ fn fixture() -> TestResult<Fixture> {
 
 fn context(clock: &dyn Clock) -> CommandContext {
     CommandContext {
+        authority_deadline: None,
+        native_members: None,
+        native_revision: None,
+
+        native_fences: None,
+        native_target: None,
         id: new_id(),
         key: Some(new_id().to_string()),
         deadline: Time::new(
@@ -118,9 +124,11 @@ fn context(clock: &dyn Clock) -> CommandContext {
 
 fn record() -> Command {
     Command::FsRecord(FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: new_id(),
         snapshot_id: new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 1,
         max_bytes: 1024,
@@ -129,6 +137,8 @@ fn record() -> Command {
 
 fn result() -> CommandResult {
     CommandResult::FsRecord(FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,

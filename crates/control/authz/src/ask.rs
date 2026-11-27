@@ -9,6 +9,7 @@ pub(crate) struct Boundary {
     pub root: Id,
     pub person: Id,
     pub expires: Option<Time>,
+    pub inspectable: bool,
 }
 
 fn setting_error(error: orch_settings::Error) -> Error {
@@ -31,6 +32,7 @@ pub(crate) async fn from_rows(
         retention_days,
         last_message_at,
         root_live,
+        inspectable,
     } in rows
     {
         let expires = if root_live {
@@ -73,6 +75,7 @@ pub(crate) async fn from_rows(
                 root: root_org_id,
                 person: person_id,
                 expires,
+                inspectable,
             },
         );
     }

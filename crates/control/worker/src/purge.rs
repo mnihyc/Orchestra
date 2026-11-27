@@ -11,7 +11,7 @@
 //! `retention.inbox_days`, read or not; those go in a transaction of their own
 //! that holds up nobody's action, a bounded number at each run.
 //! `soft_delete_purge` hard-deletes what was soft-deleted longer ago
-//! than `[retention] soft_delete_days`, and what something still refers to is
+//! than `retention.deleted_keep_days`, and what something still refers to is
 //! left: an org, a provider or an environment goes only once nothing of it is
 //! left, which the references of the schema decide and the engine's reaper
 //! brings about by removing what is on hosts first.
@@ -49,14 +49,6 @@ const FAILED_KEPT: Duration = Duration::days(30);
 /// job runs every ten minutes, so that is over a million of each a day, and a
 /// backlog goes over the runs that follow without one run holding the tables.
 const ROWS_PER_RUN: i64 = 10_000;
-
-/// For how many days an Inbox keeps a notification where the setting has no
-/// value: the setting's own default.
-const DEFAULT_INBOX_DAYS: i64 = 90;
-
-/// The fewest days an Inbox keeps a notification, whatever a row of the
-/// database says: a value that is not a number of days never empties it now.
-const LEAST_INBOX_DAYS: i64 = 1;
 
 /// Why a run of `purge_expired` failed.
 #[derive(Debug, thiserror::Error)]
@@ -116,10 +108,7 @@ pub async fn expired(
     let modern_before = Duration::try_hours(window)
         .and_then(|span| now.checked_sub_signed(span))
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let legacy_before = now
-        .checked_sub_signed(ttl_of_keys(config))
-        .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let idempotency_keys = idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
+    let idempotency_keys = idempotency::purge(&mut tx, modern_before).await?;
     let link_codes = routes::drop_expired_codes(&mut tx, now).await?;
     tx.commit().await.map_err(DbError::from)?;
     let (deliveries, inbox) = deliveries_and_inbox(db, now).await?;
@@ -147,31 +136,12 @@ pub async fn expired(
 async fn deliveries_and_inbox(db: &Db, now: DateTime<Utc>) -> Result<(u64, u64), PurgeError> {
     let mut tx = transaction_guard::scope(false, db.begin()).await?;
     transaction_guard::lock_action(&mut tx).await?;
-    let days = orch_settings::get::<i64>(&mut tx, Place::System, keys::RETENTION_INBOX_DAYS)
-        .await?
-        .unwrap_or(DEFAULT_INBOX_DAYS)
-        .max(LEAST_INBOX_DAYS);
+    let policy = orch_settings::retention::inbox(&mut tx, now).await?;
     let deliveries =
         upkeep::purge_outbox(&mut tx, now - SETTLED_KEPT, now - FAILED_KEPT, ROWS_PER_RUN).await?;
-    let inbox = upkeep::purge_inbox(
-        &mut tx,
-        now - spans::days(days.unsigned_abs()),
-        ROWS_PER_RUN,
-    )
-    .await?;
+    let inbox = upkeep::purge_inbox(&mut tx, policy.expires_before, ROWS_PER_RUN).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok((deliveries, inbox))
-}
-
-/// How long an answer is kept for repeating a request.
-fn ttl_of_keys(config: &ServerConfig) -> Duration {
-    spans::hours(config.api.idempotency_ttl_hours)
-}
-
-/// The moment before which a row that was soft-deleted is due to be purged.
-#[must_use]
-pub fn soft_delete_cutoff(now: DateTime<Utc>, config: &ServerConfig) -> DateTime<Utc> {
-    now - spans::days(config.retention.soft_delete_days)
 }
 
 /// Hard-deletes the rows soft-deleted longer ago than the days they are kept,
@@ -179,7 +149,7 @@ pub fn soft_delete_cutoff(now: DateTime<Utc>, config: &ServerConfig) -> DateTime
 pub async fn soft_deleted(
     db: &Db,
     clock: &dyn Clock,
-    config: &ServerConfig,
+    _config: &ServerConfig,
 ) -> Result<Option<Vec<SoftDeletePurged>>, DbError> {
     let Some(mut tx) =
         orch_db::queries::transaction_guard::scope(true, schedule::take(db, Job::SoftDeletePurge))
@@ -188,7 +158,13 @@ pub async fn soft_deleted(
         return Ok(None);
     };
     let now = clock.now();
-    let purged = upkeep::purge_soft_deleted(&mut tx, soft_delete_cutoff(now, config), now).await?;
+    let days = orch_settings::retention::deleted_keep_days(&mut tx).await?;
+    let purged = upkeep::purge_soft_deleted(
+        &mut tx,
+        orch_settings::retention::deleted_before(now, days),
+        now,
+    )
+    .await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(Some(purged))
 }
@@ -200,17 +176,14 @@ mod tests {
 
     #[test]
     fn a_row_is_due_after_the_days_it_is_kept_and_not_a_moment_before() {
-        let mut config = ServerConfig::default();
         let now = Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap();
         assert_eq!(
-            soft_delete_cutoff(now, &config),
+            orch_settings::retention::deleted_before(now, 30),
             Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap()
         );
-        config.retention.soft_delete_days = 7;
         assert_eq!(
-            soft_delete_cutoff(now, &config),
+            orch_settings::retention::deleted_before(now, 7),
             Utc.with_ymd_and_hms(2026, 10, 4, 12, 0, 0).unwrap()
         );
-        assert_eq!(ttl_of_keys(&config), Duration::hours(24));
     }
 }

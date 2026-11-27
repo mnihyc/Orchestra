@@ -131,10 +131,12 @@ expect "there is one host, the node's" "1" "$(printf '%s' "$HOSTS" | jq 'length'
 expect "it reports the Docker driver" "docker" "$(printf '%s' "$HOSTS" | jq -r '.[0].drivers[0].name')"
 TEMPLATE_ID="$(call GET /templates | jq -r '[.[] | select(.name == "Default")][0].id')"
 check "the Default template is listed" test -n "$TEMPLATE_ID" -a "$TEMPLATE_ID" != null
-expect "its page names everyone for it, as the system's own host does" "everyone" \
-  "$(call GET "/hosts/$HOST_ID" | jq -r '[.access.through[].holder.kind][0]')"
+# The host installed with the server is its installer's, the first administrator's, and names nobody else until she
+# shares it: environments on it run beside the server's database and secrets.
+expect "it is the server's own host, the first administrator's, and its page names nobody else for it" "true $ADMIN_NAME 0" \
+  "$(call GET "/hosts/$HOST_ID" | jq -r '"\(.bundled_with_server) \(.owner.username) \([.access.through[]? | select(.holder != null)] | length)"')"
 
-step "a person who is no administrator may use that host, and may not manage it"
+step "a person who is no administrator may use that host once its owner shares it, and may not manage it"
 BEA='bea'
 BEA_PASSWORD='correct horse battery staple'
 RESET="$(call POST /admin/users "{\"username\":\"$BEA\",\"display_name\":\"Bea\"}" | jq -r .reset_url)"
@@ -142,6 +144,14 @@ if curl -fsS -X POST "$EDGE/api/v1/auth/recovery/confirm" -H 'content-type: appl
   -d "{\"token\":\"${RESET##*/reset/}\",\"password\":\"$BEA_PASSWORD\"}" > /dev/null; then pass "Bea set her password with the link"; else fail "Bea set her password with the link"; fi
 BEA_TOKEN="$(curl -fsS -X POST "$EDGE/api/v1/auth/login" -H 'content-type: application/json' \
   -d "{\"login\":\"$BEA\",\"password\":\"$BEA_PASSWORD\"}" | jq -r .access_token)"
+BEA_ID="$(as "$BEA_TOKEN" call GET /me | jq -r .id)"
+expect "she is not listed the host until its owner shares it" "0" \
+  "$(as "$BEA_TOKEN" call GET /hosts | jq -r --arg id "$HOST_ID" 'if type == "array" then [.[] | select(.id == $id)] | length else "no list" end')"
+share_server_host "$HOST_ID" "$(jq -cn --arg bea "$BEA_ID" \
+  '{rows:[{permission:"host.view",add:[{holder:{kind:"user",id:$bea}}]},{permission:"host.use",add:[{holder:{kind:"user",id:$bea}}]}]}')"
+expect "giving her View and Use asks first for the confirmation that it is the server's own machine" \
+  "409 conflict.confirmation_required 1" "$SHARE_ASKED"
+expect "with that confirmation, its owner shares it with her" "200" "$SHARE_STATUS"
 expect "she is listed the host, with the right to view and use it and no more" "host.use host.view" \
   "$(as "$BEA_TOKEN" call GET /hosts | jq -r '.[0].access.permissions | sort | join(" ")')"
 expect "she is listed the Default template" "$TEMPLATE_ID" "$(as "$BEA_TOKEN" call GET /templates | jq -r '[.[] | select(.name == "Default")][0].id')"
@@ -204,7 +214,9 @@ fi
 lab policy set provider.upstreams "[\"http://$BRIDGE:$MODEL_PORT/v1\"]" > /dev/null
 docker exec -d "$LAB" sh -c 'exec orch-connector --data-dir /data run > /data/run.log 2>&1'
 machine_online() { [ "$(call GET /machines | jq -r '[.[] | select(.name == "lab")][0].online')" = true ]; }
-wait_for 60 "the machine is online" machine_online
+# When it is not, the connector's own words say why: its output and the end of its log.
+wait_for 60 "the machine is online" machine_online ||
+  { docker exec "$LAB" sh -c 'tail -n 40 /data/run.log; for f in $(ls -t /data/logs/* 2>/dev/null | head -1); do echo "== $f"; tail -n 40 "$f"; done' >&2 || true; false; }
 LAB_ID="$(call GET /machines | jq -r '[.[] | select(.name == "lab")][0].id')"
 # A machine is online before its facts are in, and its provider is registered against what they say its policy lets it
 # forward: the answer to a provider asked for too soon is a refusal.

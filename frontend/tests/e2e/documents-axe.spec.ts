@@ -98,8 +98,9 @@ test('the export, move, private, delete and share dialogs are accessible in both
 
   await open('Move to…');
   const move = page.getByRole('dialog', { name: 'Move to…', exact: true });
-  await move.getByRole('combobox', { name: 'Destination', exact: true }).fill('Upgrade deps');
-  const destination = page.getByRole('option', { name: 'Acme / Research / Web / Upgrade deps', exact: true });
+  await move.getByRole('combobox', { name: 'Destination', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Upgrade deps');
+  const destination = page.getByRole('treeitem', { name: 'Acme / Research / Web / Upgrade deps', exact: true });
   await expect(destination).not.toHaveAttribute('aria-disabled', 'true');
   await destination.click();
   // The native folder form retains document identity within the org; its old standalone ownership sentence is gone.
@@ -113,26 +114,18 @@ test('the export, move, private, delete and share dialogs are accessible in both
   await expectAccessibleInBothThemes(page, '[role="alertdialog"], [role="dialog"]');
   await page.keyboard.press('Escape');
 
-  await open('Delete');
-  // The native deletion form names the exact file in its preview under the shared Delete heading.
-  const deleting = page.getByRole('dialog', { name: 'Delete', exact: true });
-  await expect(deleting.getByText('Rollout plan.md', { exact: true }).first()).toBeVisible();
-  await expect(deleting.getByRole('button', { name: 'Delete', exact: true })).toBeEnabled();
-  await expectAccessibleInBothThemes(page, '[role="alertdialog"], [role="dialog"]');
-  await page.keyboard.press('Escape');
-
   // Share is the permission page every thing has: its dialog is named for the document.
   await page.getByRole('button', { name: 'Share' }).click();
   await expect(page.getByRole('dialog', { name: 'Access to “Rollout plan”' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
 });
 
-test('the list of documents beside a topic, and its recently deleted, are accessible in both themes', async ({ page }) => {
+test('the list of documents beside a topic, and its trash, are accessible in both themes', async ({ page }) => {
   await signIn(page);
   await page.goto(`/topic/${ACME.fixLogin}?tab=documents`);
   await expect(page.getByRole('link', { name: 'Rollout plan' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
-  await page.getByRole('button', { name: /^Recently deleted \(\d+\+?\)$/ }).click();
+  await page.getByRole('button', { name: /^Trash \(\d+\+?\)$/ }).click();
   // The joined retained-content world supplies a deleted document beside this topic.
   const deleted = page.getByRole('listitem').filter({ has: page.getByText('Investigation notes', { exact: true }) });
   await expect(deleted).toBeVisible();

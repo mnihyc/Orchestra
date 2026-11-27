@@ -4,7 +4,10 @@
  * it runs and whether it is switched off, opening on its own page. A new one is made here from an
  * adapter the system has, with the values of its parameters written as JSON.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { Bot, Plus } from 'lucide-react';
@@ -12,7 +15,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 
-import { createSystemAgent, harnessKindsQuery, systemAgentsQuery } from '@/api/admin';
+import { createSystemAgent, harnessKindsQuery, systemAgentsPageQuery } from '@/api/admin';
 import { parseObject } from '@/features/admin/harnesses';
 import { programInfoName, programNameIn } from '@/features/resources/programNames';
 import type { Agent } from '@/generated/api-types';
@@ -92,7 +95,9 @@ function NewProfile({ onClose }: { onClose: () => void }) {
 
 export function Agents() {
   const { t, i18n } = useTranslation();
-  const agents = useQuery(systemAgentsQuery);
+  const search = useCollectionSearch("admin-system-agents");
+  const agents = useInfiniteQuery(systemAgentsPageQuery(search.q));
+  const rows = agents.data?.pages.flatMap((page) => page.items.flatMap((row) => row.resource?.kind === "agent" ? [row.resource.value] : [])) ?? [];
   const kinds = useQuery(harnessKindsQuery);
   const [making, setMaking] = useState(false);
   const adapter = (agent: Agent) => {
@@ -126,15 +131,17 @@ export function Agents() {
           {t('admin.agents.newTitle')}
         </Button>
       </div>
+      <CollectionSearch name={t("admin.sections.agents.title")} {...search} />
       {agents.isPending ? (
         <SkeletonRows read={agents} rows={3} />
-      ) : agents.isError ? (
+      ) : agents.isError && rows.length === 0 ? (
         <ErrorState error={agents.error} retrying={agents.isRefetching} onRetry={() => void agents.refetch()} />
-      ) : agents.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<Bot aria-hidden />} title={t('admin.agents.none')} description={t('admin.agents.noneHint')} />
       ) : (
-        <Table label={t('admin.sections.agents.title')} columns={columns} rows={agents.data} rowKey={(agent) => agent.id} />
+        <Table label={t('admin.sections.agents.title')} columns={columns} rows={rows} virtual rowKey={(agent) => agent.id} />
       )}
+      <Pagination hasMore={agents.hasNextPage} loading={agents.isFetchingNextPage} error={agents.isFetchNextPageError ? agents.error : undefined} onMore={() => void agents.fetchNextPage()} />
       {making && <NewProfile onClose={() => setMaking(false)} />}
     </div>
   );
