@@ -83,8 +83,33 @@ orch_api_base::__api_bind_0d167a273a!();
 
 /// The environments a topic's threads run in and those whose home it is, the default first, each as
 /// far as the caller may see it.
-async fn environments(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Environment>> {
-    native::selected_read::<operation::Environments>(ctx, (), ()).await
+async fn environments(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<Environment>> {
+    let topic = ctx.id("id")?;
+    let rows =
+        native::selected_read::<operation::Environments>(ctx.clone(), query.clone(), ()).await?;
+    let mut conn = ctx.app.db.acquire().await?;
+    let default = default_of(&mut conn, topic).await?;
+    crate::collection::snapshot(
+        &query,
+        &format!(
+            "topic-environments:{}:{topic}:{default:?}",
+            ctx.user()?.id()
+        ),
+        rows,
+        |row| {
+            (
+                Some(row.base.id) != default,
+                row.base.name.clone(),
+                row.base.id,
+            )
+        },
+        |row| row.base.name.clone(),
+        false,
+    )
 }
 
 /// The environment new threads of a topic join, if one was chosen.

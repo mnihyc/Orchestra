@@ -949,7 +949,8 @@ impl Attachment {
                     else {
                         return Err(TerminalClosedReason::EnvironmentStopped);
                     };
-                    if row.environment_id != physical.environment
+                    if site.stopping
+                        || row.environment_id != physical.environment
                         || row.env_generation != physical.generation
                         || site.generation != physical.generation
                         || site.machine_id != physical.machine
@@ -1279,6 +1280,11 @@ impl Attachment {
         }
         match shells.holds(&mut conn, &row).await.map_err(|e| fail(&e))? {
             Holding::Yes => {}
+            Holding::Gate(
+                orch_api_contract::terminals::TerminalNotAllowedReason::EnvironmentStopping,
+            ) => {
+                return Err(TerminalClosedReason::EnvironmentStopped);
+            }
             Holding::Permission | Holding::Gate(_) => {
                 drop(conn);
                 let _ = shells

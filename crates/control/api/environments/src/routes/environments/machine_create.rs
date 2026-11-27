@@ -271,7 +271,7 @@ impl Effect for Create {
                 .map_err(|error| sparse(caller, error))?;
             if orch_db::queries::transaction_guard::in_transaction(conn) {
                 // Pin the physical row and its real facade before reloading native policy.
-                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                     .bind(value.machine.id)
                     .execute(&mut *conn)
                     .await

@@ -7,6 +7,7 @@ WITH resources AS (
   UNION ALL SELECT 'template', id, home_id, id FROM env_templates WHERE deleted_at IS NULL
   UNION ALL SELECT 'mcp_server', id, home_id, id FROM mcp_servers WHERE deleted_at IS NULL AND environment_id IS NULL
   UNION ALL SELECT 'mount', id, home_id, id FROM mounts WHERE deleted_at IS NULL
+  UNION ALL SELECT 'pool', id, home_id, id FROM pools WHERE deleted_at IS NULL
   UNION ALL SELECT 'skill', id, home_id, id FROM skills WHERE deleted_at IS NULL
   UNION ALL SELECT 'host', h.id, h.home_id, h.id FROM hosts h JOIN machines m ON m.id=h.machine_id WHERE m.deleted_at IS NULL
   UNION ALL SELECT 'machine', m.id, CASE WHEN h.id IS NULL THEN m.home_id ELSE h.home_id END, COALESCE(h.id,m.id)
